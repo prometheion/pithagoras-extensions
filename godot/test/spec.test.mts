@@ -5,10 +5,10 @@ import { specHash, stamped } from "../../shared/service.ts";
 import { displayOf } from "../src/displays.ts";
 import { godotSpec, IMAGE, names, VERSION } from "../src/server/spec.ts";
 
-/** The Godot server's container as the extension makes it: what the live godot-server's compose had, on the portal's loopback. */
+/** The Godot server's container as the extension makes it: what the live godot-server's compose had, on the extension's own network. */
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const plan = { network: "container:portal-1", token: "t0k3n", optix: "none" as const };
+const plan = { network: "pithagoras-godot-net", token: "t0k3n", optix: "none" as const };
 const server = { port: 3880, volume: "pithagoras-godot-data", image: IMAGE, display: "1600x900" as const };
 
 test("the image is the package's version, so a release cannot forget to move it", () => {
@@ -16,13 +16,13 @@ test("the image is the package's version, so a release cannot forget to move it"
   assert.equal(IMAGE, `ghcr.io/prometheion/pithagoras-godot:${pkg.version}`);
 });
 
-test("the container: on the portal's loopback, restarted unless stopped, with its token, its port, its screen and its volume", () => {
+test("the container: on the network it is given, listening on all of it, restarted unless stopped, with its token, its port, its screen and its volume", () => {
   const spec = stamped(godotSpec({ ...plan, card: { uuid: "GPU-bbbb1111" } }, server)) as any;
   assert.equal(spec.Image, IMAGE);
   assert.equal(spec.Tty, true, "plain-text logs");
-  assert.deepEqual(spec.Env, ["GODOT_SERVER_TOKEN=t0k3n", "GODOT_SERVER_PORT=3880", "DISPLAY_SIZE=1600x900", "NVIDIA_DRIVER_CAPABILITIES=all"]);
+  assert.deepEqual(spec.Env, ["GODOT_SERVER_TOKEN=t0k3n", "GODOT_SERVER_HOST=0.0.0.0", "GODOT_SERVER_PORT=3880", "DISPLAY_SIZE=1600x900", "NVIDIA_DRIVER_CAPABILITIES=all"]);
   const host = spec.HostConfig;
-  assert.equal(host.NetworkMode, "container:portal-1");
+  assert.equal(host.NetworkMode, "pithagoras-godot-net");
   assert.deepEqual(host.RestartPolicy, { Name: "unless-stopped" });
   assert.deepEqual(host.Binds, ["pithagoras-godot-data:/data"]);
   assert.deepEqual(host.DeviceRequests, [{ Driver: "nvidia", DeviceIDs: ["GPU-bbbb1111"], Capabilities: [["gpu"]] }]);
@@ -56,14 +56,14 @@ test("every name comes from the portal's environment where it says one", () => {
   const saved = { ...process.env };
   try {
     for (const key of Object.keys(process.env)) if (key.startsWith("PITHAGORAS_GODOT_")) delete process.env[key];
-    assert.deepEqual(names(), { container: "pithagoras-godot", volume: "pithagoras-godot-data", probe: "pithagoras-godot-probe", port: 3880, image: IMAGE });
+    assert.deepEqual(names(), { container: "pithagoras-godot", volume: "pithagoras-godot-data", probe: "pithagoras-godot-probe", network: "pithagoras-godot-net", port: 3880, image: IMAGE });
     Object.assign(process.env, {
       PITHAGORAS_GODOT_CONTAINER: "flairtest-godot",
       PITHAGORAS_GODOT_PORT: "3881",
       PITHAGORAS_GODOT_IMAGE: "flairtest-pithagoras-godot:0.1.0",
       PITHAGORAS_GODOT_GPU: "GPU-648bf6c5",
     });
-    assert.deepEqual(names(), { container: "flairtest-godot", volume: "flairtest-godot-data", probe: "flairtest-godot-probe", port: 3881, image: "flairtest-pithagoras-godot:0.1.0", gpu: "GPU-648bf6c5" });
+    assert.deepEqual(names(), { container: "flairtest-godot", volume: "flairtest-godot-data", probe: "flairtest-godot-probe", network: "flairtest-godot-net", port: 3881, image: "flairtest-pithagoras-godot:0.1.0", gpu: "GPU-648bf6c5" });
   } finally {
     process.env = saved;
   }
@@ -75,12 +75,12 @@ test("the screen is one the page offers, else the default", () => {
   assert.equal(displayOf(undefined), "1600x900");
 });
 
-test("the spec's hash changes with the image, the card and the screen, and not with the network", () => {
+test("the spec's hash changes with the image, the card, the screen and the network", () => {
   const card = { uuid: "GPU-a" };
   const base = specHash(godotSpec({ ...plan, card }, server));
   assert.notEqual(specHash(godotSpec({ ...plan, card }, { ...server, image: "ghcr.io/prometheion/pithagoras-godot:0.1.1" })), base);
   assert.notEqual(specHash(godotSpec({ ...plan, card: { uuid: "GPU-b" } }, server)), base);
   assert.notEqual(specHash(godotSpec(plan, server)), base);
   assert.notEqual(specHash(godotSpec({ ...plan, card }, { ...server, display: "1280x720" })), base);
-  assert.equal(specHash(godotSpec({ ...plan, card, network: "host" }, server)), base);
+  assert.notEqual(specHash(godotSpec({ ...plan, card, network: "other-net" }, server)), base);
 });

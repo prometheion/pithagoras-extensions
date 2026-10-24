@@ -6,17 +6,18 @@
 # See LICENSE beside it. The rest of the pithagoras-blender extension is Apache-2.0.
 """Headless Blender server for the pithagoras-blender extension. Runs inside `blender -b --python server.py`.
 
-One HTTP port on the loopback it is given (the Pithagoras portal's, which its container shares): the API of the
-extension's viewer (`/api/...`), the files it shows (`/files/...`) and MCP (`POST /mcp`, Streamable HTTP with a JSON
-reply to each POST, no session). The viewer's page itself is the extension's, served by the portal, not from here.
+One HTTP port on the address it is given (`BLENDER_SERVER_HOST`, which the extension sets to 0.0.0.0 of the
+container's own network, which only the Pithagoras portal reaches): the API of the extension's viewer (`/api/...`),
+the files it shows (`/files/...`) and MCP (`POST /mcp`, Streamable HTTP with a JSON reply to each POST, no session). The viewer's page itself is the extension's, served by the portal, not from here.
 Every route asks for `Authorization: Bearer <token>`: the portal's proxy adds it to what the person's browser asks,
 and the extension's MCP client sends it. There is no sign-in page and no cookie: the person signs in to the portal,
 never to this server.
 
 All work with bpy happens on Blender's main thread, which bpy needs: the HTTP threads queue it there (`run_on_main`)
 and the main thread runs it between waits. `execute_code` runs arbitrary Python in this process, as the container's
-unprivileged user, which is why the token is required and the port is on loopback only; and why nothing this server
-answers runs as the portal's page (the portal's proxy sandboxes every answer).
+unprivileged user, which is why the token is required and the port is on the container's own network, which only the
+portal reaches; and why nothing this server answers runs as the portal's page (the portal's proxy sandboxes every
+answer).
 
 Environment:
     BLENDER_SERVER_TOKEN   required; the server refuses to start without it

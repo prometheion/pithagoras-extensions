@@ -9,9 +9,10 @@
                                                                every tool on the way
 
 The server comes from GODOT_SERVER_URL (default http://127.0.0.1:3880) and the token from GODOT_SERVER_TOKEN, or
---url / --token. The server listens on the loopback of the network namespace it shares with the Pithagoras portal,
-so run this there: in the portal's container, or in a container started with --network container:<portal>. The
-token is the one the Godot extension keeps in its settings.json.
+--url / --token. The server is on a network of its own, which only the Pithagoras portal reaches, so run this where
+the portal does: on the host, against the forwarder's 127.0.0.1:3880, for a portal on the host's network; in the
+portal's container, with --url http://pithagoras-godot:3880, for a portal in a container of its own. The token is
+the one the Godot extension keeps in its settings.json.
 """
 import argparse
 import base64

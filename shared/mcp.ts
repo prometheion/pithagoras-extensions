@@ -1,6 +1,6 @@
 /**
- * A client for the MCP endpoint of the extension's own server (`POST /mcp` on the container's port, on the portal's
- * loopback): JSON-RPC over plain HTTP, every request with the server's token. Both servers it is written for answer
+ * A client for the MCP endpoint of the extension's own server (`POST /mcp` on the container's port, where the portal
+ * reaches it): JSON-RPC over plain HTTP, every request with the server's token. Both servers it is written for answer
  * each POST with one JSON reply and keep no session (their server.py), so it speaks JSON only: no event stream is
  * read, and no session id is kept.
  *
@@ -28,20 +28,25 @@ export interface McpServerInfo {
   version: string;
 }
 
-/** The server could not be reached at all: nothing answers on its port. */
+/** The server could not be reached at all: nothing answers on its port, or there is no way to it. */
 export class NotAnswering extends Error {}
 
 /** The protocol version asked for: one both servers take. */
 export const PROTOCOL_VERSION = "2025-06-18";
 
-export function mcpClient(options: { url: () => string; token: () => string }) {
+export function mcpClient(options: { url: () => Promise<string>; token: () => string }) {
   let id = 0;
 
-  /** One JSON-RPC request. The server's error is thrown with its message; an answer that is not JSON is an error too. */
+  /**
+   * One JSON-RPC request. The server's error is thrown with its message; an answer that is not JSON is an error too.
+   * Where the server is not to be found (no way to it could be given), it is not answering, with the reason why.
+   */
   async function call<T>(method: string, params: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
     let answer: Response;
+    let url = "";
     try {
-      answer = await fetch(options.url(), {
+      url = await options.url();
+      answer = await fetch(url, {
         method: "POST",
         headers: {
           authorization: `Bearer ${options.token()}`,
@@ -53,7 +58,7 @@ export function mcpClient(options: { url: () => string; token: () => string }) {
       });
     } catch (e) {
       if (signal?.aborted) throw e;
-      throw new NotAnswering(`Nothing answers at ${options.url()}: ${(e as Error).message}`);
+      throw new NotAnswering(url ? `Nothing answers at ${url}: ${(e as Error).message}` : `The server cannot be reached: ${(e as Error).message}`);
     }
     const text = await answer.text();
     let body: { result?: T; error?: { message?: string } };

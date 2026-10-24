@@ -1,6 +1,7 @@
 #!/bin/sh
-# The image's smoke test, which the release workflow runs before it publishes the image: the image started with no
-# GPU and a random token, MCP answering ping, its tools/list and the instructions its initialize gives equal to the
+# The image's smoke test, which the release workflow runs before it publishes the image: the image started as the
+# extension makes it, on a network with no way out (which also shows that it starts with no internet), with no GPU
+# and a random token, MCP answering ping, its tools/list and the instructions its initialize gives equal to the
 # committed tools.json, which is what the extension relays (a change to the server's tools or instructions must change
 # that file, and with it the label table and its German), and the viewer's routes refusing a request
 # without the token. The checks run inside the container, with its own Python. The container is removed at the end,
@@ -9,22 +10,34 @@
 #   godot/server/smoke-test.sh ghcr.io/prometheion/pithagoras-godot:0.1.0
 #
 # NAME, PORT and NETWORK change the container's name, the server's port and the container's network (by default
-# pithagoras-godot-smoke, 3880 and host: the runner's loopback, as the portal's would be).
+# pithagoras-godot-smoke, 3880, and <NAME>-net, made for the run as Docker for extensions makes the extension's:
+# internal, with no gateway, which takes Docker Engine 28.0 or later; it is removed at the end).
 set -eu
 IMAGE="${1:?the image to test}"
 NAME="${NAME:-pithagoras-godot-smoke}"
 PORT="${PORT:-3880}"
-NETWORK="${NETWORK:-host}"
+NETWORK="${NETWORK:-}"
+MADE=""
 HERE=$(cd "$(dirname "$0")" && pwd)
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
 step() { echo "$(ts) $*"; }
 TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(24))")
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -z "$MADE" ] || docker network rm "$MADE" >/dev/null 2>&1 || true' EXIT
+
+if [ -z "$NETWORK" ]; then
+  NETWORK="$NAME-net"
+  step "0/3 making the network $NETWORK, with no way out"
+  docker network create --internal -o com.docker.network.bridge.gateway_mode_ipv4=isolated "$NETWORK" >/dev/null
+  MADE="$NETWORK"
+  # As JSON: Docker 29's template prints a gateway there is none of as "invalid IP".
+  config=$(docker network inspect -f '{{json .IPAM.Config}}' "$NETWORK")
+  if echo "$config" | grep -q '"Gateway":"[0-9a-fA-F]'; then step "$NETWORK has a gateway ($config): this Docker is older than 28.0, which the extension needs"; exit 1; fi
+fi
 
 step "1/3 starting $IMAGE as $NAME (no GPU, network $NETWORK, port $PORT)"
-# As the extension makes it: its own user, no capabilities, no way to gain one.
+# As the extension makes it: its own user, no capabilities, no way to gain one, listening on its own network.
 docker run -d --name "$NAME" --network "$NETWORK" --init --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges \
-  -e GODOT_SERVER_TOKEN="$TOKEN" -e GODOT_SERVER_PORT="$PORT" "$IMAGE" >/dev/null
+  -e GODOT_SERVER_TOKEN="$TOKEN" -e GODOT_SERVER_HOST=0.0.0.0 -e GODOT_SERVER_PORT="$PORT" "$IMAGE" >/dev/null
 docker cp "$HERE/tools.json" "$NAME:/tmp/tools.json"
 
 step "2/3 MCP ping, initialize and tools/list against tools.json, and the routes without the token"
@@ -64,7 +77,8 @@ for path in ("/", "/api/state", "/mcp", "/stream/"):
 print("  /, /api/state, /mcp and /stream/ answer 401 without the token")
 PY
 
-step "3/3 removing $NAME"
+step "3/3 removing $NAME${MADE:+ and $MADE}"
 docker rm -f "$NAME" >/dev/null
+[ -z "$MADE" ] || docker network rm "$MADE" >/dev/null
 trap - EXIT
 step "DONE"

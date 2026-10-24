@@ -6,7 +6,7 @@ import type { Docker } from "../../shared/docker-api";
 import { mcpClient } from "../../shared/mcp";
 import { proxyUi, uiUpgrade, writesFromHere } from "../../shared/proxy";
 import { relay, type Bundled } from "../../shared/relay";
-import { service } from "../../shared/service";
+import { serverAddress, service } from "../../shared/service";
 import { openStore } from "../../shared/store";
 import bundled from "../server/tools.json";
 import { ACTS, LABELS, PREFIX } from "./labels";
@@ -39,7 +39,14 @@ export default function godot(portal: ServerPortal) {
   const store = openStore(data);
   const at = names();
   const docker = () => portal.extensions.use<Docker>("pithagoras-docker")!;
-  const mcp = mcpClient({ url: () => `http://127.0.0.1:${at.port}/mcp`, token: () => store.token() });
+  const address = serverAddress(docker, at);
+  const mcp = mcpClient({
+    url: async () => {
+      const { host, port } = await address.get();
+      return `http://${host}:${port}/mcp`;
+    },
+    token: () => store.token(),
+  });
   const tools = relay({ portal, prefix: PREFIX, app: "Godot", mcp, bundled: bundled as Bundled, labels: LABELS, acts: ACTS, installedFile: path.join(data, "installed") });
   const svc = service({
     portal,
@@ -50,12 +57,13 @@ export default function godot(portal: ServerPortal) {
     relay: tools,
     mcp,
     spec: (plan) => godotSpec(plan, { port: at.port, volume: at.volume, image: at.image, display: displayOf(store.setting("display")) }),
+    address,
   });
 
   // Before every route: what installs, starts, stops, removes or changes anything comes from the portal's own pages.
   portal.router.use(writesFromHere);
-  godotRoutes(portal, portal.router, svc, store, { port: at.port });
-  const proxy = { port: () => at.port, token: () => store.token(), page: readFileSync(path.join(PAGES, "viewer.html")), notAnswering: "Godot antwortet nicht. / Godot is not answering." };
+  godotRoutes(portal, portal.router, svc, store, { address });
+  const proxy = { upstream: address.get, token: () => store.token(), page: readFileSync(path.join(PAGES, "viewer.html")), notAnswering: "Godot antwortet nicht. / Godot is not answering." };
   portal.router.use("/ui", stream(PAGES));
   portal.router.use("/ui", proxyUi(proxy));
   // The editor's stream is a WebSocket: the portal checks the sign-in and the page, and hands it over here.

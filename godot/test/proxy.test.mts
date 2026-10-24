@@ -37,8 +37,10 @@ upstream.on("upgrade", (req, socket, head) => {
 upstream.listen(0, "127.0.0.1");
 await new Promise((resolve) => upstream.once("listening", resolve));
 let port = (upstream.address() as AddressInfo).port;
+/** Where the portal reaches the server, as Docker for extensions' reach gives it; or, while `unreachable`, its refusal. */
+let unreachable = false;
 
-const options = { port: () => port, token: () => "server-token", page: Buffer.from("<p>the extension's viewer</p>"), notAnswering: "Godot antwortet nicht. / Godot is not answering." };
+const options = { upstream: async () => (unreachable ? Promise.reject(new Error("There is no network pithagoras-godot-net")) : { host: "127.0.0.1", port }), token: () => "server-token", page: Buffer.from("<p>the extension's viewer</p>"), notAnswering: "Godot antwortet nicht. / Godot is not answering." };
 const ui = proxyUi(options);
 const stream = uiUpgrade(options);
 // Mounted as the portal mounts an extension's routes: /api/x/<package>, then the router's /ui.
@@ -172,5 +174,21 @@ test("a server that does not answer is said, in both languages", async () => {
     assert.equal(await page.text(), "Godot antwortet nicht. / Godot is not answering.");
   } finally {
     port = was;
+  }
+});
+
+test("where no way to the server can be given, a page is said not to answer and a stream is closed", async () => {
+  unreachable = true;
+  try {
+    const page = await fetch(`${at}/ui/api/state`);
+    assert.equal(page.status, 502);
+    assert.equal(await page.text(), "Godot antwortet nicht. / Godot is not answering.");
+    const before = seen.upgrades.length;
+    const stream = upgrade("/ui/stream/api/websockets");
+    await stream.closed;
+    assert.equal(stream.text(), "", "closed without an answer");
+    assert.equal(seen.upgrades.length, before);
+  } finally {
+    unreachable = false;
   }
 });

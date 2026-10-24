@@ -23,23 +23,23 @@ export const names = () => namesFrom(process.env, "godot", { container: "pithago
 /**
  * The container for a plan, as the live godot-server's compose made it: an init that reaps the editor's and the games'
  * children, 1 GiB of shared memory, at most 8 GiB of memory, and no core files (a Godot crash dump is 0.3-1.3 GB). On
- * the portal's own loopback (`plan.network`), where the server listens on 127.0.0.1 alone; Docker restarts it unless
- * the person stopped it (the service adds the policy). Its projects are in a named volume at /data. The card by
- * Docker's own request, with every driver capability: graphics for Vulkan and EGL, compute, and utility for
- * nvidia-smi. The stream is encoded on the CPU (x264): NVENC wants the first GPU's device node in a container that may
- * see only another card.
+ * the extension's own network, with no way out (`plan.network`), where the server listens on 0.0.0.0 of the
+ * container's own network, which only the portal reaches; Docker restarts it unless the person stopped it (the
+ * service adds the policy). Its projects are in a named volume at /data. The card by Docker's own request, with every
+ * driver capability: graphics for Vulkan and EGL, compute, and utility for nvidia-smi. The stream is encoded on the
+ * CPU (x264): NVENC wants the first GPU's device node in a container that may see only another card.
  *
  * What runs in it is the agent's as much as the server's: GDScript it sends, `@tool` scripts and games it writes. So it
  * runs as the image's own user (godot, uid 10001), not root, with no Linux capabilities at all (`CapDrop: ALL`: Xvfb,
  * Selkies and the editor need none) and no way to gain one (`no-new-privileges`, which a setuid program would
- * otherwise get round). It is in the portal's network namespace all the same: the README says what that reaches.
+ * otherwise get round). Its network has no way out, so what runs in it reaches nothing but the server.
  */
 export function godotSpec(plan: Plan, server: { port: number; volume: string; image: string; display: Display }): ContainerSpec {
   return {
     Image: server.image,
     User: "10001:10001",
     Tty: true,
-    Env: [`GODOT_SERVER_TOKEN=${plan.token}`, `GODOT_SERVER_PORT=${server.port}`, `DISPLAY_SIZE=${server.display}`, "NVIDIA_DRIVER_CAPABILITIES=all"],
+    Env: [`GODOT_SERVER_TOKEN=${plan.token}`, "GODOT_SERVER_HOST=0.0.0.0", `GODOT_SERVER_PORT=${server.port}`, `DISPLAY_SIZE=${server.display}`, "NVIDIA_DRIVER_CAPABILITIES=all"],
     HostConfig: {
       NetworkMode: plan.network,
       CapDrop: ["ALL"],

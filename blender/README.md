@@ -10,11 +10,12 @@ This extension is not made or endorsed by the Blender Foundation. "Blender" name
 
 ## What it needs
 
-- Pithagoras 0.2.0 or later.
-- [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.2.0 or later).
+- Pithagoras 0.3.0 or later.
+- [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
-- A Linux host with Docker, which the portal can reach (its socket). For GPU rendering, an NVIDIA card and the NVIDIA
-  container toolkit. Without one, Blender renders on the CPU.
+- A Linux host with Docker Engine 28.0 or later, which the portal can reach (its socket): the server's network has no
+  gateway, which older Docker cannot make. For GPU rendering, an NVIDIA card and the NVIDIA container toolkit. Without
+  one, Blender renders on the CPU.
 - About 1.2 GB of disk for the image (two builds of 0.1.0 measured 1.14 and 1.24 GB; each release reports its own), and
   room for the projects.
 
@@ -33,7 +34,8 @@ Open Settings → Blender and press **Install**. The extension:
 1. finds the cards Docker can give a container, with a short-lived probe container (`<container>-probe`, from
    `ubuntu:24.04`) that runs `nvidia-smi` and looks for the driver's OptiX weights (`nvoptix.bin`);
 2. downloads its image, `ghcr.io/prometheion/pithagoras-blender:<version>`, with the progress on the page;
-3. makes the volume `pithagoras-blender-data` and the container `pithagoras-blender`, and starts it.
+3. makes the volume `pithagoras-blender-data`, the network `pithagoras-blender-net` and the container
+   `pithagoras-blender` on it, starts it, and opens the portal's way to it (below, under Security).
 
 The card is the one with the most free memory unless you choose one on the page; the server stays on its card after
 that until you choose another. Choosing another card makes a running server again on it at once, and a stopped one at
@@ -44,11 +46,8 @@ The container is started again by Docker after it exits and when the host starts
 unless it was stopped on the page or in Settings → Docker, which it then stays. The extension never starts a server
 somebody stopped.
 
-It shares the portal's network namespace, which Docker joins it to as it starts. When the portal's own container starts
-again under the same id (Settings → About → Restart, a crash, `docker restart`), the portal comes up in a new namespace
-and the server would stay in the old one, out of reach: the extension finds that as the portal starts (and every 30
-seconds), by comparing the two namespaces, and starts the server again, which joins it to the portal's. What was not
-saved in the open scene is lost then, as nothing could reach the server to save it.
+It runs on a network of its own, `pithagoras-blender-net`. When the portal's container is made again or restarted, the
+server goes on as it was: the extension puts the portal back on the network as it looks after the server.
 
 ## The panel
 
@@ -97,8 +96,11 @@ Don't add an MCP server named `blender` beside it: its tools would have the same
 - **One credential.** The server takes a token, made once for this install (24 random bytes) and kept in the
   extension's own folder in the portal's data folder (`settings.json`, readable by the portal's user alone). Every
   request to the server carries it; no page is ever given it, and there is no default.
-- **Loopback only.** The container shares the portal's network namespace (`host` for a portal on the host,
-  `container:<portal>` for a portal in Docker) and the server binds `127.0.0.1:3870`. Nothing is published.
+- **A network of its own.** The container is on `pithagoras-blender-net`, which Docker for extensions makes internal
+  and with no gateway (gateway mode `isolated`): nothing on it reaches the host, the local network or the internet,
+  and nothing but the portal reaches it. The server listens on 0.0.0.0 of that network. For a portal on the host's
+  network, the forwarder `pithagoras-blender-forward` publishes port 3870 on 127.0.0.1 and passes it on; for a portal
+  in a container of its own, that container is on the network.
 - **An unprivileged Blender.** Blender runs as the image's own user (`blender`, uid 10001), not root, with none of the
   kernel's capabilities (`--cap-drop ALL`, raw sockets among them) and no way to gain more (`no-new-privileges`). It
   can write its home, `/tmp` and `/data`; the server and Blender itself are root's.
@@ -115,11 +117,12 @@ Don't add an MCP server named `blender` beside it: its tools would have the same
   stop, remove, the card, and everything the viewer asks of the server but a read) is refused unless it comes from the
   portal's own pages: the portal's cookie is SameSite=Lax, which a page on another port or another name of the same
   site is still sent.
-- **The tools.** What they return is outside content to the guard. `blender_execute_code` runs code on the portal's
-  loopback, so after a suspected prompt injection the guard asks you before it runs, or refuses it where nobody can
-  answer. That code can reach what listens on 127.0.0.1 where the portal runs, which for a portal on the host's network
-  (`network_mode: host`, as Pithagoras' compose file has it) is the host's own loopback, as the agent's own shell can:
-  Pithagoras' sandbox does not limit the network either. Keep services there behind a credential of their own.
+- **The tools.** What they return is outside content to the guard. `blender_execute_code` runs code in Blender, so after
+  a suspected prompt injection the guard asks you before it runs, or refuses it where nobody can answer. That code
+  reaches nothing outside the container but the forwarder's port, which leads back to the server itself (section above);
+  for a portal in a container of its own, also what that container listens on 0.0.0.0, which is the portal's own port
+  and asks for its sign-in. It can still read and change the projects, and what it prints comes back to the chat, which
+  is why the guard holds it.
 
 ## Data
 
@@ -136,17 +139,18 @@ The portal's environment can change each name, for a second portal on the same D
 
 | Variable | Default |
 | --- | --- |
-| `PITHAGORAS_BLENDER_CONTAINER` | `pithagoras-blender` (the probe is `<container>-probe`) |
+| `PITHAGORAS_BLENDER_CONTAINER` | `pithagoras-blender` (the probe is `<container>-probe`, the network `<container>-net`, the forwarder `<container>-forward`) |
 | `PITHAGORAS_BLENDER_VOLUME` | `<container>-data` |
-| `PITHAGORAS_BLENDER_PORT` | `3870`, on the portal's loopback |
+| `PITHAGORAS_BLENDER_PORT` | `3870`: the server's port, and for a portal on the host's network the forwarder's on 127.0.0.1 |
 | `PITHAGORAS_BLENDER_IMAGE` | `ghcr.io/prometheion/pithagoras-blender:<version>` |
 | `PITHAGORAS_BLENDER_GPU` | none: a card's UUID or index pins the server to it, and the page shows only that card |
 
 ## Removing
 
 Remove the server on the page first (**Remove**, optionally with the projects), then uninstall the extension: the
-portal has no uninstall hook, so a container left running keeps running. Docker for extensions cannot remove an image,
-so the image stays on disk: `docker image rm ghcr.io/prometheion/pithagoras-blender:<version>` deletes it.
+portal has no uninstall hook, so a container left running keeps running. Remove also removes the network and the
+forwarder. Docker for extensions cannot remove an image, so the image stays on disk: `docker image rm
+ghcr.io/prometheion/pithagoras-blender:<version>` deletes it.
 
 ## Limits
 
@@ -157,6 +161,8 @@ so the image stays on disk: `docker image rm ghcr.io/prometheion/pithagoras-blen
 - The chat's card of a call shows the tool's name; Blender's own words for each call (in English and German) are on
   voice mode's cards.
 - Each update of the extension leaves the previous image on disk until it is removed by hand.
+- Nothing in the container reaches the internet: Blender's online extensions, and code that downloads (a texture from
+  a URL), do not work there. Bring files in with the panel's upload.
 
 ## Licences
 

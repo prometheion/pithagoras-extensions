@@ -92,7 +92,7 @@ COPY server.py /opt/godot-server/
 
 USER 10001:10001
 WORKDIR /data
-# Nothing is published: the server listens on the loopback of the portal's network namespace.
+# Nothing is published: the server listens on the container's own network, which only the portal reaches.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
   CMD python3 -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('GODOT_SERVER_PORT', '3880'), timeout=4)"
 # -I: Python's isolated mode, so the server never imports anything from the environment or from a site folder under

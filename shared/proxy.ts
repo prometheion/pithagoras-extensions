@@ -1,16 +1,18 @@
 import http from "node:http";
 import type { Duplex } from "node:stream";
 import type { NextFunction, Request, Response } from "express";
+import type { Reach } from "./docker-api";
 
 /**
  * The viewer beside a chat, served through the portal at /api/x/<package>/ui/…, behind the portal's sign-in: the
  * extension's own page, and what the server answers it (its API, the files it serves, and for Godot its stream).
  *
- * Why a proxy and not a link to the server's port: the server binds the portal's loopback alone, so nothing else can
- * reach it, and the person never signs in to it. The portal decides who they are before anything is proxied (every
- * route under /api/x is behind its sign-in, and core checks a stream's sign-in and origin before it is handed over),
- * and the proxy adds the server's token on the way. The container is never given the portal's cookie, or anything the
- * page sent as a credential. Browser's proxy works the same way.
+ * Why a proxy and not a link to the server's port: the server is on a network of its own, which only the portal
+ * reaches (and, for a portal in the host's namespace, the host's 127.0.0.1), and the person never signs in to it. The
+ * portal decides who they are before anything is proxied (every route under /api/x is behind its sign-in, and core
+ * checks a stream's sign-in and origin before it is handed over), and the proxy adds the server's token on the way.
+ * The container is never given the portal's cookie, or anything the page sent as a credential. Browser's proxy works
+ * the same way.
  *
  * What is served here is on the portal's own origin, where a script could call the portal's API as the person. The
  * server runs code the agent writes, in the very process that answers here, so what it answers is never let run
@@ -20,8 +22,8 @@ import type { NextFunction, Request, Response } from "express";
  */
 
 export interface ProxyOptions {
-  /** The server's port on the portal's loopback. */
-  port: () => number;
+  /** Where the portal reaches the server: Docker for extensions' `networks.reach` (shared/service.ts, `serverAddress`). */
+  upstream: () => Promise<Reach>;
   /** The server's token, sent as `Authorization: Bearer`. */
   token: () => string;
   /** The extension's own page, served at /ui/ in place of anything the server would answer there. */
@@ -30,16 +32,14 @@ export interface ProxyOptions {
   notAnswering: string;
 }
 
-const UPSTREAM_HOST = "127.0.0.1";
-
 /** What is never sent on to the server: the portal's cookie, any credential the page sent, and where the request came from. */
 const DROPPED = new Set(["cookie", "authorization", "origin", "referer", "host"]);
 
-/** The request's headers as they go on to the server: as they came, without what is dropped, with the server's host and token. */
-export function forwarded(headers: http.IncomingHttpHeaders, options: ProxyOptions): http.OutgoingHttpHeaders {
+/** The request's headers as they go on to the server (`at`): as they came, without what is dropped, with the server's host and token. */
+export function forwarded(headers: http.IncomingHttpHeaders, options: ProxyOptions, at: Reach): http.OutgoingHttpHeaders {
   const kept: http.OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(headers)) if (!DROPPED.has(name) && value !== undefined) kept[name] = value;
-  return { ...kept, host: `${UPSTREAM_HOST}:${options.port()}`, authorization: `Bearer ${options.token()}` };
+  return { ...kept, host: `${at.host}:${at.port}`, authorization: `Bearer ${options.token()}` };
 }
 
 const FRAME_ANCESTORS = "frame-ancestors 'self'";
@@ -105,10 +105,11 @@ export function writesFromHere(req: Request, res: Response, next: NextFunction):
  * The route half, for every method under /ui (`portal.router.use("/ui", proxyUi(…))`). Express strips the mount
  * path, so `req.url` is already the server's own. /ui/ itself is the extension's page; everything else is the
  * server's. Bodies are piped as they come (the portal reads none for an extension's routes), so an upload of a
- * project and a picture of the viewport pass untouched.
+ * project and a picture of the viewport pass untouched. Where no way to the server can be given, the answer is the one
+ * for a server that does not answer.
  */
 export function proxyUi(options: ProxyOptions) {
-  return (req: Request, res: Response): void => {
+  return async (req: Request, res: Response): Promise<void> => {
     // The page loads what it needs relative to where it is, so it is at /ui/, with the slash.
     const [pathname, ...query] = req.originalUrl.split("?");
     if (req.path === "/" && !pathname.endsWith("/")) {
@@ -121,17 +122,24 @@ export function proxyUi(options: ProxyOptions) {
       return;
     }
     const path = req.url || "/";
+    const notAnswering = () => {
+      if (res.headersSent) return void res.end();
+      res.status(502).type("text/plain").end(options.notAnswering);
+    };
+    let at: Reach;
+    try {
+      at = await options.upstream();
+    } catch {
+      return notAnswering();
+    }
     const proxied = http.request(
-      { host: UPSTREAM_HOST, port: options.port(), path, method: req.method, headers: forwarded(req.headers, options) },
+      { host: at.host, port: at.port, path, method: req.method, headers: forwarded(req.headers, options, at) },
       (upstream) => {
         res.writeHead(upstream.statusCode ?? 502, answered(upstream.headers));
         upstream.pipe(res);
       },
     );
-    proxied.on("error", () => {
-      if (res.headersSent) return void res.end();
-      res.status(502).type("text/plain").end(options.notAnswering);
-    });
+    proxied.on("error", notAnswering);
     req.pipe(proxied);
   };
 }
@@ -154,23 +162,30 @@ const UI = /^\/ui(?=$|[/?])/i;
  * The stream half (`portal.http.upgrade(uiUpgrade(…))`), handed a WebSocket under the extension's routes once core has
  * checked its sign-in and the page it comes from. Only the streams under /ui are the server's. The upgrade request
  * goes on with the same headers a request does: without the portal's cookie and the page's `Origin` (core checked it
- * already, and a server that compares it with its own host would refuse it), with the server's token.
+ * already, and a server that compares it with its own host would refuse it), with the server's token. Where no way to
+ * the server can be given, the stream is closed, as for a server that does not answer.
  */
 export function uiUpgrade(options: ProxyOptions) {
-  return (req: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
+  return async (req: http.IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
     if (!UI.test(req.url ?? "")) return refuse(socket, 404, "Not Found");
     const rest = req.url!.replace(UI, "");
+    socket.on("error", () => socket.destroy());
+    let at: Reach;
+    try {
+      at = await options.upstream();
+    } catch {
+      return void socket.destroy();
+    }
     const proxied = http.request({
-      host: UPSTREAM_HOST,
-      port: options.port(),
+      host: at.host,
+      port: at.port,
       path: rest.startsWith("/") ? rest : `/${rest}`,
       method: "GET",
-      headers: forwarded(req.headers, options),
+      headers: forwarded(req.headers, options, at),
     });
     proxied.end();
     // A visitor who leaves during the handshake takes the request with them.
     socket.once("close", () => proxied.destroy());
-    socket.on("error", () => socket.destroy());
     proxied.on("upgrade", (upstreamRes, upstreamSocket, upstreamHead) => {
       if (socket.destroyed) return void upstreamSocket.destroy();
       const lines = Object.entries(upstreamRes.headers).map(([k, v]) => `${k}: ${v}`);

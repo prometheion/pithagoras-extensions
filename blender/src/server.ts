@@ -5,7 +5,7 @@ import type { Docker } from "../../shared/docker-api";
 import { mcpClient } from "../../shared/mcp";
 import { proxyUi, writesFromHere } from "../../shared/proxy";
 import { relay, type Bundled } from "../../shared/relay";
-import { service } from "../../shared/service";
+import { serverAddress, service } from "../../shared/service";
 import { openStore } from "../../shared/store";
 import bundled from "../server/tools.json";
 import { ACTS, LABELS, PREFIX } from "./labels";
@@ -34,14 +34,21 @@ export default function blender(portal: ServerPortal) {
   const store = openStore(data);
   const at = names();
   const docker = () => portal.extensions.use<Docker>("pithagoras-docker")!;
-  const mcp = mcpClient({ url: () => `http://127.0.0.1:${at.port}/mcp`, token: () => store.token() });
+  const address = serverAddress(docker, at);
+  const mcp = mcpClient({
+    url: async () => {
+      const { host, port } = await address.get();
+      return `http://${host}:${port}/mcp`;
+    },
+    token: () => store.token(),
+  });
   const tools = relay({ portal, prefix: PREFIX, app: "Blender", mcp, bundled: bundled as Bundled, labels: LABELS, acts: ACTS, installedFile: path.join(data, "installed") });
-  const svc = service({ portal, docker, app: "Blender", names: at, store, relay: tools, mcp, spec: (plan) => blenderSpec(plan, at.port, at.volume, at.image) });
+  const svc = service({ portal, docker, app: "Blender", names: at, store, relay: tools, mcp, spec: (plan) => blenderSpec(plan, at.port, at.volume, at.image), address });
 
   portal.router.use(writesFromHere);
-  blenderRoutes(portal, portal.router, svc, { port: at.port, token: () => store.token() });
+  blenderRoutes(portal, portal.router, svc, { address, token: () => store.token() });
   // No stream to proxy: the viewer asks for each frame of the viewport with a plain request.
-  portal.router.use("/ui", proxyUi({ port: () => at.port, token: () => store.token(), page: readFileSync(VIEWER), notAnswering: "Blender antwortet nicht. / Blender is not answering." }));
+  portal.router.use("/ui", proxyUi({ upstream: address.get, token: () => store.token(), page: readFileSync(VIEWER), notAnswering: "Blender antwortet nicht. / Blender is not answering." }));
 
   let stopped = false;
   const look = () => {

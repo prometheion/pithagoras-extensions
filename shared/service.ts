@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { readlinkSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
-import type { ContainerSpec, Docker } from "./docker-api";
+import type { ContainerSpec, Docker, NetworkInfo, Reach } from "./docker-api";
 import { mostFree, probe, type Card, type Optix, type Probed } from "./gpu";
 import type { McpClient } from "./mcp";
 import type { Relay } from "./relay";
@@ -20,18 +19,16 @@ import type { Store } from "./store";
  * the server down after a reboot. So it keeps running when the extension is switched off or uninstalled, as the
  * portal has no uninstall hook: the Settings page says to remove the server there first.
  *
- * What the container is made with is hashed into a label of its own (`pithagoras.extension-spec`): everything but its
- * network, which is checked as it is. A container whose label is not the hash of what would be made now (another
- * image after an update, another card) or whose network is not the portal's loopback as it is now (the portal's own
- * container was made again) is stale. A running one is made again at once, the volume kept; a stopped one at its next
+ * The container is on a network of its own (`names.network`), which Docker for extensions makes with no way out: code
+ * the server runs reaches nothing but the server, and the portal reaches the server where `networks.reach` says
+ * (`serverAddress`). What it is made with is hashed into a label of its own (`pithagoras.extension-spec`). A container
+ * whose label is not the hash of what would be made now (another image after an update, another card), or that is not
+ * on the network as it is now (by the network's id: one removed and made again is another network, on which an old
+ * container cannot start), is stale. A running one is made again at once, the volume kept; a stopped one at its next
  * Start. That is Voice's rule, with a hash for Voice's recipe label.
  *
- * A network that reads the same can still be the wrong one. Docker joins a container made with `container:<portal>`
- * to the portal's network namespace as it starts it, and leaves it there: when the portal's container starts again
- * under the same id (Settings → About → Restart, a crash, `docker restart`), the portal comes up in a namespace of its
- * own, and the server stays in the old one, where nothing of the portal's reaches it. So a server that Docker says is
- * running and that does not answer has the namespace it is in compared with the portal's (`strayed`), and is started
- * again where they differ, which joins it to the portal's as it is now (`rejoin`).
+ * The portal's container being made again or restarted leaves the server as it is: a new portal container is put on
+ * the network at the next reach, which is asked as the server starts and where it does not answer.
  */
 
 /** The names a service goes by, each one the portal's environment can change: see `namesFrom`. */
@@ -40,7 +37,9 @@ export interface Names {
   volume: string;
   /** The short-lived container the GPU probe runs in. */
   probe: string;
-  /** The server's port on the portal's loopback. */
+  /** The network the container is on, the extension's own, which has no way out. */
+  network: string;
+  /** The server's port in its container, and, for a portal in the host's namespace, on 127.0.0.1 (the forwarder's). */
   port: number;
   image: string;
   /** A card the host's owner pinned, by UUID or index: the only one the probe asks for and the server is given. */
@@ -60,6 +59,7 @@ export function namesFrom(env: NodeJS.ProcessEnv, app: string, defaults: { conta
     container,
     volume: key("VOLUME") ?? `${container}-data`,
     probe: `${container}-probe`,
+    network: `${container}-net`,
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : defaults.port,
     image: key("IMAGE") ?? defaults.image,
     ...(key("GPU") ? { gpu: key("GPU") } : {}),
@@ -70,6 +70,7 @@ export function namesFrom(env: NodeJS.ProcessEnv, app: string, defaults: { conta
 export interface Plan {
   card?: { uuid: string };
   optix: Optix;
+  /** The network it is on: the extension's own, which has no way out. */
   network: string;
   token: string;
 }
@@ -99,6 +100,7 @@ interface Inspected {
   Image?: string;
   Config?: { Image?: string; Labels?: Record<string, string> | null };
   HostConfig?: { NetworkMode?: string; DeviceRequests?: { DeviceIDs?: string[] | null }[] | null; Mounts?: { Target?: string }[] | null };
+  NetworkSettings?: { Networks?: Record<string, { NetworkID?: string }> | null };
   State?: { Running?: boolean; Restarting?: boolean; ExitCode?: number; Error?: string; StartedAt?: string };
   RestartCount?: number;
 }
@@ -106,11 +108,10 @@ interface Inspected {
 export const SPEC_LABEL = "pithagoras.extension-spec";
 const RESTART = { Name: "unless-stopped" };
 
-/** What a spec is hashed by: everything but its network, which is compared as it is. */
+/** What a spec is hashed by: everything but its labels. */
 export function specHash(spec: ContainerSpec): string {
-  const { HostConfig, Labels: _labels, ...rest } = spec as ContainerSpec & { HostConfig?: Record<string, unknown> };
-  const { NetworkMode: _network, ...host } = HostConfig ?? {};
-  return createHash("sha256").update(JSON.stringify({ ...rest, HostConfig: host })).digest("hex").slice(0, 16);
+  const { Labels: _labels, ...rest } = spec;
+  return createHash("sha256").update(JSON.stringify(rest)).digest("hex").slice(0, 16);
 }
 
 /** The spec as it is made: the restart policy every service container has, and the hash of the rest as its label. */
@@ -131,6 +132,22 @@ const heldCard = (detail: Inspected | undefined): string | undefined => detail?.
 /** How long a server may take to answer after its start before the half stops waiting for it (the 30 s look goes on). */
 const ANSWER_WITHIN_MS = 180_000;
 
+/**
+ * Where the portal reaches the server: what Docker for extensions' `networks.reach` gave, asked once in each run of the
+ * half and again where the server does not answer (`again`). A name, or 127.0.0.1 through a forwarder, never an
+ * address of the container's, which changes as it starts again: so what was given stays right while the portal runs.
+ */
+export function serverAddress(docker: () => Docker, names: Names) {
+  let reached: Promise<Reach> | undefined;
+  const again = () =>
+    (reached = docker().networks.reach(names.network, names.container, names.port).catch((e) => {
+      reached = undefined;
+      throw e;
+    }));
+  return { get: () => reached ?? again(), again, forget: () => void (reached = undefined) };
+}
+export type ServerAddress = ReturnType<typeof serverAddress>;
+
 export interface ServiceOptions {
   portal: ServerPortal;
   docker: () => Docker;
@@ -144,18 +161,14 @@ export interface ServiceOptions {
   spec: (plan: Plan) => ContainerSpec;
   /** Runs the GPU probe; the tests give their own. */
   probe?: (docker: Docker, name: string, pinned?: string) => Promise<Probed>;
-  /** The portal's own network namespace, as Linux names it (`net:[…]`); the tests give their own. */
-  netns?: () => string;
+  /** Where the portal reaches the server (`serverAddress`), which the MCP client and the proxy ask too. */
+  address: ServerAddress;
 }
-
-/** What names the network namespace a process is in, the same in every process in it. */
-const NETNS = "/proc/self/ns/net";
 
 export function service(options: ServiceOptions) {
   const { portal, app, names, store, relay, mcp } = options;
   const docker = options.docker;
   const runProbe = options.probe ?? probe;
-  const portalNetns = options.netns ?? (() => readlinkSync(NETNS));
   let pending = false;
   let downloading = false;
   let progress = "";
@@ -218,14 +231,13 @@ export function service(options: ServiceOptions) {
     return detail?.HostConfig?.Mounts?.some((m) => m.Target === "/usr/share/nvidia/nvoptix.bin") ? "host" : "none";
   }
 
-  async function wantedSpec(detail: Inspected | undefined): Promise<ContainerSpec> {
-    const network = await docker().sharedNetwork();
-    return stamped(options.spec({ card: wantedCard(detail), optix: wantedOptix(detail), network, token: store.token() }));
-  }
+  const wantedSpec = (detail: Inspected | undefined, island: NetworkInfo): ContainerSpec =>
+    stamped(options.spec({ card: wantedCard(detail), optix: wantedOptix(detail), network: island.name, token: store.token() }));
 
-  const current = (detail: Inspected, spec: ContainerSpec) =>
+  /** Made as it would be now, and on the network as it is now: by its id, as one made again under the name is another. */
+  const current = (detail: Inspected, spec: ContainerSpec, island: NetworkInfo) =>
     detail.Config?.Labels?.[SPEC_LABEL] === (spec.Labels as Record<string, string>)[SPEC_LABEL] &&
-    detail.HostConfig?.NetworkMode === (spec.HostConfig as { NetworkMode?: string }).NetworkMode;
+    detail.NetworkSettings?.Networks?.[island.name]?.NetworkID === island.id;
 
   // --- how it stands ---
 
@@ -244,7 +256,8 @@ export function service(options: ServiceOptions) {
     let problem = error;
     if (running && !pending) {
       try {
-        if (!current(detail!, await wantedSpec(detail))) {
+        const island = await d.networks.get(names.network);
+        if (!island || !current(detail!, wantedSpec(detail, island), island)) {
           void install().catch((e) => portal.log(`could not make the ${app} container again: ${(e as Error).message}`));
           return { ...base, busy: true, state: "starting", error: "", log: "" };
         }
@@ -311,10 +324,11 @@ export function service(options: ServiceOptions) {
         });
         downloading = false;
         await d.volumes.create(names.volume);
+        const island = await d.networks.create(names.network);
         const detail = await own();
         if (detail === "foreign") throw new Error(`A container named ${names.container} is there that is not this extension's. Rename or remove it first.`);
-        const spec = await wantedSpec(detail);
-        if (detail && current(detail, spec)) {
+        const spec = wantedSpec(detail, island);
+        if (detail && current(detail, spec, island)) {
           // One Docker is starting again is running to Docker: stopped first, so this start is a start of its own.
           if (retrying(detail)) await d.containers.stop(names.container);
           await d.containers.start(names.container);
@@ -323,6 +337,8 @@ export function service(options: ServiceOptions) {
           await d.containers.create(names.container, spec);
           await d.containers.start(names.container);
         }
+        // The portal's way onto the network: its container put on it, or the forwarder made and started.
+        await options.address.again();
         relay.setInstalled(true);
         void whenAnswering().catch((e) => portal.log(`could not compare ${app}'s tools: ${(e as Error).message}`));
       } catch (e) {
@@ -343,8 +359,9 @@ export function service(options: ServiceOptions) {
   }
 
   /**
-   * Removes the container, and with `removeData` the volume with the projects. The image stays: Docker for extensions
-   * cannot remove one, and the page says how. The tools leave every chat.
+   * Removes the container, then its network, with the forwarder or the portal's container taken off it, and with
+   * `removeData` the volume with the projects. The image stays: Docker for extensions cannot remove one, and the page
+   * says how. The tools leave every chat.
    */
   async function uninstall(removeData: boolean): Promise<void> {
     if (pending) throw new Error("Wait for the setup to finish.");
@@ -356,6 +373,8 @@ export function service(options: ServiceOptions) {
       if (detail === "foreign") throw new Error(`A container named ${names.container} is there that is not this extension's. Rename or remove it first.`);
       if (detail) await d.containers.remove(names.container);
       relay.setInstalled(false);
+      await d.networks.remove(names.network);
+      options.address.forget();
       if (removeData) await d.volumes.remove(names.volume);
     } finally {
       pending = false;
@@ -363,40 +382,13 @@ export function service(options: ServiceOptions) {
   }
 
   /**
-   * Is the server's process in another network namespace than the portal's? Read in the container, which has to be
-   * running: the namespace's name is the same in every process in it.
-   */
-  async function strayed(): Promise<boolean> {
-    const read = await docker().containers.exec(names.container, ["readlink", NETNS], { timeoutMs: 10_000 });
-    return read.exitCode === 0 && read.output.trim() !== portalNetns();
-  }
-
-  /**
-   * The server started again, the container and the volume kept, so that Docker joins it to the portal's namespace as
-   * it is now. What was not saved in the open scene is lost with the process, as nothing could reach it to save it.
-   */
-  async function rejoin(): Promise<void> {
-    pending = true;
-    error = "";
-    portal.log(`the ${app} container is in a network namespace the portal is no longer in (the portal's container started again): starting it again`);
-    try {
-      await docker().containers.stop(names.container);
-      await docker().containers.start(names.container);
-    } catch (e) {
-      error = (e as Error).message;
-      return;
-    } finally {
-      pending = false;
-    }
-    void whenAnswering().catch((e) => portal.log(`could not compare ${app}'s tools: ${(e as Error).message}`));
-  }
-
-  /**
    * The look every 30 seconds, and once as the half starts: a running container that is stale is made again (in
    * `status`); while the server answers, what it lists is compared with the extension's tools, which the log says
-   * where they differ (code the agent ran can change the server); and one Docker says is running that does not answer
-   * is started again where it is in a namespace the portal is no longer in. A container somebody stopped is never
-   * started here.
+   * where they differ (code the agent ran can change the server); and for one Docker says is running that does not
+   * answer, the portal's way to it is asked for again (`networks.reach`), which puts right what is not as it should
+   * be: a portal container made again is put on the network, and a forwarder somebody removed or stopped comes back.
+   * Nothing is stopped or started for it, so a server that is only slow to start loses nothing. A container somebody
+   * stopped is never started here.
    */
   async function maintain(): Promise<void> {
     const now = await status();
@@ -404,7 +396,7 @@ export function service(options: ServiceOptions) {
     // Only these can be running to Docker without answering: one starting, and one Docker starts again after it exited.
     if (now.busy || (now.state !== "starting" && now.state !== "failed")) return;
     const detail = await own();
-    if (detail && detail !== "foreign" && detail.State?.Running && !detail.State.Restarting && (await strayed())) await rejoin();
+    if (detail && detail !== "foreign" && detail.State?.Running && !detail.State.Restarting) await options.address.again();
   }
 
   /** The cards as the probe finds them now, and which the server is, or would be, on. */

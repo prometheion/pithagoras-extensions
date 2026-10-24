@@ -1,6 +1,6 @@
 import type { Request, Response, Router } from "express";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
-import type { Service } from "../../../shared/service";
+import type { ServerAddress, Service } from "../../../shared/service";
 
 /**
  * Blender's page in Settings, and its panel, at /api/x/pithagoras-blender/…, behind the portal's sign-in:
@@ -17,9 +17,10 @@ import type { Service } from "../../../shared/service";
  */
 
 /** What the server says of its renderer, from its own state (GET /api/state): nothing while it does not answer. */
-async function renderer(port: number, token: string): Promise<{ backend: string; denoiser: string } | undefined> {
+async function renderer(address: ServerAddress, token: string): Promise<{ backend: string; denoiser: string } | undefined> {
   try {
-    const answer = await fetch(`http://127.0.0.1:${port}/api/state`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) });
+    const { host, port } = await address.get();
+    const answer = await fetch(`http://${host}:${port}/api/state`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) });
     if (!answer.ok) return undefined;
     const state = (await answer.json()) as { gpu?: string; denoiser?: string };
     return { backend: state.gpu ?? "", denoiser: state.denoiser ?? "" };
@@ -28,14 +29,14 @@ async function renderer(port: number, token: string): Promise<{ backend: string;
   }
 }
 
-export function blenderRoutes(portal: ServerPortal, router: Router, svc: Service, server: { port: number; token: () => string }): void {
+export function blenderRoutes(portal: ServerPortal, router: Router, svc: Service, server: { address: ServerAddress; token: () => string }): void {
   const json = portal.http.json();
   const fail = (res: Response, status: number, e: unknown) => res.status(status).json({ error: (e as Error).message });
 
   router.get("/state", async (_req: Request, res: Response) => {
     try {
       const state = await svc.status();
-      res.json({ ...state, ...(state.state === "running" ? { renderer: await renderer(server.port, server.token()) } : {}) });
+      res.json({ ...state, ...(state.state === "running" ? { renderer: await renderer(server.address, server.token()) } : {}) });
     } catch (e) {
       fail(res, 503, e);
     }

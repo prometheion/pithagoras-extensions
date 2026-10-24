@@ -9,13 +9,12 @@ Not made or endorsed by the Godot Foundation. "Godot" names what the extension r
 
 ## What it needs
 
-- Pithagoras 0.2.0 or later.
-- **Docker for extensions** (`pithagoras-docker` 1.2.0 or later), which ships with the portal but is not on by
+- Pithagoras 0.3.0 or later.
+- **Docker for extensions** (`pithagoras-docker` 1.3.0 or later), which ships with the portal but is not on by
   default. Installing this extension from npm installs or switches it on along with it; installing it from a folder
   does not, and the extension then waits, saying so in Settings → Extensions, until you install Docker for
   extensions from Settings → Extensions → Discover.
-- A Linux host with Docker, where the portal runs on the host itself or in a container of its own (Docker for
-  extensions shares the portal's network with the server's container).
+- A Linux host with Docker Engine 28.0 or later: the server's network has no gateway, which older Docker cannot make.
 - For the GPU, an NVIDIA card and the NVIDIA Container Toolkit. Without one, Godot opens Compatibility projects (the
   2D template) with Mesa's software OpenGL and cannot render Forward+ projects.
 - The portal over **HTTPS, or opened as `http://localhost`**. The editor's stream decodes with WebCodecs, which
@@ -35,9 +34,10 @@ In Settings → Extensions → Discover → **Install by name**:
 ## The first start
 
 Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/prometheion/pithagoras-godot:0.1.0`,
-about 0.6 GB unpacked), makes a volume for the projects, makes the container and starts it. The page shows the
-download, then the server starting, then the editor's own state ("Editor ready: starter"). The first start makes a
-3D project called `starter`; the agent and you make more.
+about 0.6 GB unpacked), makes a volume for the projects and a network of its own (`pithagoras-godot-net`), makes the
+container on it and starts it, and opens the portal's way to it (below, under Security). The page shows the download,
+then the server starting, then the editor's own state ("Editor ready: starter"). The first start makes a 3D project
+called `starter`; the agent and you make more.
 
 The card: the page lists the NVIDIA cards Docker can give a container, read in a short-lived probe container
 (`pithagoras-godot-probe`), with how much of each card's memory is in use. **Automatic** gives a new server the card
@@ -103,14 +103,12 @@ Don't add an MCP server named `godot` beside this extension: its tools would hav
   it or read its memory or its environment). It takes the stream's Unix socket only from the Selkies it started (the
   listener's process has to be in that Selkies' session), so code in the container cannot put a server of its own
   in Selkies' place.
-- **What it reaches.** The container is in the portal's network namespace. For a portal run in Docker that is the
-  portal container's loopback: the portal itself, the other extensions' servers there, and the internet as the
-  portal reaches it. For a portal run on the host itself it is the host's network: every service listening on the
-  host's loopback, the local network, and the internet. That is what `godot_execute_gdscript`, a `@tool` script or a
-  game reaches, as the agent's own shell does in a portal without the sandbox. A private network between the portal
-  and an extension's server would narrow this; Pithagoras 0.2.0 has none. The server's token is in the container's
-  environment, which code there can read (the init process is the same user's): with it, that code can call the
-  server it already runs in, nothing more.
+- **What it reaches.** The container is on `pithagoras-godot-net`, which has no way out. What
+  `godot_execute_gdscript`, a `@tool` script or a game reaches is the server and, through the forwarder's port, the
+  server again; for a portal in a container of its own, also what that container listens on 0.0.0.0, which is the
+  portal's own port and asks for its sign-in. Not the host, its loopback, the local network or the internet. The
+  server's token is in the container's environment, which code there can read (the init process is the same user's):
+  with it, that code can call the server it already runs in, nothing more.
 - **Nothing it serves runs on the portal's origin.** The viewer and Selkies' web client come from the package, and
   the server sends no page: what it answers is JSON, files to download (served with `sandbox`, and as attachments
   but for pictures and videos), and the stream's frames. Web builds are files to download, not pages served there:
@@ -120,11 +118,14 @@ Don't add an MCP server named `godot` beside this extension: its tools would hav
   own folder (`settings.json`, mode 0600, which only the portal's user can open), and given to the container. Every
   route of the server but `/healthz` asks for it as `Authorization: Bearer`. The portal's proxy adds it; no page is
   given it. There is no password, default or otherwise.
-- **Loopback only.** The container shares the portal's network namespace (Docker for extensions' `sharedNetwork`: the
-  host's for a portal on the host, the portal container's otherwise) and publishes nothing. The server listens on
-  127.0.0.1. Selkies listens on a Unix socket in a folder only the server can open, and the X display is the
-  container's own (`-nolisten local`). The editor's own listeners (its bridge plugin, with a secret of its own per
-  start, the GDScript language server, the debug adapter and the debugger) take free loopback ports at each start.
+- **A network of its own.** The container is on `pithagoras-godot-net`, which Docker for extensions makes internal and
+  with no gateway (gateway mode `isolated`): nothing on it reaches the host, the local network or the internet, and
+  nothing but the portal reaches it. The server listens on 0.0.0.0 of that network. For a portal on the host's network,
+  the forwarder `pithagoras-godot-forward` publishes port 3880 on 127.0.0.1 and passes it on; for a portal in a
+  container of its own, that container is on the network. Selkies listens on a Unix socket in a folder only the server
+  can open, and the X display is the container's own (`-nolisten local`). The editor's own listeners (its bridge plugin,
+  with a secret of its own per start, the GDScript language server, the debug adapter and the debugger) take free
+  loopback ports at each start.
 - **Through the portal.** Every route of the extension is behind the portal's sign-in, and any of them that changes
   something (Install, Start, Stop, Remove, the card, the screen, and every write the viewer makes) is refused unless it
   comes from the portal's own pages, by its Origin or `Sec-Fetch-Site: same-origin`: the portal's cookie is
@@ -139,7 +140,8 @@ Don't add an MCP server named `godot` beside this extension: its tools would hav
   the model is told of the tools, and the instructions in every chat's prompt, are the package's (`server/tools.json`),
   never what the running server says of itself.
 - **Who can use it.** Everyone signed in to the portal can use the panel, and drive the editor from it.
-- **The other direction.** A process in the portal's network namespace can reach the server's port, but not without
+- **The other direction.** For a portal on the host's network, a process on the host reaches the server's port on
+  127.0.0.1; for a portal in a container of its own, the processes in that container do. Neither can use it without
   the token. With the sandbox on, agents run as users of their own and cannot read it; with it off, the agent runs as
   the portal's user and could.
 
@@ -161,9 +163,9 @@ To back it up, for example: `docker run --rm -v pithagoras-godot-data:/data -v "
 
 | Variable | Default | |
 |---|---|---|
-| `PITHAGORAS_GODOT_CONTAINER` | `pithagoras-godot` | the container's name; the probe is `<name>-probe` |
+| `PITHAGORAS_GODOT_CONTAINER` | `pithagoras-godot` | the container's name; the probe is `<name>-probe`, the network `<name>-net`, the forwarder `<name>-forward` |
 | `PITHAGORAS_GODOT_VOLUME` | `<container>-data` | the projects' volume |
-| `PITHAGORAS_GODOT_PORT` | `3880` | the server's port on the portal's loopback |
+| `PITHAGORAS_GODOT_PORT` | `3880` | the server's port, and for a portal on the host's network the forwarder's on 127.0.0.1 |
 | `PITHAGORAS_GODOT_IMAGE` | `ghcr.io/prometheion/pithagoras-godot:<version>` | another image, such as one built locally |
 | `PITHAGORAS_GODOT_GPU` | | a card's UUID or index: the only card the server is given |
 
@@ -174,8 +176,8 @@ card or a port.
 
 **Remove** on the Settings page first, then uninstall the extension: the container is restarted by Docker unless
 stopped (`unless-stopped`), and outlives the extension, which has no say once it is uninstalled. Remove asks whether to
-delete the projects too. The image stays on disk, as other containers may use it: `docker image rm
-ghcr.io/prometheion/pithagoras-godot:0.1.0` deletes it.
+delete the projects too, and also removes the network and the forwarder. The image stays on disk, as other containers
+may use it: `docker image rm ghcr.io/prometheion/pithagoras-godot:0.1.0` deletes it.
 
 ## Limits
 
@@ -186,16 +188,13 @@ ghcr.io/prometheion/pithagoras-godot:0.1.0` deletes it.
 - No window manager: a game opens as a window over the editor, not in the editor's Game tab.
 - The stream is encoded on the CPU (x264): NVENC wants the first GPU's device node, which a container that sees only
   another card does not have.
-- Port 3880 on the portal's loopback (the host's, for a portal on the host): a port in use shows as the server failing
-  to start, with "Address already in use" in its log; `PITHAGORAS_GODOT_PORT` moves it.
+- For a portal on the host's network, port 3880 on 127.0.0.1 is the forwarder's: a port in use shows as the server
+  failing to start, with Docker's "address already in use"; `PITHAGORAS_GODOT_PORT` moves it.
 - An upload must arrive within Node's request timeout (300 s): about 3 GB at 10 MB/s, less on a slow link; the
   server takes up to 2 GB.
-- After a host restart with the portal in Docker, Docker may start this container before the portal's; the page then
-  shows it failed, and Start makes it again on the portal's network.
-- When the portal's container is made again (an update), the server's container is made again on the new one's
-  network at the half's first look; when it restarts under the same id (Settings → About → Restart, or Docker
-  restarting it), the server's container is started again in the portal's new network namespace. Either way the
-  editor starts again: what was not saved in the open scenes is lost, as nothing could reach the old one to save it.
+- When the portal's container is made again or restarted, the editor keeps running.
+- Nothing in the container reaches the internet: the editor's Asset Library, and a game or a script that downloads, do
+  not work there. Bring files in with the panel's Upload.
 - Only Chrome is tested.
 
 ## Licences

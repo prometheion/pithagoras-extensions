@@ -1,6 +1,6 @@
 import type { Request, Response, Router } from "express";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
-import type { Service } from "../../../shared/service";
+import type { ServerAddress, Service } from "../../../shared/service";
 import type { Store } from "../../../shared/store";
 import { DISPLAYS, displayOf } from "../displays";
 
@@ -34,9 +34,10 @@ export interface EditorState {
 }
 
 /** What the server says of its editor: nothing while it does not answer in time. */
-async function editorState(port: number, token: string): Promise<EditorState | undefined> {
+async function editorState(address: ServerAddress, token: string): Promise<EditorState | undefined> {
   try {
-    const answer = await fetch(`http://127.0.0.1:${port}/api/state`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) });
+    const { host, port } = await address.get();
+    const answer = await fetch(`http://${host}:${port}/api/state`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) });
     if (!answer.ok) return undefined;
     const { ready, editor, project, renderer, busy, restarts, adapter, godot } = (await answer.json()) as EditorState;
     return { ready, editor, project, renderer, busy, restarts, adapter, godot };
@@ -45,14 +46,14 @@ async function editorState(port: number, token: string): Promise<EditorState | u
   }
 }
 
-export function godotRoutes(portal: ServerPortal, router: Router, svc: Service, store: Store, server: { port: number }): void {
+export function godotRoutes(portal: ServerPortal, router: Router, svc: Service, store: Store, server: { address: ServerAddress }): void {
   const json = portal.http.json();
   const fail = (res: Response, status: number, e: unknown) => res.status(status).json({ error: (e as Error).message });
 
   router.get("/state", async (_req: Request, res: Response) => {
     try {
       const state = await svc.status();
-      const editor = state.state === "running" ? await editorState(server.port, store.token()) : undefined;
+      const editor = state.state === "running" ? await editorState(server.address, store.token()) : undefined;
       res.json({ ...state, ...(editor ? { editor } : {}), display: displayOf(store.setting("display")) });
     } catch (e) {
       fail(res, 503, e);

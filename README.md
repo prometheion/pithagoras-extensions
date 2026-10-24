@@ -18,20 +18,22 @@ anything else.
 
 ## What they need
 
-- Pithagoras 0.2.0 or later.
-- [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.2.0 or later).
+- Pithagoras 0.3.0 or later.
+- [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
   It ships with the portal but is not on by default; installing one of these extensions from npm brings it along.
-- A Linux host with Docker that the portal can reach. For the GPU, an NVIDIA card and the NVIDIA Container Toolkit.
-  Without one, Blender renders on the CPU, and Godot opens Compatibility projects with Mesa's software OpenGL but
-  cannot render Forward+ projects.
+- A Linux host with Docker Engine 28.0 or later that the portal can reach. For the GPU, an NVIDIA card and the NVIDIA
+  Container Toolkit. Without one, Blender renders on the CPU, and Godot opens Compatibility projects with Mesa's
+  software OpenGL but cannot render Forward+ projects.
 - For Godot, the portal over HTTPS or opened as `http://localhost`: the editor's stream decodes with WebCodecs, which
   browsers give only a secure context. Over plain HTTP on another name the panel says so; the Pithagoras guide's
   [HTTPS section](https://thecodacus.github.io/pithagoras/guide/deploying#https) shows how to turn it on
   (`PORTAL_TLS_CERT` and `PORTAL_TLS_KEY`).
 
-Each container shares the portal's network namespace. For a portal run on the host's network (`network_mode: host`),
-code the agent runs in Blender or Godot reaches the host's loopback and local network. Each extension's README says
-more under Security.
+Each server runs on a network of its own that has no way out: code the agent runs in Blender or Godot reaches neither
+the host, its loopback, the local network nor the internet. The portal reaches the server through Docker for
+extensions: for a portal on the host's network (both of Pithagoras' Compose files), through a small forwarder
+container that publishes the server's port on 127.0.0.1; for a portal in a container on a network of its own, by
+putting that container on the server's network. Each extension's README says more under Security.
 
 ## Installing
 

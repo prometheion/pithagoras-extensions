@@ -12,7 +12,7 @@ import { BUNDLED, fakeMcp, fakePortal, TOOLS } from "./fakes.mts";
 async function setup(options: { dataDir?: string; acts?: typeof ACTS } = {}) {
   const server = await fakeMcp("tok");
   const fake = fakePortal(options);
-  const mcp = mcpClient({ url: () => server.url, token: () => "tok" });
+  const mcp = mcpClient({ url: async () => server.url, token: () => "tok" });
   const installedFile = path.join(fake.dataDir, "installed");
   const tools = relay({ portal: fake.portal, prefix: "blender", app: "Blender", mcp, bundled: BUNDLED, labels: LABELS, acts: options.acts ?? ACTS, installedFile });
   return { server, fake, tools, installedFile };

@@ -13,11 +13,13 @@ import { fakeDocker, fakeMcp, fakePortal, TOOLS } from "./fakes.mts";
  * the server removed, with its tools gone from every list.
  */
 
-const docker = fakeDocker({ network: "container:portal-1" });
+const docker = fakeDocker();
 const fake = fakePortal(docker.docker);
 const token = () => JSON.parse(readFileSync(path.join(fake.dataDir, "settings.json"), "utf8")).token as string;
 const server = await fakeMcp(token);
-process.env.PITHAGORAS_GODOT_PORT = String(server.port);
+// The server's own port is the default; the portal reaches it where Docker's reach says, the stand-in's port.
+delete process.env.PITHAGORAS_GODOT_PORT;
+docker.state.reach = { host: "127.0.0.1", port: server.port };
 process.env.PITHAGORAS_GODOT_CONTAINER = "flairtest-godot";
 process.env.PITHAGORAS_GODOT_IMAGE = "flairtest-pithagoras-godot:0.1.0";
 const { default: godot } = await import("../src/server.ts");
@@ -83,7 +85,9 @@ test("Install makes and starts the container, and once the server answers its to
   assert.doesNotMatch(JSON.stringify(state), new RegExp(token()), "the token is not the page's");
   const spec = docker.containers.get("flairtest-godot")!.spec as any;
   assert.ok(spec.Env.includes(`GODOT_SERVER_TOKEN=${token()}`));
-  assert.ok(spec.Env.includes(`GODOT_SERVER_PORT=${server.port}`));
+  assert.ok(spec.Env.includes("GODOT_SERVER_PORT=3880"));
+  assert.equal(spec.HostConfig.NetworkMode, "flairtest-godot-net");
+  assert.ok(docker.calls.includes("reach flairtest-godot-net flairtest-godot 3880"), "the way to the server is Docker's to give");
   assert.equal(spec.Image, "flairtest-pithagoras-godot:0.1.0");
   // The tools are asked for once the server answers, in the background.
   for (let i = 0; i < 200 && !fake.registered().length; i++) await new Promise((r) => setTimeout(r, 10));

@@ -7,15 +7,18 @@ import { fakeMcp, fakePortal, memoryDocker, TOOLS } from "./fakes.mts";
 
 /**
  * Blender's server half as the portal starts it: its routes at /api/x/pithagoras-blender, its tools, its viewer through
- * the proxy, with Docker in memory and an MCP server standing in for the container on the server's port.
+ * the proxy, with Docker in memory and an MCP server standing in for the container where Docker's reach says the
+ * portal reaches it.
  */
 
 async function start() {
   const fake = fakePortal();
   // The token is made before the half starts, so that the stand-in server can ask for it.
   const server = await fakeMcp(openStore(fake.dataDir).token());
-  process.env.PITHAGORAS_BLENDER_PORT = String(server.port);
+  delete process.env.PITHAGORAS_BLENDER_PORT;
   const d = memoryDocker();
+  // The server's own port is the default; the portal reaches it where reach says, the stand-in's port.
+  d.state.reach = { host: "127.0.0.1", port: server.port };
   d.state.onStart = (c) => {
     if (c.name !== "pithagoras-blender-probe") return;
     c.log = "0, GPU-1b1b1b1b, NVIDIA GeForce RTX 3060, 158, 12288\nOPTIX=host\n";
@@ -49,6 +52,8 @@ test("Settings → Blender through install to running, with its tools in every c
   assert.equal(state.state, "running");
   assert.deepEqual(state.renderer, { backend: "OPTIX", denoiser: "OPTIX" });
   assert.ok(d.containers.has("pithagoras-blender"));
+  assert.ok(d.calls.includes("reach pithagoras-blender-net pithagoras-blender 3870"), "the way to the server is Docker's to give");
+  assert.ok((d.containers.get("pithagoras-blender")!.spec as any).Env.includes("BLENDER_SERVER_PORT=3870"));
   for (let i = 0; i < 100 && !fake.registered().length; i++) await delay(10);
   assert.equal(fake.registered().length, TOOLS.length);
   assert.equal(fake.offered().length, TOOLS.length);

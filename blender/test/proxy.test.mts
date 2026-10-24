@@ -42,7 +42,8 @@ async function upstream() {
 async function setup() {
   const up = await upstream();
   const fake = fakePortal();
-  const options = { port: () => up.port, token: () => "tok", page: PAGE, notAnswering: "Blender antwortet nicht. / Blender is not answering." };
+  // Where the portal reaches the server, as Docker for extensions' reach gives it.
+  const options = { upstream: async () => ({ host: "127.0.0.1", port: up.port }), token: () => "tok", page: PAGE, notAnswering: "Blender antwortet nicht. / Blender is not answering." };
   fake.portal.router.use(writesFromHere);
   fake.portal.router.post("/stop", (_req: unknown, res: { json: (body: unknown) => void }) => res.json({ ok: true }));
   fake.portal.router.use("/ui", proxyUi(options));
@@ -116,13 +117,18 @@ test("/ui without its slash goes to ui/, with its query", async () => {
   assert.equal(answer.headers.get("location"), "ui/?lang=de");
 });
 
-test("a server that does not answer is said to", async () => {
-  const fake = fakePortal();
-  fake.portal.router.use("/ui", proxyUi({ port: () => 1, token: () => "tok", page: PAGE, notAnswering: "Blender antwortet nicht. / Blender is not answering." }));
-  const at = await fake.serve();
-  const answer = await fetch(`${at}/ui/api/state`);
-  assert.equal(answer.status, 502);
-  assert.equal(await answer.text(), "Blender antwortet nicht. / Blender is not answering.");
+test("a server that does not answer, or that no way to can be given, is said to", async () => {
+  for (const upstream of [async () => ({ host: "127.0.0.1", port: 1 }), () => Promise.reject(new Error("There is no network pithagoras-blender-net"))]) {
+    const fake = fakePortal();
+    const options = { upstream, token: () => "tok", page: PAGE, notAnswering: "Blender antwortet nicht. / Blender is not answering." };
+    fake.portal.router.use("/ui", proxyUi(options));
+    fake.portal.http.upgrade(uiUpgrade(options));
+    const at = await fake.serve();
+    const answer = await fetch(`${at}/ui/api/state`);
+    assert.equal(answer.status, 502);
+    assert.equal(await answer.text(), "Blender antwortet nicht. / Blender is not answering.");
+    await assert.rejects(openStream(at, "/ui/stream/websocket", {}), /socket hang up/, "a stream is closed");
+  }
 });
 
 /** Opens a WebSocket's handshake through the proxy, as a browser would, and gives back the socket or the refusal. */

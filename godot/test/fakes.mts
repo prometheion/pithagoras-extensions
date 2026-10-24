@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import express from "express";
-import type { ContainerInfo, ContainerSpec, Docker, PullState } from "../../shared/docker-api.ts";
+import type { ContainerInfo, ContainerSpec, Docker, PullState, Reach } from "../../shared/docker-api.ts";
 
 /**
  * What the unit tests stand in for: Docker for extensions (in memory, recording what it was asked), the portal a
@@ -17,29 +17,37 @@ import type { ContainerInfo, ContainerSpec, Docker, PullState } from "../../shar
 export const LISTED = JSON.parse(readFileSync(new URL("../server/tools.json", import.meta.url), "utf8")) as { instructions: string; tools: { name: string; description: string; inputSchema: Record<string, unknown> }[] };
 export const TOOLS = LISTED.tools;
 
-type Kept = { spec: ContainerSpec; owner: string; id: string; running: boolean; exitCode: number; startedAt: string; logs: string; restarting: boolean; restarts: number };
+/** A container, with the networks it is on by name, each with its id, as inspect's `NetworkSettings.Networks` has them. */
+type Kept = { spec: ContainerSpec; owner: string; id: string; running: boolean; exitCode: number; startedAt: string; logs: string; restarting: boolean; restarts: number; networks: Record<string, { NetworkID: string }> };
 
-export function fakeDocker(options: { owner?: string; network?: string; gpus?: string; noGpu?: string } = {}) {
+/**
+ * Docker for extensions for one extension. A container made with a `NetworkMode` that names one of its networks is on
+ * it, by that network's id. `reach` is where `networks.reach` says the portal reaches a container on one (127.0.0.1
+ * and the port asked for, unless a test says), refused as Docker for extensions refuses it for a network or a
+ * container there is none of and for a container not on the network, and with `reachFails` in those words.
+ */
+export function fakeDocker(options: { owner?: string; gpus?: string; noGpu?: string } = {}) {
   const owner = options.owner ?? "pithagoras-godot";
   const containers = new Map<string, Kept>();
   const volumes = new Set<string>();
+  const networks = new Map<string, { id: string; owner: string }>();
   const images = new Set<string>();
   const calls: string[] = [];
   let n = 0;
   const state = {
-    network: options.network ?? "container:portal-1",
     /** What nvidia-smi prints in a probe, and the error Docker gives when it will not hand out a GPU. */
     gpus: options.gpus ?? "0, GPU-aaaa0000, NVIDIA GeForce RTX 3060, 11000, 12288\n1, GPU-bbbb1111, NVIDIA GeForce RTX 3060, 158, 12288\nOPTIX=toolkit\n",
     noGpu: options.noGpu,
     available: true,
     pullFails: undefined as string | undefined,
-    /** The network namespace a command run in a container finds it in (`readlink /proc/self/ns/net`). */
-    namespace: "net:[4026532001]",
+    reach: undefined as Reach | undefined,
+    reachFails: undefined as string | undefined,
   };
+  const refused = (status: number, message: string) => Object.assign(new Error(message), { status });
   const info = (name: string, kept: Kept): ContainerInfo => ({ name, id: kept.id, image: kept.spec.Image, state: kept.running ? "running" : "exited", status: "", owner: kept.owner, labels: (kept.spec.Labels as Record<string, string>) ?? {} });
   const docker: Docker = {
     available: async () => state.available,
-    sharedNetwork: async () => state.network,
+    sharedNetwork: async () => "host",
     images: {
       present: async (image) => images.has(image),
       async ensure(image, onProgress?: (s: PullState) => void) {
@@ -57,7 +65,9 @@ export function fakeDocker(options: { owner?: string; network?: string; gpus?: s
       async create(name, spec) {
         calls.push(`create ${name}`);
         containers.delete(name);
-        containers.set(name, { spec: structuredClone(spec), owner, id: `id${++n}`, running: false, exitCode: 0, startedAt: "", logs: "", restarting: false, restarts: 0 });
+        const mode = (spec.HostConfig as { NetworkMode?: string } | undefined)?.NetworkMode ?? "";
+        const on = networks.get(mode);
+        containers.set(name, { spec: structuredClone(spec), owner, id: `id${++n}`, running: false, exitCode: 0, startedAt: "", logs: "", restarting: false, restarts: 0, networks: on ? { [mode]: { NetworkID: on.id } } : {} });
         return info(name, containers.get(name)!);
       },
       async start(name) {
@@ -91,6 +101,7 @@ export function fakeDocker(options: { owner?: string; network?: string; gpus?: s
           Id: k.id,
           Config: { Image: k.spec.Image, Labels: k.spec.Labels ?? {} },
           HostConfig: k.spec.HostConfig,
+          NetworkSettings: { Networks: k.networks },
           State: { Running: k.running, Restarting: k.restarting, ExitCode: k.exitCode, StartedAt: k.startedAt },
           RestartCount: k.restarts,
         };
@@ -99,7 +110,7 @@ export function fakeDocker(options: { owner?: string; network?: string; gpus?: s
       async exec(name, cmd) {
         calls.push(`exec ${name} ${cmd.join(" ")}`);
         if (!containers.get(name)?.running) throw Object.assign(new Error(`Container ${name} is not running`), { status: 409 });
-        return { output: `${state.namespace}\n`, exitCode: 0, timedOut: false };
+        return { output: "", exitCode: 0, timedOut: false };
       },
       adopt: async (name) => info(name, containers.get(name)!),
     },
@@ -115,10 +126,35 @@ export function fakeDocker(options: { owner?: string; network?: string; gpus?: s
       },
       adopt: async () => {},
     },
+    networks: {
+      async create(name) {
+        calls.push(`network ${name}`);
+        const there = networks.get(name);
+        if (there && there.owner !== owner) throw refused(403, `${name} is ${there.owner || "no extension"}'s network, not ${owner}'s`);
+        if (!there) networks.set(name, { id: `net${++n}`, owner });
+        return { name, ...networks.get(name)! };
+      },
+      get: async (name) => (networks.has(name) ? { name, ...networks.get(name)! } : undefined),
+      async reach(name, container, port) {
+        calls.push(`reach ${name} ${container} ${port}`);
+        if (!networks.has(name)) throw refused(404, `There is no network ${name}`);
+        const kept = containers.get(container);
+        if (!kept || kept.owner !== owner) throw refused(404, `There is no container ${container}`);
+        if (!kept.networks[name]) throw refused(409, `${container} is not on ${name}`);
+        if (state.reachFails) throw refused(0, state.reachFails);
+        return state.reach ?? { host: "127.0.0.1", port };
+      },
+      async remove(name) {
+        calls.push(`remove network ${name}`);
+        const on = [...containers].filter(([, k]) => k.owner === owner && k.networks[name]);
+        if (on.length) throw refused(403, `error while removing network: network ${name} has active endpoints (name:"${on[0][0]}")`);
+        networks.delete(name);
+      },
+    },
   };
   /** A container someone else made, under `name`. */
-  const foreign = (name: string, by = "") => containers.set(name, { spec: { Image: "x" }, owner: by, id: `id${++n}`, running: true, exitCode: 0, startedAt: "t0", logs: "", restarting: false, restarts: 0 });
-  return { docker, containers, volumes, images, calls, state, foreign };
+  const foreign = (name: string, by = "") => containers.set(name, { spec: { Image: "x" }, owner: by, id: `id${++n}`, running: true, exitCode: 0, startedAt: "t0", logs: "", restarting: false, restarts: 0, networks: {} });
+  return { docker, containers, volumes, networks, images, calls, state, foreign };
 }
 
 export function fakePortal(docker?: Docker) {

@@ -14,7 +14,8 @@ import { fakeMcp, TOOLS } from "../fakes.mts";
  * Godot as a portal runs it: its server half started by Pithagoras' own extension host, after Docker for extensions'
  * (which it requires), each from its package as the portal reads it, with Docker speaking to the daemon of
  * Pithagoras' own tests (extensions/docker/test/fake-docker.ts), never to one on the machine, and the Godot server
- * stood in for on its port. Its routes are served as the portal serves an extension's, under /api/x/pithagoras-godot,
+ * stood in for on its port on 127.0.0.1, where the forwarder would publish it for a portal on the host's network. Its
+ * routes are served as the portal serves an extension's, under /api/x/pithagoras-godot,
  * and its stream as the portal hands an extension its upgrades.
  *
  * Needs a Pithagoras checkout at the version this extension is built for, with its server built:
@@ -32,15 +33,18 @@ inProcessHome("flair-godot-portal-");
 process.env.PORTAL_PASSWORD = "";
 process.env.PORTAL_ALLOW_NO_PASSWORD = "1";
 
-// Docker, stood in for: the portal's own container to share the network of, and nvidia-smi in the GPU probe.
+// Docker, stood in for: the portal's own container, on the host's network as both of Pithagoras' Compose files run it
+// (the way to the server is then a forwarder), and nvidia-smi in the GPU probe.
 const { fakeDocker } = await import(from("extensions/docker/test/fake-docker.ts"));
 const docker = await fakeDocker();
 process.env.DOCKER_SOCKET = docker.socket;
 process.env.PORTAL_CONTAINER_NAME = "portal-test";
-const portalContainer = (id: string) => ({ Id: id, Name: "portal-test", Image: "pithagoras", State: "running", Labels: {}, Tty: false, out: "", err: "" });
-docker.containers.push(portalContainer("portal-1"));
+const portalContainer = (id: string, mode: string) => ({ Id: id, Name: "portal-test", Image: "pithagoras", State: "running", Labels: {}, Tty: false, out: "", err: "", HostConfig: { NetworkMode: mode } });
+docker.containers.push(portalContainer("portal-1", "host"));
 docker.images.add("ubuntu:24.04");
 docker.images.add("ghcr.io/prometheion/pithagoras-godot:0.1.0");
+// The forwarder's image (Docker for extensions' forward.ts).
+docker.images.add("node:22.23.4-alpine3.23");
 docker.runs.onStart = (c: { Name: string; out: string; code?: number }) => {
   if (!c.Name.endsWith("-probe")) return new Promise<void>(() => {});
   c.out = "0, GPU-aaaa0000, NVIDIA GeForce RTX 3060, 11000, 12288\n1, GPU-bbbb1111, NVIDIA GeForce RTX 3060, 158, 12288\n";
@@ -99,14 +103,14 @@ const chatTools = (chatId: string) => {
 test("it waits for Docker for extensions, as its package.json requires, and starts once Docker's half runs", async () => {
   await host.syncServerHalves([halves.godot]);
   assert.equal(host.isServing("pithagoras-godot"), false);
-  assert.match(host.serverFailure("pithagoras-godot") ?? "", /It needs pithagoras-docker \(\^1\.2\.0\), which is not installed, or is switched off/);
+  assert.match(host.serverFailure("pithagoras-godot") ?? "", /It needs pithagoras-docker \(\^1\.3\.0\), which is not installed, or is switched off/);
   await host.syncServerHalves([halves.docker, halves.godot]);
   assert.equal(host.serverFailure("pithagoras-godot"), undefined);
   assert.deepEqual([host.isServing("pithagoras-docker"), host.isServing("pithagoras-godot")], [true, true]);
   assert.equal((await state()).state, "absent");
 });
 
-test("Install against the daemon: the GPU probe made, read and removed, then the container on the portal's network", async () => {
+test("Install against the daemon: the GPU probe made, read and removed, then the container on a network of its own, and the forwarder", async () => {
   const answer = await fetch(`${at}/install`, { method: "POST", headers: { origin: new URL(at).origin } });
   assert.deepEqual(await answer.json(), { ok: true });
   const s = await until((s) => s.state === "running", "running");
@@ -116,10 +120,20 @@ test("Install against the daemon: the GPU probe made, read and removed, then the
   assert.deepEqual((probe.made.HostConfig as any).DeviceRequests, [{ Driver: "nvidia", Count: -1, Capabilities: [["gpu"]] }]);
   assert.ok(!docker.containers.some((c: { Name: string }) => c.Name === "pithagoras-godot-probe"), "and removed");
   const made = container().made as any;
-  assert.equal(made.HostConfig.NetworkMode, "container:portal-1");
+  assert.equal(made.HostConfig.NetworkMode, "pithagoras-godot-net");
+  assert.ok(made.Env.includes("GODOT_SERVER_HOST=0.0.0.0"));
   assert.deepEqual(made.HostConfig.RestartPolicy, { Name: "unless-stopped" });
   assert.equal(container().Labels["pithagoras.extension"], "pithagoras-godot", "Docker for extensions' own label: the container is Godot's");
   assert.ok(docker.volumes.some((v: { Name: string }) => v.Name === "pithagoras-godot-data"));
+  // Its network: Docker's bridge with no way out, the extension's.
+  const island = docker.networks.find((n: { Name: string }) => n.Name === "pithagoras-godot-net")!;
+  assert.deepEqual([island.Internal, island.EnableIPv6, island.Options!["com.docker.network.bridge.gateway_mode_ipv4"], island.Labels["pithagoras.extension"]], [true, false, "isolated", "pithagoras-godot"]);
+  // The portal is on the host's network, to which Docker adds none: the forwarder publishes the port on 127.0.0.1.
+  const forwarder = docker.containers.find((c: { Name: string }) => c.Name === "pithagoras-godot-forward")!;
+  assert.equal(forwarder.State, "running");
+  assert.equal(forwarder.Labels["pithagoras.extension"], "pithagoras-godot");
+  assert.deepEqual((forwarder.made as any).HostConfig.PortBindings, { [`${server.port}/tcp`]: [{ HostIp: "127.0.0.1", HostPort: String(server.port) }] });
+  assert.deepEqual(docker.connects, [], "the portal's container is not connected to anything");
 });
 
 test("the relayed tools as the portal lists them in Settings → Tools and gives them to a chat's pi", async () => {
@@ -150,22 +164,26 @@ test("the stream reaches the server through the portal's upgrade, without its Or
   assert.equal(asked.headers.authorization, `Bearer ${token()}`);
 });
 
-test("after the portal's container is made again, a running server is made again on its new network, keeping the volume", async () => {
+test("for a portal in a container of its own network, its container is put on the server's network, and nothing is published", async () => {
   const before = container().Id;
-  docker.containers.splice(docker.containers.findIndex((c: { Name: string }) => c.Name === "portal-test"), 1, portalContainer("portal-2"));
-  // A start of the halves looks after the container at once, as the maintain loop does every 30 seconds.
+  // The portal's container made again, on Docker's bridge: a new run of the halves asks the way to the server anew.
+  docker.containers.splice(docker.containers.findIndex((c: { Name: string }) => c.Name === "portal-test"), 1, portalContainer("portal-2", "bridge"));
   await host.syncServerHalves([]);
   await host.syncServerHalves([halves.docker, halves.godot]);
-  await until(() => container()?.Id !== before && container()?.State === "running", "made again");
-  assert.equal((container().made as any).HostConfig.NetworkMode, "container:portal-2");
-  assert.ok(docker.volumes.some((v: { Name: string }) => v.Name === "pithagoras-godot-data"));
+  for (let i = 0; i < 300 && !docker.connects.length; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(docker.connects, [{ network: "pithagoras-godot-net", container: "portal-test" }]);
+  assert.ok(docker.containers.find((c: { Name: string }) => c.Name === "portal-test").Networks?.["pithagoras-godot-net"], "the portal's container is on it");
+  assert.ok(!docker.containers.some((c: { Name: string }) => c.Name === "pithagoras-godot-forward"), "no forwarder: it would hold the port for nothing");
+  assert.ok(docker.containers.every((c: any) => !c.made?.HostConfig?.PortBindings), "nothing is published");
+  assert.equal(container().Id, before, "the server goes on as it was");
 });
 
-test("Remove with the projects: the container and the volume go, and so do the tools", async () => {
-  await until((s) => s.state === "running", "running");
+test("Remove with the projects: the container, its network and the volume go, and so do the tools", async () => {
   const answer = await fetch(`${at}/uninstall`, { method: "POST", headers: { "content-type": "application/json", origin: new URL(at).origin }, body: JSON.stringify({ removeData: true }) });
   assert.deepEqual(await answer.json(), { ok: true });
   assert.equal(container(), undefined);
+  assert.ok(!docker.networks.some((n: { Name: string }) => n.Name === "pithagoras-godot-net"));
+  assert.equal(docker.containers.find((c: { Name: string }) => c.Name === "portal-test").Networks?.["pithagoras-godot-net"], undefined, "the portal's container is taken off it");
   assert.ok(!docker.volumes.some((v: { Name: string }) => v.Name === "pithagoras-godot-data"));
   assert.deepEqual(host.offeredTools().get("pithagoras-godot"), []);
   assert.deepEqual(Object.keys(chatTools("chat-1")), []);

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """The Godot editor, rendered on the GPU, streamed to a browser and driven over MCP, behind a Pithagoras portal.
 
-This process is the container's supervisor and its only network listener: plain HTTP on 127.0.0.1 (the portal's
-loopback, as the container shares the portal's network namespace), and every route but /healthz asks for the one
-credential, `Authorization: Bearer <token>`. Nobody reaches it directly: the Godot extension's server half proxies
-what the viewer asks of it and its stream at /api/x/pithagoras-godot/ui/ behind the portal's own sign-in, and adds the
-token on the way, and relays the MCP tools to the chats.
+This process is the container's supervisor and its only network listener: plain HTTP on GODOT_SERVER_HOST, which
+the extension sets to 0.0.0.0 of the container's own network, which only the portal reaches, and every route but
+/healthz asks for the one credential, `Authorization: Bearer <token>`. Nobody reaches it directly: the Godot
+extension's server half proxies what the viewer asks of it and its stream at /api/x/pithagoras-godot/ui/ behind the
+portal's own sign-in, and adds the token on the way, and relays the MCP tools to the chats.
 
     /stream/...          the Selkies stream (its WebSocket and its API), piped to Selkies on its Unix socket
     /files/<path>        exports and recordings, for download
@@ -71,8 +71,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON_SRC = os.path.join(HERE, "addon", "godot_mcp_bridge")
 
 DISPLAY = ":1"
-# Selkies listens on a Unix socket in a folder only this process's user can open: in the portal's network namespace
-# a TCP port on loopback would be open to every process there, the portal's agents included.
+# Selkies listens on a Unix socket in a folder only this process's user can open: a TCP port on loopback would be open
+# to every process in the container's network namespace, the games and the code the editor runs included.
 SELKIES_DIR = "/tmp/gs"
 SELKIES_SOCKET = os.path.join(SELKIES_DIR, "selkies.sock")
 BRIDGE_SECRET = secrets.token_hex(24)   # new every start; only the editor this process launches gets it
@@ -94,8 +94,8 @@ MAX_UPLOAD = 2 * 1024 ** 3
 
 def free_port():
     """A TCP port on loopback that nothing listens on now. The editor's own listeners (the bridge, the GDScript
-    language server, the debug adapter, the debugger) are on the portal's loopback, shared with everything else in
-    its network namespace, so each editor start takes ports that are free rather than Godot's fixed defaults."""
+    language server, the debug adapter, the debugger) are on the container's loopback, shared with the games and the
+    code the editor runs, so each editor start takes ports that are free rather than Godot's fixed defaults."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
@@ -343,8 +343,8 @@ def gl_prefix(proj_dir):
 
 def xvfb_argv():
     # Only the socket file in this container's /tmp/.X11-unix: -nolisten local turns off the abstract socket
-    # (@/tmp/.X11-unix/X1), which belongs to the network namespace, the portal's, where it would clash with another X
-    # server on :1 and be open to every process there.
+    # (@/tmp/.X11-unix/X1), which belongs to the network namespace, not to the file system, so no file's mode would
+    # keep a process there from it.
     return ["Xvfb", DISPLAY, "-screen", "0", f"{SCREEN_W}x{SCREEN_H}x24", "-s", "0", "-dpms", "-nolisten", "tcp",
             "-nolisten", "local", "-noreset", "+extension", "GLX", "+extension", "RANDR", "+extension", "XTEST",
             "+extension", "XFIXES", "+extension", "DAMAGE", "+extension", "MIT-SHM"]

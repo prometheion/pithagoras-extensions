@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { after } from "node:test";
 import express from "express";
-import type { ContainerInfo, ContainerSpec, Docker } from "../../shared/docker-api.ts";
+import type { ContainerInfo, ContainerSpec, Docker, Reach } from "../../shared/docker-api.ts";
 
 /**
  * What the unit tests run the server half against, none of it the machine's: a Docker in memory, a portal that keeps
@@ -32,32 +32,36 @@ interface Held {
   restarts: number;
   startedAt: string;
   log: string;
-  /** The network namespace its process is in, as `readlink /proc/self/ns/net` in it says: the portal's as it started. */
-  netns: string;
+  /** The networks it is on, by name, with each one's id, as inspect's `NetworkSettings.Networks` has them. */
+  networks: Record<string, { NetworkID: string }>;
 }
 
 /**
  * Docker for one extension, in memory: what it was asked, in order (`calls`), each container's create body, the
- * volumes and images there are. `refuseGpu` refuses to start a container that asks for a GPU, as Docker does without
- * the NVIDIA runtime; `onStart` says what a started container does (the probe prints and exits). `namespace` is the
- * portal's network namespace, which a container is joined to as it starts, and keeps until it starts again.
+ * volumes, networks and images there are. `refuseGpu` refuses to start a container that asks for a GPU, as Docker does
+ * without the NVIDIA runtime; `onStart` says what a started container does (the probe prints and exits). A container
+ * made with a `NetworkMode` that names one of the networks is on it, by that network's id. `reach` is where
+ * `networks.reach` says the portal reaches a container on it (127.0.0.1 and the port asked for, unless a test says),
+ * refused as Docker for extensions refuses it for a network or container there is none of and for a container not on
+ * the network, and with `reachFails` in those words.
  */
 export function memoryDocker(options: { owner?: string } = {}) {
   const owner = options.owner ?? EXTENSION;
   const containers = new Map<string, Held>();
   const volumes = new Map<string, string>();
+  const networks = new Map<string, { id: string; owner: string }>();
   const images = new Set<string>();
   const calls: string[] = [];
   let ids = 0;
   let clock = Date.parse("2026-10-24T00:00:00Z");
   const state = {
     available: true,
-    network: "host",
     refuseGpu: false,
     /** What a started container does: the probe prints this and exits. */
     onStart: undefined as ((c: Held) => void) | undefined,
     pullFails: undefined as string | undefined,
-    namespace: "net:[4026531840]",
+    reach: undefined as Reach | undefined,
+    reachFails: undefined as string | undefined,
   };
   const status = (status: number, message: string) => Object.assign(new Error(message), { status });
   const info = (c: Held): ContainerInfo => ({ name: c.name, id: c.id, image: c.spec.Image, state: c.state, status: c.state, owner: c.owner, labels: (c.spec.Labels as Record<string, string>) ?? {} });
@@ -68,7 +72,7 @@ export function memoryDocker(options: { owner?: string } = {}) {
   };
   const docker: Docker = {
     available: async () => state.available,
-    sharedNetwork: async () => state.network,
+    sharedNetwork: async () => "host",
     images: {
       present: async (image) => images.has(image),
       async ensure(image, onProgress) {
@@ -86,7 +90,9 @@ export function memoryDocker(options: { owner?: string } = {}) {
       async create(name, spec) {
         calls.push(`create ${name}`);
         if (mine(name)) containers.delete(name);
-        const made: Held = { id: `id${++ids}`, name, owner, spec: structuredClone(spec), state: "created", exitCode: 0, restarts: 0, startedAt: "0001-01-01T00:00:00Z", log: "", netns: "" };
+        const mode = (spec.HostConfig as { NetworkMode?: string } | undefined)?.NetworkMode ?? "";
+        const on = networks.get(mode);
+        const made: Held = { id: `id${++ids}`, name, owner, spec: structuredClone(spec), state: "created", exitCode: 0, restarts: 0, startedAt: "0001-01-01T00:00:00Z", log: "", networks: on ? { [mode]: { NetworkID: on.id } } : {} };
         containers.set(name, made);
         return info(made);
       },
@@ -100,7 +106,6 @@ export function memoryDocker(options: { owner?: string } = {}) {
         c.state = "running";
         c.restarts = 0;
         c.startedAt = new Date((clock += 1000)).toISOString();
-        c.netns = state.namespace;
         state.onStart?.(c);
       },
       async stop(name) {
@@ -124,6 +129,7 @@ export function memoryDocker(options: { owner?: string } = {}) {
         return {
           Config: { ...config, Labels: c.spec.Labels ?? {} },
           HostConfig: HostConfig ?? {},
+          NetworkSettings: { Networks: c.networks },
           State: { Status: c.state, Running: c.state === "running" || c.state === "restarting", Restarting: c.state === "restarting", ExitCode: c.exitCode, StartedAt: c.startedAt },
           RestartCount: c.restarts,
         };
@@ -134,7 +140,6 @@ export function memoryDocker(options: { owner?: string } = {}) {
         const c = mine(name);
         if (!c) throw status(404, `There is no container ${name}`);
         if (c.state !== "running") throw status(409, `Container ${name} is not running`);
-        if (cmd.join(" ") === "readlink /proc/self/ns/net") return { output: `${c.netns}\n`, exitCode: 0, timedOut: false };
         return { output: "", exitCode: 0, timedOut: false };
       },
       async adopt(name) {
@@ -158,10 +163,35 @@ export function memoryDocker(options: { owner?: string } = {}) {
         volumes.set(name, owner);
       },
     },
+    networks: {
+      async create(name) {
+        calls.push(`network ${name}`);
+        const there = networks.get(name);
+        if (there && there.owner !== owner) throw status(403, `${name} is ${there.owner || "no extension"}'s network, not ${owner}'s`);
+        if (!there) networks.set(name, { id: `net${++ids}`, owner });
+        return { name, ...networks.get(name)! };
+      },
+      get: async (name) => (networks.has(name) ? { name, ...networks.get(name)! } : undefined),
+      async reach(name, container, port) {
+        calls.push(`reach ${name} ${container} ${port}`);
+        if (!networks.has(name)) throw status(404, `There is no network ${name}`);
+        const c = mine(container);
+        if (!c) throw status(404, `There is no container ${container}`);
+        if (!c.networks[name]) throw status(409, `${container} is not on ${name}`);
+        if (state.reachFails) throw status(0, state.reachFails);
+        return state.reach ?? { host: "127.0.0.1", port };
+      },
+      async remove(name) {
+        calls.push(`remove network ${name}`);
+        const on = [...containers.values()].filter((c) => c.owner === owner && c.networks[name]);
+        if (on.length) throw status(403, `error while removing network: network ${name} has active endpoints (name:"${on[0].name}")`);
+        networks.delete(name);
+      },
+    },
   };
   /** A container made by someone else, with that owner ("" for nobody's). */
-  const foreign = (name: string, by: string) => containers.set(name, { id: `id${++ids}`, name, owner: by, spec: { Image: "other" }, state: "running", exitCode: 0, restarts: 0, startedAt: "", log: "", netns: "" });
-  return { docker, containers, volumes, images, calls, state, foreign };
+  const foreign = (name: string, by: string) => containers.set(name, { id: `id${++ids}`, name, owner: by, spec: { Image: "other" }, state: "running", exitCode: 0, restarts: 0, startedAt: "", log: "", networks: {} });
+  return { docker, containers, volumes, networks, images, calls, state, foreign };
 }
 
 /** A portal for one server half: an express router behind /api/x/<package>, the tools it offers and registers, a data folder. */

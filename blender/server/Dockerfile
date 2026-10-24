@@ -1,6 +1,7 @@
 # The Blender server of the pithagoras-blender extension: headless Blender with its viewer's API and MCP on one
-# loopback port, for hosts with Docker, and for the GPU the NVIDIA container toolkit. Built from the extension's folder
-# (`docker build -f server/Dockerfile .`), so that its NOTICE goes into the image; .dockerignore lets nothing else in.
+# port of the container's own network, for hosts with Docker, and for the GPU the NVIDIA container toolkit. Built from
+# the extension's folder (`docker build -f server/Dockerfile .`), so that its NOTICE goes into the image; .dockerignore
+# lets nothing else in.
 FROM ubuntu:24.04
 
 ARG BLENDER_VERSION=5.2.2
@@ -46,7 +47,8 @@ COPY NOTICE /usr/share/doc/pithagoras-blender/NOTICE
 COPY server/LICENSE /usr/share/doc/pithagoras-blender/LICENSE.GPL-3.0
 
 # Scenes, renders and exports live here; the extension mounts its volume over it, which takes the folder's owner when
-# Docker makes it. Nothing is published: the server binds the portal's loopback, which the container shares.
+# Docker makes it. Nothing is published: the server listens on the container's own network, which only the portal
+# reaches.
 WORKDIR /data
 USER blender
 

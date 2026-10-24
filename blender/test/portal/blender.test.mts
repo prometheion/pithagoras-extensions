@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
  * Blender as Pithagoras runs it: its server half started by the portal's own extension host, after Docker's, which it
  * requires, each from its source as the portal reads a package, Docker speaking to the portal's own fake daemon
  * (extensions/docker/test/fake-docker.ts), never to one on the machine, and a stand-in for the Blender server on the
- * server's port. As Voice's portal tests do, against the Pithagoras this repository builds with: fetch and build it with
+ * server's port on 127.0.0.1, where the forwarder would publish it for a portal on the host's network. As Voice's portal tests do, against the Pithagoras this repository builds with: fetch and build it with
  * scripts/pithagoras.sh, then PITHAGORAS_DIR=.pithagoras npm run test:portal.
  */
 
@@ -31,10 +31,14 @@ process.env.DOCKER_SOCKET = daemon.socket;
 process.env.PORTAL_CONTAINER_NAME = "portal-test";
 process.env.PORTAL_PASSWORD = "";
 process.env.PORTAL_ALLOW_NO_PASSWORD = "1";
-daemon.containers.push({ Id: "portal-one", Name: "portal-test", Image: "pithagoras-portal:latest", State: "running", Labels: {}, Tty: false, out: "", err: "" });
+// The portal's container, on the host's network as both of Pithagoras' Compose files run it: the way to the server is a
+// forwarder.
+daemon.containers.push({ Id: "portal-one", Name: "portal-test", Image: "pithagoras-portal:latest", State: "running", Labels: {}, Tty: false, out: "", err: "", HostConfig: { NetworkMode: "host" } });
 daemon.images.add("ghcr.io/prometheion/pithagoras-blender:0.1.0");
 daemon.images.add("ubuntu:24.04");
-// The probe prints the cards it was given and exits; the Blender container runs until it is stopped.
+// The forwarder's image (Docker for extensions' forward.ts).
+daemon.images.add("node:22.23.4-alpine3.23");
+// The probe prints the cards it was given and exits; the Blender container and the forwarder run until they are stopped.
 daemon.runs.onStart = (c: { Name: string; out: string; code?: number }) => {
   if (c.Name !== "pithagoras-blender-probe") return new Promise<void>(() => {});
   c.out = "0, GPU-1b1b1b1b, NVIDIA GeForce RTX 3060, 158, 12288\nOPTIX=host\n";
@@ -68,7 +72,8 @@ const blender = http.createServer((req, res) => {
 });
 blender.listen(0, "127.0.0.1");
 await once(blender, "listening");
-process.env.PITHAGORAS_BLENDER_PORT = String((blender.address() as AddressInfo).port);
+const PORT = (blender.address() as AddressInfo).port;
+process.env.PITHAGORAS_BLENDER_PORT = String(PORT);
 
 const host = await import(from("core/server/dist/extension-host.js"));
 const { requiresOf } = await import(from("core/server/dist/extension-ui.js"));
@@ -136,10 +141,24 @@ test("Settings → Blender from install to running, through the portal's routes 
   assert.equal(now.state, "running");
   assert.equal(now.card, "GPU-1b1b1b1b");
   const made = daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender")!.made as any;
-  assert.equal(made.HostConfig.NetworkMode, "container:portal-one");
+  assert.equal(made.HostConfig.NetworkMode, "pithagoras-blender-net");
+  assert.ok(made.Env.includes("BLENDER_SERVER_HOST=0.0.0.0"));
   assert.deepEqual(made.HostConfig.RestartPolicy, { Name: "unless-stopped" });
   assert.equal(made.Labels["pithagoras.extension"], "pithagoras-blender", "Docker's API marks it as the extension's");
   assert.ok(daemon.volumes.some((v: { Name: string }) => v.Name === "pithagoras-blender-data"));
+  // Its network: Docker's bridge with no way out, the extension's.
+  const island = daemon.networks.find((n: { Name: string }) => n.Name === "pithagoras-blender-net")!;
+  assert.equal(island.Internal, true);
+  assert.equal(island.EnableIPv6, false);
+  assert.equal(island.Options!["com.docker.network.bridge.gateway_mode_ipv4"], "isolated");
+  assert.equal(island.Labels["pithagoras.extension"], "pithagoras-blender");
+  // The portal is on the host's network, to which Docker adds none: the forwarder publishes the port on 127.0.0.1.
+  const forwarder = daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender-forward")!;
+  assert.equal(forwarder.State, "running");
+  assert.equal(forwarder.Labels["pithagoras.extension"], "pithagoras-blender");
+  assert.deepEqual((forwarder.made as any).HostConfig.PortBindings, { [`${PORT}/tcp`]: [{ HostIp: "127.0.0.1", HostPort: String(PORT) }] });
+  assert.deepEqual(Object.keys((forwarder.made as any).NetworkingConfig.EndpointsConfig).sort(), ["pithagoras-blender-forward", "pithagoras-blender-net"]);
+  assert.deepEqual(daemon.connects, [], "the portal's container is not connected to anything");
 });
 
 test("the relayed tools are listed in Settings → Tools and registered in a chat's pi, and a call returns the server's parts", async () => {
@@ -173,25 +192,27 @@ test("a change from another page of the same site is refused on the extension's 
   assert.equal((await state()).state, "running");
 });
 
-test("a container left on the portal's old network is made again on its new one, with the volume kept", async () => {
-  // The portal's container was made again: another id under its name.
-  const at0 = daemon.containers.findIndex((c: { Name: string }) => c.Name === "portal-test");
-  daemon.containers.splice(at0, 1);
-  daemon.containers.push({ Id: "portal-two", Name: "portal-test", Image: "pithagoras-portal:latest", State: "running", Labels: {}, Tty: false, out: "", err: "" });
-  await state();
-  for (let i = 0; i < 300; i++) {
-    const made = daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender")?.made as any;
-    if (made?.HostConfig.NetworkMode === "container:portal-two" && (await state()).state === "running") break;
-    await delay(20);
-  }
-  const made = daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender")!.made as any;
-  assert.equal(made.HostConfig.NetworkMode, "container:portal-two");
-  assert.ok(daemon.volumes.some((v: { Name: string }) => v.Name === "pithagoras-blender-data"));
+test("for a portal in a container of its own network, its container is put on the server's network, and nothing is published", async () => {
+  // The portal's container made again, on Docker's bridge: a new run of the halves asks the way to the server anew.
+  daemon.containers.splice(daemon.containers.findIndex((c: { Name: string }) => c.Name === "portal-test"), 1);
+  daemon.containers.push({ Id: "portal-two", Name: "portal-test", Image: "pithagoras-portal:latest", State: "running", Labels: {}, Tty: false, out: "", err: "", HostConfig: { NetworkMode: "bridge" } });
+  const server = daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender")!.Id;
+  await host.syncServerHalves([]);
+  await host.syncServerHalves([docker, own]);
+  for (let i = 0; i < 300 && !daemon.connects.length; i++) await delay(20);
+  assert.deepEqual(daemon.connects, [{ network: "pithagoras-blender-net", container: "portal-test" }]);
+  assert.ok(daemon.containers.find((c: { Name: string }) => c.Name === "portal-test")!.Networks?.["pithagoras-blender-net"], "the portal's container is on it");
+  assert.equal(daemon.containers.some((c: { Name: string }) => c.Name === "pithagoras-blender-forward"), false, "no forwarder: it would hold the port for nothing");
+  assert.equal(daemon.networks.some((n: { Name: string }) => n.Name === "pithagoras-blender-forward"), false);
+  assert.ok(daemon.containers.every((c: any) => !c.made?.HostConfig?.PortBindings), "nothing is published");
+  assert.equal(daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender")!.Id, server, "the server goes on as it was");
 });
 
-test("uninstall with the projects removes the container, the volume and the tools", async () => {
+test("uninstall with the projects removes the container, its network, the volume and the tools", async () => {
   assert.equal((await json(`${at}/uninstall`, { method: "POST", body: JSON.stringify({ removeData: true }) })).status, 200);
   assert.equal(daemon.containers.some((c: { Name: string }) => c.Name === "pithagoras-blender"), false);
+  assert.equal(daemon.networks.some((n: { Name: string }) => n.Name === "pithagoras-blender-net"), false);
+  assert.equal(daemon.containers.find((c: { Name: string }) => c.Name === "portal-test")!.Networks?.["pithagoras-blender-net"], undefined, "the portal's container is taken off it");
   assert.equal(daemon.volumes.some((v: { Name: string }) => v.Name === "pithagoras-blender-data"), false);
   assert.deepEqual(host.offeredTools().get("pithagoras-blender"), []);
   assert.deepEqual(registered(chat()), []);

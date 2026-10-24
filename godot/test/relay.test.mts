@@ -19,7 +19,7 @@ after(() => server.close());
 function setup(dataDir?: string) {
   const fake = fakePortal();
   const dir = dataDir ?? fake.dataDir;
-  const mcp = mcpClient({ url: () => `http://127.0.0.1:${server.port}/mcp`, token: () => "tok" });
+  const mcp = mcpClient({ url: async () => `http://127.0.0.1:${server.port}/mcp`, token: () => "tok" });
   const tools = relay({ portal: fake.portal, prefix: "godot", app: "Godot", mcp, bundled: LISTED, labels: LABELS, acts: ACTS, installedFile: path.join(dir, "installed") });
   return { fake, tools, dir };
 }
@@ -93,7 +93,7 @@ test("a call the server says failed is a failed call with what it said; nothing 
 
   // The half started again, with the server installed before: the tools are there at once, from the marker it kept.
   const down = fakePortal();
-  relay({ portal: down.portal, prefix: "godot", app: "Godot", mcp: mcpClient({ url: () => "http://127.0.0.1:1/mcp", token: () => "tok" }), bundled: LISTED, labels: LABELS, acts: ACTS, installedFile: path.join(dir, "installed") });
+  relay({ portal: down.portal, prefix: "godot", app: "Godot", mcp: mcpClient({ url: async () => "http://127.0.0.1:1/mcp", token: () => "tok" }), bundled: LISTED, labels: LABELS, acts: ACTS, installedFile: path.join(dir, "installed") });
   assert.equal(down.registered().length, TOOLS.length);
   await assert.rejects(down.registered()[0].execute("c", {}, undefined), /^Error: Godot is not running\. The person can start it in Settings → Godot\.$/);
 });

@@ -5,10 +5,10 @@
  * since what they return comes from the scene and its files, which may have come from an uploaded .blend.
  *
  * `execute_code` runs Python in Blender, as the container's own unprivileged user, without capabilities, on the
- * portal's loopback: what listens on 127.0.0.1 where the portal runs, which for a portal on the host's network is the
- * host's, it can reach, as the agent's own shell can. So once a conversation has read something that looks like a
- * prompt injection, the guard asks the person before it runs, or refuses it where nobody is there to answer
- * (`upload`). The other tools read the scene, or write only in the container's data folder.
+ * extension's own network, which has no way out: it reaches nothing outside the container but the server again, and
+ * yet it can read and change the projects, and what it prints comes back to the chat. So once a conversation has read
+ * something that looks like a prompt injection, the guard asks the person before it runs, or refuses it where nobody
+ * is there to answer (`upload`). The other tools read the scene, or write only in the container's data folder.
  */
 
 /** Marks a text to be translated where it is shown: a label kept in a table. */

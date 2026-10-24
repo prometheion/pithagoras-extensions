@@ -15,7 +15,7 @@
     "client": "./web/client.js",
     "style": "./web/client.css",
     "server": "./server.js",
-    "requires": { "pithagoras-docker": "^1.2.0" }
+    "requires": { "pithagoras-docker": "^1.3.0" }
   },
   "files": ["web", "server.js", "viewer.html", "README.md", "NOTICE", "LICENSE"],
   "scripts": {

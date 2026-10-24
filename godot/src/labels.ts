@@ -48,9 +48,9 @@ export const LABELS: Record<string, string> = {
  * table does not name to `upload`). The ones that run code, or write code the editor runs, are uploads: a GDScript file
  * loads as soon as it is written, a `@tool` script runs in the editor, and a game is a program. Once the conversation
  * has read a result the guard flags as a likely prompt injection, the guard asks the person before each of their
- * calls, or refuses where nobody can answer, since that code runs in the portal's network namespace (see the README on
- * what it reaches). The others read the project or the editor, or change the project through the editor's own
- * operations, in the container's data folder.
+ * calls, or refuses where nobody can answer, since that code can change the projects and what it prints comes back to
+ * the chat, though its network has no way out (see the README on what it reaches). The others read the project or the
+ * editor, or change the project through the editor's own operations, in the container's data folder.
  */
 export const ACTS: Record<string, "upload"[]> = {
   ping: [],

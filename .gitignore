@@ -7,6 +7,9 @@ node_modules/
 /*/server.js
 /*/viewer.html
 /godot/lib/
+# What the browser tests leave (Playwright).
+/*/test-results/
+/*/playwright-report/
 # Pithagoras, fetched and built for the portal-tier tests (scripts/pithagoras.sh).
 /.pithagoras/
 __pycache__/

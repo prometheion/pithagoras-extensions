@@ -1,0 +1,50 @@
+import type { Plural } from "@pithagoras/extension-api";
+
+/**
+ * On-demand UI's texts in German, each by what the code says in English. Those the portal says the same way are here as
+ * well, as the portal has them. What the model is told (the tools' descriptions, the messages that bring a card's
+ * events) stays English, as pi's does.
+ */
+export const de: Record<string, string | Plural> = {
+  "A card has no network and no way into the portal: it cannot load anything from anywhere, nor read your chats or files.": "Eine Karte hat kein Netzwerk und keinen Weg ins Portal: Sie kann nichts von irgendwo laden und weder deine Chats noch deine Dateien lesen.",
+  "A card sends only once you have clicked or typed in it, and only the events the agent declared for it.": "Eine Karte sendet erst, wenn du in sie geklickt oder getippt hast, und nur die Ereignisse, die der Agent für sie angegeben hat.",
+  "An event the agent marks wake (a Submit button, say) starts its turn when it is idle. Off, such an event waits for your next message, as every other does.": "Ein Ereignis, das der Agent mit wake markiert (etwa eine Absenden-Schaltfläche), startet seinen Durchlauf, wenn er nichts zu tun hat. Ausgeschaltet wartet ein solches Ereignis wie jedes andere auf deine nächste Nachricht.",
+  "Cancel": "Abbrechen",
+  "Cards": "Karten",
+  "Cards are kept with their chat, on every page open on it, and go when the chat is deleted.": "Karten werden mit ihrem Chat aufbewahrt, auf jeder Seite, die ihn offen hat, und verschwinden, wenn der Chat gelöscht wird.",
+  "Close the card": "Karte schließen",
+  "Closed": "Geschlossen",
+  "Closed by you": "Von dir geschlossen",
+  "Closing a card": "Schließt eine Karte",
+  "Full screen": "Vollbild",
+  "Good to know": "Gut zu wissen",
+  "Highest a card is drawn (px)": "Größte Höhe einer Karte (px)",
+  "How long a card's event waits for the person to pause before it is sent, where the card does not say: {min} to {max}.": "Wie lange ein Ereignis einer Karte wartet, bis die Person innehält, bevor es gesendet wird, wo die Karte nichts anderes sagt: {min} bis {max}.",
+  "Kept for the agent: it gets it with your next message.": "Für den Agenten aufbewahrt: Er bekommt es mit deiner nächsten Nachricht.",
+  "Leave full screen": "Vollbild verlassen",
+  "Let a card start the agent's turn": "Eine Karte darf den Agenten starten",
+  "Loading…": "Wird geladen…",
+  "Not sent: the card is closed.": "Nicht gesendet: Die Karte ist geschlossen.",
+  "Not sent: the card sends too much at once.": "Nicht gesendet: Die Karte sendet zu viel auf einmal.",
+  "Not sent: the portal could not be reached.": "Nicht gesendet: Das Portal war nicht erreichbar.",
+  "Not sent: what the card sent is too large.": "Nicht gesendet: Was die Karte geschickt hat, ist zu groß.",
+  "On-demand UI": "On-demand UI",
+  "Opening the card…": "Karte wird geöffnet…",
+  "Past this a card scrolls inside, and its head has a button to show all of it: {min} to {max}.": "Darüber hinaus scrollt eine Karte in sich, und ihr Kopf hat eine Schaltfläche, die alles zeigt: {min} bis {max}.",
+  "Save": "Speichern",
+  "Sent: the agent gets it at its next step.": "Gesendet: Der Agent bekommt es bei seinem nächsten Schritt.",
+  "Sent: the agent is on it.": "Gesendet: Der Agent ist dran.",
+  "Sent: the agent was waiting for this.": "Gesendet: Der Agent hat darauf gewartet.",
+  "Show all of it": "Alles zeigen",
+  "Show less": "Weniger zeigen",
+  "Showing a card": "Zeigt eine Karte",
+  "Starting the agent": "Den Agenten starten",
+  "The agent knows this card as {id}": "Der Agent kennt diese Karte als {id}",
+  "The agent shows a card with ui_show: HTML it writes, drawn under its message in a frame that reaches nothing.": "Der Agent zeigt eine Karte mit ui_show: HTML, das er schreibt, gezeichnet unter seiner Nachricht in einem Rahmen, der nichts erreicht.",
+  "This card is closed: it takes no input and sends nothing.": "Diese Karte ist geschlossen: Sie nimmt keine Eingaben an und sendet nichts.",
+  "This card is no longer kept.": "Diese Karte ist nicht mehr gespeichert.",
+  "Updating a card": "Aktualisiert eine Karte",
+  "Wait after the last change (ms)": "Warten nach der letzten Änderung (ms)",
+  "Waiting for you": "Wartet auf dich",
+  "While the agent works, what you do in a card reaches it at its next step; while it is idle, with your next message.": "Während der Agent arbeitet, erreicht ihn, was du in einer Karte tust, bei seinem nächsten Schritt; hat er nichts zu tun, mit deiner nächsten Nachricht.",
+};

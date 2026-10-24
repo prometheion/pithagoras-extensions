@@ -1,5 +1,19 @@
-# A release of the Blender extension, on its tag: blender-v<version>, the version in blender/package.json.
+# A release of the Blender extension: blender-v<version>, the version in blender/package.json. Merging a pull request
+# that changes that version releases it, and a tag pushed by hand still does.
 #
+# 0. The gate, a job that is cheap and runs first, works out the tag and the version. On a tag, the tag has to be
+#    blender-v<the version in blender/package.json>. On a push to main that changes blender/package.json, the tag is
+#    blender-v<its version>: where that tag is there already (the edit left the version as it was, or the version was
+#    tagged by hand), the run ends there and releases nothing; otherwise the gate puts the tag on the pushed commit and
+#    pushes it with the job's GITHUB_TOKEN. GitHub starts no workflow run for what GITHUB_TOKEN pushes (only
+#    workflow_dispatch, repository_dispatch and some pull_request events are exceptions:
+#    https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow),
+#    so that tag does not start this workflow a second time. One release of the extension runs at a time (the
+#    concurrency group), so a merge and a hand-pushed tag of one version cannot both release it: the merge's run finds
+#    the tag and stops, and a tag pushed by hand after the gate pushed it is refused, or has nothing to push.
+#    If a tag ruleset limits who may create *-v* tags, github-actions[bot] (the GitHub Actions app) has to be on its
+#    bypass list, or the gate's push is refused. If the release job fails after the gate pushed the tag, "Re-run
+#    failed jobs" runs it again for that tag; re-running all jobs runs the gate again, which finds the tag and stops.
 # 1. The image is built from blender/server/Dockerfile (amd64), tagged with the version.
 # 2. Its smoke test (scripts/smoke-blender.sh): it answers MCP with the tools blender/server/tools.json has, and refuses
 #    requests without its token. Then its live view's (scripts/viewport-blender.py): the view follows what the agent's
@@ -24,23 +38,68 @@ name: Blender release
 on:
   push:
     tags: ["blender-v*"]
+    branches: [main]
+    # For the push to main only: GitHub does not look at paths for a tag.
+    paths: [blender/package.json]
 
-permissions:
-  contents: write
-  packages: write
-  # npm's trusted publishing.
-  id-token: write
+concurrency:
+  group: blender-release
+  cancel-in-progress: false
 
 env:
   # How the package goes to npm: see 5. above.
   NPM_PUBLISH: ${{ vars.NPM_STAGE == 'true' && 'npm stage publish' || 'npm publish' }} -w blender --access public
 
 jobs:
-  blender:
+  # 0. above.
+  gate:
     runs-on: ubuntu-24.04
+    permissions:
+      # To push the tag.
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      release: ${{ steps.tag.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag, and whether there is anything to release
+        id: tag
+        run: |
+          VERSION=$(node -p "require('./blender/package.json').version")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG=$GITHUB_REF_NAME
+            [ "$TAG" = "blender-v$VERSION" ] || { echo "the tag $TAG is not blender-v$VERSION"; exit 1; }
+          else
+            TAG=blender-v$VERSION
+            # An assignment, so that a failed ls-remote fails the step rather than reading as no tag.
+            REMOTE=$(git ls-remote --tags origin "refs/tags/$TAG")
+            if [ -n "$REMOTE" ]; then
+              echo "$TAG exists: nothing to release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          { echo "tag=$TAG"; echo "version=$VERSION"; echo "release=true"; } >> "$GITHUB_OUTPUT"
+
+  blender:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      # The GitHub release.
+      contents: write
+      # The image, to GHCR.
+      packages: write
+      # npm's trusted publishing.
+      id-token: write
     env:
       IMAGE: ghcr.io/prometheion/pithagoras-blender
       BLENDER_VERSION: 5.2.2
+      TAG: ${{ needs.gate.outputs.tag }}
+      VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,11 +111,6 @@ jobs:
       # before anything is pushed.
       - name: npm 11
         run: npm install -g npm@11.21.0 && npm --version
-      - name: The tag is the package's version
-        run: |
-          VERSION=$(node -p "require('./blender/package.json').version")
-          [ "$GITHUB_REF_NAME" = "blender-v$VERSION" ] || { echo "the tag $GITHUB_REF_NAME is not blender-v$VERSION"; exit 1; }
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
       - name: Build the image
         run: docker build -f blender/server/Dockerfile --build-arg VERSION="$VERSION" -t "$IMAGE:$VERSION" blender
       - name: Smoke test
@@ -82,7 +136,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "Blender $VERSION" --notes "@pithagoras/blender $VERSION: the extension (npm:@pithagoras/blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
+          gh release create "$TAG" --verify-tag --title "Blender $VERSION" --notes "@pithagoras/blender $VERSION: the extension (npm:@pithagoras/blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
       - run: npm ci
       - name: Publish to npm
         run: |

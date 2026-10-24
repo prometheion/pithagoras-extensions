@@ -67,11 +67,16 @@ lifecycle, the GPU probe, an MCP client, the tool relay and the proxy). A build 
 it into its server half's one file, so a published package needs nothing beside it.
 
 A release is a tag, `blender-v<version>` or `godot-v<version>`, matching the version in that extension's
-`package.json`. Its workflow builds and smoke-tests the image, pushes it to GHCR, makes a GitHub release with the
+`package.json`. Merging a pull request that changes that version releases it: the extension's release workflow
+(`.github/workflows/blender-release.yml` or `godot-release.yml`) runs on the push to main, puts the tag on the merged
+commit and pushes it, and a push to main whose version already has its tag releases nothing. A tag pushed by hand still
+makes a release. The workflow builds and smoke-tests the image, pushes it to GHCR, makes a GitHub release with the
 sources that go with the image, and then publishes the package to npm under the `@pithagoras` scope, through npm's
 trusted publishing for that workflow, with no token. The first version of a package is published by hand, as only a
-package that is there can be given a trusted publisher; the workflow's header says how. Each extension's README says
-how to build its image by hand.
+package that is there can be given a trusted publisher; the workflow's header says how. If the repository or the
+organization is given a tag ruleset that limits who may create `*-v*` tags, github-actions[bot] (the GitHub Actions
+app) has to be on its bypass list, or the workflow's push of the tag is refused. Each extension's README says how to
+build its image by hand.
 
 ## Licences
 

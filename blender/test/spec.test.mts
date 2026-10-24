@@ -75,6 +75,6 @@ test("the spec's hash changes with the image, the card and the network", () => {
   assert.equal(hash(made()), specHash(made()));
   assert.notEqual(hash(made({ network: "other-net" })), hash(made()));
   assert.notEqual(hash(made({ card: { uuid: "GPU-other" } })), hash(made()));
-  assert.notEqual(hash(stamped(blenderSpec(plan, 3870, "pithagoras-blender-data", "ghcr.io/prometheion/pithagoras-blender:0.2.0"))), hash(made()));
+  assert.notEqual(hash(stamped(blenderSpec(plan, 3870, "pithagoras-blender-data", "ghcr.io/prometheion/pithagoras-blender:0.0.0"))), hash(made()));
   assert.notEqual(hash(made({ optix: "host" as never })), hash(made()));
 });

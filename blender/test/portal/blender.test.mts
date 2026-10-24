@@ -7,6 +7,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { guidelineOf } from "../../../shared/relay.ts";
 
 /**
  * Blender as Pithagoras runs it: its server half started by the portal's own extension host, after Docker's, which it
@@ -180,7 +181,7 @@ test("the relayed tools are listed in Settings → Tools and registered in a cha
   assert.equal(inChat.length, tools.length);
   const ping = inChat.find((t) => t.name === "blender_ping");
   assert.deepEqual(ping.guard, { outside: true });
-  assert.deepEqual(ping.promptGuidelines, [bundled.instructions], "the extension's own instructions, not what the server says");
+  assert.deepEqual(ping.promptGuidelines, [guidelineOf(bundled.instructions, tools.map((t: { name: string }) => t.name), "blender")], "the extension's own instructions, in the chat's names, not what the server says");
   assert.deepEqual(inChat.find((t) => t.name === "blender_execute_code").guard, { outside: true, acts: ["upload"] });
   const result = await ping.execute("call-1", {});
   assert.deepEqual(result.content, [{ type: "text", text: "pong" }, { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);

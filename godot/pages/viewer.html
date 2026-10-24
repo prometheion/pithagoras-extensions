@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Godot</title>
+<style>
+  :root{
+    --bg:#121417; --panel:#1b1f24; --panel2:#232830; --line:#2d333b; --text:#e1e5ea; --muted:#8d97a3; --faint:#5d6773;
+    --accent:#478cbf; --accent-hi:#5ea3d6; --ok:#4fd18b; --warn:#f2b441; --bad:#ff7a6b;
+    --sans:system-ui,-apple-system,"Segoe UI",sans-serif; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box} [hidden]{display:none!important}
+  html,body{height:100%} body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 var(--sans)}
+  button,input{font:inherit;color:inherit}
+  #app{display:grid;grid-template-rows:44px minmax(0,1fr);height:100%}
+
+  header{display:flex;align-items:center;gap:10px;padding:0 10px 0 12px;background:var(--panel);border-bottom:1px solid var(--line);min-width:0}
+  .mark{width:26px;height:26px;border-radius:7px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:800;flex:none}
+  .title{font-size:14px;font-weight:600;white-space:nowrap}
+  .btn{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px;border-radius:7px;border:1px solid var(--line);
+       background:var(--panel2);cursor:pointer;white-space:nowrap}
+  .btn:hover{border-color:#3c444e;background:#29303a} .btn:focus-visible{outline:2px solid var(--accent-hi);outline-offset:1px}
+  .btn:disabled{opacity:.55;cursor:default} a.btn{color:inherit;text-decoration:none}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600} .btn.primary:hover{background:var(--accent-hi)}
+  .btn svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  .btn.primary svg{fill:currentColor;stroke:none}
+  #projBtn{max-width:min(360px,40vw);min-width:0} #projBtn .nm{overflow:hidden;text-overflow:ellipsis;font-weight:600}
+  .chip{font:11px var(--mono);color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px;line-height:17px;white-space:nowrap}
+  .pill{display:flex;align-items:center;gap:7px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted);white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+  .pill.busy{color:var(--warn);border-color:rgba(242,180,65,.4)} .pill.busy .dot{background:var(--warn);animation:pulse 1s infinite}
+  .pill.bad{color:var(--bad);border-color:rgba(255,122,107,.4)} .pill.bad .dot{background:var(--bad)}
+  @keyframes pulse{50%{opacity:.3}}
+  .spacer{flex:1;min-width:0}
+  .badge{min-width:18px;height:18px;border-radius:9px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:inline-grid;place-items:center;padding:0 5px}
+  header a{color:var(--muted);text-decoration:none;font-size:12px;white-space:nowrap} header a:hover{color:var(--text)}
+
+  main{position:relative;min-height:0;background:#000;overflow:hidden}
+  /* The stream page keeps the virtual screen's size; fitStream() scales it to the window, so a resize never cuts
+     the editor off or leaves it in a corner, and the stream client never has to refit. */
+  #stream{position:absolute;left:0;top:0;width:1600px;height:900px;border:0;display:block;background:#000;transform-origin:0 0}
+
+  .menu{position:absolute;top:8px;left:10px;width:min(380px,calc(100% - 20px));max-height:calc(100% - 16px);display:flex;flex-direction:column;
+        background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.5);z-index:5}
+  .menu h2{margin:0;padding:12px 14px 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  #projList{list-style:none;margin:0;padding:0 6px 6px;overflow:auto;min-height:0}
+  #projList li{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px}
+  #projList li:hover{background:var(--panel2)}
+  #projList .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #projList .when{color:var(--faint);font-size:11px;white-space:nowrap}
+  #projList .cur{color:var(--ok);font-size:11px;font-weight:600}
+  #projList .open{height:24px;padding:0 9px;font-size:12px}
+  .sect{border-top:1px solid var(--line);padding:10px 14px 12px}
+  .row{display:flex;gap:6px;align-items:center}
+  .row input{flex:1;min-width:0;height:30px;padding:0 10px;border-radius:7px;border:1px solid var(--line);background:#111418;outline:none}
+  .row input:focus{border-color:var(--accent)}
+  .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
+  #outList{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:2px}
+  #outList a{display:flex;gap:8px;align-items:center;padding:5px 6px;border-radius:6px;color:var(--text);text-decoration:none}
+  #outList a:hover{background:var(--panel2)} #outList .when{margin-left:auto;color:var(--faint);font-size:11px;white-space:nowrap}
+
+  .drawer{position:absolute;top:0;right:0;bottom:0;width:min(400px,100%);background:var(--panel);border-left:1px solid var(--line);
+          display:flex;flex-direction:column;z-index:4;box-shadow:-12px 0 40px rgba(0,0,0,.4)}
+  .drawer header{height:40px;flex:none}
+  .drawer h2{margin:0;font-size:13px}
+  #log{list-style:none;margin:0;padding:6px 0;overflow:auto;flex:1;min-height:0;font:11.5px/1.5 var(--mono)}
+  #log li{padding:3px 14px;color:var(--muted);white-space:pre-wrap;word-break:break-word;border-left:2px solid transparent}
+  #log li.tool{color:var(--text);border-left-color:var(--accent)}
+  #log li.tool-error,#log li.error{color:var(--bad);border-left-color:var(--bad)}
+  #log li.fresh{background:rgba(71,140,191,.12)}
+  .x{width:28px;height:28px;border-radius:6px;border:0;background:none;cursor:pointer;color:var(--muted);display:grid;place-items:center}
+  .x:hover{background:var(--panel2);color:var(--text)} .x svg{width:14px;height:14px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round}
+
+  #note{position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(27,31,36,.94);border:1px solid var(--line);border-radius:999px;
+        padding:6px 14px;color:var(--warn);font-size:12px;z-index:3;pointer-events:none;white-space:nowrap}
+  #toast{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);border-radius:8px;
+         padding:9px 14px;z-index:6;max-width:min(640px,calc(100% - 32px));box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  #toast.bad{border-color:rgba(255,122,107,.6);color:var(--bad)}
+  #takeover{position:absolute;inset:0;z-index:3;display:grid;place-items:center;background:rgba(18,20,23,.78);padding:16px}
+  #takeover .card{max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  #takeover h2{margin:0 0 6px;font-size:15px} #takeover p{margin:0 0 16px;color:var(--muted)}
+
+  #gone{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:var(--bg);color:var(--muted);padding:16px;text-align:center}
+  /* Beside a chat the frame is narrow: the project, the state and the two buttons, without the name and the words. */
+  @media (max-width:720px){ .title,.pill{display:none} #projBtn{max-width:46vw} .btn .wide{display:none} }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="mark" aria-hidden="true">G</div>
+    <span class="title" data-t="Godot editor"></span>
+    <button class="btn" id="projBtn" aria-haspopup="true" aria-expanded="false" data-title="Projects">
+      <svg viewBox="0 0 16 16"><path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/></svg>
+      <span class="nm" id="projName">…</span><span class="chip" id="projRenderer"></span>
+      <svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></svg>
+    </button>
+    <div class="pill" id="status"><span class="dot"></span><span id="statusText" data-t="connecting"></span></div>
+    <div class="spacer"></div>
+    <button class="btn primary" id="runBtn" data-title="Run the open project's main scene in the editor">
+      <svg viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8z"/></svg><span id="runText" class="wide" data-t="Run"></span>
+    </button>
+    <button class="btn" id="stopBtn" hidden data-title="Stop the game the editor runs">
+      <svg viewBox="0 0 16 16"><path d="M4 4h8v8H4z"/></svg><span class="wide" data-t="Stop"></span>
+    </button>
+    <button class="btn" id="actBtn" aria-expanded="false" data-title="Agent activity">
+      <svg viewBox="0 0 16 16"><path d="M2 8h3l2-5 2 10 2-5h3"/></svg><span class="wide" data-t="Activity"></span><span class="badge" id="actBadge" hidden>0</span>
+    </button>
+  </header>
+  <main>
+    <iframe id="stream" data-aria="Godot editor stream" allow="fullscreen; clipboard-read; clipboard-write; keyboard-map"></iframe>
+    <div id="note" hidden></div>
+    <div id="takeover" hidden role="alert">
+      <div class="card">
+        <h2 id="takeoverTitle"></h2>
+        <p id="takeoverText"></p>
+        <button class="btn primary" id="takeoverBtn" data-t="Reconnect here"></button>
+      </div>
+    </div>
+    <div id="gone" hidden role="alert"><p data-t="Not connected: open Godot from the portal."></p></div>
+
+    <div class="menu" id="menu" hidden role="dialog" data-aria="Projects">
+      <h2 data-t="Projects"></h2>
+      <ul id="projList"></ul>
+      <div class="sect">
+        <div class="row">
+          <input id="newName" maxlength="64" data-placeholder="New project name" data-aria="New project name">
+          <button class="btn" data-template="2d" data-title="Node2D scene, Compatibility renderer" data-t="New 2D"></button>
+          <button class="btn" data-template="3d" data-title="Node3D scene with camera, sun and sky, Forward+" data-t="New 3D"></button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="uploadBtn"><svg viewBox="0 0 16 16"><path d="M8 11V3M5 6l3-3 3 3M3 13h10"/></svg><span data-t="Upload .zip"></span></button>
+          <a class="btn" id="downloadBtn" href="#"><svg viewBox="0 0 16 16"><path d="M8 3v8M5 8l3 3 3-3M3 13h10"/></svg><span data-t="Download open project"></span></a>
+          <input type="file" id="uploadFile" accept=".zip,application/zip" hidden>
+        </div>
+      </div>
+      <div class="sect">
+        <h2 style="padding:0" data-t="Builds and recordings"></h2>
+        <ul id="outList"></ul>
+      </div>
+    </div>
+
+    <aside class="drawer" id="drawer" hidden data-aria="Agent activity">
+      <header><h2 data-t="Activity"></h2><div class="spacer"></div>
+        <button class="x" id="drawerClose" data-aria="Close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></header>
+      <ul id="log"></ul>
+    </aside>
+    <div id="toast" hidden role="status"></div>
+  </main>
+</div>
+<script>
+// The texts of the page in English and German, chosen by ?lang= on its address (the Godot panel passes the portal's
+// language), English otherwise. Godot's own German words where Godot has them.
+const TEXTS = {
+  en: {},
+  de: {
+    "Godot editor": "Godot-Editor",
+    "Projects": "Projekte",
+    "connecting": "verbinde",
+    "Run": "Ausführen",
+    "Stop": "Beenden",
+    "Activity": "Aktivität",
+    "Agent activity": "Aktivität des Agenten",
+    "Run the open project's main scene in the editor": "Die Hauptszene des offenen Projekts im Editor ausführen",
+    "Stop the game the editor runs": "Das Spiel beenden, das der Editor ausführt",
+    "Godot editor stream": "Stream des Godot-Editors",
+    "Reconnect here": "Hier wieder verbinden",
+    "Not connected: open Godot from the portal.": "Nicht verbunden: Öffne Godot aus dem Portal.",
+    "New project name": "Name des neuen Projekts",
+    "Node2D scene, Compatibility renderer": "Node2D-Szene, Compatibility-Renderer",
+    "Node3D scene with camera, sun and sky, Forward+": "Node3D-Szene mit Kamera, Sonne und Himmel, Forward+",
+    "New 2D": "Neu 2D",
+    "New 3D": "Neu 3D",
+    "Upload .zip": ".zip hochladen",
+    "Download open project": "Offenes Projekt herunterladen",
+    "Builds and recordings": "Builds und Aufnahmen",
+    "Close": "Schließen",
+    "No projects yet": "Noch keine Projekte",
+    "open": "geöffnet",
+    "Open": "Öffnen",
+    "no project": "kein Projekt",
+    "just now": "gerade eben",
+    "{n} min ago": "vor {n} Min.",
+    "{n} h ago": "vor {n} Std.",
+    "{n} d ago": "vor {n} T.",
+    "Editor ready": "Editor bereit",
+    "Editor crashed, restarting": "Editor abgestürzt, startet neu",
+    "Editor starting": "Editor startet",
+    "server unreachable": "Server nicht erreichbar",
+    "The editor exited; it restarts by itself": "Der Editor wurde beendet und startet von selbst neu",
+    "The editor is starting (the first open of a project imports its files)": "Der Editor startet (beim ersten Öffnen eines Projekts werden seine Dateien importiert)",
+    "This view was taken over": "Diese Ansicht wurde übernommen",
+    "The stream stopped": "Der Stream wurde beendet",
+    "The editor was opened in another tab or on another device, and only one view can be connected at a time. The editor keeps running there.": "Der Editor wurde in einem anderen Tab oder auf einem anderen Gerät geöffnet, und es kann immer nur eine Ansicht verbunden sein. Der Editor läuft dort weiter.",
+    "The stream server ended this view: {reason}": "Der Stream-Server hat diese Ansicht beendet: {reason}",
+    "Opening {name}": "Öffne {name}",
+    "{label}: done": "{label}: fertig",
+    "{label}: {error}": "{label}: {error}",
+    "Type a name for the new project first": "Gib zuerst einen Namen für das neue Projekt ein",
+    "Creating {name}": "Lege {name} an",
+    "Uploading {name}": "Lade {name} hoch",
+    "Uploaded as {name}; open it from the list": "Als {name} hochgeladen; öffne es in der Liste",
+    "Starting the game": "Starte das Spiel",
+    "Stopping the game": "Beende das Spiel",
+    "Web build (.zip)": "Web-Build (.zip)",
+    "Linux build (.zip)": "Linux-Build (.zip)",
+    "Recording (.mp4)": "Aufnahme (.mp4)",
+    "No builds or recordings yet: the agent makes them with export and record.": "Noch keine Builds oder Aufnahmen: Der Agent erstellt sie mit export und record.",
+  },
+};
+const LANG = new URLSearchParams(location.search).get('lang') === 'de' ? 'de' : 'en';
+document.documentElement.lang = LANG;
+function t(text, vars = {}) {
+  const said = TEXTS[LANG][text] ?? text;
+  return said.replace(/\{(\w+)\}/g, (all, k) => (k in vars ? String(vars[k]) : all));
+}
+for (const el of document.querySelectorAll('[data-t]')) el.textContent = t(el.dataset.t);
+for (const el of document.querySelectorAll('[data-title]')) el.title = t(el.dataset.title);
+for (const el of document.querySelectorAll('[data-aria]')) el.setAttribute('aria-label', t(el.dataset.aria));
+for (const el of document.querySelectorAll('[data-placeholder]')) el.placeholder = t(el.dataset.placeholder);
+for (const el of document.querySelectorAll('#stream')) el.title = t('Godot editor stream');
+
+const $ = id => document.getElementById(id);
+const RENDERER = {forward_plus: 'Forward+', mobile: 'Mobile', gl_compatibility: 'Compatibility'};
+let state = null, seenLog = 0, drawerOpen = false, toastTimer = null, working = false, display = null;
+
+// Every address is relative: the page is served by the portal, under the Godot extension's own routes.
+async function api(path, opts = {}) {
+  // JSON by default: the server only takes POSTs of the types this page sends.
+  const r = await fetch(path, {credentials: 'same-origin', ...opts, headers: {'Content-Type': 'application/json', ...opts.headers}});
+  if (r.status === 401) { $('gone').hidden = false; throw new Error('not connected'); }
+  $('gone').hidden = true;
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+function toast(text, bad = false, ms = 5000) {
+  const el = $('toast'); el.textContent = text; el.className = bad ? 'bad' : ''; el.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.hidden = true, ms);
+}
+function ago(when) {
+  const s = Date.now() / 1000 - when;
+  if (s < 60) return t('just now'); if (s < 3600) return t('{n} min ago', {n: Math.round(s / 60)});
+  if (s < 86400) return t('{n} h ago', {n: Math.round(s / 3600)}); return t('{n} d ago', {n: Math.round(s / 86400)});
+}
+
+// Scale the stream page (the virtual screen's size) to fit <main>, centred, on every resize.
+function fitStream() {
+  if (!display) return;
+  const m = document.querySelector('main').getBoundingClientRect(), [w, h] = display, f = $('stream');
+  const k = Math.min(m.width / w, m.height / h);
+  f.style.width = w + 'px'; f.style.height = h + 'px';
+  f.style.transform = `translate(${(m.width - w * k) / 2}px, ${(m.height - h * k) / 2}px) scale(${k})`;
+}
+new ResizeObserver(fitStream).observe(document.querySelector('main'));
+
+// Only one view can be connected; the stream page (see STREAM_JS in server.py) says when the server ended this one.
+window.addEventListener('message', e => {
+  if (e.origin !== location.origin || e.source !== $('stream').contentWindow || !e.data || e.data.gsStream !== 'ended') return;
+  const taken = /new primary client/i.test(e.data.reason || '');
+  $('takeoverTitle').textContent = taken ? t('This view was taken over') : t('The stream stopped');
+  $('takeoverText').textContent = taken
+    ? t('The editor was opened in another tab or on another device, and only one view can be connected at a time. The editor keeps running there.')
+    : t('The stream server ended this view: {reason}', {reason: e.data.reason});
+  $('takeover').hidden = false;
+});
+$('takeoverBtn').onclick = () => {
+  $('takeover').hidden = true;
+  $('stream').contentWindow.location.reload();
+  $('stream').focus();
+};
+
+function render() {
+  const s = state; if (!s) return;
+  if (!display) { display = s.display; fitStream(); $('stream').src = 'stream/'; }
+  if (!seenLog && s.log.length) seenLog = s.log[0].t;   // only count what happens after the page opened
+  $('projName').textContent = s.project || t('no project');
+  $('projRenderer').textContent = RENDERER[s.renderer] || '';
+  $('projRenderer').hidden = !s.renderer;
+  $('downloadBtn').href = s.project ? `api/projects/${encodeURIComponent(s.project)}/download` : '#';
+  $('runBtn').hidden = s.playing; $('stopBtn').hidden = !s.playing;
+  $('runBtn').disabled = !s.ready || working;
+  const st = $('status');
+  let text, cls = '';
+  if (s.busy) { text = s.busy + '…'; cls = 'busy'; }
+  else if (s.ready) { text = t('Editor ready') + (s.adapter ? ' · ' + s.adapter.replace(/^NVIDIA GeForce /, '') : ''); }
+  else if (s.editor === 'crashed') { text = t('Editor crashed, restarting'); cls = 'bad'; }
+  else { text = t('Editor starting'); cls = 'busy'; }
+  st.className = 'pill ' + cls; $('statusText').textContent = text;
+  const note = $('note');
+  note.hidden = s.ready;
+  note.textContent = s.editor === 'crashed' ? t('The editor exited; it restarts by itself') : t('The editor is starting (the first open of a project imports its files)');
+  // activity
+  const log = $('log');
+  const newest = s.log.length ? s.log[0].t : 0;
+  const fresh = s.log.filter(e => e.t > seenLog && e.kind.startsWith('tool')).length;
+  const badge = $('actBadge');
+  badge.hidden = drawerOpen || !fresh; badge.textContent = fresh > 99 ? '99+' : fresh;
+  log.replaceChildren(...s.log.map(e => {
+    const li = document.createElement('li');
+    li.className = e.kind + (drawerOpen && e.t > seenLog ? ' fresh' : '');
+    li.textContent = e.line; return li;
+  }));
+  if (drawerOpen && newest > seenLog) setTimeout(() => { seenLog = newest; }, 2500);
+}
+
+async function poll() {
+  try { state = await api('api/state'); render(); }
+  catch (e) { if (e.message !== 'not connected') { $('statusText').textContent = t('server unreachable'); $('status').className = 'pill bad'; } }
+  setTimeout(poll, 1500);
+}
+
+// projects menu
+function outputLink(href, label, when) {
+  const li = document.createElement('li'), a = document.createElement('a');
+  a.href = href; a.download = '';
+  const nm = document.createElement('span'); nm.textContent = label;
+  const w = document.createElement('span'); w.className = 'when'; w.textContent = ago(when);
+  a.append(nm, w); li.append(a); return li;
+}
+async function showMenu(open) {
+  $('menu').hidden = !open; $('projBtn').setAttribute('aria-expanded', open);
+  if (!open) { $('stream').focus(); return; }
+  const list = $('projList'); list.replaceChildren();
+  const outs = $('outList'); outs.replaceChildren();
+  try {
+    const r = await api('api/projects');
+    if (!r.projects.length) { const li = document.createElement('li'); li.textContent = t('No projects yet'); list.append(li); }
+    for (const p of r.projects) {
+      const li = document.createElement('li');
+      const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = p.name; nm.title = p.name;
+      const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = RENDERER[p.renderer] || p.renderer;
+      const when = document.createElement('span'); when.className = 'when'; when.textContent = ago(p.modified);
+      li.append(nm, chip, when);
+      if (p.open) { const c = document.createElement('span'); c.className = 'cur'; c.textContent = t('open'); li.append(c); }
+      else {
+        const b = document.createElement('button'); b.className = 'btn open'; b.textContent = t('Open');
+        b.onclick = () => run(t('Opening {name}', {name: p.name}), () => api('api/projects/open', {method: 'POST', body: JSON.stringify({name: p.name})}));
+        li.append(b);
+      }
+      list.append(li);
+    }
+    if (r.open) {
+      // The open project's builds and recordings: files to download, never pages run here (see server.py).
+      const o = await api(`api/outputs?project=${encodeURIComponent(r.open)}`);
+      for (const b of o.builds) outs.append(outputLink(`api/projects/${encodeURIComponent(o.project)}/builds/${b.platform}.zip`, b.platform === 'web' ? t('Web build (.zip)') : t('Linux build (.zip)'), b.modified));
+      for (const rec of o.recordings) outs.append(outputLink('files/' + rec.path.split('/').map(encodeURIComponent).join('/'), t('Recording (.mp4)'), rec.modified));
+      if (!outs.children.length) { const li = document.createElement('li'); li.className = 'hint'; li.textContent = t('No builds or recordings yet: the agent makes them with export and record.'); outs.append(li); }
+    }
+  } catch (e) { toast(e.message, true); }
+}
+async function run(label, fn) {
+  if (working) return; working = true; showMenu(false); toast(label + '…', false, 60000);
+  try { await fn(); toast(t('{label}: done', {label})); } catch (e) { toast(t('{label}: {error}', {label, error: e.message}), true, 9000); }
+  finally { working = false; }
+}
+$('projBtn').onclick = () => showMenu($('menu').hidden);
+for (const b of document.querySelectorAll('[data-template]')) {
+  b.onclick = () => {
+    const name = $('newName').value.trim();
+    if (!name) { $('newName').focus(); toast(t('Type a name for the new project first'), true); return; }
+    run(t('Creating {name}', {name}), () => api('api/projects/new', {method: 'POST', body: JSON.stringify({name, template: b.dataset.template})}))
+      .then(() => { $('newName').value = ''; });
+  };
+}
+$('uploadBtn').onclick = () => $('uploadFile').click();
+$('uploadFile').onchange = () => {
+  const f = $('uploadFile').files[0]; if (!f) return;
+  const name = $('newName').value.trim() || f.name.replace(/\.zip$/i, '');
+  run(t('Uploading {name}', {name: f.name}), async () => {
+    const r = await api(`api/projects/upload?name=${encodeURIComponent(name)}`, {method: 'POST', body: f, headers: {'Content-Type': 'application/zip'}});
+    toast(t('Uploaded as {name}; open it from the list', {name: r.project})); setTimeout(() => showMenu(true), 400);
+  });
+  $('uploadFile').value = '';
+};
+
+// Run and Stop: the game runs in the editor, in a window over it, as the editor's own Play button runs it.
+$('runBtn').onclick = () => run(t('Starting the game'), () => api('api/run', {method: 'POST', body: '{}'})).then(() => $('stream').focus());
+$('stopBtn').onclick = () => run(t('Stopping the game'), () => api('api/stop', {method: 'POST', body: '{}'})).then(() => $('stream').focus());
+
+// activity drawer
+function showDrawer(open) {
+  drawerOpen = open; $('drawer').hidden = !open; $('actBtn').setAttribute('aria-expanded', open);
+  if (open && state && state.log.length) setTimeout(() => { seenLog = Math.max(seenLog, state.log[0].t); }, 2500);
+  if (!open) $('stream').focus();
+  render();
+}
+$('actBtn').onclick = () => showDrawer(!drawerOpen);
+$('drawerClose').onclick = () => showDrawer(false);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { showMenu(false); if (drawerOpen) showDrawer(false); } });
+window.addEventListener('blur', () => {   // a click into the stream focuses the iframe
+  if (document.activeElement === $('stream') && !$('menu').hidden) showMenu(false);
+});
+document.addEventListener('pointerdown', e => {
+  if (!$('menu').hidden && !$('menu').contains(e.target) && !$('projBtn').contains(e.target)) showMenu(false);
+});
+poll();
+</script>
+</body>
+</html>

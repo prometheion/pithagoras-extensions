@@ -1,0 +1,102 @@
+# A release of the Godot extension, on a tag godot-v<version> that is godot/package.json's version: the image is built
+# from godot/server (after fetch-assets.sh has fetched and checked what it is built from), tested with no GPU
+# (smoke-test.sh), and pushed to ghcr.io/prometheion/pithagoras-godot:<version>; then a GitHub release carries the sources
+# the image's GPL parts ask for and the list of its Ubuntu packages; then the package is published to npm. npm comes
+# last, so a version on npm never names an image that is not there.
+#
+# Once, by hand, after the first push: GHCR makes a new package private, and Docker for extensions pulls without a
+# login, so an owner of the prometheion organization switches ghcr.io/prometheion/pithagoras-godot to public in the
+# package's settings (GitHub does not let it go back). npm needs an NPM_TOKEN secret.
+#
+# The x264, x265 and libde265 sources are the commits pixelflux 2.2.1 (inside Selkies 2.1.0) builds them from, as its
+# pyproject.toml pins them (build_x264, build_x265, build_de265). The LGPL libraries pcmflux 2.2.0 (inside Selkies)
+# bundles are AlmaLinux 8 builds, named with their versions in its sboms/auditwheel.cdx.json, whose source RPMs are in
+# AlmaLinux's 8.10 vault. Moving Selkies, pixelflux or pcmflux means reading them again there.
+name: Godot release
+
+on:
+  push:
+    tags: ["godot-v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/prometheion/pithagoras-godot
+  PIXELFLUX: "2.2.1"
+  PCMFLUX: "2.2.0"
+  X264_SOURCE: https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2
+  X265_SOURCE: https://bitbucket.org/multicoreware/x265_git/get/e444744c03978c1fb4e037168967020cf2648427.tar.gz
+  LIBDE265_SOURCE: https://github.com/strukturag/libde265/archive/ba62bf4cfb3242f3bf0a45617ff09e35236e4d82.tar.gz
+  VIRTUALGL_SOURCE: https://github.com/VirtualGL/virtualgl/releases/download/3.1.5/VirtualGL-3.1.5.tar.gz
+  ALMALINUX_VAULT: https://vault.almalinux.org/8.10
+  # pcmflux.libs' LGPL libraries, by the source RPM each is built from: libpulse and libpulsecommon, libasyncns,
+  # libsndfile, libsystemd, libgcrypt, libgpg-error, libmount and libblkid.
+  ALMALINUX_SOURCES: >-
+    AppStream/Source/Packages/pulseaudio-14.0-4.el8.src.rpm
+    AppStream/Source/Packages/libasyncns-0.8-14.el8.src.rpm
+    AppStream/Source/Packages/libsndfile-1.0.28-17.el8_10.src.rpm
+    BaseOS/Source/Packages/systemd-239-82.el8_10.19.src.rpm
+    BaseOS/Source/Packages/libgcrypt-1.8.5-8.el8_10.src.rpm
+    BaseOS/Source/Packages/libgpg-error-1.31-1.el8.src.rpm
+    BaseOS/Source/Packages/util-linux-2.32.1-48.el8_10.src.rpm
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: The tag is the package's version
+        id: version
+        run: |
+          version=$(node -p "require('./godot/package.json').version")
+          [ "${GITHUB_REF_NAME#godot-v}" = "$version" ] || { echo "tag $GITHUB_REF_NAME is not godot-v$version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: What the image is built from
+        run: |
+          # fetch-assets.sh reads the export templates' zip as it downloads, with bsdtar.
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools
+          godot/server/fetch-assets.sh
+      - name: The image
+        run: docker build --build-arg VERSION=${{ steps.version.outputs.version }} -t "$IMAGE:${{ steps.version.outputs.version }}" godot/server
+      - name: Smoke test, with no GPU
+        run: godot/server/smoke-test.sh "$IMAGE:${{ steps.version.outputs.version }}"
+      - name: Its size
+        run: echo "Image size $(docker image inspect "$IMAGE:${{ steps.version.outputs.version }}" --format '{{.Size}}') bytes" >> "$GITHUB_STEP_SUMMARY"
+      - name: Push to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ steps.version.outputs.version }}"
+      - name: The sources the image's GPL and LGPL parts ask for, and its packages
+        run: |
+          set -eu
+          mkdir sources
+          image="$IMAGE:${{ steps.version.outputs.version }}"
+          docker run --rm --entrypoint dpkg "$image" -l > sources/ubuntu-packages.txt
+          # The pixelflux and pcmflux in the image are the ones these sources are for.
+          docker run --rm --entrypoint sh "$image" -c "test -d /opt/selkies/lib/python3.12/site-packages/pixelflux-$PIXELFLUX.dist-info && test -d /opt/selkies/lib/python3.12/site-packages/pcmflux-$PCMFLUX.dist-info"
+          curl -fsSL -o "sources/pixelflux-$PIXELFLUX.tar.gz" "https://github.com/selkies-project/pixelflux/archive/refs/tags/$PIXELFLUX.tar.gz"
+          curl -fsSL -o sources/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2 "$X264_SOURCE"
+          curl -fsSL -o sources/x265-4.2-e444744c03978c1fb4e037168967020cf2648427.tar.gz "$X265_SOURCE"
+          curl -fsSL -o sources/libde265-1.1.3-ba62bf4cfb3242f3bf0a45617ff09e35236e4d82.tar.gz "$LIBDE265_SOURCE"
+          curl -fsSL -o "sources/pcmflux-$PCMFLUX.tar.gz" "https://github.com/selkies-project/pcmflux/archive/refs/tags/$PCMFLUX.tar.gz"
+          for srpm in $ALMALINUX_SOURCES; do curl -fsSL -o "sources/almalinux-8.10-$(basename "$srpm")" "$ALMALINUX_VAULT/$srpm"; done
+          curl -fsSL -o sources/VirtualGL-3.1.5.tar.gz "$VIRTUALGL_SOURCE"
+          (cd sources && sha256sum * > SHA256SUMS)
+      - name: The GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" sources/* --title "Godot ${{ steps.version.outputs.version }}" \
+            --notes "pithagoras-godot ${{ steps.version.outputs.version }}: the package on npm (npm:pithagoras-godot) and the image $IMAGE:${{ steps.version.outputs.version }}. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
+      - run: npm ci
+      - name: Publish to npm
+        run: npm publish -w godot --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

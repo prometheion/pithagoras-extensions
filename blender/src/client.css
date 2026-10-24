@@ -1,0 +1,13 @@
+/*
+ * Blender's own stylesheet: what its parts need that the portal's Tailwind preset cannot say (the utilities it uses
+ * are made after this, see build.mjs).
+ */
+
+/* Where the viewer is shown beside a chat: black from edge to edge, as the viewer's own page is. */
+.blender-screen { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #121417; color: #dfe4ea; }
+.blender-screen > iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+.blender-said { margin: auto; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: 420px; text-align: center; font-size: 13px; }
+.blender-said > p { margin: 0; }
+/* On the panel's black, as the viewer's own buttons are. */
+.blender-said > button { padding: 6px 12px; border: 1px solid #2b3138; border-radius: 8px; background: #1a1e23; color: #dfe4ea; font-size: 12px; cursor: pointer; }
+.blender-said > button:hover { border-color: #f5a623; }

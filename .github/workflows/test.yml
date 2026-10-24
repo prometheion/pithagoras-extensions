@@ -1,0 +1,34 @@
+# Every pull request, and main: each extension built and type-checked, its unit tests, and its portal-tier tests
+# against the Pithagoras its extension API is of (scripts/pithagoras.sh).
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build and type-check
+        run: npm run build
+      - name: Unit tests
+        run: npm test
+      - name: The servers' Python compiles
+        run: python3 -m py_compile blender/server/server.py godot/server/server.py godot/server/client.py
+      - name: Pithagoras, for the portal-tier tests
+        run: ./scripts/pithagoras.sh
+      - name: Portal-tier tests
+        run: npm run test:portal
+        env:
+          PITHAGORAS_DIR: ${{ github.workspace }}/.pithagoras

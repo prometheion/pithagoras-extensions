@@ -1,0 +1,10 @@
+/*
+ * Godot's own stylesheet: what its parts need that the portal's Tailwind preset cannot say (the utilities it uses are
+ * made after this, see build.mjs).
+ */
+
+/* Where the editor is shown beside a chat: black from edge to edge, as the screen it shows is. */
+.godot-screen { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #0b0b0d; color: #d1d8e3; }
+.godot-screen > iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+.godot-screen > .godot-said { margin: auto; max-width: 30rem; padding: 16px; font-size: 13px; line-height: 1.5; text-align: center; }
+.godot-screen .godot-said button, .godot-screen .godot-said a { color: #8fc1ea; }

@@ -1,0 +1,5 @@
+# The image is built from this folder (server/Dockerfile) and needs only these.
+*
+!server/server.py
+!server/LICENSE
+!NOTICE

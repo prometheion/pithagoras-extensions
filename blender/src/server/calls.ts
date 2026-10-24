@@ -12,6 +12,12 @@ import type { CallHooks, Part } from "../../../shared/relay";
  * viewer and in voice mode's pictures. The model gets it as before, unless it asked for none (`return_image: false`),
  * and is told where it was put. One that cannot be put there is still the model's, which is told why the chat does
  * not show it.
+ *
+ * `execute_code` with a `path`: a script in the agent's own files, which it writes once and edits there, run in
+ * place of code written inline. The file is read here, in the portal, as the chat's agent (`likeParent` for that
+ * chat: what the sandbox closes to the agent is refused, as is anything outside the chat's folder), and its text is
+ * what the server is sent as `code`, with the path as the name it runs under, so that an error names the file and
+ * the line. The container never mounts the agent's files, and reads none of them.
  */
 
 /** The folder in a chat's folder that Blender's renders are put in, for the chat to show them. */
@@ -37,7 +43,37 @@ function renderedName(parts: Part[]): string | undefined {
   return undefined;
 }
 
+/**
+ * Where `given` is in the chat's folder `base`, relative to it: a path relative to the folder, or absolute inside it,
+ * as it really is or as the chat names it (`workspace`, which can reach it through a link). Nothing for a path
+ * outside it, or the folder itself.
+ */
+function inFolder(chat: Chat, base: string, given: string): string | undefined {
+  const below = (root: string, at: string) => {
+    const rel = path.relative(root, at);
+    return rel && rel.split(path.sep)[0] !== ".." && !path.isAbsolute(rel) ? rel : undefined;
+  };
+  return below(base, path.resolve(base, given)) ?? below(path.resolve(chat.workspace), path.resolve(chat.workspace, given));
+}
+
 export function blenderCalls(portal: ServerPortal): Record<string, CallHooks> {
+  /** The text of the script `given`, read as the chat's agent would read it. */
+  function script(chat: Chat, given: string): string {
+    const base = portal.chats.folder(chat.id);
+    const rel = inFolder(chat, base, given);
+    if (!rel) throw new Error(`${given} is not in this chat's folder: only a script there can be run. Save it there first.`);
+    let read;
+    try {
+      read = portal.files.read(base, rel, { likeParent: true, chats: [chat.id] });
+    } catch (e) {
+      if (refusal(e) === "missing") throw new Error(`There is no file ${given} in this chat's folder.`);
+      if (refusal(e) === "invalid") throw new Error(`${given} is not a file this chat's agent may read.`);
+      throw new Error(`${given} could not be read: ${(e as Error).message}`);
+    }
+    if (read.binary) throw new Error(`${given} is not a text file, or is over 1 MB.`);
+    return read.content;
+  }
+
   /** Writes the picture into the chat's folder, in `RENDERS`, and returns where, from the folder. */
   function keep(chat: Chat, bytes: Buffer): string {
     const base = portal.chats.folder(chat.id);
@@ -50,6 +86,13 @@ export function blenderCalls(portal: ServerPortal): Record<string, CallHooks> {
   }
 
   return {
+    execute_code: {
+      arguments(params, chat) {
+        if (params.path === undefined) return params;
+        if (params.code !== undefined) throw new Error("Give code or path, not both.");
+        return { ...params, code: script(chat, String(params.path)) };
+      },
+    },
     render: {
       arguments: (params) => ({ ...params, return_image: true }),
       answer(parts, params, chat) {

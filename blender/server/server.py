@@ -32,6 +32,7 @@ import hmac
 import http.server
 import io
 import json
+import linecache
 import math
 import os
 import queue
@@ -180,11 +181,33 @@ def refresh_view():
     release_frame()
 
 
+class CodeFailed(Exception):
+    """What the agent's code raised, told as Python tells it: the lines of the code it went through, then the error."""
+
+
 def cmd_execute_code(p):
+    """Runs `code`. With `path` it is the text of a script in the agent's own files, which the portal read as the agent
+    and sent (the server never sees those files), and it runs under that name, so that what it raises names the file
+    and the line. `args`, a JSON object, is what the code reads as ARGS."""
+    code, name, args = p.get("code"), p.get("path") or "<request>", p.get("args", {})
+    if not isinstance(code, str):
+        raise ValueError("code is required: the Python to run, or with path the script's text, which the portal sends")
+    if not isinstance(args, dict):
+        raise ValueError("args must be a JSON object")
+    # The code is no file here: its lines, for the traceback to quote.
+    linecache.cache[name] = (len(code), None, code.splitlines(True), name)
     out = io.StringIO()
-    ns = {"bpy": bpy, "refresh_view": refresh_view, "__name__": "__blender_server__"}
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-        exec(compile(p["code"], "<request>", "exec"), ns)
+    ns = {"bpy": bpy, "refresh_view": refresh_view, "ARGS": args, "__name__": "__blender_server__"}
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            exec(compile(code, name, "exec"), ns)
+    except Exception as e:
+        frames = [f for f in traceback.extract_tb(e.__traceback__) if f.filename == name]
+        told = "".join(traceback.format_exception_only(type(e), e))
+        if frames:
+            told = "Traceback (most recent call last):\n" + "".join(traceback.format_list(frames)) + told
+        printed = out.getvalue()[-4000:]
+        raise CodeFailed((f"It printed, before the error:\n{printed.rstrip()}\n\n" if printed.strip() else "") + told.rstrip()) from None
     return {"output": out.getvalue()[-20000:]}
 
 
@@ -842,11 +865,18 @@ MCP_TOOLS = [
     ("get_object_info", "Transform, dimensions, materials and mesh stats of one object.",
      _obj({"name": {"type": "string", "description": "Object name"}}, ["name"])),
     ("execute_code", "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or "
-     "change anything in the scene. The live browser view refreshes afterwards, also after an error; in a script that "
-     "takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs.",
-     _obj({"code": {"type": "string", "description": "Python source"},
+     "change anything in the scene. Give `code` inline for a one-off step. For a script that is long or that you will "
+     "run again, write it once as a .py file in your own files, edit it there, and give its `path` instead, with "
+     "`args` for what changes between runs (the script reads them as the dict ARGS); Blender never sees your files, "
+     "only the script's text. An error names the file and the line. The live browser view refreshes afterwards, "
+     "also after an error; in a script that takes long, call refresh_view() between its steps so the person sees "
+     "the scene take shape while it runs.",
+     _obj({"code": {"type": "string", "description": "Python source, for a one-off step. Give code or path, not both"},
+           "path": {"type": "string", "description": "A .py script in your own files, relative to the chat's folder "
+                    "or absolute inside it, run in place of code"},
+           "args": {"type": "object", "description": "Values the code reads as ARGS, for a script run by its path"},
            "read_only": {"type": "boolean", "default": False, "description": "Set true when the code only inspects "
-                         "the scene: skips the unsaved-changes mark and the browser view refresh"}}, ["code"])),
+                         "the scene: skips the unsaved-changes mark and the browser view refresh"}})),
     ("preview", "Quick Workbench render from the scene camera (or an automatic view if there is none), returned as "
      "an image. Use it to check your work after edits.", _obj({})),
     ("render", "Full render from the scene camera, saved under renders/ unless `path` is given. The person sees it in "
@@ -1175,7 +1205,8 @@ def handle(req):
         log(f"{kind} failed: {e}")
         if changes:   # what the code did before it failed is in the scene too
             after_scene_change(kind)
-        return {"status": "error", "message": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()[-4000:]}
+        message = str(e) if isinstance(e, CodeFailed) else f"{type(e).__name__}: {e}"
+        return {"status": "error", "message": message, "traceback": traceback.format_exc()[-4000:]}
     finally:
         with STATE_LOCK:
             STATE["busy"] = None

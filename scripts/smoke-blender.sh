@@ -4,7 +4,8 @@
 # later, and shows that it starts with no internet), with no GPU and a random token, until MCP answers, asked from
 # inside the container, as nothing else reaches it; its tools/list and its instructions compared with
 # blender/server/tools.json, which the extension offers in their place (a change to the server's tools changes that
-# file, the label and guard tables and their German); the viewer's API and MCP refused without the token; Blender run
+# file, the label and guard tables and their German); a script sent with its path run under that name, with its ARGS;
+# the viewer's API and MCP refused without the token; Blender run
 # as the image's own user, which cannot change the server; then the container and the network removed.
 #   scripts/smoke-blender.sh <image>        SMOKE_PORT (default 3870) and SMOKE_NAME (default blender-smoke) change them
 set -eu
@@ -50,6 +51,18 @@ if instructions != kept["instructions"]:
     sys.exit("the image gives other instructions than blender/server/tools.json")
 print(len(listed), "tools and the instructions, as blender/server/tools.json has them")
 ' "/tmp/$NAME-tools.json" "/tmp/$NAME-init.json" "$ROOT/blender/server/tools.json"
+
+echo "$(ts) a script sent with its path reads its ARGS, and its error names the file and the line"
+mcp '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"execute_code","arguments":{"path":"scripts/smoke.py","args":{"n":2},"code":"print(ARGS[\"n\"] * 21)\nraise ValueError(\"on purpose\")\n"}}}' > "/tmp/$NAME-script.json"
+python3 -c '
+import json, sys
+result = json.load(open(sys.argv[1]))["result"]
+text = result["content"][0]["text"]
+for want in ("42", "File \"scripts/smoke.py\", line 2, in <module>", "ValueError: on purpose"):
+    if want not in text or not result["isError"]:
+        sys.exit("the script error does not say " + repr(want) + ": " + text)
+print("the script printed 42, and its error names scripts/smoke.py, line 2")
+' "/tmp/$NAME-script.json"
 
 echo "$(ts) Blender runs as the image's own user, which cannot change the server"
 user=$(docker exec "$NAME" id -un)

@@ -202,6 +202,20 @@ test("a render is put in the chat's folder, and the portal takes the file the ca
   assert.deepEqual(readFileSync(path.join(folder, shown[0].path)), Buffer.from(PIXEL, "base64"));
 });
 
+test("a script is run by its path, read from the chat's folder through the portal's own files, and refused outside it", async () => {
+  const id = chat();
+  const run = registered(id).find((t) => t.name === "blender_execute_code");
+  const folder = realpathSync(process.env.WORKSPACE_ROOT!);
+  mkdirSync(path.join(folder, "scripts"), { recursive: true });
+  writeFileSync(path.join(folder, "scripts/tower.py"), "for i in range(ARGS['floors']):\n    bpy.ops.mesh.primitive_cube_add(location=(0, 0, i))\n");
+  await run.execute("call-3", { path: "scripts/tower.py", args: { floors: 4 } });
+  assert.deepEqual(calls.at(-1), { name: "execute_code", arguments: { path: "scripts/tower.py", args: { floors: 4 }, code: "for i in range(ARGS['floors']):\n    bpy.ops.mesh.primitive_cube_add(location=(0, 0, i))\n" } });
+  const before = calls.length;
+  await assert.rejects(run.execute("call-4", { path: "../outside.py" }), /is not in this chat's folder/);
+  await assert.rejects(run.execute("call-5", { path: "scripts/none.py" }), /There is no file scripts\/none\.py in this chat's folder/);
+  assert.equal(calls.length, before, "Blender was asked nothing for those");
+});
+
 test("the viewer is the extension's page, its API is the server's, sandboxed, and a stream is not this extension's", async () => {
   const page = await fetch(`${at}/ui/`);
   assert.equal(await page.text(), readFileSync(path.join(PACKAGE, "src/viewer.html"), "utf8"));

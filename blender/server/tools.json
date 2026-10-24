@@ -37,13 +37,21 @@
     },
     {
       "name": "execute_code",
-      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. The live browser view refreshes afterwards, also after an error; in a script that takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs.",
+      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. Give `code` inline for a one-off step. For a script that is long or that you will run again, write it once as a .py file in your own files, edit it there, and give its `path` instead, with `args` for what changes between runs (the script reads them as the dict ARGS); Blender never sees your files, only the script's text. An error names the file and the line. The live browser view refreshes afterwards, also after an error; in a script that takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "code": {
             "type": "string",
-            "description": "Python source"
+            "description": "Python source, for a one-off step. Give code or path, not both"
+          },
+          "path": {
+            "type": "string",
+            "description": "A .py script in your own files, relative to the chat's folder or absolute inside it, run in place of code"
+          },
+          "args": {
+            "type": "object",
+            "description": "Values the code reads as ARGS, for a script run by its path"
           },
           "read_only": {
             "type": "boolean",
@@ -51,9 +59,7 @@
             "description": "Set true when the code only inspects the scene: skips the unsaved-changes mark and the browser view refresh"
           }
         },
-        "required": [
-          "code"
-        ]
+        "required": []
       }
     },
     {

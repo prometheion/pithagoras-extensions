@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { mcpClient } from "../../shared/mcp.ts";
@@ -8,7 +8,10 @@ import { ACTS, LABELS } from "../src/labels.ts";
 import { blenderCalls, RENDERS } from "../src/server/calls.ts";
 import { BUNDLED, fakeMcp, fakePortal } from "./fakes.mts";
 
-/** What the extension does around a call of Blender's tools, in the chat it is made in: a render shown in the chat. */
+/**
+ * What the extension does around a call of Blender's tools, in the chat it is made in: a render shown in the chat, and
+ * a script of the agent's run by its path.
+ */
 
 /** A PNG's first bytes, which is what the portal tells a picture by. */
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
@@ -75,4 +78,51 @@ test("the other tools' calls go to the server as the model gave them, and come b
   const result = await tool("preview").execute("c1", { return_image: true });
   assert.deepEqual(sent("preview"), [{ return_image: true }]);
   assert.deepEqual(result, { content: [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }], details: {} });
+});
+
+test("a script is run by its path: read in the portal as the chat's agent, and its text sent as the code, with its args", async () => {
+  const { fake, tool, sent, server } = await setup();
+  server.answers.execute_code = () => ({ content: [{ type: "text", text: "made 3" }], isError: false });
+  mkdirSync(path.join(fake.chatDir, "scripts"));
+  writeFileSync(path.join(fake.chatDir, "scripts/trees.py"), "for i in range(ARGS['count']):\n    print(i)\n");
+  const result = await tool("execute_code").execute("c1", { path: "scripts/trees.py", args: { count: 3 } });
+  assert.deepEqual(result, { content: [{ type: "text", text: "made 3" }], details: {} });
+  assert.deepEqual(sent("execute_code"), [{ path: "scripts/trees.py", args: { count: 3 }, code: "for i in range(ARGS['count']):\n    print(i)\n" }]);
+  assert.deepEqual(fake.reads, [{ rel: path.join("scripts", "trees.py"), options: { likeParent: true, chats: ["chat-1"] } }], "read as the chat's agent");
+  // Absolute inside the chat's folder is the same file, and the server runs it under the name the agent gave.
+  const absolute = path.join(fake.chatDir, "scripts/trees.py");
+  await tool("execute_code").execute("c2", { path: absolute, read_only: true });
+  assert.deepEqual(sent("execute_code")[1], { path: absolute, read_only: true, code: "for i in range(ARGS['count']):\n    print(i)\n" });
+});
+
+test("code written inline goes to the server as it is, and nothing of the chat's folder is read", async () => {
+  const { fake, tool, sent, server } = await setup();
+  server.answers.execute_code = () => ({ content: [{ type: "text", text: "(no output)" }], isError: false });
+  await tool("execute_code").execute("c1", { code: "bpy.ops.mesh.primitive_cube_add()" });
+  assert.deepEqual(sent("execute_code"), [{ code: "bpy.ops.mesh.primitive_cube_add()" }]);
+  assert.deepEqual(fake.reads, []);
+});
+
+test("a script outside the chat's folder, one that is not there, one the agent may not read, and code beside a path are refused before Blender is asked", async () => {
+  const { fake, tool, sent } = await setup();
+  const run = (params: Record<string, unknown>) => tool("execute_code").execute("c", params);
+  await assert.rejects(run({ path: "../other-agent/secret.py" }), /^Error: \.\.\/other-agent\/secret\.py is not in this chat's folder: only a script there can be run\. Save it there first\.$/);
+  await assert.rejects(run({ path: "/etc/passwd" }), /\/etc\/passwd is not in this chat's folder/);
+  assert.deepEqual(fake.reads, [], "nothing outside it is read");
+  await assert.rejects(run({ path: "nope.py" }), /^Error: There is no file nope\.py in this chat's folder\.$/);
+  writeFileSync(path.join(fake.chatDir, "closed.py"), "print(1)\n");
+  fake.files.refuse = "invalid";
+  await assert.rejects(run({ path: "closed.py" }), /^Error: closed\.py is not a file this chat's agent may read\.$/);
+  fake.files.refuse = undefined;
+  writeFileSync(path.join(fake.chatDir, "blob.py"), Buffer.from([0, 1, 2]));
+  await assert.rejects(run({ path: "blob.py" }), /blob\.py is not a text file, or is over 1 MB/);
+  await assert.rejects(run({ path: "closed.py", code: "print(2)" }), /Give code or path, not both/);
+  assert.deepEqual(sent("execute_code"), [], "Blender was asked nothing");
+});
+
+test("a script's error comes back as the server tells it, naming the file and the line", async () => {
+  const { fake, tool, server } = await setup();
+  writeFileSync(path.join(fake.chatDir, "broken.py"), "x = 1\nraise ValueError(x)\n");
+  server.answers.execute_code = (args) => ({ content: [{ type: "text", text: `Traceback (most recent call last):\n  File "${args.path}", line 2, in <module>\nValueError: 1` }], isError: true });
+  await assert.rejects(tool("execute_code").execute("c", { path: "broken.py" }), /File "broken\.py", line 2, in <module>\nValueError: 1/);
 });

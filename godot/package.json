@@ -1,9 +1,15 @@
 {
   "name": "@pithagoras/godot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Godot for Pithagoras: the real Godot 4.7 editor on the GPU, run in a container through Docker, streamed into a panel beside the chat, with its tools in every chat",
   "type": "module",
-  "keywords": ["pi-package", "pithagoras", "godot", "game-engine", "mcp"],
+  "keywords": [
+    "pi-package",
+    "pithagoras",
+    "godot",
+    "game-engine",
+    "mcp"
+  ],
   "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/godot#readme",
   "repository": {
     "type": "git",
@@ -18,9 +24,18 @@
     "client": "./web/client.js",
     "style": "./web/client.css",
     "server": "./lib/server.js",
-    "requires": { "pithagoras-docker": "^1.3.0" }
+    "requires": {
+      "pithagoras-docker": "^1.3.0"
+    }
   },
-  "files": ["web", "lib", "pages", "README.md", "NOTICE", "LICENSE"],
+  "files": [
+    "web",
+    "lib",
+    "pages",
+    "README.md",
+    "NOTICE",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node build.mjs && tsc --noEmit -p .",
     "test": "node --import tsx --test --test-timeout=60000 test/*.test.mts",
@@ -30,6 +45,8 @@
   "devDependencies": {
     "react-icons": "5.7.0"
   },
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "Apache-2.0"
 }

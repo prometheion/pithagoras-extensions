@@ -1,5 +1,7 @@
 # Every pull request, and main: each extension built and type-checked, its unit tests, and its portal-tier tests
-# against the Pithagoras its extension API is of (scripts/pithagoras.sh).
+# against the Pithagoras its extension API is of (scripts/pithagoras.sh). Until a release of Pithagoras has Docker for
+# extensions 1.3.0, which the extensions require, that is the commit of its main that brought it (PITHAGORAS_REF): its
+# v0.2.0 has 1.2.0, which the extensions refuse. With that release, the extension API is bumped and the line goes.
 name: Test
 
 on:
@@ -28,6 +30,8 @@ jobs:
         run: python3 -m py_compile blender/server/server.py godot/server/server.py godot/server/client.py
       - name: Pithagoras, for the portal-tier tests
         run: ./scripts/pithagoras.sh
+        env:
+          PITHAGORAS_REF: 6e3adc1ce0fd7123499de3d2ba4599df703ba32e
       - name: Portal-tier tests
         run: npm run test:portal
         env:

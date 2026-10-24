@@ -58,7 +58,7 @@ The extensions are npm workspaces of this repository:
 npm ci                     # what every extension is built and tested with
 npm run build              # each extension's browser and server halves
 npm test                   # the unit tests, with Docker, the portal and the server faked
-./scripts/pithagoras.sh    # Pithagoras at the extension API's version, into .pithagoras/
+./scripts/pithagoras.sh    # Pithagoras at the extension API's version (or PITHAGORAS_REF), into .pithagoras/
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
 ```
 

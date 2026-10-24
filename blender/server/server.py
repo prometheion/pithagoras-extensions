@@ -172,9 +172,17 @@ def cmd_get_object_info(p):
     return info
 
 
+def refresh_view():
+    """For code the agent runs, between the steps of a long script: the person's live view and outliner show the
+    scene as it is now, while the rest runs. The scene is left on its own frame and actions, as the script had it."""
+    summarize_scene("execute_code")
+    refresh_viewport("execute_code")
+    release_frame()
+
+
 def cmd_execute_code(p):
     out = io.StringIO()
-    ns = {"bpy": bpy, "__name__": "__blender_server__"}
+    ns = {"bpy": bpy, "refresh_view": refresh_view, "__name__": "__blender_server__"}
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         exec(compile(p["code"], "<request>", "exec"), ns)
     return {"output": out.getvalue()[-20000:]}
@@ -236,7 +244,7 @@ def list_projects():
 
 
 def cmd_new_scene(p):
-    VP.update(scene=None, cam=None, dirty=True, mode=None)
+    forget_viewport()
     bpy.ops.wm.read_factory_settings(use_empty=bool(p.get("empty", True)))
     global GPU
     GPU = setup_gpu()   # factory reset also resets preferences
@@ -247,7 +255,7 @@ def cmd_new_scene(p):
 
 
 def cmd_open_file(p):
-    VP.update(scene=None, cam=None, dirty=True, mode=None)
+    forget_viewport()
     path = inside_data(p["path"])
     if not os.path.isfile(path):
         raise FileNotFoundError(f"no such project: {p['path']}")
@@ -260,14 +268,7 @@ def cmd_open_file(p):
 
 
 def cmd_save_file(p):
-    if VP["scene"] is not None and VP["scene"].name in bpy.data.scenes:
-        cam = VP["cam"]
-        bpy.data.scenes.remove(VP["scene"])
-        if cam is not None and cam.name in bpy.data.objects:
-            data = cam.data
-            bpy.data.objects.remove(cam)
-            bpy.data.cameras.remove(data)
-    VP.update(scene=None, cam=None, dirty=True, mode=None)
+    drop_viewport()   # the viewport's own scene and camera are not the project's
     path = inside_data(p["path"])
     bpy.ops.wm.save_as_mainfile(filepath=path)
     set_project(path, dirty=False)
@@ -505,27 +506,59 @@ def view_resolution(view, width=None):
 VIEWPORT_JPG = os.path.join(DATA, "viewport", "live.jpg")
 
 
+# The viewport's own scene and camera, each by its name and its address (`as_pointer()`), never by a Python object
+# kept between jobs: code the agent runs can free either (it deletes every object, removes the scenes it does not
+# know, loads a file), and a kept object of a freed datablock raises ReferenceError at any touch, its name included,
+# which once made every frame after it fail. Looked up again for each use (`kept`), a freed one is simply not there.
 VP = {"scene": None, "cam": None, "dirty": True, "mode": None}
+
+
+def kept(collection, held):
+    """The datablock `held` names, (name, address), if it is still the one in `collection`; None once it is not."""
+    if held is None:
+        return None
+    found = collection.get(held[0])
+    return found if found is not None and found.as_pointer() == held[1] else None
+
+
+def hold(idblock):
+    return (idblock.name, idblock.as_pointer())
+
+
+def forget_viewport():
+    """Before a file replaces everything: the viewport's datablocks go with it, and are made again for the next frame."""
+    VP.update(scene=None, cam=None, dirty=True, mode=None)
+
+
+def drop_viewport():
+    """Removes the viewport's own scene and camera, where they are still there, and forgets them."""
+    vp, cam = kept(bpy.data.scenes, VP["scene"]), kept(bpy.data.objects, VP["cam"])
+    if vp is not None:
+        bpy.data.scenes.remove(vp)
+    if cam is not None:
+        data = cam.data
+        bpy.data.objects.remove(cam)
+        bpy.data.cameras.remove(data)
+    forget_viewport()
+
+
+@bpy.app.handlers.persistent
+def forget_viewport_on_load(*_):
+    """A file loaded by code the agent ran (open_mainfile, read_homefile, read_factory_settings): what VP names is gone,
+    and a new datablock could be given a freed one's address."""
+    forget_viewport()
 
 
 def viewport_scene(mode):
     """A hidden scene that links the user's objects and owns its own camera and engine settings.
 
-    Orbiting only moves VP["cam"], so nothing the renderer has cached is invalidated: Cycles keeps the scene on the
-    GPU between frames (use_persistent_data) and EEVEE keeps its shaders. The user's scene is never modified.
-    Rebuilt only after an edit (dirty) or a shading-mode change."""
+    Orbiting only moves the viewport's camera, so nothing the renderer has cached is invalidated: Cycles keeps the scene
+    on the GPU between frames (use_persistent_data) and EEVEE keeps its shaders. The user's scene is never modified.
+    Rebuilt after an edit (dirty), a shading-mode change, or when code the agent ran took its scene or camera away."""
     src = bpy.context.scene
-    vp = VP["scene"]
-    if vp is not None and vp.name not in bpy.data.scenes:
-        vp = None
-    if vp is None or VP["dirty"]:
-        if vp is not None:
-            cam = VP["cam"]
-            bpy.data.scenes.remove(vp)
-            if cam is not None and cam.name in bpy.data.objects:
-                data = cam.data
-                bpy.data.objects.remove(cam)
-                bpy.data.cameras.remove(data)
+    vp, cam = kept(bpy.data.scenes, VP["scene"]), kept(bpy.data.objects, VP["cam"])
+    if vp is None or cam is None or VP["dirty"]:
+        drop_viewport()
         vp = bpy.data.scenes.new("__viewport")
         for coll in src.collection.children:
             vp.collection.children.link(coll)
@@ -544,7 +577,7 @@ def viewport_scene(mode):
         vp.render.image_settings.file_format = "JPEG"
         vp.render.image_settings.quality = 82
         vp.render.filepath = VIEWPORT_JPG
-        VP.update(scene=vp, cam=cam, dirty=False, mode=None)
+        VP.update(scene=hold(vp), cam=hold(cam), dirty=False, mode=None)
     if VP["mode"] != mode:
         if mode in ("RENDERED", "MATERIAL"):
             # Both are Cycles kept resident on the GPU (use_persistent_data): a camera move costs ~25 ms.
@@ -579,7 +612,7 @@ def viewport_scene(mode):
             vp.display.shading.light = "STUDIO"
             vp.display.shading.color_type = "MATERIAL"
         VP["mode"] = mode
-    return vp
+    return vp, cam
 
 
 FRAME_HOLD = {"frame": None}   # the scene's own frame while the viewport is showing a different one
@@ -641,6 +674,17 @@ def release_frame():
 
 
 def render_viewport(view):
+    """A live-viewport frame (`viewport_frame`). One that fails is tried once more in a viewport made anew, so that a
+    viewport broken by what code the agent ran did to it is not broken for every frame after."""
+    try:
+        return viewport_frame(view)
+    except Exception as e:
+        log(f"viewport frame failed, making the viewport anew: {e}")
+        drop_viewport()
+        return viewport_frame(view)
+
+
+def viewport_frame(view):
     """One live-viewport frame from the browser's viewpoint. Only the camera, resolution, sample count and frame
     change between frames, which is what keeps them fast.
 
@@ -648,14 +692,14 @@ def render_viewport(view):
     moving the active scene to N for the render; release_frame() moves it back."""
     mode = view.get("shading", "SOLID").upper()
     t0 = time.time()
-    vp = viewport_scene(mode)
+    vp, cam = viewport_scene(mode)
     show_actions(view.get("actions") or {})
     if view.get("frame") is not None:
         main, frame = bpy.context.scene, int(view["frame"])
         own = main.frame_current if FRAME_HOLD["frame"] is None else FRAME_HOLD["frame"]
         FRAME_HOLD["frame"] = own if frame != own else None
         main.frame_current = frame
-    place_camera(VP["cam"], view)
+    place_camera(cam, view)
     vp.render.resolution_x, vp.render.resolution_y = view_resolution(view)
     samples = max(1, int(view.get("samples", 1)))
     if mode in ("RENDERED", "MATERIAL"):
@@ -673,12 +717,12 @@ def render_viewport(view):
             raise
     with open(VIEWPORT_JPG, "rb") as f:
         data = f.read()
-    took = round(time.time() - t0, 3)
+    took, at = round(time.time() - t0, 3), time.time()
     with STATE_LOCK:
         STATE["viewport_view"] = dict(view)
-        STATE["viewport_at"] = time.time()
+        STATE["viewport_at"] = at
         STATE["viewport_ms"] = int(took * 1000)
-    return data, took
+    return data, took, at
 
 
 def refresh_viewport(reason):
@@ -798,7 +842,8 @@ MCP_TOOLS = [
     ("get_object_info", "Transform, dimensions, materials and mesh stats of one object.",
      _obj({"name": {"type": "string", "description": "Object name"}}, ["name"])),
     ("execute_code", "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or "
-     "change anything in the scene. The live browser view refreshes afterwards.",
+     "change anything in the scene. The live browser view refreshes afterwards, also after an error; in a script that "
+     "takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs.",
      _obj({"code": {"type": "string", "description": "Python source"},
            "read_only": {"type": "boolean", "default": False, "description": "Set true when the code only inspects "
                          "the scene: skips the unsaved-changes mark and the browser view refresh"}}, ["code"])),
@@ -926,11 +971,13 @@ class Viewer(http.server.BaseHTTPRequestHandler):
                 return
             box = run_on_main(lambda: render_viewport(view), timeout=120)
             if "result" in box:
-                data, took = box["result"]
+                data, took, at = box["result"]
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("X-Render-Seconds", str(took))
+                # When it was made, by this server's clock: what the viewer compares `viewport_at` with, not its own.
+                self.send_header("X-Viewport-At", repr(at))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
@@ -952,6 +999,7 @@ class Viewer(http.server.BaseHTTPRequestHandler):
                 with STATE_LOCK:
                     STATE["busy"] = {"open": "opening project", "new": "creating project",
                                      "save": "saving", "save_as": "saving"}[action]
+                    STATE["busy_at"] = time.time()
                 try:
                     release_frame()
                     if action == "open":
@@ -1019,7 +1067,7 @@ class Viewer(http.server.BaseHTTPRequestHandler):
 
             def job():
                 with STATE_LOCK:
-                    STATE["busy"] = label
+                    STATE["busy"], STATE["busy_at"] = label, time.time()
                 try:
                     return fn(view)
                 finally:
@@ -1047,6 +1095,7 @@ class Viewer(http.server.BaseHTTPRequestHandler):
             with STATE_LOCK:
                 body = {"project": dict(STATE["project"]), "preview_at": STATE["preview_at"], "scene_at": STATE["scene_at"],
                         "viewport_at": STATE.get("viewport_at", 0), "viewport_ms": STATE.get("viewport_ms"), "scene": STATE["scene"], "busy": STATE["busy"],
+                        "busy_at": STATE.get("busy_at", 0), "now": time.time(),
                         "log": list(STATE["log"]), "renders": list(STATE["renders"]),
                         "blender": bpy.app.version_string, "gpu": (GPU or {}).get("backend", "?"), "denoiser": denoiser()}
             self.reply(200, "application/json", json.dumps(body).encode())
@@ -1106,21 +1155,25 @@ def handle(req):
     if fn is None:
         return {"status": "error", "message": f"unknown command {kind!r}; available: {sorted(COMMANDS)}"}
     t0 = time.time()
+    params = req.get("params") or {}
+    changes = kind in CHANGES_SCENE and not (kind == "execute_code" and params.get("read_only"))
     with STATE_LOCK:
-        STATE["busy"] = kind
+        STATE["busy"], STATE["busy_at"] = kind, t0
     try:
         release_frame()
-        result = fn(req.get("params") or {})
+        result = fn(params)
         log(f"{kind} ok in {time.time() - t0:.2f}s")
         if kind == "render":
             with STATE_LOCK:
                 STATE["renders"].appendleft({"rel": os.path.relpath(result["path"], DATA), "engine": result["engine"],
                                              "seconds": result["seconds"]})
-        if kind in CHANGES_SCENE and not (kind == "execute_code" and (req.get("params") or {}).get("read_only")):
+        if changes:
             after_scene_change(kind)
         return {"status": "success", "result": result}
     except Exception as e:  # report to the caller, keep serving
         log(f"{kind} failed: {e}")
+        if changes:   # what the code did before it failed is in the scene too
+            after_scene_change(kind)
         return {"status": "error", "message": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()[-4000:]}
     finally:
         with STATE_LOCK:
@@ -1139,6 +1192,7 @@ if __name__ == "__main__":
         print("BLENDER_SERVER_TOKEN is not set; refusing to start a server that can execute code.", file=sys.stderr)
         sys.exit(1)
     signal.signal(signal.SIGTERM, stop)
+    bpy.app.handlers.load_pre.append(forget_viewport_on_load)
     os.makedirs(DATA, exist_ok=True)
     GPU = setup_gpu()
     start_server()

@@ -56,7 +56,10 @@ tools runs in that chat. The panel holds the viewer, the extension's own page, w
 portal's language:
 
 - the live viewport, rendered by Blender from where you look: drag to orbit, right-drag or Shift-drag to pan, scroll to
-  zoom; Solid (Workbench), Material preview and Rendered (Cycles, denoised);
+  zoom; Solid (Workbench), Material preview and Rendered (Cycles, denoised). It follows the agent: it is rendered
+  again after each of its changes, also one that failed half way, and between the steps of a long script that calls
+  `refresh_view()`. While Blender is busy with something that holds its frames back, the view says what and for how
+  long, over the picture from before;
 - the scene camera's preview and the last render, the timeline of the scene's frame range, and a picker for an
   object's actions;
 - the outliner and the render panel, folded at first in a narrow panel (T and N, as in Blender);
@@ -188,6 +191,8 @@ npm test -w blender        # unit tests, with Docker, the portal and the server 
 ./scripts/pithagoras.sh    # Pithagoras v0.2.0 into .pithagoras/, for the portal-tier tests
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w blender
 docker build -f blender/server/Dockerfile -t pithagoras-blender:dev blender   # the image
+./scripts/smoke-blender.sh pithagoras-blender:dev                              # its smoke test
+./scripts/viewport-blender.py pithagoras-blender:dev                           # its live view, against the agent's code
 ```
 
 `server/tools.json` is what the server lists (`tools/list`) and its MCP instructions, which the extension registers in

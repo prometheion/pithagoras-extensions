@@ -37,7 +37,7 @@
     },
     {
       "name": "execute_code",
-      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. The live browser view refreshes afterwards.",
+      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. The live browser view refreshes afterwards, also after an error; in a script that takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs.",
       "inputSchema": {
         "type": "object",
         "properties": {

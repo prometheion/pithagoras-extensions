@@ -95,6 +95,11 @@
   .hint kbd{font-family:var(--mono);font-size:11px;color:var(--text)}
   .badge{position:absolute;bottom:10px;right:10px;font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(26,30,35,.92);border:1px solid var(--line);border-radius:6px;padding:3px 8px}
   .badge.working{color:var(--accent)}
+  /* Blender is busy with something that holds its frames back (the agent's script, a render): said over the view, so
+     that the picture under it reads as the one from before, not as the scene now */
+  .busy-note{position:absolute;top:10px;left:10px;max-width:calc(100% - 140px);display:flex;flex-direction:column;gap:2px;background:rgba(26,30,35,.92);border:1px solid rgba(245,166,35,.45);border-radius:8px;padding:6px 10px;color:var(--accent);font-size:12px;pointer-events:none}
+  .busy-note b{display:flex;align-items:center;gap:7px;font-weight:600} .busy-note b::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite}
+  .busy-note span{color:var(--muted);font-size:11.5px}
   .empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint);pointer-events:none}
   .foot{display:flex;gap:16px;padding:6px 12px;border-top:1px solid var(--line);color:var(--faint);font-family:var(--mono);font-size:11px}
 
@@ -218,6 +223,7 @@
           </div>
           <div class="hint" data-t-html="hint"></div>
           <div class="badge" id="badge">—</div>
+          <div class="busy-note" id="busyNote" hidden><b id="busyWhat"></b><span data-t="live.busyHint"></span></div>
         </div>
         <div data-pane="prev" hidden><img id="prevImg" data-t-alt="prev.alt"><div class="empty" id="emptyPrev" data-t="prev.none"></div></div>
         <div data-pane="last" hidden><img id="lastImg" data-t-alt="last.alt"><div class="empty" id="emptyLast" data-t="last.none"></div></div>
@@ -305,6 +311,10 @@ const TEXTS = {
     changed: 'scene changed {ago}', 'ago.s': '{n} s ago', 'ago.min': '{n} min ago',
     'busy.opening project': 'opening project', 'busy.creating project': 'creating project', 'busy.saving': 'saving',
     'busy.render from browser view': 'rendering this view', 'busy.set scene camera': 'setting the scene camera',
+    'busy.execute_code': 'running Python', 'busy.render': 'rendering', 'busy.preview': 'previewing', 'busy.export': 'exporting',
+    'busy.open_file': 'opening a project', 'busy.save_file': 'saving', 'busy.new_scene': 'starting a new scene',
+    'busy.get_scene_info': 'reading the scene', 'busy.get_object_info': 'reading an object', 'busy.list_projects': 'listing projects', 'busy.ping': 'checking',
+    'live.busy': 'Blender is {what} · {s} s', 'live.busyHint': 'The view shows the scene as it was, and updates when this is done.',
     'ws.none': 'No projects yet. Create one or upload a .blend.', 'ws.open': 'open', 'ws.noPreview': 'no preview',
     'ws.openQ': 'Open “{name}”', 'ws.unsavedIn': '“{name}” has unsaved changes.', 'ws.neverSaved': 'This scene has never been saved.',
     'ws.newQ': 'Start a new project', cancel: 'Cancel', discard: 'Discard changes', saveContinue: 'Save, then continue',
@@ -353,6 +363,10 @@ const TEXTS = {
     changed: 'Szene geändert {ago}', 'ago.s': 'vor {n} s', 'ago.min': 'vor {n} min',
     'busy.opening project': 'öffnet ein Projekt', 'busy.creating project': 'legt ein Projekt an', 'busy.saving': 'speichert',
     'busy.render from browser view': 'rendert diese Ansicht', 'busy.set scene camera': 'setzt die Szenenkamera',
+    'busy.execute_code': 'führt Python aus', 'busy.render': 'rendert', 'busy.preview': 'erstellt eine Vorschau', 'busy.export': 'exportiert',
+    'busy.open_file': 'öffnet ein Projekt', 'busy.save_file': 'speichert', 'busy.new_scene': 'beginnt eine neue Szene',
+    'busy.get_scene_info': 'liest die Szene', 'busy.get_object_info': 'liest ein Objekt', 'busy.list_projects': 'listet Projekte', 'busy.ping': 'prüft',
+    'live.busy': 'Blender {what} · {s} s', 'live.busyHint': 'Die Ansicht zeigt die Szene, wie sie war, und wird aktualisiert, sobald das fertig ist.',
     'ws.none': 'Noch keine Projekte. Lege eines an oder lade eine .blend hoch.', 'ws.open': 'offen', 'ws.noPreview': 'keine Vorschau',
     'ws.openQ': '„{name}“ öffnen', 'ws.unsavedIn': '„{name}“ hat ungespeicherte Änderungen.', 'ws.neverSaved': 'Diese Szene wurde noch nie gespeichert.',
     'ws.newQ': 'Ein neues Projekt beginnen', cancel: 'Abbrechen', discard: 'Änderungen verwerfen', saveContinue: 'Speichern, dann weiter',
@@ -556,7 +570,8 @@ async function submit(req) {
         if (frameCache.size >= CACHE_MAX) { const old = frameCache.keys().next().value; if (frameCache.get(old) !== lastUrl) URL.revokeObjectURL(frameCache.get(old)); frameCache.delete(old); }
         frameCache.set(v.frame, url); drawTimeline();
       }
-      ok = true; lastSeenViewport = Date.now() / 1000;
+      // When the server made it, by its own clock, as `viewport_at` is: never the page's, which can be another.
+      ok = true; lastSeenViewport = +r.headers.get('X-Viewport-At') || lastSeenViewport;
       if (req.play) {
         latency = latency * 0.8 + (performance.now() - t0) * 0.2;
         // early: tick() shows it when the playhead gets there. On the beat or late: show it now
@@ -862,12 +877,18 @@ async function poll() {
     const resp = await fetch('api/state');
     if (resp.status === 401) { notConnected(); return; }
     const s = await resp.json(); lastState = s; showProject(s.project); syncAnim(s.scene && s.scene.anim, s.scene_at);
+    const doing = s.busy && (TEXTS[LANG]['busy.' + s.busy] ?? String(s.busy).replaceAll('_', ' '));
     $('pill').className = 'pill' + (s.busy ? ' busy' : '');
-    $('pilltext').textContent = s.busy ? tr('working', { what: TEXTS[LANG]['busy.' + s.busy] ?? String(s.busy).replaceAll('_', ' ') }) : tr('idle');
+    $('pilltext').textContent = s.busy ? tr('working', { what: doing }) : tr('idle');
+    // Busy for more than a moment: the frames wait for it, so the view says so rather than look current.
+    const busyFor = s.busy && s.busy_at ? Math.round(s.now - s.busy_at) : 0;
+    $('busyNote').hidden = busyFor < 1;
+    if (busyFor >= 1) $('busyWhat').textContent = tr('live.busy', { what: doing, s: busyFor });
     $('meta').textContent = `Blender ${s.blender} · ${s.gpu}`;
     if (!framed && s.scene && s.scene.bounds) { framed = true; frameBox(s.scene.bounds.center, s.scene.bounds.size); }
-    // an edit re-rendered the viewport on the server: show it
-    if (s.viewport_at && s.viewport_at > lastSeenViewport + 0.05 && !inflight && !drag && !anim.playing) {
+    // an edit re-rendered the viewport on the server, or a long script asked for a frame between its steps: show it,
+    // also while a frame of the page's own waits for Blender behind that work
+    if (s.viewport_at && s.viewport_at > lastSeenViewport && !drag && !anim.playing) {
       lastSeenViewport = s.viewport_at;
       show('files/viewport/live.jpg?t=' + s.viewport_at, true);
       $('badge').textContent = tr('badge.edited', { ms: s.viewport_ms });

@@ -1,0 +1,116 @@
+# A release of the On-demand UI extension: ondemand-ui-v<version>, the version in ondemand-ui/package.json. Merging a
+# pull request that changes that version releases it, and a tag pushed by hand still does. It has no image: the
+# package is all there is.
+#
+# 0. The gate, as Blender's and Godot's (blender-release.yml says it at length): on a tag, the tag has to be
+#    ondemand-ui-v<the version in ondemand-ui/package.json>; on a push to main that changes ondemand-ui/package.json,
+#    the tag is ondemand-ui-v<its version>, and where that tag is there already the run ends and releases nothing,
+#    otherwise the gate puts the tag on the pushed commit and pushes it with the job's GITHUB_TOKEN (which starts no
+#    run of this workflow again). One release of the extension runs at a time (the concurrency group). If a tag ruleset
+#    limits who may create *-v* tags, github-actions[bot] has to be on its bypass list. If the release job fails after
+#    the gate pushed the tag, "Re-run failed jobs" runs it again for that tag.
+# 1. The package is built, type-checked and its unit tests run (with the browsers its card's tests drive), from the
+#    tagged commit.
+# 2. The GitHub release is made for the tag.
+# 3. The package, @pithagoras/ondemand-ui, goes to npm. npm's trusted publishing signs in with this workflow's identity
+#    (`id-token: write`), with no token, and adds provenance. Only a package that is there can be given a trusted
+#    publisher, so its first version is published by hand (`npm publish -w ondemand-ui --auth-type=web`, from a clean
+#    checkout of the tag), and npmjs.com's settings of the package then name this repository and this workflow
+#    (ondemand-ui-release.yml) as its trusted publisher: where npm has the tag's version already, the step says so and
+#    publishes nothing. With the variable NPM_STAGE "true" (the repository's or the organization's), the version is
+#    staged (`npm stage publish`) and published once a maintainer approves it with 2FA on npmjs.com.
+name: On-demand UI release
+
+on:
+  push:
+    tags: ["ondemand-ui-v*"]
+    branches: [main]
+    # For the push to main only: GitHub does not look at paths for a tag.
+    paths: [ondemand-ui/package.json]
+
+concurrency:
+  group: ondemand-ui-release
+  cancel-in-progress: false
+
+env:
+  # How the package goes to npm: see 3. above.
+  NPM_PUBLISH: ${{ vars.NPM_STAGE == 'true' && 'npm stage publish' || 'npm publish' }} -w ondemand-ui --access public
+
+jobs:
+  # 0. above.
+  gate:
+    runs-on: ubuntu-24.04
+    permissions:
+      # To push the tag.
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      release: ${{ steps.tag.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag, and whether there is anything to release
+        id: tag
+        run: |
+          VERSION=$(node -p "require('./ondemand-ui/package.json').version")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG=$GITHUB_REF_NAME
+            [ "$TAG" = "ondemand-ui-v$VERSION" ] || { echo "the tag $TAG is not ondemand-ui-v$VERSION"; exit 1; }
+          else
+            TAG=ondemand-ui-v$VERSION
+            # An assignment, so that a failed ls-remote fails the step rather than reading as no tag.
+            REMOTE=$(git ls-remote --tags origin "refs/tags/$TAG")
+            if [ -n "$REMOTE" ]; then
+              echo "$TAG exists: nothing to release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          { echo "tag=$TAG"; echo "version=$VERSION"; echo "release=true"; } >> "$GITHUB_OUTPUT"
+
+  ondemand-ui:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      # The GitHub release.
+      contents: write
+      # npm's trusted publishing.
+      id-token: write
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      # Node 22 comes with npm 10: trusted publishing takes 11.5.1 or later, and `npm stage` 11.15.
+      - name: npm 11
+        run: npm install -g npm@11.21.0 && npm --version
+      - run: npm ci
+      - name: Build and type-check
+        run: npm run build -w ondemand-ui
+      - name: The browsers the card's tests drive
+        run: npx playwright install --with-deps chromium firefox
+      - name: Unit and browser tests
+        run: npm test -w ondemand-ui
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$TAG" --verify-tag --title "On-demand UI $VERSION" --notes "@pithagoras/ondemand-ui $VERSION: the extension, on npm as npm:@pithagoras/ondemand-ui@$VERSION. It has no image."
+      - name: Publish to npm
+        run: |
+          NAME=$(node -p "require('./ondemand-ui/package.json').name")
+          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "$NAME@$VERSION is on npm already: nothing to publish"
+            exit 0
+          fi
+          $NPM_PUBLISH

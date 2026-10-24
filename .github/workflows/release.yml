@@ -3,9 +3,9 @@
 # 1. The image is built from blender/server/Dockerfile (amd64), tagged with the version.
 # 2. Its smoke test (scripts/smoke-blender.sh): it answers MCP with the tools blender/server/tools.json has, and refuses
 #    requests without its token.
-# 3. It is pushed to GHCR, linked to this repository by its org.opencontainers.image.source label. A package pushed to a
-#    personal account starts private: switch it to public once, in the package's settings on GitHub, or no portal can
-#    pull it.
+# 3. It is pushed to GHCR, as a package of the prometheion organization, linked to this repository by its
+#    org.opencontainers.image.source label. A new package starts private: an owner of the organization switches it to
+#    public once, in the package's settings on GitHub (GitHub does not let it go back), or no portal can pull it.
 # 4. The GitHub release is made with what the GPL asks to go with the image: Blender's source, checked against
 #    blender.org's published sum; the sources of the copyleft libraries the official Linux build links in (FFmpeg,
 #    built with x264 and x265, and the others under the GPL, the LGPL or the MPL: scripts/blender-sources.sh), each
@@ -27,7 +27,7 @@ jobs:
   blender:
     runs-on: ubuntu-24.04
     env:
-      IMAGE: ghcr.io/thecodacus/pithagoras-blender
+      IMAGE: ghcr.io/prometheion/pithagoras-blender
       BLENDER_VERSION: 5.2.2
     steps:
       - uses: actions/checkout@v4

@@ -34,7 +34,7 @@ In Settings → Extensions → Discover → **Install by name**:
 
 ## The first start
 
-Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/thecodacus/pithagoras-godot:0.1.0`,
+Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/prometheion/pithagoras-godot:0.1.0`,
 about 0.6 GB unpacked), makes a volume for the projects, makes the container and starts it. The page shows the
 download, then the server starting, then the editor's own state ("Editor ready: starter"). The first start makes a
 3D project called `starter`; the agent and you make more.
@@ -164,7 +164,7 @@ To back it up, for example: `docker run --rm -v pithagoras-godot-data:/data -v "
 | `PITHAGORAS_GODOT_CONTAINER` | `pithagoras-godot` | the container's name; the probe is `<name>-probe` |
 | `PITHAGORAS_GODOT_VOLUME` | `<container>-data` | the projects' volume |
 | `PITHAGORAS_GODOT_PORT` | `3880` | the server's port on the portal's loopback |
-| `PITHAGORAS_GODOT_IMAGE` | `ghcr.io/thecodacus/pithagoras-godot:<version>` | another image, such as one built locally |
+| `PITHAGORAS_GODOT_IMAGE` | `ghcr.io/prometheion/pithagoras-godot:<version>` | another image, such as one built locally |
 | `PITHAGORAS_GODOT_GPU` | | a card's UUID or index: the only card the server is given |
 
 They are for a second portal on the same Docker daemon, for tests, and for a host owner who keeps the server off a
@@ -175,7 +175,7 @@ card or a port.
 **Remove** on the Settings page first, then uninstall the extension: the container is restarted by Docker unless
 stopped (`unless-stopped`), and outlives the extension, which has no say once it is uninstalled. Remove asks whether to
 delete the projects too. The image stays on disk, as other containers may use it: `docker image rm
-ghcr.io/thecodacus/pithagoras-godot:0.1.0` deletes it.
+ghcr.io/prometheion/pithagoras-godot:0.1.0` deletes it.
 
 ## Limits
 

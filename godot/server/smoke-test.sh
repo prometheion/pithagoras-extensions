@@ -6,7 +6,7 @@
 # without the token. The checks run inside the container, with its own Python. The container is removed at the end,
 # whatever happened.
 #
-#   godot/server/smoke-test.sh ghcr.io/thecodacus/pithagoras-godot:0.1.0
+#   godot/server/smoke-test.sh ghcr.io/prometheion/pithagoras-godot:0.1.0
 #
 # NAME, PORT and NETWORK change the container's name, the server's port and the container's network (by default
 # pithagoras-godot-smoke, 3880 and host: the runner's loopback, as the portal's would be).

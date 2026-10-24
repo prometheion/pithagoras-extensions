@@ -11,7 +11,7 @@ This extension is not made or endorsed by the Blender Foundation. Blender is a t
 name is used here only to say what the extension runs.
 
 
-The container image (ghcr.io/thecodacus/pithagoras-blender) redistributes:
+The container image (ghcr.io/prometheion/pithagoras-blender) redistributes:
 
 - Blender 5.2.2: the official Linux build, blender-5.2.2-linux-x64.tar.xz from
   https://download.blender.org/release/Blender5.2/, checked against blender.org's published SHA-256, unpacked in

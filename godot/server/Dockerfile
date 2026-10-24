@@ -1,5 +1,5 @@
 # The Godot editor on the GPU, streamed to the browser and driven over MCP: the container the Pithagoras Godot
-# extension runs (see ../README.md). Built in CI and published as ghcr.io/thecodacus/pithagoras-godot:<version>.
+# extension runs (see ../README.md). Built in CI and published as ghcr.io/prometheion/pithagoras-godot:<version>.
 # Build context: this folder after ./fetch-assets.sh has filled assets/ (nothing is downloaded from GitHub here).
 FROM ubuntu:24.04
 

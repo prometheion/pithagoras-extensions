@@ -1,12 +1,12 @@
 # A release of the Godot extension, on a tag godot-v<version> that is godot/package.json's version: the image is built
 # from godot/server (after fetch-assets.sh has fetched and checked what it is built from), tested with no GPU
-# (smoke-test.sh), and pushed to ghcr.io/thecodacus/pithagoras-godot:<version>; then a GitHub release carries the sources
+# (smoke-test.sh), and pushed to ghcr.io/prometheion/pithagoras-godot:<version>; then a GitHub release carries the sources
 # the image's GPL parts ask for and the list of its Ubuntu packages; then the package is published to npm. npm comes
 # last, so a version on npm never names an image that is not there.
 #
 # Once, by hand, after the first push: GHCR makes a new package private, and Docker for extensions pulls without a
-# login, so the owner switches ghcr.io/thecodacus/pithagoras-godot to public in the package's settings (GitHub does
-# not let it go back). npm needs an NPM_TOKEN secret.
+# login, so an owner of the prometheion organization switches ghcr.io/prometheion/pithagoras-godot to public in the
+# package's settings (GitHub does not let it go back). npm needs an NPM_TOKEN secret.
 #
 # The x264, x265 and libde265 sources are the commits pixelflux 2.2.1 (inside Selkies 2.1.0) builds them from, as its
 # pyproject.toml pins them (build_x264, build_x265, build_de265). The LGPL libraries pcmflux 2.2.0 (inside Selkies)
@@ -23,7 +23,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/thecodacus/pithagoras-godot
+  IMAGE: ghcr.io/prometheion/pithagoras-godot
   PIXELFLUX: "2.2.1"
   PCMFLUX: "2.2.0"
   X264_SOURCE: https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2

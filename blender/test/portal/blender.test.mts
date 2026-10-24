@@ -32,7 +32,7 @@ process.env.PORTAL_CONTAINER_NAME = "portal-test";
 process.env.PORTAL_PASSWORD = "";
 process.env.PORTAL_ALLOW_NO_PASSWORD = "1";
 daemon.containers.push({ Id: "portal-one", Name: "portal-test", Image: "pithagoras-portal:latest", State: "running", Labels: {}, Tty: false, out: "", err: "" });
-daemon.images.add("ghcr.io/thecodacus/pithagoras-blender:0.1.0");
+daemon.images.add("ghcr.io/prometheion/pithagoras-blender:0.1.0");
 daemon.images.add("ubuntu:24.04");
 // The probe prints the cards it was given and exits; the Blender container runs until it is stopped.
 daemon.runs.onStart = (c: { Name: string; out: string; code?: number }) => {

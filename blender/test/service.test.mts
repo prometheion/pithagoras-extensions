@@ -21,7 +21,7 @@ async function setup(options: { names?: Partial<Names>; probed?: Probed } = {}) 
   const store = openStore(fake.dataDir);
   const server = await fakeMcp(store.token());
   const d = memoryDocker();
-  const names: Names = { container: "pithagoras-blender", volume: "pithagoras-blender-data", probe: "pithagoras-blender-probe", port: server.port, image: "ghcr.io/thecodacus/pithagoras-blender:0.1.0", ...options.names };
+  const names: Names = { container: "pithagoras-blender", volume: "pithagoras-blender-data", probe: "pithagoras-blender-probe", port: server.port, image: "ghcr.io/prometheion/pithagoras-blender:0.1.0", ...options.names };
   const mcp = mcpClient({ url: () => `http://127.0.0.1:${names.port}/mcp`, token: () => store.token() });
   const tools = relay({ portal: fake.portal, prefix: "blender", app: "Blender", mcp, bundled: BUNDLED, labels: LABELS, acts: ACTS, installedFile: path.join(fake.dataDir, "installed") });
   const probes: (string | undefined)[] = [];
@@ -56,7 +56,7 @@ test("install downloads the image, makes the volume, makes the container on the 
   await svc.install();
   await settled(svc);
   assert.deepEqual(d.calls.filter((c) => !c.startsWith("ensure ubuntu")), [
-    "ensure ghcr.io/thecodacus/pithagoras-blender:0.1.0",
+    "ensure ghcr.io/prometheion/pithagoras-blender:0.1.0",
     "volume pithagoras-blender-data",
     "create pithagoras-blender",
     "start pithagoras-blender",

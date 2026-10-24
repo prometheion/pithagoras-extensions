@@ -13,7 +13,7 @@ pages/stream holds Selkies 2.1.0's web client, by the Selkies Project, unchanged
 (pages/stream/LICENSE); its source is https://github.com/selkies-project/selkies/tree/2.1.0. The server half serves its
 index.html with one script tag added to the head, which loads pages/stream/__gs_shim.js, this package's own file.
 
-The package contains no Godot. The container image it runs, ghcr.io/thecodacus/pithagoras-godot, is built from
+The package contains no Godot. The container image it runs, ghcr.io/prometheion/pithagoras-godot, is built from
 godot/server in the same repository and redistributes Godot (MIT), Selkies, pixelflux and pcmflux (MPL-2.0, pixelflux
 bundling x264 and x265 under the GPL and libde265 under the LGPL, pcmflux bundling libraries under the LGPL), VirtualGL
 (wxWindows Library Licence) and Ubuntu packages, each under its own licence:

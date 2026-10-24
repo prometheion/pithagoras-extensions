@@ -28,7 +28,7 @@ async function setup(options: { names?: Partial<Names>; probed?: Probed | "real"
   const server = await fakeMcp(() => store.token());
   after(() => server.close());
   const d = fakeDocker();
-  const names: Names = { container: "pithagoras-godot", volume: "pithagoras-godot-data", probe: "pithagoras-godot-probe", port: server.port, image: "ghcr.io/thecodacus/pithagoras-godot:0.1.0", ...options.names };
+  const names: Names = { container: "pithagoras-godot", volume: "pithagoras-godot-data", probe: "pithagoras-godot-probe", port: server.port, image: "ghcr.io/prometheion/pithagoras-godot:0.1.0", ...options.names };
   const mcp = mcpClient({ url: () => `http://127.0.0.1:${names.port}/mcp`, token: () => store.token() });
   const tools = relay({ portal: fake.portal, prefix: "godot", app: "Godot", mcp, labels: LABELS, acts: ACTS, bundled: LISTED, installedFile: path.join(fake.dataDir, "installed") });
   const svc = service({
@@ -62,7 +62,7 @@ test("an install downloads the image, makes the volume, makes the container on t
   const now = await settled(svc);
   assert.equal(now.state, "running");
   assert.equal(now.card, "GPU-bbbb1111");
-  assert.deepEqual(d.calls, ["pull ghcr.io/thecodacus/pithagoras-godot:0.1.0", "volume pithagoras-godot-data", "create pithagoras-godot", "start pithagoras-godot"]);
+  assert.deepEqual(d.calls, ["pull ghcr.io/prometheion/pithagoras-godot:0.1.0", "volume pithagoras-godot-data", "create pithagoras-godot", "start pithagoras-godot"]);
   assert.equal(spec(d).Labels[SPEC_LABEL], specHash(spec(d)), "the spec's hash is in its label");
   assert.equal(spec(d).HostConfig.NetworkMode, "container:portal-1");
   assert.deepEqual(spec(d).HostConfig.RestartPolicy, { Name: "unless-stopped" });
@@ -200,7 +200,7 @@ test("a card the host pins that Docker cannot give is said as that, and nothing 
   assert.match(hardware.error, /unknown device/);
   await assert.rejects(svc.install(), /^Error: The card PITHAGORAS_GODOT_GPU names is not on this host\.$/);
   assert.ok(!d.containers.has("pithagoras-godot"));
-  assert.ok(!d.calls.includes("pull ghcr.io/thecodacus/pithagoras-godot:0.1.0"), "not even the image is downloaded");
+  assert.ok(!d.calls.includes("pull ghcr.io/prometheion/pithagoras-godot:0.1.0"), "not even the image is downloaded");
   assert.ok(!d.containers.has("pithagoras-godot-probe"), "the probe is removed");
 });
 

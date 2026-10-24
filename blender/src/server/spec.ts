@@ -10,7 +10,7 @@ import { namesFrom, type Plan } from "../../../shared/service";
  * colon, which a digest would be cut at.
  */
 export const VERSION = "0.1.0";
-export const IMAGE = `ghcr.io/thecodacus/pithagoras-blender:${VERSION}`;
+export const IMAGE = `ghcr.io/prometheion/pithagoras-blender:${VERSION}`;
 
 /** The names, each of which the portal's environment can change (`PITHAGORAS_BLENDER_CONTAINER`, `_VOLUME`, `_PORT`, `_IMAGE`, `_GPU`). */
 export const names = () => namesFrom(process.env, "blender", { container: "pithagoras-blender", port: 3870, image: IMAGE });

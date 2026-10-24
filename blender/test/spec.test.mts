@@ -12,7 +12,7 @@ const made = (over: Partial<typeof plan> = {}) => stamped(blenderSpec({ ...plan,
 
 test("the image is the one the release publishes for this version of the package", () => {
   assert.equal(VERSION, pkg.version);
-  assert.equal(IMAGE, `ghcr.io/thecodacus/pithagoras-blender:${pkg.version}`);
+  assert.equal(IMAGE, `ghcr.io/prometheion/pithagoras-blender:${pkg.version}`);
 });
 
 test("the container gets the card by its UUID, and none without one", () => {
@@ -72,6 +72,6 @@ test("the spec's hash changes with the image and the card, and not with the netw
   assert.equal(hash(made()), specHash(made()));
   assert.equal(hash(made({ network: "container:a" })), hash(made({ network: "host" })));
   assert.notEqual(hash(made({ card: { uuid: "GPU-other" } })), hash(made()));
-  assert.notEqual(hash(stamped(blenderSpec(plan, 3870, "pithagoras-blender-data", "ghcr.io/thecodacus/pithagoras-blender:0.2.0"))), hash(made()));
+  assert.notEqual(hash(stamped(blenderSpec(plan, 3870, "pithagoras-blender-data", "ghcr.io/prometheion/pithagoras-blender:0.2.0"))), hash(made()));
   assert.notEqual(hash(made({ optix: "host" as never })), hash(made()));
 });

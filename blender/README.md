@@ -32,7 +32,7 @@ Open Settings → Blender and press **Install**. The extension:
 
 1. finds the cards Docker can give a container, with a short-lived probe container (`<container>-probe`, from
    `ubuntu:24.04`) that runs `nvidia-smi` and looks for the driver's OptiX weights (`nvoptix.bin`);
-2. downloads its image, `ghcr.io/thecodacus/pithagoras-blender:<version>`, with the progress on the page;
+2. downloads its image, `ghcr.io/prometheion/pithagoras-blender:<version>`, with the progress on the page;
 3. makes the volume `pithagoras-blender-data` and the container `pithagoras-blender`, and starts it.
 
 The card is the one with the most free memory unless you choose one on the page; the server stays on its card after
@@ -139,14 +139,14 @@ The portal's environment can change each name, for a second portal on the same D
 | `PITHAGORAS_BLENDER_CONTAINER` | `pithagoras-blender` (the probe is `<container>-probe`) |
 | `PITHAGORAS_BLENDER_VOLUME` | `<container>-data` |
 | `PITHAGORAS_BLENDER_PORT` | `3870`, on the portal's loopback |
-| `PITHAGORAS_BLENDER_IMAGE` | `ghcr.io/thecodacus/pithagoras-blender:<version>` |
+| `PITHAGORAS_BLENDER_IMAGE` | `ghcr.io/prometheion/pithagoras-blender:<version>` |
 | `PITHAGORAS_BLENDER_GPU` | none: a card's UUID or index pins the server to it, and the page shows only that card |
 
 ## Removing
 
 Remove the server on the page first (**Remove**, optionally with the projects), then uninstall the extension: the
 portal has no uninstall hook, so a container left running keeps running. Docker for extensions cannot remove an image,
-so the image stays on disk: `docker image rm ghcr.io/thecodacus/pithagoras-blender:<version>` deletes it.
+so the image stays on disk: `docker image rm ghcr.io/prometheion/pithagoras-blender:<version>` deletes it.
 
 ## Limits
 

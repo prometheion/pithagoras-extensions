@@ -13,7 +13,7 @@ const server = { port: 3880, volume: "pithagoras-godot-data", image: IMAGE, disp
 
 test("the image is the package's version, so a release cannot forget to move it", () => {
   assert.equal(VERSION, pkg.version);
-  assert.equal(IMAGE, `ghcr.io/thecodacus/pithagoras-godot:${pkg.version}`);
+  assert.equal(IMAGE, `ghcr.io/prometheion/pithagoras-godot:${pkg.version}`);
 });
 
 test("the container: on the portal's loopback, restarted unless stopped, with its token, its port, its screen and its volume", () => {
@@ -78,7 +78,7 @@ test("the screen is one the page offers, else the default", () => {
 test("the spec's hash changes with the image, the card and the screen, and not with the network", () => {
   const card = { uuid: "GPU-a" };
   const base = specHash(godotSpec({ ...plan, card }, server));
-  assert.notEqual(specHash(godotSpec({ ...plan, card }, { ...server, image: "ghcr.io/thecodacus/pithagoras-godot:0.1.1" })), base);
+  assert.notEqual(specHash(godotSpec({ ...plan, card }, { ...server, image: "ghcr.io/prometheion/pithagoras-godot:0.1.1" })), base);
   assert.notEqual(specHash(godotSpec({ ...plan, card: { uuid: "GPU-b" } }, server)), base);
   assert.notEqual(specHash(godotSpec(plan, server)), base);
   assert.notEqual(specHash(godotSpec({ ...plan, card }, { ...server, display: "1280x720" })), base);

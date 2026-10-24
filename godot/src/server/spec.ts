@@ -11,7 +11,7 @@ import type { Display } from "../displays";
  * a digest: Docker for extensions splits an image's name at its last ':'.
  */
 export const VERSION = "0.1.0";
-export const IMAGE = `ghcr.io/thecodacus/pithagoras-godot:${VERSION}`;
+export const IMAGE = `ghcr.io/prometheion/pithagoras-godot:${VERSION}`;
 
 /**
  * The names and the port, each as the portal's environment says it where it does: `PITHAGORAS_GODOT_CONTAINER`,

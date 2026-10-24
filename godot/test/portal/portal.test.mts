@@ -40,7 +40,7 @@ process.env.PORTAL_CONTAINER_NAME = "portal-test";
 const portalContainer = (id: string) => ({ Id: id, Name: "portal-test", Image: "pithagoras", State: "running", Labels: {}, Tty: false, out: "", err: "" });
 docker.containers.push(portalContainer("portal-1"));
 docker.images.add("ubuntu:24.04");
-docker.images.add("ghcr.io/thecodacus/pithagoras-godot:0.1.0");
+docker.images.add("ghcr.io/prometheion/pithagoras-godot:0.1.0");
 docker.runs.onStart = (c: { Name: string; out: string; code?: number }) => {
   if (!c.Name.endsWith("-probe")) return new Promise<void>(() => {});
   c.out = "0, GPU-aaaa0000, NVIDIA GeForce RTX 3060, 11000, 12288\n1, GPU-bbbb1111, NVIDIA GeForce RTX 3060, 158, 12288\n";

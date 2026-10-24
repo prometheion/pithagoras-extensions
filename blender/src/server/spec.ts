@@ -1,15 +1,17 @@
 import type { ContainerSpec } from "../../../shared/docker-api";
 import { namesFrom, type Plan } from "../../../shared/service";
+import { version } from "../../package.json";
 
 /**
  * The Blender server's container: what it is called, the image it runs, and what it is made with.
  *
  * The image is published by this repository's release (`blender-v<version>` builds `server/Dockerfile` and pushes it
- * to GHCR), tagged with the package's version, so that an update of the extension is an update of its server, and a
- * test holds the two to each other. It is pinned by its tag: Docker for extensions splits a reference at its last
- * colon, which a digest would be cut at.
+ * to GHCR), tagged with the package's version, so that an update of the extension is an update of its server. The
+ * version is package.json's, which the build bundles into server.js, so a release changes package.json and nothing
+ * else. It is pinned by its tag: Docker for extensions splits a reference at its last colon, which a digest would be
+ * cut at.
  */
-export const VERSION = "0.1.0";
+export const VERSION: string = version;
 export const IMAGE = `ghcr.io/prometheion/pithagoras-blender:${VERSION}`;
 
 /** The names, each of which the portal's environment can change (`PITHAGORAS_BLENDER_CONTAINER`, `_VOLUME`, `_PORT`, `_IMAGE`, `_GPU`). */

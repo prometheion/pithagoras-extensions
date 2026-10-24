@@ -1,16 +1,18 @@
 import type { ContainerSpec } from "../../../shared/docker-api";
 import { namesFrom, type Plan } from "../../../shared/service";
 import type { Display } from "../displays";
+import { version } from "../../package.json";
 
 /**
  * What the Godot server's container is: its image, its names, its port and the spec it is made with.
  *
  * The image is published by this repository's release workflow, built from godot/server/ (its Dockerfile), and tagged
- * with the package's version, which a test holds equal to package.json's: an update of the extension is an update of
- * the image, and the container is made again from it (shared/service.ts, the stale rule). It is pinned by its tag, not
- * a digest: Docker for extensions splits an image's name at its last ':'.
+ * with the package's version, package.json's, which the build bundles into lib/server.js, so a release changes
+ * package.json and nothing else: an update of the extension is an update of the image, and the container is made again
+ * from it (shared/service.ts, the stale rule). It is pinned by its tag, not a digest: Docker for extensions splits an
+ * image's name at its last ':'.
  */
-export const VERSION = "0.1.0";
+export const VERSION: string = version;
 export const IMAGE = `ghcr.io/prometheion/pithagoras-godot:${VERSION}`;
 
 /**

@@ -1,0 +1,981 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blender</title>
+<style>
+  :root{
+    --bg:#121417; --panel:#1a1e23; --panel2:#20252b; --line:#2b3138; --text:#dfe4ea; --muted:#8b95a1; --faint:#5b6470;
+    --accent:#f5a623; --accent-ink:#1a1306; --ok:#4fd18b; --bad:#ff7a6b; --sel:#6cb8ff;
+    --sans:system-ui,-apple-system,"Segoe UI",sans-serif; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box} [hidden]{display:none!important}
+  html,body{height:100%} body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 var(--sans)}
+  button,select,input{font:inherit;color:inherit}
+  #app{display:grid;grid-template-rows:auto 1fr;height:100%}
+
+  header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .mark{width:26px;height:26px;border-radius:7px;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;font-weight:800}
+  header h1{font-size:15px;margin:0}
+  .pill{display:flex;align-items:center;gap:7px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+  .pill.busy{color:var(--accent);border-color:rgba(245,166,35,.45)} .pill.busy .dot{background:var(--accent);animation:pulse 1s infinite}
+  .pill.off .dot{background:var(--bad)}
+  @keyframes pulse{50%{opacity:.3}}
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  header .spacer{flex:1}
+  header{flex-wrap:wrap;row-gap:8px} @media (max-width:640px){header .meta{display:none}}
+  /* the server refused the request: the portal's sign-in ended, or the page was opened without the portal */
+  #nc{position:fixed;inset:0;display:grid;place-items:center;padding:24px;background:var(--bg);color:var(--text);text-align:center;z-index:10}
+
+  main{display:grid;grid-template-columns:var(--lw,260px) minmax(0,1fr) var(--rw,300px);min-height:0}
+  main.noleft{--lw:30px} main.noright{--rw:30px}
+  aside .rail{display:none}
+  aside.collapsed > *{display:none!important}
+  aside.collapsed > .rail{display:flex!important;flex-direction:column;align-items:center;gap:10px;padding:10px 0;height:100%;width:100%;border:0;background:none;cursor:pointer;color:var(--muted)}
+  aside.collapsed > .rail:hover{background:var(--panel2);color:var(--text)}
+  .rail span{writing-mode:vertical-rl;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+  .rail svg,.pbtn svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .h2r{display:flex;align-items:center;gap:8px}
+  .pbtn{width:20px;height:20px;border-radius:5px;border:1px solid transparent;background:none;display:grid;place-items:center;cursor:pointer;color:var(--muted);padding:0}
+  .pbtn:hover{background:var(--panel2);border-color:var(--line);color:var(--text)}
+  aside{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  aside.right{border-right:0;border-left:1px solid var(--line)}
+  .sect{padding:12px 14px;border-bottom:1px solid var(--line)}
+  .sect h2{margin:0 0 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:flex;justify-content:space-between}
+  .sect h2 b{color:var(--faint);font-weight:500}
+  .help{color:var(--muted);font-size:12px;margin:6px 0 0}
+  .scroll{overflow:auto;min-height:0;flex:1}
+
+  #objFilter{width:100%;background:#111418;border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:12px}
+  #objFilter:focus{outline:none;border-color:var(--accent)}
+  #outliner{list-style:none;margin:0;padding:4px 6px 8px}
+  #outliner li{display:flex;gap:6px;align-items:center;height:26px;padding-right:8px;border-radius:5px;cursor:pointer;white-space:nowrap}
+  #outliner li:hover{background:var(--panel2)} #outliner li.sel{background:rgba(108,184,255,.16);color:#cfe7ff}
+  #outliner li.off .nm{color:var(--faint)} #outliner li.coll .nm{font-weight:600}
+  #outliner .tw{width:14px;height:14px;flex:none;display:grid;place-items:center;color:var(--muted);border-radius:3px}
+  #outliner .tw svg{width:8px;height:8px;fill:currentColor;transition:transform .12s}
+  #outliner .tw.open svg{transform:rotate(90deg)} #outliner .tw:hover{color:var(--text);background:rgba(255,255,255,.08)}
+  #outliner .ic{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;color:#e8963c}
+  #outliner .ic.COLLECTION{color:#dfe4ea} #outliner .ic.CAMERA{color:#9aa4b0} #outliner .ic.LIGHT{color:#f2d15c}
+  #outliner .ic.ARMATURE{color:#7fd08a} #outliner .ic.EMPTY{color:#9aa4b0}
+  #outliner .nm{overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+  #outliner .ct{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  #outliner .none{color:var(--faint);cursor:default;padding-left:10px}
+  #objinfo{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:pre-wrap}
+
+  .center{display:grid;grid-template-rows:auto 1fr auto auto;grid-template-columns:minmax(0,1fr);min-height:0;min-width:0;background:#0d0f12}
+  .tabs{display:flex;align-items:end;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--line)}
+  .tab{padding:7px 12px;border:1px solid transparent;border-bottom:0;border-radius:7px 7px 0 0;background:none;color:var(--muted);cursor:pointer}
+  .tab[aria-selected=true]{background:var(--panel);border-color:var(--line);color:var(--text)}
+  .tab:focus-visible{outline:2px solid var(--sel)}
+  .stage{position:relative;min-height:0;overflow:hidden}
+  .stage > div{position:absolute;inset:0}
+  #live,#prevImg,#lastImg{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0d0f12;user-select:none;-webkit-user-drag:none}
+  #liveWrap{cursor:grab} #liveWrap.dragging{cursor:grabbing}
+  /* viewport header, Blender style: shading buttons, then the navigation gizmo and its round buttons */
+  .shading{position:absolute;top:10px;right:10px;display:flex;background:rgba(26,30,35,.92);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .shading button{border:0;background:none;width:30px;height:26px;display:grid;place-items:center;cursor:pointer;color:#b9c1cb}
+  .shading button + button{border-left:1px solid var(--line)}
+  .shading button:hover{background:var(--panel2)}
+  .shading button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
+  .shading svg{width:16px;height:16px;display:block}
+  .nav{position:absolute;top:46px;right:10px;display:flex;flex-direction:column;align-items:center;gap:6px}
+  #gizmo{width:92px;height:92px;border-radius:50%;cursor:grab;touch-action:none;user-select:none}
+  #gizmo:hover,#gizmo.dragging{background:rgba(255,255,255,.1)} #gizmo.dragging{cursor:grabbing}
+  #gizmo [data-axis]{cursor:pointer} #gizmo [data-axis]:hover{filter:brightness(1.3)}
+  #gizmo text{font:700 10px var(--sans);text-anchor:middle;dominant-baseline:central;pointer-events:none;fill:#101215}
+  .navbtns{display:flex;flex-direction:column;gap:5px;align-self:flex-end;margin-right:2px}
+  .navbtns button{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:rgba(26,30,35,.92);display:grid;place-items:center;cursor:pointer;color:#b9c1cb;padding:0}
+  .navbtns button:hover{background:var(--panel2);color:var(--text)}
+  .navbtns svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .shading button:focus-visible,.navbtns button:focus-visible{outline:2px solid var(--sel);outline-offset:-2px}
+  .hint{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);background:rgba(26,30,35,.92);border:1px solid var(--line);border-radius:999px;padding:5px 14px;color:var(--muted);font-size:12px;white-space:nowrap}
+  .hint kbd{font-family:var(--mono);font-size:11px;color:var(--text)}
+  .badge{position:absolute;bottom:10px;right:10px;font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(26,30,35,.92);border:1px solid var(--line);border-radius:6px;padding:3px 8px}
+  .badge.working{color:var(--accent)}
+  .empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint);pointer-events:none}
+  .foot{display:flex;gap:16px;padding:6px 12px;border-top:1px solid var(--line);color:var(--faint);font-family:var(--mono);font-size:11px}
+
+  .row{display:grid;grid-template-columns:80px 1fr;align-items:center;gap:8px;margin-bottom:8px}
+  .row label{color:var(--muted);font-size:12px}
+  select,input[type=number]{width:100%;background:#111418;border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  select:focus,input:focus{outline:none;border-color:var(--accent)}
+  .btn{width:100%;padding:9px 10px;border-radius:7px;border:1px solid var(--line);background:var(--panel2);cursor:pointer;margin-top:6px;text-align:left}
+  .btn b{display:block;font-weight:600} .btn span{display:block;color:var(--muted);font-size:11.5px;margin-top:2px}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)} .btn.primary span{color:rgba(26,19,6,.75)}
+  .btn:hover{filter:brightness(1.08)} .btn:disabled{opacity:.5;cursor:default;filter:none}
+  .btn:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+  #gallery{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  #gallery figure{margin:0;cursor:pointer} #gallery img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px;border:1px solid var(--line);background:#000}
+  #gallery figcaption{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #log{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:180px;overflow:auto;margin:0}
+  .toast{position:fixed;bottom:18px;right:18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:8px;padding:10px 14px;max-width:340px;box-shadow:0 10px 30px rgba(0,0,0,.4);z-index:6}
+  .toast.err{border-left-color:var(--bad)}
+  .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:grid;place-items:center;cursor:zoom-out;z-index:5}
+  .lightbox img{max-width:94vw;max-height:90vh;border-radius:6px}
+  /* narrower side panels in a narrow window; folded ones stay folded (main.noleft / main.noright win) */
+  @media (max-width:1100px){main{--lw:200px;--rw:260px}}
+  /* a panel beside a chat: the mouse hint would sit under the frame badge, and the timeline keeps its frame numbers */
+  @media (max-width:720px){.hint{display:none} #tlTime{display:none}}
+  /* timeline */
+  .timeline{display:flex;align-items:center;gap:10px;padding:6px 10px;border-top:1px solid var(--line);background:var(--panel)}
+  .tlbtns{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;flex:none}
+  .tlbtns button{border:0;background:var(--panel2);width:30px;height:28px;display:grid;place-items:center;cursor:pointer;color:var(--text)}
+  .tlbtns button + button{border-left:1px solid var(--line)}
+  .tlbtns button:hover{background:#2a3038} .tlbtns button:focus-visible{outline:2px solid var(--sel);outline-offset:-2px}
+  .tlbtns button.play{width:40px;background:var(--accent);color:var(--accent-ink)}
+  .tlbtns svg{width:12px;height:12px;fill:currentColor}
+  .tlact{display:flex;align-items:center;gap:6px;flex:none;color:var(--muted);font-size:12px}
+  .tlact select{width:auto;max-width:170px;padding:5px 8px;font-size:12px}
+  #tlCanvas{flex:1 1 0;width:0;min-width:0;height:36px;cursor:ew-resize;touch-action:none;border-radius:6px}
+  .tlinfo{display:flex;align-items:center;gap:6px;flex:none;font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+  .tlinfo input{width:58px;background:#111418;border:1px solid var(--line);border-radius:6px;padding:4px 6px;text-align:right;font-family:var(--mono);font-size:12px}
+  /* workspace menu */
+  .ws{position:relative}
+  .wsbtn{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 12px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);cursor:pointer;max-width:320px}
+  .wsbtn:hover,.wsbtn[aria-expanded=true]{border-color:var(--accent)}
+  .wsbtn .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wsbtn .unsaved{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+  .wsbtn .car{color:var(--muted);font-size:10px}
+  .wsmenu{position:absolute;top:calc(100% + 6px);left:0;width:440px;max-width:calc(100vw - 32px);background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 50px rgba(0,0,0,.5);z-index:4;display:flex;flex-direction:column;max-height:min(640px,calc(100vh - 80px))}
+  .wsacts{display:flex;flex-wrap:wrap;gap:6px;padding:10px;border-bottom:1px solid var(--line)}
+  .wsacts button{padding:6px 10px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);cursor:pointer}
+  .wsacts button:hover{border-color:var(--accent)} .wsacts button:disabled{opacity:.45;cursor:default;border-color:var(--line)}
+  .wsform{padding:10px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+  .wsform p{margin:0;color:var(--text)} .wsform .sub{color:var(--muted);font-size:12px}
+  .wsform input[type=text]{width:100%;background:#111418;border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+  .wsform .btns{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+  .wsform .btns button{padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);cursor:pointer}
+  .wsform .btns button.go{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+  .wsform .btns button.danger{color:var(--bad)}
+  .wslist{list-style:none;margin:0;padding:6px;overflow:auto}
+  .wslist li{display:flex;gap:10px;align-items:center;padding:6px;border-radius:7px;cursor:pointer}
+  .wslist li:hover{background:var(--panel2)} .wslist li.cur{background:rgba(245,166,35,.1)}
+  .wslist .th{width:96px;aspect-ratio:16/9;border-radius:5px;border:1px solid var(--line);background:#0c0e10 center/cover no-repeat;flex:none;display:grid;place-items:center;color:var(--faint);font-size:10px}
+  .wslist .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wslist .info{min-width:0;flex:1} .wslist .sub{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .wslist .tag{font-size:10.5px;color:var(--accent);margin-left:6px;font-weight:400}
+  .wsempty{padding:16px;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="mark">B</div><h1>Blender</h1>
+    <div class="ws">
+      <button class="wsbtn" id="wsBtn" aria-expanded="false" data-t-title="projects"><span class="nm" id="wsName"></span><span class="unsaved" id="wsDirty" hidden data-t-title="unsaved"></span><span class="car">▼</span></button>
+      <div class="wsmenu" id="wsMenu" hidden>
+        <div class="wsacts">
+          <button id="wsNew" data-t="ws.new"></button><button id="wsSave" data-t="ws.save"></button><button id="wsSaveAs" data-t="ws.saveAs"></button>
+          <button id="wsUpload" data-t="ws.upload"></button><button id="wsDownload" data-t="ws.download"></button>
+          <input type="file" id="wsFile" accept=".blend" hidden>
+        </div>
+        <div class="wsform" id="wsForm" hidden></div>
+        <ul class="wslist" id="wsList"></ul>
+      </div>
+    </div>
+    <div class="pill" id="pill"><span class="dot"></span><span id="pilltext" data-t="connecting"></span></div>
+    <span class="meta" id="meta"></span>
+    <span class="spacer"></span>
+  </header>
+
+  <main>
+    <aside id="panelL">
+      <button class="rail" id="showL" data-t-title="showL.title" data-t-aria="showL"><svg viewBox="0 0 12 12"><path d="M4.5 2.5 8 6l-3.5 3.5"/></svg><span data-t="scene"></span></button>
+      <div class="sect"><h2><span data-t="scene"></span> <span class="h2r"><b id="objcount"></b><button class="pbtn" id="hideL" data-t-title="hideL.title" data-t-aria="hideL"><svg viewBox="0 0 12 12"><path d="M7.5 2.5 4 6l3.5 3.5"/></svg></button></span></h2>
+        <input id="objFilter" type="search" data-t-placeholder="filter" data-t-aria="filter" autocomplete="off"></div>
+      <div class="scroll"><ul id="outliner"></ul></div>
+      <div class="sect"><h2 data-t="selected"></h2><div id="objinfo" data-t="nothingSelected"></div></div>
+    </aside>
+
+    <section class="center">
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" aria-selected="true" data-tab="live"><span data-t="tab.live"></span> <span class="meta" data-t="tab.liveBy"></span></button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="prev" data-t="tab.camera"></button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="last" data-t="tab.last"></button>
+      </div>
+      <div class="stage">
+        <div data-pane="live" id="liveWrap">
+          <img id="live" data-t-alt="live.alt">
+          <div class="empty" id="emptyLive" data-t="live.waiting"></div>
+          <div class="shading" role="group" data-t-aria="shading">
+            <button data-shade="SOLID" aria-pressed="true" data-t-aria="solid" data-t-title="solid.title">
+              <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="currentColor"/></svg></button>
+            <button data-shade="MATERIAL" aria-pressed="false" data-t-aria="material" data-t-title="material.title">
+              <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 8V2.6A5.4 5.4 0 0 1 13.4 8zM8 8v5.4A5.4 5.4 0 0 1 2.6 8z" fill="currentColor"/></svg></button>
+            <button data-shade="RENDERED" aria-pressed="false" data-t-aria="rendered" data-t-title="rendered.title">
+              <svg viewBox="0 0 16 16"><defs><radialGradient id="shadeBall" cx="35%" cy="32%" r="75%"><stop offset="0" stop-color="currentColor" stop-opacity="1"/><stop offset="1" stop-color="currentColor" stop-opacity=".18"/></radialGradient></defs><circle cx="8" cy="8" r="6" fill="url(#shadeBall)"/><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1"/></svg></button>
+          </div>
+          <div class="nav">
+            <svg id="gizmo" viewBox="0 0 92 92" role="group" data-t-aria="gizmo"></svg>
+            <div class="navbtns">
+              <button id="fit" data-t-title="fit" data-t-aria="fit"><svg viewBox="0 0 14 14"><path d="M1.5 4.5v-3h3M9.5 1.5h3v3M12.5 9.5v3h-3M4.5 12.5h-3v-3"/><rect x="4.6" y="4.6" width="4.8" height="4.8" rx=".8"/></svg></button>
+              <button id="zin" data-t-title="zoomIn" data-t-aria="zoomIn"><svg viewBox="0 0 14 14"><circle cx="6" cy="6" r="4.2"/><path d="M9.2 9.2l3.3 3.3M4.2 6h3.6M6 4.2v3.6"/></svg></button>
+              <button id="zout" data-t-title="zoomOut" data-t-aria="zoomOut"><svg viewBox="0 0 14 14"><circle cx="6" cy="6" r="4.2"/><path d="M9.2 9.2l3.3 3.3M4.2 6h3.6"/></svg></button>
+            </div>
+          </div>
+          <div class="hint" data-t-html="hint"></div>
+          <div class="badge" id="badge">—</div>
+        </div>
+        <div data-pane="prev" hidden><img id="prevImg" data-t-alt="prev.alt"><div class="empty" id="emptyPrev" data-t="prev.none"></div></div>
+        <div data-pane="last" hidden><img id="lastImg" data-t-alt="last.alt"><div class="empty" id="emptyLast" data-t="last.none"></div></div>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="tlbtns">
+          <button id="tlStart" data-t-title="tl.first.title" data-t-aria="tl.first"><svg viewBox="0 0 12 12"><rect x="1" y="1.5" width="2" height="9"/><path d="M11 1.5v9L4 6z"/></svg></button>
+          <button id="tlPrev" data-t-title="tl.prev.title" data-t-aria="tl.prev"><svg viewBox="0 0 12 12"><path d="M9.5 1.5v9L2.5 6z"/></svg></button>
+          <button id="tlPlay" class="play" data-t-title="tl.play.title" data-t-aria="tl.play"><svg viewBox="0 0 12 12"><path id="tlPlayIcon" d="M2.5 1v10l8-5z"/></svg></button>
+          <button id="tlNext" data-t-title="tl.next.title" data-t-aria="tl.next"><svg viewBox="0 0 12 12"><path d="M2.5 1.5v9l7-4.5z"/></svg></button>
+          <button id="tlEnd" data-t-title="tl.last.title" data-t-aria="tl.last"><svg viewBox="0 0 12 12"><rect x="9" y="1.5" width="2" height="9"/><path d="M1 1.5v9L8 6z"/></svg></button>
+        </div>
+        <div class="tlact" id="tlAct" hidden>
+          <label for="tlAction" data-t="tl.action"></label>
+          <select id="tlTarget" hidden data-t-aria="tl.target" data-t-title="tl.target.title"></select>
+          <select id="tlAction" data-t-title="tl.action.title"></select>
+        </div>
+        <canvas id="tlCanvas" data-t-aria="tl.canvas"></canvas>
+        <div class="tlinfo"><input id="tlFrame" type="number" step="1" data-t-aria="tl.frame"><span id="tlRange">/ —</span><span id="tlTime"></span></div>
+      </div>
+      <div class="foot"><span id="camInfo"></span><span id="sceneAge"></span></div>
+    </section>
+
+    <aside class="right" id="panelR">
+      <button class="rail" id="showR" data-t-title="showR.title" data-t-aria="showR"><svg viewBox="0 0 12 12"><path d="M7.5 2.5 4 6l3.5 3.5"/></svg><span data-t="render"></span></button>
+      <div class="sect">
+        <h2><span data-t="render"></span> <button class="pbtn" id="hideR" data-t-title="hideR.title" data-t-aria="hideR"><svg viewBox="0 0 12 12"><path d="M4.5 2.5 8 6l-3.5 3.5"/></svg></button></h2>
+        <div class="row"><label for="engine" data-t="engine"></label>
+          <select id="engine"><option value="CYCLES" data-t="engine.cycles"></option><option value="EEVEE" data-t="engine.eevee"></option></select></div>
+        <div class="row"><label for="samples" data-t="samples"></label><input id="samples" type="number" min="1" max="4096" value="64"></div>
+        <div class="row"><label for="width" data-t="width"></label><input id="width" type="number" min="64" max="7680" step="2" value="1280"></div>
+        <button class="btn primary" id="renderView"><b data-t="renderView"></b><span data-t="renderView.hint"></span></button>
+        <button class="btn" id="setCam"><b data-t="setCam"></b><span data-t="setCam.hint"></span></button>
+      </div>
+      <div class="sect" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <h2><span data-t="renders"></span> <b id="rcount"></b></h2>
+        <div class="scroll"><div id="gallery"></div></div>
+      </div>
+      <div class="sect"><h2 data-t="activity"></h2><pre id="log"></pre></div>
+    </aside>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+// ---------- texts: English, and German for ?lang=de (the portal passes its language) ----------
+const TEXTS = {
+  en: {
+    projects: 'Projects', unsaved: 'Unsaved changes', untitled: 'untitled',
+    'ws.new': 'New…', 'ws.save': 'Save', 'ws.saveAs': 'Save as…', 'ws.upload': 'Upload .blend', 'ws.download': 'Download',
+    connecting: 'connecting…', idle: 'Idle', working: 'Working: {what}', disconnected: 'Disconnected',
+    notConnected: 'Not connected: open Blender from the portal.',
+    scene: 'Scene', 'showL.title': 'Show the scene panel (T)', showL: 'Show the scene panel', 'hideL.title': 'Hide this panel (T)', hideL: 'Hide the scene panel',
+    filter: 'Filter objects', selected: 'Selected', nothingSelected: 'Nothing selected.',
+    'obj.type': 'type', 'obj.location': 'location', 'obj.parent': 'parent', 'obj.in': 'in',
+    'tab.live': 'Live viewport', 'tab.liveBy': 'rendered by Blender', 'tab.camera': 'Scene camera', 'tab.last': 'Last render',
+    'live.alt': 'Live viewport rendered by Blender on the server', 'live.waiting': 'Waiting for the first frame from Blender…',
+    shading: 'Viewport shading', solid: 'Solid', 'solid.title': 'Solid — Workbench: fast, flat colours',
+    material: 'Material preview', 'material.title': 'Material preview — Cycles with simplified light bounces: real materials and lights, near real time',
+    rendered: 'Rendered', 'rendered.title': "Rendered — Cycles with the scene's own light bounces, denoised",
+    gizmo: 'View axes: click an axis to look along it, drag to orbit', 'gizmo.view': '{view} view (from {axis})',
+    'view.Right': 'Right', 'view.Left': 'Left', 'view.Front': 'Front', 'view.Back': 'Back', 'view.Top': 'Top', 'view.Bottom': 'Bottom',
+    fit: 'Frame the whole scene', zoomIn: 'Zoom in', zoomOut: 'Zoom out',
+    hint: '<kbd>Drag</kbd> orbit · <kbd>Right-drag</kbd> / <kbd>Shift+drag</kbd> pan · <kbd>Scroll</kbd> zoom · <kbd>Space</kbd> play',
+    'prev.alt': 'Blender preview from the scene camera', 'prev.none': 'No preview yet.', 'last.alt': 'Most recent full render', 'last.none': 'No renders yet.',
+    'badge.rendering': 'rendering…', 'badge.refine': 'refine {n}/{of}', 'badge.frame': 'frame {n}', 'badge.moving': 'moving',
+    'badge.done': '{shading} · {what} · {samples} spp · {width}px · {ms} ms', 'badge.failed': 'frame failed', 'badge.offline': 'offline',
+    'badge.playing': '{shading} · playing {fps}/{rate} fps · {ready}/{n} frames ready', 'badge.edited': 'updated after edit · {ms} ms',
+    'shade.SOLID': 'solid', 'shade.MATERIAL': 'material', 'shade.RENDERED': 'rendered',
+    'tl.first.title': 'First frame (Home)', 'tl.first': 'First frame', 'tl.prev.title': 'Previous frame (←)', 'tl.prev': 'Previous frame',
+    'tl.play.title': 'Play / pause (Space)', 'tl.play': 'Play', 'tl.pause': 'Pause', 'tl.next.title': 'Next frame (→)', 'tl.next': 'Next frame',
+    'tl.last.title': 'Last frame (End)', 'tl.last': 'Last frame', 'tl.action': 'Action', 'tl.target': 'Animated object',
+    'tl.target.title': 'Object whose action to choose', 'tl.action.title': 'Which action to play. Only the browser view changes; the file keeps its own.',
+    'tl.canvas': 'Timeline: drag to scrub', 'tl.frame': 'Current frame', 'tl.time': '{s} s · {fps} fps', 'tl.still': ' · no animation yet',
+    'tl.default': 'Scene default', 'tl.frames': '{name} · {n} frames',
+    cam: 'view  x {x}  y {y}  z {z}  ·  fov {fov}°  ·  distance {d}',
+    'out.none': 'No objects match.', 'out.empty': 'The scene is empty.', 'out.collection': 'collection', 'out.hidden': 'hidden in renders',
+    render: 'Render', 'showR.title': 'Show the render panel (N)', showR: 'Show the render panel', 'hideR.title': 'Hide this panel (N)', hideR: 'Hide the render panel',
+    engine: 'Engine', 'engine.cycles': 'Cycles (path traced)', 'engine.eevee': 'EEVEE (real-time)', samples: 'Samples', width: 'Width px',
+    renderView: 'Render this view', 'renderView.hint': "Full-quality render from where the live viewport is looking. The scene's own camera is not changed.",
+    setCam: 'Set as scene camera', 'setCam.hint': 'Moves Blender’s camera to this view, so later renders and the “Scene camera” tab use it.',
+    renders: 'Renders', activity: 'Activity',
+    'toast.rendering': 'Rendering this view…', 'toast.renderFailed': 'Render failed: {error}', 'toast.rendered': 'Rendered frame {frame} in {s}s ({how}).',
+    'toast.cyclesOn': 'Cycles on {device}', 'toast.camFailed': 'Could not set camera: {error}', 'toast.camMoved': 'Scene camera “{camera}” moved to this view.',
+    changed: 'scene changed {ago}', 'ago.s': '{n} s ago', 'ago.min': '{n} min ago',
+    'busy.opening project': 'opening project', 'busy.creating project': 'creating project', 'busy.saving': 'saving',
+    'busy.render from browser view': 'rendering this view', 'busy.set scene camera': 'setting the scene camera',
+    'ws.none': 'No projects yet. Create one or upload a .blend.', 'ws.open': 'open', 'ws.noPreview': 'no preview',
+    'ws.openQ': 'Open “{name}”', 'ws.unsavedIn': '“{name}” has unsaved changes.', 'ws.neverSaved': 'This scene has never been saved.',
+    'ws.newQ': 'Start a new project', cancel: 'Cancel', discard: 'Discard changes', saveContinue: 'Save, then continue',
+    'ws.opened': 'Opened “{name}”.', 'ws.saved': 'Saved “{name}”.', 'ws.created': 'Created “{name}”.',
+    'ws.create': 'Create project', 'ws.createGo': 'Create', 'ws.name': 'Project name', 'ws.template': 'Start from Blender’s default scene (cube, light, camera)',
+    'ws.saveAsTitle': 'Save as a new project', 'ws.saveAsGo': 'Save', 'ws.newName': 'New project name',
+    'ws.uploading': 'Uploading {name} ({size})…', 'ws.uploadFailed': 'Upload failed: {error}', 'ws.openUploaded': 'Open the uploaded “{name}”',
+  },
+  de: {
+    projects: 'Projekte', unsaved: 'Ungespeicherte Änderungen', untitled: 'unbenannt',
+    'ws.new': 'Neu…', 'ws.save': 'Speichern', 'ws.saveAs': 'Speichern unter…', 'ws.upload': '.blend hochladen', 'ws.download': 'Herunterladen',
+    connecting: 'verbindet…', idle: 'Bereit', working: 'Arbeitet: {what}', disconnected: 'Getrennt',
+    notConnected: 'Nicht verbunden: Öffne Blender aus dem Portal.',
+    scene: 'Szene', 'showL.title': 'Den Szenenbereich zeigen (T)', showL: 'Den Szenenbereich zeigen', 'hideL.title': 'Diesen Bereich ausblenden (T)', hideL: 'Den Szenenbereich ausblenden',
+    filter: 'Objekte filtern', selected: 'Ausgewählt', nothingSelected: 'Nichts ausgewählt.',
+    'obj.type': 'Typ', 'obj.location': 'Position', 'obj.parent': 'Eltern', 'obj.in': 'in',
+    'tab.live': 'Live-Viewport', 'tab.liveBy': 'von Blender gerendert', 'tab.camera': 'Szenenkamera', 'tab.last': 'Letztes Rendering',
+    'live.alt': 'Live-Viewport, von Blender auf dem Server gerendert', 'live.waiting': 'Warte auf das erste Bild von Blender…',
+    shading: 'Viewport-Schattierung', solid: 'Volumenmodell', 'solid.title': 'Volumenmodell — Workbench: schnell, flache Farben',
+    material: 'Material-Vorschau', 'material.title': 'Material-Vorschau — Cycles mit vereinfachten Lichtsprüngen: echte Materialien und Lichter, nahezu in Echtzeit',
+    rendered: 'Gerendert', 'rendered.title': 'Gerendert — Cycles mit den eigenen Lichtsprüngen der Szene, entrauscht',
+    gizmo: 'Ansichtsachsen: Klicke auf eine Achse, um entlang ihr zu schauen, ziehe, um zu kreisen', 'gizmo.view': 'Ansicht {view} (von {axis})',
+    'view.Right': 'Rechts', 'view.Left': 'Links', 'view.Front': 'Vorne', 'view.Back': 'Hinten', 'view.Top': 'Oben', 'view.Bottom': 'Unten',
+    fit: 'Die ganze Szene einpassen', zoomIn: 'Hineinzoomen', zoomOut: 'Herauszoomen',
+    hint: '<kbd>Ziehen</kbd> kreisen · <kbd>Rechts ziehen</kbd> / <kbd>Umschalt+Ziehen</kbd> verschieben · <kbd>Scrollen</kbd> zoomen · <kbd>Leertaste</kbd> abspielen',
+    'prev.alt': 'Blender-Vorschau aus der Szenenkamera', 'prev.none': 'Noch keine Vorschau.', 'last.alt': 'Neuestes vollständiges Rendering', 'last.none': 'Noch keine Renderings.',
+    'badge.rendering': 'rendert…', 'badge.refine': 'verfeinert {n}/{of}', 'badge.frame': 'Bild {n}', 'badge.moving': 'in Bewegung',
+    'badge.done': '{shading} · {what} · {samples} spp · {width}px · {ms} ms', 'badge.failed': 'Bild fehlgeschlagen', 'badge.offline': 'offline',
+    'badge.playing': '{shading} · spielt {fps}/{rate} fps · {ready}/{n} Bilder bereit', 'badge.edited': 'nach Änderung aktualisiert · {ms} ms',
+    'shade.SOLID': 'Volumenmodell', 'shade.MATERIAL': 'Material', 'shade.RENDERED': 'gerendert',
+    'tl.first.title': 'Erstes Bild (Pos1)', 'tl.first': 'Erstes Bild', 'tl.prev.title': 'Vorheriges Bild (←)', 'tl.prev': 'Vorheriges Bild',
+    'tl.play.title': 'Abspielen / anhalten (Leertaste)', 'tl.play': 'Abspielen', 'tl.pause': 'Anhalten', 'tl.next.title': 'Nächstes Bild (→)', 'tl.next': 'Nächstes Bild',
+    'tl.last.title': 'Letztes Bild (Ende)', 'tl.last': 'Letztes Bild', 'tl.action': 'Aktion', 'tl.target': 'Animiertes Objekt',
+    'tl.target.title': 'Objekt, dessen Aktion gewählt wird', 'tl.action.title': 'Welche Aktion abgespielt wird. Nur die Ansicht im Browser ändert sich; die Datei behält ihre eigene.',
+    'tl.canvas': 'Zeitleiste: zum Scrubben ziehen', 'tl.frame': 'Aktuelles Bild', 'tl.time': '{s} s · {fps} fps', 'tl.still': ' · noch keine Animation',
+    'tl.default': 'Szenenstandard', 'tl.frames': '{name} · {n} Bilder',
+    cam: 'Ansicht  x {x}  y {y}  z {z}  ·  Blickwinkel {fov}°  ·  Abstand {d}',
+    'out.none': 'Keine Objekte passen.', 'out.empty': 'Die Szene ist leer.', 'out.collection': 'Sammlung', 'out.hidden': 'beim Rendern ausgeblendet',
+    render: 'Rendern', 'showR.title': 'Den Renderbereich zeigen (N)', showR: 'Den Renderbereich zeigen', 'hideR.title': 'Diesen Bereich ausblenden (N)', hideR: 'Den Renderbereich ausblenden',
+    engine: 'Engine', 'engine.cycles': 'Cycles (Pfadverfolgung)', 'engine.eevee': 'EEVEE (Echtzeit)', samples: 'Samples', width: 'Breite px',
+    renderView: 'Diese Ansicht rendern', 'renderView.hint': 'Rendering in voller Qualität von dort, wohin der Live-Viewport schaut. Die eigene Kamera der Szene bleibt unverändert.',
+    setCam: 'Als Szenenkamera setzen', 'setCam.hint': 'Bewegt die Kamera von Blender zu dieser Ansicht, damit spätere Renderings und der Tab „Szenenkamera“ sie nutzen.',
+    renders: 'Renderings', activity: 'Aktivität',
+    'toast.rendering': 'Diese Ansicht wird gerendert…', 'toast.renderFailed': 'Rendern fehlgeschlagen: {error}', 'toast.rendered': 'Bild {frame} in {s} s gerendert ({how}).',
+    'toast.cyclesOn': 'Cycles auf {device}', 'toast.camFailed': 'Kamera konnte nicht gesetzt werden: {error}', 'toast.camMoved': 'Szenenkamera „{camera}“ zu dieser Ansicht bewegt.',
+    changed: 'Szene geändert {ago}', 'ago.s': 'vor {n} s', 'ago.min': 'vor {n} min',
+    'busy.opening project': 'öffnet ein Projekt', 'busy.creating project': 'legt ein Projekt an', 'busy.saving': 'speichert',
+    'busy.render from browser view': 'rendert diese Ansicht', 'busy.set scene camera': 'setzt die Szenenkamera',
+    'ws.none': 'Noch keine Projekte. Lege eines an oder lade eine .blend hoch.', 'ws.open': 'offen', 'ws.noPreview': 'keine Vorschau',
+    'ws.openQ': '„{name}“ öffnen', 'ws.unsavedIn': '„{name}“ hat ungespeicherte Änderungen.', 'ws.neverSaved': 'Diese Szene wurde noch nie gespeichert.',
+    'ws.newQ': 'Ein neues Projekt beginnen', cancel: 'Abbrechen', discard: 'Änderungen verwerfen', saveContinue: 'Speichern, dann weiter',
+    'ws.opened': '„{name}“ geöffnet.', 'ws.saved': '„{name}“ gespeichert.', 'ws.created': '„{name}“ angelegt.',
+    'ws.create': 'Projekt anlegen', 'ws.createGo': 'Anlegen', 'ws.name': 'Projektname', 'ws.template': 'Mit der Standardszene von Blender beginnen (Würfel, Licht, Kamera)',
+    'ws.saveAsTitle': 'Als neues Projekt speichern', 'ws.saveAsGo': 'Speichern', 'ws.newName': 'Neuer Projektname',
+    'ws.uploading': '{name} wird hochgeladen ({size})…', 'ws.uploadFailed': 'Hochladen fehlgeschlagen: {error}', 'ws.openUploaded': 'Das hochgeladene „{name}“ öffnen',
+  },
+};
+const LANG = /^de\b/i.test(new URLSearchParams(location.search).get('lang') || '') ? 'de' : 'en';
+document.documentElement.lang = LANG;
+/** A text in the page's language, `{name}` filled in from `vars`. */
+const tr = (key, vars) => (TEXTS[LANG][key] ?? TEXTS.en[key] ?? key).replace(/\{(\w+)\}/g, (all, k) => (vars && k in vars ? String(vars[k]) : all));
+for (const el of document.querySelectorAll('[data-t]')) el.textContent = tr(el.dataset.t);
+for (const el of document.querySelectorAll('[data-t-html]')) el.innerHTML = tr(el.dataset.tHtml);   // our own markup (<kbd>)
+for (const [attr, name] of [['tTitle', 'title'], ['tAria', 'aria-label'], ['tPlaceholder', 'placeholder'], ['tAlt', 'alt']])
+  for (const el of document.querySelectorAll(`[data-${name === 'aria-label' ? 't-aria' : 't-' + name}]`)) el.setAttribute(name, tr(el.dataset[attr]));
+$('wsName').textContent = tr('untitled');
+const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+/** A path under the data folder as the address of `files/…`, every part encoded, quotes and brackets too, so it is safe in CSS's url('…'). */
+const fileUrl = rel => 'files/' + String(rel).split('/').map(p => encodeURIComponent(p).replace(/['()]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())).join('/');
+/** The server refused the request: the portal's sign-in ended, or this page was not opened from the portal. */
+let connected = true;
+function notConnected() {
+  if (!connected) return; connected = false;
+  const nc = document.createElement('div'); nc.id = 'nc'; nc.textContent = tr('notConnected'); document.body.appendChild(nc);
+}
+
+const wrap = $('liveWrap'), img = $('live');
+
+// ---------- orbit camera, in Blender coordinates (Z up) ----------
+const cam = { target: [0, 0, 0], yaw: -0.85, pitch: 0.5, dist: 20, fov: 40 };
+let shading = 'SOLID';
+function camPos() {
+  const cp = Math.cos(cam.pitch);
+  return [cam.target[0] + cam.dist * cp * Math.cos(cam.yaw), cam.target[1] + cam.dist * cp * Math.sin(cam.yaw),
+          cam.target[2] + cam.dist * Math.sin(cam.pitch)];
+}
+function aspect() { const r = wrap.getBoundingClientRect(); return r.width / Math.max(1, r.height); }
+function frameBox(center, size, yaw, pitch) {
+  cam.target = center.slice(); cam.dist = Math.max(size, 0.5) * 1.9 / Math.tan(cam.fov * Math.PI / 360) / 2;
+  if (yaw !== undefined) cam.yaw = yaw; if (pitch !== undefined) cam.pitch = pitch;
+  requestFrame('full');
+}
+const bounds = () => (lastState.scene && lastState.scene.bounds) || { center: [0, 0, 0], size: 4 };
+$('fit').onclick = () => frameBox(bounds().center, bounds().size);
+$('zin').onclick = () => { cam.dist *= 0.8; requestFrame('full'); };
+$('zout').onclick = () => { cam.dist *= 1.25; requestFrame('full'); };
+
+// ---------- navigation gizmo: the scene's axes as seen from the view. Click an end to look along that axis
+// (click it again for the opposite side), drag the gizmo to orbit.
+const POLE = Math.PI / 2 - 0.001;   // straight down / up, short of the point where the view's "up" is undefined
+const AXES = [['X', [1, 0, 0], '#ff3352'], ['Y', [0, 1, 0], '#8bdc00'], ['Z', [0, 0, 1], '#2890ff']];
+const VIEWS = { '+X': [0, 0, 'Right'], '-X': [Math.PI, 0, 'Left'], '-Y': [-Math.PI / 2, 0, 'Front'], '+Y': [Math.PI / 2, 0, 'Back'],
+                '+Z': [-Math.PI / 2, POLE, 'Top'], '-Z': [-Math.PI / 2, -POLE, 'Bottom'] };
+const gizmo = $('gizmo'); let gizmoKey = '', tweenTimer = 0;
+function drawGizmo() {
+  const key = cam.yaw.toFixed(3) + '|' + cam.pitch.toFixed(3);
+  if (key === gizmoKey) return; gizmoKey = key;
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const right = [-sy, cy, 0], up = [-sp * cy, -sp * sy, cp], toward = [cp * cy, cp * sy, sp], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const ends = [];
+  for (const [name, v, color] of AXES) for (const sign of [1, -1]) {
+    const w = v.map(c => c * sign);
+    ends.push({ id: (sign > 0 ? '+' : '-') + name, name, sign, color, x: 46 + 31 * dot(w, right), y: 46 - 31 * dot(w, up), z: dot(w, toward) });
+  }
+  ends.sort((a, b) => a.z - b.z);   // far ends first, so near ones draw on top
+  gizmo.innerHTML = ends.map(e => {
+    const dim = 0.72 + 0.28 * (e.z + 1) / 2, tip = `<title>${esc(tr('gizmo.view', { view: tr('view.' + VIEWS[e.id][2]), axis: e.id }))}</title>`;
+    return e.sign > 0
+      ? `<g data-axis="${e.id}" opacity="${dim.toFixed(2)}">${tip}<line x1="46" y1="46" x2="${e.x.toFixed(1)}" y2="${e.y.toFixed(1)}" stroke="${e.color}" stroke-width="2.4" stroke-linecap="round"/><circle cx="${e.x.toFixed(1)}" cy="${e.y.toFixed(1)}" r="9.5" fill="${e.color}"/><text x="${e.x.toFixed(1)}" y="${e.y.toFixed(1)}">${e.name}</text></g>`
+      : `<g data-axis="${e.id}" opacity="${dim.toFixed(2)}">${tip}<circle cx="${e.x.toFixed(1)}" cy="${e.y.toFixed(1)}" r="7.5" fill="${e.color}" fill-opacity=".28" stroke="${e.color}" stroke-width="1.6"/></g>`;
+  }).join('');
+}
+function tweenView(yaw, pitch) {
+  clearInterval(tweenTimer);
+  const y0 = cam.yaw, p0 = cam.pitch, dy = Math.atan2(Math.sin(yaw - y0), Math.cos(yaw - y0)), t0 = performance.now();
+  tweenTimer = setInterval(() => {
+    const k = Math.min(1, (performance.now() - t0) / 260), e = k * k * (3 - 2 * k);
+    cam.yaw = y0 + dy * e; cam.pitch = p0 + (pitch - p0) * e;
+    if (k < 1) requestFrame('fast');
+    else { clearInterval(tweenTimer); cam.yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw)); requestFrame('full'); }
+  }, 40);
+}
+function snapTo(id) {
+  const turn = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+  let [yaw, pitch] = VIEWS[id];
+  // already looking from there: go round to the opposite side, as Blender's gizmo does
+  if (Math.abs(cam.pitch - pitch) < 0.02 && (id[1] === 'Z' || turn(cam.yaw, yaw) < 0.02)) [yaw, pitch] = VIEWS[(id[0] === '+' ? '-' : '+') + id[1]];
+  tweenView(yaw, pitch);
+}
+let gz = null;
+gizmo.addEventListener('pointerdown', e => {
+  clearInterval(tweenTimer);
+  const hit = e.target.closest('[data-axis]');
+  gz = { x: e.clientX, y: e.clientY, axis: hit && hit.dataset.axis, moved: false };
+  gizmo.setPointerCapture(e.pointerId); e.preventDefault();
+});
+gizmo.addEventListener('pointermove', e => {
+  if (!gz) return;
+  const dx = e.clientX - gz.x, dy = e.clientY - gz.y;
+  if (!gz.moved && Math.hypot(dx, dy) < 4) return;
+  gz.moved = true; gz.x = e.clientX; gz.y = e.clientY; gizmo.classList.add('dragging');
+  cam.yaw -= dx * 0.02; cam.pitch = Math.max(-POLE, Math.min(POLE, cam.pitch + dy * 0.02));
+  requestFrame('fast');
+});
+function endGizmo() {
+  if (!gz) return;
+  const g = gz; gz = null; gizmo.classList.remove('dragging');
+  if (g.moved) requestFrame('full'); else if (g.axis) snapTo(g.axis);
+}
+gizmo.addEventListener('pointerup', endGizmo); gizmo.addEventListener('pointercancel', endGizmo);
+
+let drag = null;
+wrap.addEventListener('contextmenu', e => e.preventDefault());
+wrap.addEventListener('pointerdown', e => {
+  if (e.target.closest('.nav,.shading')) return;
+  clearInterval(tweenTimer);
+  drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+  wrap.setPointerCapture(e.pointerId); wrap.classList.add('dragging');
+});
+wrap.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) {
+    const h = wrap.getBoundingClientRect().height, k = 2 * Math.tan(cam.fov * Math.PI / 360) * cam.dist / h;
+    const right = [-Math.sin(cam.yaw), Math.cos(cam.yaw), 0];
+    const up = [-Math.sin(cam.pitch) * Math.cos(cam.yaw), -Math.sin(cam.pitch) * Math.sin(cam.yaw), Math.cos(cam.pitch)];
+    for (let i = 0; i < 3; i++) cam.target[i] += (dx * right[i] + dy * up[i]) * k;
+  } else {
+    cam.yaw -= dx * 0.008; cam.pitch = Math.max(-POLE, Math.min(POLE, cam.pitch + dy * 0.008));
+  }
+  requestFrame('fast');
+});
+function endDrag() { if (drag) { drag = null; wrap.classList.remove('dragging'); requestFrame('full'); } }
+wrap.addEventListener('pointerup', endDrag); wrap.addEventListener('pointercancel', endDrag);
+let wheelTimer = 0;
+wrap.addEventListener('wheel', e => {
+  e.preventDefault(); cam.dist = Math.max(0.05, cam.dist * Math.exp(e.deltaY * 0.0015)); requestFrame('fast');
+  clearTimeout(wheelTimer); wheelTimer = setTimeout(() => requestFrame('full'), 250);
+}, { passive: false });
+document.querySelectorAll('[data-shade]').forEach(b => b.onclick = () => {
+  shading = b.dataset.shade;
+  document.querySelectorAll('[data-shade]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  requestFrame('full');
+});
+
+// ---------- frame requests: one in flight, latest wins, progressive refinement at rest ----------
+// While moving: the chosen shading at 1 sample and reduced size. When the view settles: sharper passes in turn,
+// cancelled by any new movement. Blender's own viewport behaves the same way.
+const REST = { SOLID: [{ s: 1 }], MATERIAL: [{ s: 4 }, { s: 16 }], RENDERED: [{ s: 4 }, { s: 32 }] };
+const PLAY = { SOLID: 1, MATERIAL: 2, RENDERED: 2 };   // samples for playback and scrubbing frames (these get cached)
+let inflight = false, pending = null, lastUrl = null, lastOwned = false, lastSeenViewport = 0, gen = 0;
+// playback cache: frame -> image URL, valid for one viewpoint + shading + size + scene state
+const frameCache = new Map(); let cacheEpoch = 0; const CACHE_MAX = 1500;
+function clearCache() {
+  for (const u of frameCache.values()) if (u !== lastUrl) URL.revokeObjectURL(u);
+  if (frameCache.size) lastOwned = false;   // the image on screen is ours to release again
+  frameCache.clear(); cacheEpoch++; if (typeof drawTimeline === 'function') drawTimeline();
+}
+function show(url, owned) {
+  img.src = url; $('emptyLive').hidden = true;
+  if (lastUrl && lastUrl !== url && !lastOwned) URL.revokeObjectURL(lastUrl);
+  lastUrl = url; lastOwned = owned;
+}
+function sizes() {
+  const r = wrap.getBoundingClientRect(), dpr = Math.min(devicePixelRatio, 2);
+  const full = Math.min(1600, Math.round(r.width * dpr / 2) * 2);
+  return { full, motion: Math.min(960, full) };
+}
+function liveView(req) {
+  const sz = sizes(), rest = REST[shading];
+  const stage = req.stage === undefined ? null : rest[req.stage];
+  return { coords: 'blender', position: camPos(), target: cam.target.slice(), fov: cam.fov, aspect: aspect(), shading,
+           samples: stage ? stage.s : req.cache ? PLAY[shading] : 1, width: stage ? sz.full : sz.motion,
+           frame: req.frame === undefined ? anim.frame : req.frame, actions: anim.pick,
+           full_width: sz.full, rest_samples: rest[rest.length - 1].s };
+}
+// quality: 'fast' = a movement frame, 'full' = start refining from the first rest pass, 'scrub' = a timeline frame.
+// Anything that changes the picture for every frame (camera, shading, size) drops the playback cache;
+// timeline moves pass sameView.
+function requestFrame(quality, sameView) {
+  if (!sameView) clearCache();
+  if (quality !== 'full') gen++;
+  if (quality === 'full' && anim.playing) return;   // playback keeps the picture moving; refine when it stops
+  submit(quality === 'fast' ? { gen } : quality === 'scrub' ? { gen, cache: true } : { gen, stage: 0 });
+}
+async function submit(req) {
+  if (inflight) { if (!req.play) pending = req; return; }   // playback frames are simply asked for again
+  inflight = true;
+  if (!req.play) { $('badge').className = 'badge working'; $('badge').textContent = tr('badge.rendering'); }
+  const v = liveView(req), epoch = cacheEpoch, t0 = performance.now();
+  let ok = false;
+  try {
+    const r = await fetch('api/viewport', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(v) });
+    if (r.status === 401) { notConnected(); inflight = false; return; }
+    if (r.ok) {
+      const url = URL.createObjectURL(await r.blob());
+      const keep = req.cache && epoch === cacheEpoch;
+      if (keep) {
+        if (frameCache.size >= CACHE_MAX) { const old = frameCache.keys().next().value; if (frameCache.get(old) !== lastUrl) URL.revokeObjectURL(frameCache.get(old)); frameCache.delete(old); }
+        frameCache.set(v.frame, url); drawTimeline();
+      }
+      ok = true; lastSeenViewport = Date.now() / 1000;
+      if (req.play) {
+        latency = latency * 0.8 + (performance.now() - t0) * 0.2;
+        // early: tick() shows it when the playhead gets there. On the beat or late: show it now
+        const ahead = (((v.frame - anim.frame) % frames()) + frames()) % frames();
+        if (anim.playing && (ahead === 0 || ahead > frames() / 2) && (ahead === 0 || !frameCache.has(anim.frame))) { show(url, keep); shown++; }
+        else if (!keep) URL.revokeObjectURL(url);
+      } else {
+        show(url, keep);
+        const ms = Math.round(+r.headers.get('X-Render-Seconds') * 1000);
+        const what = req.stage !== undefined ? tr('badge.refine', { n: req.stage + 1, of: REST[shading].length }) : req.cache ? tr('badge.frame', { n: v.frame }) : tr('badge.moving');
+        $('badge').className = 'badge'; $('badge').textContent = tr('badge.done', { shading: tr('shade.' + shading), what, samples: v.samples, width: v.width, ms });
+      }
+    } else { $('badge').className = 'badge'; $('badge').textContent = tr('badge.failed'); }
+  } catch (e) { $('badge').textContent = tr('badge.offline'); }
+  inflight = false;
+  if (pending) { const q = pending; pending = null; submit(q); return; }
+  if (anim.playing) { tick(); return; }   // ask for the next playback frame straight away
+  // no newer request: continue refining if the view has not moved since this pass was asked for
+  if (ok && req.stage !== undefined && req.gen === gen && !drag && !anim.playing && req.stage + 1 < REST[shading].length) submit({ gen, stage: req.stage + 1 });
+}
+
+// ---------- timeline: scrub and play the scene's animation. The frame is a view setting, like the orbit
+// camera: Blender renders whatever frame is asked for and the scene's own current frame stays where it was.
+// So is the action: picking one plays it in the browser over its own frame range; the file keeps its own.
+const anim = { start: 1, end: 250, fps: 24, frame: 1, keys: [], animated: false, playing: false, ready: false,
+               scene: { start: 1, end: 250, keys: [] },   // the scene's own range and keyframes
+               targets: [], target: null, pick: {} };       // objects with several actions; object -> picked action
+let latency = 80, shown = 0, shownAt = performance.now(), playFps = 0, playFrom = 1, playT0 = 0, playTimer = 0, scrubbing = false;
+const tl = $('tlCanvas'), PAD = 12;
+const frames = () => anim.end - anim.start + 1;
+const wrapFrame = f => anim.start + (((f - anim.start) % frames()) + frames()) % frames();
+function frameX(f, w) { return PAD + (frames() > 1 ? (f - anim.start) / (frames() - 1) : 0) * (w - 2 * PAD); }
+function drawTimeline() {
+  const r = tl.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
+  if (!r.width) return;
+  if (tl.width !== Math.round(r.width * dpr)) { tl.width = Math.round(r.width * dpr); tl.height = Math.round(r.height * dpr); }
+  const c = tl.getContext('2d'), w = r.width, h = r.height; c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h); c.fillStyle = '#111418'; c.beginPath(); c.roundRect(0, 0, w, h, 6); c.fill();
+  const step = (w - 2 * PAD) / Math.max(1, frames() - 1);
+  // rendered frames ready for instant playback
+  c.fillStyle = 'rgba(245,166,35,.55)';
+  for (const f of frameCache.keys()) if (f >= anim.start && f <= anim.end) c.fillRect(frameX(f, w) - Math.max(step, 1) / 2, h - 5, Math.max(step, 1) + .5, 3);
+  // frame numbers
+  const nice = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000].find(n => n * step >= 46) || 10000;
+  c.font = '10px ui-monospace,Menlo,monospace'; c.textBaseline = 'top';
+  for (let f = Math.ceil(anim.start / nice) * nice; f <= anim.end; f += nice) {
+    const x = frameX(f, w); c.fillStyle = '#2b3138'; c.fillRect(x, 0, 1, h - 6); c.fillStyle = '#5b6470'; c.fillText(f, x + 3, 3);
+  }
+  // keyframes
+  c.fillStyle = '#6cb8ff';
+  for (const k of anim.keys) if (k >= anim.start && k <= anim.end) { const x = frameX(k, w); c.beginPath(); c.moveTo(x, h - 17); c.lineTo(x + 3.5, h - 13); c.lineTo(x, h - 9); c.lineTo(x - 3.5, h - 13); c.fill(); }
+  // playhead
+  const x = frameX(anim.frame, w), label = String(anim.frame), lw = c.measureText(label).width + 8;
+  c.fillStyle = '#f5a623'; c.fillRect(x - 1, 0, 2, h);
+  const lx = Math.min(Math.max(x - lw / 2, 1), w - lw - 1); c.beginPath(); c.roundRect(lx, 1, lw, 14, 3); c.fill();
+  c.fillStyle = '#1a1306'; c.fillText(label, lx + 4, 3);
+  if (document.activeElement !== $('tlFrame')) $('tlFrame').value = anim.frame;
+  $('tlRange').textContent = `/ ${anim.end}`;
+  $('tlTime').textContent = tr('tl.time', { s: ((anim.frame - anim.start) / anim.fps).toFixed(2), fps: anim.fps }) + (anim.animated ? '' : tr('tl.still'));
+}
+new ResizeObserver(drawTimeline).observe(tl);
+
+function setFrame(f, scrub) {
+  f = Math.min(anim.end, Math.max(anim.start, Math.round(f)));
+  if (anim.playing) { playFrom = f; playT0 = performance.now(); }
+  if (f === anim.frame && scrub) return;
+  anim.frame = f; drawTimeline();
+  if (anim.playing) return;
+  if (frameCache.has(f)) {
+    show(frameCache.get(f), true);
+    if (scrub) { gen++; pending = null; return; }   // already rendered: nothing to ask for until the scrub ends
+  }
+  requestFrame(scrub ? 'scrub' : 'full', true);
+}
+function play(on) {
+  anim.playing = on; $('tlPlayIcon').setAttribute('d', on ? 'M2.5 1.5h2.5v9H2.5zM7 1.5h2.5v9H7z' : 'M2.5 1v10l8-5z');
+  $('tlPlay').setAttribute('aria-label', tr(on ? 'tl.pause' : 'tl.play'));
+  if (on) { gen++; pending = null; playFrom = anim.frame >= anim.end ? anim.start : anim.frame; playT0 = performance.now(); shown = 0; shownAt = playT0; clearInterval(playTimer); playTimer = setInterval(tick, 8); }
+  else { clearInterval(playTimer); requestFrame('full', true); }
+}
+function tick() {
+  if (!anim.playing) return;
+  const now = performance.now(), n = frames();
+  const f = wrapFrame(playFrom + Math.floor((now - playT0) * anim.fps / 1000));
+  if (f !== anim.frame) {
+    anim.frame = f;
+    if (frameCache.has(f)) { show(frameCache.get(f), true); shown++; }
+    drawTimeline();
+  }
+  if (!inflight && frameCache.size < Math.min(n, CACHE_MAX)) {
+    // ask for the frame the playhead will be on when the answer arrives; once that is cached, fill gaps further on
+    const lead = Math.max(1, Math.ceil(latency * anim.fps / 1000));
+    for (let i = 0; i < Math.min(n, 400); i++) {
+      const g = wrapFrame(f + lead + i);
+      if (!frameCache.has(g)) { submit({ gen, play: true, cache: true, frame: g }); break; }
+    }
+  }
+  if (now - shownAt > 1000) {
+    playFps = shown * 1000 / (now - shownAt); shown = 0; shownAt = now;
+    $('badge').className = 'badge';
+    $('badge').textContent = tr('badge.playing', { shading: tr('shade.' + shading), fps: playFps.toFixed(0), rate: anim.fps, ready: Math.min(frameCache.size, n), n });
+  }
+}
+$('tlPlay').onclick = () => play(!anim.playing);
+$('tlStart').onclick = () => setFrame(anim.start); $('tlEnd').onclick = () => setFrame(anim.end);
+$('tlPrev').onclick = () => setFrame(anim.frame <= anim.start ? anim.end : anim.frame - 1);
+$('tlNext').onclick = () => setFrame(anim.frame >= anim.end ? anim.start : anim.frame + 1);
+$('tlFrame').onchange = () => setFrame(+$('tlFrame').value || anim.start);
+function scrubTo(e) {
+  const r = tl.getBoundingClientRect();
+  setFrame(anim.start + (e.clientX - r.left - PAD) / Math.max(1, r.width - 2 * PAD) * (frames() - 1), true);
+}
+tl.addEventListener('pointerdown', e => { scrubbing = true; tl.setPointerCapture(e.pointerId); scrubTo(e); });
+tl.addEventListener('pointermove', e => { if (scrubbing) scrubTo(e); });
+function endScrub() { if (scrubbing) { scrubbing = false; if (!anim.playing) requestFrame('full', true); } }
+tl.addEventListener('pointerup', endScrub); tl.addEventListener('pointercancel', endScrub);
+document.addEventListener('keydown', e => {
+  const el = e.target instanceof Element ? e.target : document.body;
+  if (el.closest('input,select,textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+  const side = { t: 'L', n: 'R' }[e.key.toLowerCase()];
+  if (side) { setPanel(side, !$('panel' + side).classList.contains('collapsed')); return; }
+  if ($('timeline').hidden) return;
+  const act = { ' ': () => play(!anim.playing), ArrowLeft: () => $('tlPrev').onclick(), ArrowRight: () => $('tlNext').onclick(),
+                Home: () => setFrame(anim.start), End: () => setFrame(anim.end) }[e.key];
+  if (act) { e.preventDefault(); if (el.closest('button')) el.blur(); act(); }
+});
+// called from poll(): follow the scene's frame range, rate and keyframes; an edit drops the cached frames
+let animSceneAt = 0;
+function syncAnim(a, sceneAt) {
+  if (!a) return;
+  const edited = sceneAt !== animSceneAt; animSceneAt = sceneAt;
+  if (edited) clearCache();
+  Object.assign(anim, { fps: a.fps, animated: a.animated, targets: a.targets || [],
+                        scene: { start: a.start, end: Math.max(a.start, a.end), keys: a.keys } });
+  for (const o of Object.keys(anim.pick)) {   // a picked action that no longer exists falls back to the scene's
+    const t = anim.targets.find(t => t.object === o);
+    if (!t || !t.actions.some(x => x.name === anim.pick[o])) delete anim.pick[o];
+  }
+  const sig = JSON.stringify(anim.targets.map(t => [t.object, t.active, t.actions.map(x => [x.name, x.start, x.end])]));
+  if (sig !== pickerSig) { pickerSig = sig; buildActionPicker(); }
+  if (!anim.ready) { anim.ready = true; anim.frame = a.frame; }
+  applyRange();
+  if (edited) drawTimeline();
+}
+let pickerSig = '';
+function pickedAction() {
+  const t = anim.targets.find(t => t.object === anim.target);
+  return (t && t.actions.find(x => x.name === anim.pick[t.object])) || null;
+}
+function applyRange() {
+  const a = pickedAction();
+  anim.start = a ? a.start : anim.scene.start;
+  anim.end = Math.max(anim.start, a ? (a.loops ? a.end - 1 : a.end) : anim.scene.end);   // a loop's last frame repeats its first
+  anim.keys = a ? a.keys : anim.scene.keys;
+  anim.frame = Math.min(anim.end, Math.max(anim.start, anim.frame));
+}
+function buildActionPicker() {
+  const ts = anim.targets; $('tlAct').hidden = !ts.length;
+  if (!ts.length) { anim.target = null; return; }
+  if (!ts.some(t => t.object === anim.target)) anim.target = ts[0].object;
+  const t = ts.find(t => t.object === anim.target);
+  $('tlTarget').hidden = ts.length < 2;
+  $('tlTarget').innerHTML = ts.map(t => `<option value="${esc(t.object)}">${esc(t.object)}</option>`).join('');
+  $('tlTarget').value = anim.target;
+  $('tlAction').innerHTML = `<option value="">${esc(tr('tl.default'))}${t.active ? ' · ' + esc(t.active) : ''}</option>` +
+    t.actions.map(x => `<option value="${esc(x.name)}">${esc(tr('tl.frames', { name: x.name, n: x.end - x.start + (x.loops ? 0 : 1) }))}</option>`).join('');
+  $('tlAction').value = anim.pick[anim.target] || '';
+}
+$('tlTarget').onchange = () => { anim.target = $('tlTarget').value; buildActionPicker(); applyRange(); drawTimeline(); $('tlTarget').blur(); };
+$('tlAction').onchange = () => {
+  const v = $('tlAction').value;
+  if (v) anim.pick[anim.target] = v; else delete anim.pick[anim.target];
+  applyRange();
+  if (anim.playing) { anim.frame = playFrom = anim.start; playT0 = performance.now(); }
+  drawTimeline(); requestFrame('full');   // every frame looks different now: this drops the cached ones
+  $('tlAction').blur();                   // so Space plays instead of reopening the list
+};
+function updateCamInfo() {
+  const p = camPos();
+  $('camInfo').textContent = tr('cam', { x: p[0].toFixed(1), y: p[1].toFixed(1), z: p[2].toFixed(1), fov: cam.fov, d: cam.dist.toFixed(1) });
+  drawGizmo();
+  requestAnimationFrame(updateCamInfo);
+}
+updateCamInfo();
+new ResizeObserver(() => { if (lastState.scene && lastState.scene.bounds) requestFrame('full'); }).observe(wrap);
+
+// ---------- side panels: hide either one to give the viewport the room (T / N, as in Blender)
+function setPanel(side, hide) {
+  document.querySelector('main').classList.toggle(side === 'L' ? 'noleft' : 'noright', hide);
+  $('panel' + side).classList.toggle('collapsed', hide);
+  try { localStorage.setItem('bs_panel' + side, hide ? '1' : '0'); } catch (e) {}
+}
+for (const side of ['L', 'R']) {
+  $('hide' + side).onclick = () => setPanel(side, true); $('show' + side).onclick = () => setPanel(side, false);
+  // Folded or not as the person last left it; never chosen, folded where the frame is narrow (a panel beside a chat).
+  let kept = null; try { kept = localStorage.getItem('bs_panel' + side); } catch (e) {}
+  if (kept === '1' || (kept === null && innerWidth < 720)) { document.querySelector('main').classList.add(side === 'L' ? 'noleft' : 'noright'); $('panel' + side).classList.add('collapsed'); }
+}
+
+// ---------- outliner: collections and parent/child nesting, as in Blender's
+const ICONS = {
+  COLLECTION: '<rect x="2" y="3" width="10" height="8.5" rx="1.5"/><path d="M2 6h10"/>',
+  MESH: '<path d="M7 2.2 12.3 11.5H1.7z"/>',
+  ARMATURE: '<circle cx="3.6" cy="10.4" r="1.6"/><circle cx="10.4" cy="3.6" r="1.6"/><path d="M4.8 9.2 9.2 4.8"/>',
+  CAMERA: '<rect x="1.5" y="4" width="7.5" height="6" rx="1"/><path d="M9 6.2 12.5 4.5v5L9 7.8"/>',
+  LIGHT: '<circle cx="7" cy="7" r="2.4"/><path d="M7 1.2v1.6M7 11.2v1.6M1.2 7h1.6M11.2 7h1.6M2.9 2.9 4 4M10 10l1.1 1.1M2.9 11.1 4 10M10 4l1.1-1.1"/>',
+  EMPTY: '<path d="M7 1.5v11M1.5 7h11M3.2 10.8l7.6-7.6"/>',
+  CURVE: '<path d="M1.5 11C3 3 11 11 12.5 3"/>',
+  FONT: '<path d="M3 3h8M7 3v8.5"/>',
+  OTHER: '<circle cx="7" cy="7" r="3"/>',
+};
+let closedNodes = new Set(); try { closedNodes = new Set(JSON.parse(localStorage.getItem('bs_closed') || '[]')); } catch (e) {}
+function treeHtml(scene, filter) {
+  const objs = scene.objects || [], names = new Set(objs.map(o => o.name)), kids = new Map();
+  const add = (k, n) => { if (!kids.has(k)) kids.set(k, []); kids.get(k).push(n); };
+  for (const c of scene.collections || []) add(c.parent ? 'c:' + c.parent : 'root', { key: 'c:' + c.name, kind: 'COLLECTION', name: c.name, off: c.hidden });
+  // a child object sits under its parent; everything else under the collection that holds it
+  for (const o of objs) add(o.parent && names.has(o.parent) ? 'o:' + o.parent : o.collection ? 'c:' + o.collection : 'root',
+                            { key: 'o:' + o.name, kind: o.type, name: o.name, off: o.hidden, obj: true });
+  const row = (n, depth, tw) => `<li class="${n.obj ? '' : 'coll'}${n.obj && n.name === selected ? ' sel' : ''}${n.off ? ' off' : ''}" data-key="${esc(n.key)}"${n.obj ? ` data-name="${esc(n.name)}"` : ''} style="padding-left:${4 + depth * 14}px" title="${esc(n.name)}${n.obj ? ' · ' + esc(String(n.kind).toLowerCase()) : ' · ' + esc(tr('out.collection'))}${n.off ? ' · ' + esc(tr('out.hidden')) : ''}">${tw}<svg class="ic ${esc(n.kind)}" viewBox="0 0 14 14">${ICONS[n.kind] || ICONS.OTHER}</svg><span class="nm">${esc(n.name)}</span>${kids.has(n.key) ? `<span class="ct">${kids.get(n.key).length}</span>` : ''}</li>`;
+  if (filter) {
+    const hits = objs.filter(o => o.name.toLowerCase().includes(filter));
+    return hits.length ? hits.map(o => row({ key: 'o:' + o.name, kind: o.type, name: o.name, off: o.hidden, obj: true }, 0, '<span class="tw"></span>')).join('')
+                       : `<li class="none">${esc(tr('out.none'))}</li>`;
+  }
+  const walk = (key, depth) => (kids.get(key) || []).map(n => {
+    const has = kids.has(n.key), open = has && !closedNodes.has(n.key);
+    return row(n, depth, `<span class="tw${open ? ' open' : ''}"${has ? ' data-toggle' : ''}>${has ? '<svg viewBox="0 0 8 8"><path d="M2 .8 6.4 4 2 7.2z"/></svg>' : ''}</span>`) + (open ? walk(n.key, depth + 1) : '');
+  }).join('');
+  return walk('root', 0) || `<li class="none">${esc(tr('out.empty'))}</li>`;
+}
+function drawOutliner() {
+  const html = treeHtml(lastState.scene || {}, $('objFilter').value.trim().toLowerCase());
+  if ($('outliner').dataset.html !== html) { $('outliner').innerHTML = html; $('outliner').dataset.html = html; }
+}
+$('objFilter').oninput = drawOutliner;
+$('outliner').onclick = e => {
+  const li = e.target.closest('li[data-key]'); if (!li) return;
+  if (e.target.closest('[data-toggle]') || !li.dataset.name) {   // the arrow, or anywhere on a collection row
+    closedNodes.has(li.dataset.key) ? closedNodes.delete(li.dataset.key) : closedNodes.add(li.dataset.key);
+    try { localStorage.setItem('bs_closed', JSON.stringify([...closedNodes].slice(-300))); } catch (e) {}
+    drawOutliner();
+  } else select(li.dataset.name);
+};
+let selected = null;
+function select(name) {
+  selected = name;
+  document.querySelectorAll('#outliner li').forEach(li => li.classList.toggle('sel', li.dataset.name === name));
+  const o = (lastState.scene.objects || []).find(x => x.name === name);
+  const line = (key, value) => `\n${tr(key).padEnd(10)}${value}`;
+  $('objinfo').textContent = o ? o.name + line('obj.type', o.type) + line('obj.location', o.location.map(v => v.toFixed(2)).join(', ')) +
+    (o.parent ? line('obj.parent', o.parent) : '') + (o.collection ? line('obj.in', o.collection) : '') : tr('nothingSelected');
+  if (o && o.type !== 'CAMERA' && o.type !== 'LIGHT') frameBox(o.center, o.size);
+}
+
+// ---------- tabs ----------
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => showTab(t.dataset.tab));
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', t.dataset.tab === name));
+  document.querySelectorAll('[data-pane]').forEach(p => p.hidden = p.dataset.pane !== name);
+  $('timeline').hidden = name !== 'live'; if (name !== 'live' && anim.playing) play(false);
+  if (name === 'live') drawTimeline();
+}
+
+// ---------- render panel ----------
+function view() {
+  return { coords: 'blender', position: camPos(), target: cam.target.slice(), fov: cam.fov, aspect: aspect(), frame: anim.frame, actions: anim.pick,
+           engine: $('engine').value, samples: +$('samples').value, width: +$('width').value };
+}
+async function post(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (r.status === 401) { notConnected(); return {}; }
+  return r.json();
+}
+function toast(msg, bad) {
+  const t = document.createElement('div'); t.className = 'toast' + (bad ? ' err' : ''); t.textContent = msg;
+  document.body.appendChild(t); setTimeout(() => t.remove(), 5000);
+}
+function setBusy(b) { $('renderView').disabled = b; $('setCam').disabled = b; }
+$('renderView').onclick = async () => {
+  setBusy(true); toast(tr('toast.rendering'));
+  try {
+    const r = await post('api/render_view', view());
+    if (r.error) toast(tr('toast.renderFailed', { error: r.error }), true);
+    else if (r.result) { toast(tr('toast.rendered', { frame: r.result.frame, s: r.result.seconds, how: r.result.engine === 'CYCLES' ? tr('toast.cyclesOn', { device: r.result.device }) : 'EEVEE' })); showTab('last'); }
+  } finally { setBusy(false); }
+};
+$('setCam').onclick = async () => {
+  setBusy(true);
+  try {
+    const r = await post('api/set_camera', view());
+    if (r.error) toast(tr('toast.camFailed', { error: r.error }), true);
+    else if (r.result) toast(tr('toast.camMoved', { camera: r.result.camera }));
+  } finally { setBusy(false); }
+};
+
+// ---------- server state: status, outliner, edits ----------
+let lastState = { scene: {} }, lastPreview = 0, lastRender = '', framed = false;
+function ago(t) { const s = Math.round(Date.now() / 1000 - t); return s < 60 ? tr('ago.s', { n: s }) : tr('ago.min', { n: Math.round(s / 60) }); }
+async function poll() {
+  try {
+    if (!connected) return;
+    const resp = await fetch('api/state');
+    if (resp.status === 401) { notConnected(); return; }
+    const s = await resp.json(); lastState = s; showProject(s.project); syncAnim(s.scene && s.scene.anim, s.scene_at);
+    $('pill').className = 'pill' + (s.busy ? ' busy' : '');
+    $('pilltext').textContent = s.busy ? tr('working', { what: TEXTS[LANG]['busy.' + s.busy] ?? String(s.busy).replaceAll('_', ' ') }) : tr('idle');
+    $('meta').textContent = `Blender ${s.blender} · ${s.gpu}`;
+    if (!framed && s.scene && s.scene.bounds) { framed = true; frameBox(s.scene.bounds.center, s.scene.bounds.size); }
+    // an edit re-rendered the viewport on the server: show it
+    if (s.viewport_at && s.viewport_at > lastSeenViewport + 0.05 && !inflight && !drag && !anim.playing) {
+      lastSeenViewport = s.viewport_at;
+      show('files/viewport/live.jpg?t=' + s.viewport_at, true);
+      $('badge').textContent = tr('badge.edited', { ms: s.viewport_ms });
+    }
+    const objs = (s.scene && s.scene.objects) || [];
+    $('objcount').textContent = objs.length;
+    drawOutliner();
+    $('sceneAge').textContent = s.scene_at ? tr('changed', { ago: ago(s.scene_at) }) : '';
+    if (s.preview_at && s.preview_at !== lastPreview) { lastPreview = s.preview_at; $('prevImg').src = 'files/previews/latest.png?t=' + s.preview_at; $('emptyPrev').hidden = true; }
+    if (s.renders.length && s.renders[0].rel !== lastRender) { lastRender = s.renders[0].rel; $('lastImg').src = fileUrl(lastRender); $('emptyLast').hidden = true; }
+    $('rcount').textContent = s.renders.length || '';
+    const g = s.renders.map(r => `<figure data-src="${esc(fileUrl(r.rel))}"><img loading="lazy" src="${esc(fileUrl(r.rel))}" alt=""><figcaption>${esc(String(r.rel).split('/').pop())} · ${esc(r.seconds)}s</figcaption></figure>`).join('');
+    if ($('gallery').dataset.html !== g) { $('gallery').innerHTML = g; $('gallery').dataset.html = g;
+      $('gallery').querySelectorAll('figure').forEach(f => f.onclick = () => { const lb = document.createElement('div'); lb.className = 'lightbox'; const big = document.createElement('img'); big.src = f.dataset.src; big.alt = ''; lb.appendChild(big); lb.onclick = () => lb.remove(); document.body.appendChild(lb); }); }
+    $('log').textContent = s.log.join('\n');
+  } catch (e) { $('pill').className = 'pill off'; $('pilltext').textContent = tr('disconnected'); }
+}
+setInterval(poll, 1000); poll();
+
+// ---------- workspace: switch, create, save, upload, download projects ----------
+let project = { path: null, name: 'untitled', dirty: false }, wsBusy = false;
+function showProject(p) {
+  if (!p) return;
+  if (p.path !== project.path) { framed = false; selected = null; anim.ready = false; anim.pick = {}; anim.target = null; if (anim.playing) play(false); }   // a different project: frame its contents, start on its frame
+  project = p;
+  $('wsName').textContent = p.path ? p.name : tr('untitled'); $('wsDirty').hidden = !p.dirty;
+  $('wsSave').disabled = !p.path; $('wsDownload').disabled = !p.path;
+}
+
+function openMenu(open) {
+  $('wsMenu').hidden = !open; $('wsBtn').setAttribute('aria-expanded', open);
+  if (open) { closeForm(); loadProjects(); }
+}
+$('wsBtn').onclick = e => { e.stopPropagation(); openMenu($('wsMenu').hidden); };
+document.addEventListener('click', e => { if (!$('wsMenu').hidden && !e.target.closest('.ws')) openMenu(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('wsMenu').hidden) openMenu(false); });
+
+function size(b) { return b > 1e9 ? (b / 1e9).toFixed(1) + ' GB' : b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' KB'; }
+async function loadProjects() {
+  const r = await fetch('api/projects'); if (r.status === 401) { notConnected(); return; }
+  const list = (await r.json()).projects;
+  $('wsList').innerHTML = list.length ? list.map(p => `<li data-path="${esc(p.path)}" class="${p.path === project.path ? 'cur' : ''}">
+      <span class="th" style="${p.thumb ? esc(`background-image:url('${fileUrl(p.thumb)}?t=${Number(p.modified)}')`) : ''}">${p.thumb ? '' : esc(tr('ws.noPreview'))}</span>
+      <span class="info"><div class="nm">${esc(p.name)}${p.path === project.path ? `<span class="tag">${esc(tr('ws.open'))}</span>` : ''}</div>
+      <div class="sub">${esc(p.path.replace(/^scenes\//, ''))} · ${size(p.bytes)} · ${esc(ago(p.modified))}</div></span></li>`).join('')
+    : `<div class="wsempty">${esc(tr('ws.none'))}</div>`;
+  $('wsList').querySelectorAll('li').forEach(li => li.onclick = () => {
+    if (wsBusy || li.dataset.path === project.path) return;
+    guard(tr('ws.openQ', { name: li.querySelector('.nm').firstChild.textContent }), () => act({ action: 'open', path: li.dataset.path }, 'ws.opened'));
+  });
+}
+
+function closeForm() { $('wsForm').hidden = true; $('wsForm').innerHTML = ''; }
+function form(html, wire) { $('wsForm').innerHTML = html; $('wsForm').hidden = false; wire($('wsForm')); }
+
+// unsaved work: ask before replacing it
+function guard(what, go) {
+  if (!project.dirty) return go();
+  form(`<p>${esc(what)}?</p><div class="sub">${esc(project.path ? tr('ws.unsavedIn', { name: project.name }) : tr('ws.neverSaved'))}</div>
+    <div class="btns"><button data-b="cancel">${esc(tr('cancel'))}</button><button data-b="discard" class="danger">${esc(tr('discard'))}</button>
+    ${project.path ? `<button data-b="save" class="go">${esc(tr('saveContinue'))}</button>` : ''}</div>`, f => {
+    f.querySelector('[data-b=cancel]').onclick = closeForm;
+    f.querySelector('[data-b=discard]').onclick = () => { closeForm(); go(); };
+    const sv = f.querySelector('[data-b=save]');
+    if (sv) sv.onclick = async () => { closeForm(); if (await act({ action: 'save' }, 'ws.saved', true)) go(); };
+  });
+}
+
+async function act(body, done, keepOpen) {
+  wsBusy = true; document.querySelectorAll('.wsacts button').forEach(b => b.disabled = true);
+  try {
+    const r = await post('api/project', body);
+    if (r.error) { toast(r.error, true); return false; }
+    await poll(); toast(tr(done, { name: project.name }));
+    if (!keepOpen) openMenu(false); else loadProjects();
+    if (body.action === 'open' || body.action === 'new') requestFrame('full');
+    return true;
+  } finally { wsBusy = false; document.querySelectorAll('.wsacts button').forEach(b => b.disabled = false); showProject(project); }
+}
+
+function nameForm(title, label, go, extra, submit) {
+  form(`<p>${esc(title)}</p><input type="text" id="wsNameIn" placeholder="${esc(label)}" maxlength="80" autocomplete="off">${extra}
+    <div class="btns"><button data-b="cancel">${esc(tr('cancel'))}</button><button data-b="ok" class="go">${esc(go)}</button></div>`, f => {
+    const inp = f.querySelector('#wsNameIn'); inp.focus();
+    const ok = () => { const v = inp.value.trim(); if (!v) { inp.focus(); return; } submit(v, f); };
+    f.querySelector('[data-b=ok]').onclick = ok; inp.onkeydown = e => { if (e.key === 'Enter') ok(); };
+    f.querySelector('[data-b=cancel]').onclick = closeForm;
+  });
+}
+$('wsNew').onclick = () => guard(tr('ws.newQ'), () => nameForm(tr('ws.create'), tr('ws.name'), tr('ws.createGo'),
+  `<label class="sub"><input type="checkbox" id="wsTpl"> ${esc(tr('ws.template'))}</label>`,
+  (name, f) => act({ action: 'new', name, template: f.querySelector('#wsTpl').checked ? 'default' : 'empty' }, 'ws.created')));
+$('wsSave').onclick = () => act({ action: 'save' }, 'ws.saved', true);
+$('wsSaveAs').onclick = () => nameForm(tr('ws.saveAsTitle'), tr('ws.newName'), tr('ws.saveAsGo'), '',
+  name => act({ action: 'save_as', name }, 'ws.saved', true));
+$('wsDownload').onclick = () => { if (project.path) location.href = fileUrl(project.path); };
+$('wsUpload').onclick = () => $('wsFile').click();
+$('wsFile').onchange = async () => {
+  const file = $('wsFile').files[0]; $('wsFile').value = ''; if (!file) return;
+  const name = file.name.replace(/\.blend$/i, '');
+  toast(tr('ws.uploading', { name: file.name, size: size(file.size) }));
+  const r = await fetch('api/project/upload?name=' + encodeURIComponent(name), { method: 'POST', body: file });
+  if (r.status === 401) { notConnected(); return; }
+  const j = await r.json();
+  if (j.error) { toast(tr('ws.uploadFailed', { error: j.error }), true); return; }
+  await loadProjects();
+  guard(tr('ws.openUploaded', { name }), () => act({ action: 'open', path: j.result.path }, 'ws.opened'));
+};
+</script>
+</body>
+</html>

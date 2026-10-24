@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.log
+*.tgz
+# What each extension's build makes (npm pack builds it first)
+*/web/
+*/server.js
+*/viewer.html
+# Pithagoras, fetched and built for the portal-tier tests (scripts/pithagoras.sh)
+.pithagoras/
+__pycache__/

@@ -1,0 +1,72 @@
+# A release of an extension, on its tag: blender-v<version>, the version in blender/package.json.
+#
+# 1. The image is built from blender/server/Dockerfile (amd64), tagged with the version.
+# 2. Its smoke test (scripts/smoke-blender.sh): it answers MCP with the tools blender/server/tools.json has, and refuses
+#    requests without its token.
+# 3. It is pushed to GHCR, linked to this repository by its org.opencontainers.image.source label. A package pushed to a
+#    personal account starts private: switch it to public once, in the package's settings on GitHub, or no portal can
+#    pull it.
+# 4. The GitHub release is made with what the GPL asks to go with the image: Blender's source, checked against
+#    blender.org's published sum; the sources of the copyleft libraries the official Linux build links in (FFmpeg,
+#    built with x264 and x265, and the others under the GPL, the LGPL or the MPL: scripts/blender-sources.sh), each
+#    checked against the hash Blender's source pins; and the list of the image's Ubuntu packages (their sources are in
+#    Ubuntu's archive).
+# 5. The package is published to npm (secret NPM_TOKEN), last, so that a version on npm never names an image that is
+#    not there.
+name: Release
+
+on:
+  push:
+    tags: ["blender-v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  blender:
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ghcr.io/thecodacus/pithagoras-blender
+      BLENDER_VERSION: 5.2.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - name: The tag is the package's version
+        run: |
+          VERSION=$(node -p "require('./blender/package.json').version")
+          [ "$GITHUB_REF_NAME" = "blender-v$VERSION" ] || { echo "the tag $GITHUB_REF_NAME is not blender-v$VERSION"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Build the image
+        run: docker build -f blender/server/Dockerfile --build-arg VERSION="$VERSION" -t "$IMAGE:$VERSION" blender
+      - name: Smoke test
+        run: ./scripts/smoke-blender.sh "$IMAGE:$VERSION"
+      - name: Its size
+        run: docker image inspect "$IMAGE:$VERSION" --format '{{.Size}} bytes' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Push to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:$VERSION"
+      - name: The sources that go with the image
+        run: |
+          mkdir sources && cd sources
+          curl -fsSLO "https://download.blender.org/source/blender-$BLENDER_VERSION.tar.xz"
+          curl -fsSLO "https://download.blender.org/source/blender-$BLENDER_VERSION.tar.xz.md5sum"
+          md5sum -c "blender-$BLENDER_VERSION.tar.xz.md5sum"
+          ../scripts/blender-sources.sh "$BLENDER_VERSION" .
+          docker run --rm --entrypoint dpkg-query "$IMAGE:$VERSION" -W -f '${Package}\t${Version}\t${Architecture}\n' > "pithagoras-blender-$VERSION-packages.txt"
+          cp ../blender/NOTICE "pithagoras-blender-$VERSION-NOTICE.txt"
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "Blender $VERSION" --notes "pithagoras-blender $VERSION: the extension (npm:pithagoras-blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
+      - run: npm ci
+      - name: Publish to npm
+        run: npm publish -w blender --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

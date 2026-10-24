@@ -1,0 +1,198 @@
+{
+  "instructions": "Tools for a headless Blender 5 server with GPU rendering. Build and edit scenes with execute_code (bpy), check your work with preview (it returns an image), render with render, and keep projects in scenes/ with save_file / open_file / list_projects. The person watches the scene in the Blender panel beside the chat, which refreshes after every scene change; its timeline plays the scene's frame range, so set frame_start / frame_end / fps when you animate. One Blender is shared by every chat and the person: check list_projects before replacing the open scene. Paths are relative to the server's data folder; projects live in scenes/<name>.blend.",
+  "tools": [
+    {
+      "name": "ping",
+      "description": "Blender version, GPU devices and the open file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "get_scene_info",
+      "description": "Current scene: engine, resolution, frame range and up to 200 objects with transforms.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "get_object_info",
+      "description": "Transform, dimensions, materials and mesh stats of one object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Object name"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "execute_code",
+      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. The live browser view refreshes afterwards.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Python source"
+          },
+          "read_only": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true when the code only inspects the scene: skips the unsaved-changes mark and the browser view refresh"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      }
+    },
+    {
+      "name": "preview",
+      "description": "Quick Workbench render from the scene camera (or an automatic view if there is none), returned as an image. Use it to check your work after edits.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "render",
+      "description": "Full render from the scene camera, saved under renders/ unless `path` is given. Returns the image unless return_image is false.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "engine": {
+            "type": "string",
+            "enum": [
+              "CYCLES",
+              "EEVEE",
+              "WORKBENCH"
+            ],
+            "default": "CYCLES"
+          },
+          "samples": {
+            "type": "integer",
+            "description": "Cycles samples"
+          },
+          "resolution": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "frame": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string",
+            "description": "Output .png path. Paths are relative to the server's data folder; projects live in scenes/<name>.blend."
+          },
+          "return_image": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "export",
+      "description": "Export the scene to a file under the data folder.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "glb",
+              "gltf",
+              "fbx",
+              "obj",
+              "usd",
+              "stl"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "Output path, e.g. exports/scene.glb. Paths are relative to the server's data folder; projects live in scenes/<name>.blend."
+          }
+        },
+        "required": [
+          "format",
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "list_projects",
+      "description": "Projects (.blend files) in scenes/, newest first, plus the open project and whether it has unsaved changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "open_file",
+      "description": "Open a .blend, replacing the current scene (unsaved changes are lost; check list_projects first).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "e.g. scenes/island.blend. Paths are relative to the server's data folder; projects live in scenes/<name>.blend."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "save_file",
+      "description": "Save the scene to a .blend (also makes it the open project and writes its thumbnail).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "e.g. scenes/my_project.blend. Paths are relative to the server's data folder; projects live in scenes/<name>.blend."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "new_scene",
+      "description": "Start a new scene, replacing the current one (unsaved changes are lost). With `name` it is saved straight away as scenes/<name>.blend.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "empty": {
+            "type": "boolean",
+            "default": true,
+            "description": "false = Blender's default cube scene"
+          }
+        },
+        "required": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+pithagoras-blender
+Copyright 2026 Anirban Kar and Contributors
+
+The extension (its TypeScript, the viewer page src/viewer.html, its build and its Dockerfile) is licensed under the
+Apache License, Version 2.0 (LICENSE), as the rest of the pithagoras-flair repository is. server/server.py, which runs
+inside Blender and uses its Python API (bpy), is licensed under the GNU General Public License, version 3 or (at your
+option) any later version (server/LICENSE). Of the two, the image holds server.py alone, with its licence in
+/usr/share/doc/pithagoras-blender/LICENSE.GPL-3.0, beside this NOTICE.
+
+This extension is not made or endorsed by the Blender Foundation. Blender is a trademark of the Blender Foundation; the
+name is used here only to say what the extension runs.
+
+
+The container image (ghcr.io/thecodacus/pithagoras-blender) redistributes:
+
+- Blender 5.2.2: the official Linux build, blender-5.2.2-linux-x64.tar.xz from
+  https://download.blender.org/release/Blender5.2/, checked against blender.org's published SHA-256, unpacked in
+  /opt/blender. Blender's source code is licensed under the GNU General Public License, version 2 or any later
+  version, with parts under other licences (Apache-2.0 for Cycles among them); its binaries are distributed under the
+  GNU General Public License, version 3 or any later version. The licence texts Blender ships are in the image at
+  /opt/blender/copyright.txt and in /opt/blender/license/.
+
+  The official build links in libraries of other projects, and the binary's corresponding source is Blender's source
+  and theirs. Those under a copyleft licence, in the Linux build of 5.2.2: FFmpeg 8.1, configured with --enable-gpl
+  and built with x264 and x265, so under the GPL as a whole (LGPL-2.1-or-later on its own); x264 and x265
+  (GPL-2.0-or-later); FFTW 3.3.10, FLAC 1.4.2, GMP 6.3.0, Potrace 1.16 and Rubber Band 4.0.0 (GPL-2.0-or-later, as
+  Blender's build lists them); LAME 3.100, libsndfile 1.2.2, OpenAL Soft 1.23.1 and FriBidi 1.0.12
+  (LGPL-2.1-or-later); libheif 1.20.2 (LGPL-3.0-or-later); OpenVDB 13.0.0 and Eigen (MPL-2.0). The other libraries
+  are under permissive licences; the Python packages in Blender's own Python are in the image as their source.
+
+  Every GitHub release of pithagoras-flair that publishes the image attaches the corresponding source, so it does not
+  depend on blender.org keeping it: blender-5.2.2.tar.xz from https://download.blender.org/source/, checked against
+  its published sum, which holds the build's recipe and the patches it applies to those libraries
+  (build_files/build_environment/); and the source of each library named above, as the official build fetched it
+  from Blender's mirror (https://projects.blender.org/blender/lib-source), checked against the hash Blender's source
+  pins for it (build_files/build_environment/cmake/versions.cmake), listed in blender-5.2.2-libraries.txt.
+
+- Ubuntu 24.04 (the base image ubuntu:24.04) and the packages installed on it: ca-certificates, curl, xz-utils and the
+  X11 and GL runtime libraries Blender links against (libx11-6, libxi6, libxxf86vm1, libxfixes3, libxrender1,
+  libxkbcommon0, libsm6, libice6, libgl1, libegl1, libglx0, libopengl0, libxext6, libxrandr2, libxinerama1,
+  libxcursor1), with what they depend on. Each is under its own licence, in /usr/share/doc/<package>/copyright in the
+  image. Their sources are in Ubuntu's archive (https://archive.ubuntu.com/ubuntu/, `apt-get source <package>`), and the
+  list of the image's packages, with their versions, is attached to every release that publishes the image.
+
+The NVIDIA driver is not in the image: the NVIDIA container toolkit gives the container the host's driver as it starts,
+and the extension binds the driver's OptiX weights (/usr/share/nvidia/nvoptix.bin) from the host where the toolkit
+does not.

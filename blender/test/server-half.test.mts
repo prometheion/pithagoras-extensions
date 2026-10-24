@@ -6,7 +6,7 @@ import { openStore } from "../../shared/store.ts";
 import { fakeMcp, fakePortal, memoryDocker, TOOLS } from "./fakes.mts";
 
 /**
- * Blender's server half as the portal starts it: its routes at /api/x/pithagoras-blender, its tools, its viewer through
+ * Blender's server half as the portal starts it: its routes at /api/x/@pithagoras/blender, its tools, its viewer through
  * the proxy, with Docker in memory and an MCP server standing in for the container where Docker's reach says the
  * portal reaches it.
  */

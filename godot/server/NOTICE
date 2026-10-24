@@ -1,7 +1,7 @@
 pithagoras-godot container image
 Copyright 2026 Anirban Kar and Contributors
 
-This image is what the Pithagoras Godot extension (pithagoras-godot,
+This image is what the Pithagoras Godot extension (@pithagoras/godot,
 https://github.com/prometheion/pithagoras-extensions) runs. Its own files are under the Apache License 2.0:
 /opt/godot-server/server.py and the editor plugin /opt/godot-server/addon/godot_mcp_bridge. The plugin is copied into
 each Godot project the server opens, and is Apache-2.0 there too.

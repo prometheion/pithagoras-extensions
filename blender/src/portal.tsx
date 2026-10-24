@@ -14,4 +14,4 @@ export const tp = (n: number, one: string, other: string, vars?: Record<string, 
 export const msg = <T extends string>(text: T): T => text;
 
 /** Where Blender's page in Settings is. */
-export const SETTINGS_PAGE = "/settings/x/pithagoras-blender";
+export const SETTINGS_PAGE = "/settings/x/@pithagoras/blender";

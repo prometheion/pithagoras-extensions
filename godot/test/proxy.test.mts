@@ -7,7 +7,7 @@ import express from "express";
 import { proxyUi, uiUpgrade, writesFromHere } from "../../shared/proxy.ts";
 
 /**
- * What the viewer asks of the server, through the portal at /api/x/pithagoras-godot/ui/: the portal's cookie and the
+ * What the viewer asks of the server, through the portal at /api/x/@pithagoras/godot/ui/: the portal's cookie and the
  * page's own credentials left out, the server's token added, writes only from the portal's own page, the answers framed
  * only by the portal, run as no page of the portal's and never setting a cookie on its origin, the viewer the
  * extension's own, and the stream's WebSocket passed on both ways. That the portal asks for its sign-in first, of every
@@ -47,17 +47,17 @@ const stream = uiUpgrade(options);
 const router = express.Router();
 router.use(writesFromHere);
 router.use("/ui", ui);
-const app = express().use("/api/x/pithagoras-godot", router);
+const app = express().use("/api/x/%40pithagoras/godot", router);
 const portal = http.createServer(app);
 // Core checks the sign-in and the page, strips /api/x/<package>, and hands the stream to the extension's handler.
 portal.on("upgrade", (req, socket, head) => {
-  req.url = req.url!.replace(/^\/api\/x\/pithagoras-godot/, "");
+  req.url = req.url!.replace(/^\/api\/x\/%40pithagoras\/godot/, "");
   stream(req, socket, head);
 });
 portal.listen(0, "127.0.0.1");
 await new Promise((resolve) => portal.once("listening", resolve));
 const portalPort = (portal.address() as AddressInfo).port;
-const at = `http://127.0.0.1:${portalPort}/api/x/pithagoras-godot`;
+const at = `http://127.0.0.1:${portalPort}/api/x/%40pithagoras/godot`;
 after(() => {
   // What the tests leave open: the streams the stand-in took, and the proxy's kept connections to it.
   for (const s of streams) s.destroy();
@@ -132,7 +132,7 @@ function upgrade(url: string, headers: Record<string, string> = {}, first = "") 
   let text = "";
   socket.on("data", (d) => (text += d));
   socket.on("error", () => {});
-  const lines = [`GET /api/x/pithagoras-godot${url} HTTP/1.1`, `Host: 127.0.0.1:${portalPort}`, "Connection: Upgrade", "Upgrade: websocket", "Sec-WebSocket-Version: 13", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`)];
+  const lines = [`GET /api/x/%40pithagoras/godot${url} HTTP/1.1`, `Host: 127.0.0.1:${portalPort}`, "Connection: Upgrade", "Upgrade: websocket", "Sec-WebSocket-Version: 13", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`)];
   socket.write(`${lines.join("\r\n")}\r\n\r\n${first}`);
   return { socket, text: () => text, closed: new Promise((resolve) => socket.once("close", resolve)) };
 }

@@ -143,10 +143,10 @@ test("a container from before, on the portal's network, is made again on the ext
     // As the code before this made it: on the portal's network, without the server's host, with a hash of that.
     const old = blenderSpec({ card: { uuid: "GPU-1111" }, optix: "host", network: "container:portal-1", token: "t" }, 3870, "pithagoras-blender-data", "ghcr.io/prometheion/pithagoras-blender:0.1.0") as any;
     old.Env = old.Env.filter((e: string) => !e.startsWith("BLENDER_SERVER_HOST="));
-    return { id: "old", name: "pithagoras-blender", owner: "pithagoras-blender", spec: { ...old, Labels: { [SPEC_LABEL]: "0123456789abcdef" } }, state, exitCode: 0, restarts: 0, startedAt: "2026-10-23T00:00:00.000Z", log: "", networks: {} };
+    return { id: "old", name: "pithagoras-blender", owner: "@pithagoras/blender", spec: { ...old, Labels: { [SPEC_LABEL]: "0123456789abcdef" } }, state, exitCode: 0, restarts: 0, startedAt: "2026-10-23T00:00:00.000Z", log: "", networks: {} };
   };
   const running = await setup();
-  running.d.volumes.set("pithagoras-blender-data", "pithagoras-blender");
+  running.d.volumes.set("pithagoras-blender-data", "@pithagoras/blender");
   running.d.containers.set("pithagoras-blender", before("running"));
   assert.equal((await running.svc.status()).busy, true, "made again at the first look");
   // Until it is made again: a look that began before the remake says nothing of it.
@@ -174,7 +174,7 @@ test("a container on a network that was made again is stale", async () => {
   await settled(svc);
   const first = d.containers.get("pithagoras-blender")!.id;
   // Removed and made again under its name: another network, on which the container is not.
-  d.networks.set("pithagoras-blender-net", { id: "net-again", owner: "pithagoras-blender" });
+  d.networks.set("pithagoras-blender-net", { id: "net-again", owner: "@pithagoras/blender" });
   assert.equal((await svc.status()).busy, true);
   await settled(svc);
   assert.notEqual(d.containers.get("pithagoras-blender")!.id, first);

@@ -3,7 +3,7 @@ import type { ServerPortal } from "@pithagoras/extension-api/server";
 import type { ServerAddress, Service } from "../../../shared/service";
 
 /**
- * Blender's page in Settings, and its panel, at /api/x/pithagoras-blender/…, behind the portal's sign-in:
+ * Blender's page in Settings, and its panel, at /api/x/@pithagoras/blender/…, behind the portal's sign-in:
  *
  *   GET  /state       how the server stands (shared/service.ts `status`), with what the server says of its renderer
  *                     while it answers: the GPU backend Cycles uses and the denoiser the viewport uses

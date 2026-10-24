@@ -5,7 +5,7 @@ import type { Store } from "../../../shared/store";
 import { DISPLAYS, displayOf } from "../displays";
 
 /**
- * The Godot page in Settings, and the panel beside each chat, at /api/x/pithagoras-godot/…, behind the portal's
+ * The Godot page in Settings, and the panel beside each chat, at /api/x/@pithagoras/godot/…, behind the portal's
  * sign-in:
  *
  *   GET  /state       how the server stands (shared/service.ts `status`), the editor's own state while it answers,

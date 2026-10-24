@@ -26,4 +26,4 @@ await build({
   legalComments: "eof",
   logLevel: "warning",
 });
-console.log("pithagoras-godot: built web/ and lib/server.js");
+console.log("@pithagoras/godot: built web/ and lib/server.js");

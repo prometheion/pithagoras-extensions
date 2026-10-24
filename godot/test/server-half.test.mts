@@ -25,10 +25,10 @@ process.env.PITHAGORAS_GODOT_IMAGE = "flairtest-pithagoras-godot:0.1.0";
 const { default: godot } = await import("../src/server.ts");
 const stop = godot(fake.portal) as () => void;
 
-const app = express().use("/api/x/pithagoras-godot", fake.router);
+const app = express().use("/api/x/%40pithagoras/godot", fake.router);
 const portal = http.createServer(app).listen(0, "127.0.0.1");
 await new Promise((resolve) => portal.once("listening", resolve));
-const at = `http://127.0.0.1:${(portal.address() as AddressInfo).port}/api/x/pithagoras-godot`;
+const at = `http://127.0.0.1:${(portal.address() as AddressInfo).port}/api/x/%40pithagoras/godot`;
 after(async () => {
   stop();
   http.globalAgent.destroy();

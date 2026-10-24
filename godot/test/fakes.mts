@@ -27,7 +27,7 @@ type Kept = { spec: ContainerSpec; owner: string; id: string; running: boolean; 
  * container there is none of and for a container not on the network, and with `reachFails` in those words.
  */
 export function fakeDocker(options: { owner?: string; gpus?: string; noGpu?: string } = {}) {
-  const owner = options.owner ?? "pithagoras-godot";
+  const owner = options.owner ?? "@pithagoras/godot";
   const containers = new Map<string, Kept>();
   const volumes = new Set<string>();
   const networks = new Map<string, { id: string; owner: string }>();
@@ -167,7 +167,7 @@ export function fakePortal(docker?: Docker) {
   const router = express.Router();
   const portal = {
     version: 1,
-    extension: "pithagoras-godot",
+    extension: "@pithagoras/godot",
     executor: "host",
     log: (text: string) => void lines.push(text),
     dataDir: () => dataDir,

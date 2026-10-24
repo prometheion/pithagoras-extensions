@@ -15,4 +15,4 @@ import { buildExtension } from "@pithagoras/extension-api/build";
 const HERE = import.meta.dirname;
 await buildExtension({ dir: HERE, tailwind: true, server: "src/server.ts" });
 copyFileSync(path.join(HERE, "src", "viewer.html"), path.join(HERE, "viewer.html"));
-console.log("pithagoras-blender: built web/, server.js and viewer.html");
+console.log("@pithagoras/blender: built web/, server.js and viewer.html");

@@ -1,6 +1,6 @@
 # Blender for Pithagoras
 
-`pithagoras-blender` runs a headless [Blender](https://www.blender.org) 5.2 in a container on the portal's Docker host,
+`@pithagoras/blender` runs a headless [Blender](https://www.blender.org) 5.2 in a container on the portal's Docker host,
 gives every chat its tools, and shows its live viewport in a panel beside each chat. The agent builds scenes with
 Blender's Python API, checks them with a quick preview and renders them with Cycles on the GPU; the pictures come back
 to the model as pictures. The person watches, orbits and renders in the panel, through the portal, without signing in
@@ -21,7 +21,7 @@ This extension is not made or endorsed by the Blender Foundation. "Blender" name
 
 ## Installing
 
-In Settings → Extensions → Discover → Install by name: `npm:pithagoras-blender`. The portal says that it brings Docker
+In Settings → Extensions → Discover → Install by name: `npm:@pithagoras/blender`. The portal says that it brings Docker
 for extensions along where that is not on yet.
 
 For development, build it (`npm ci && npm run build` at the repository's root) and install the folder by its path, for
@@ -93,7 +93,7 @@ A render is yours as well as the model's: the extension puts the picture in the 
 and the call gives it to the chat as any tool gives a file, so it is drawn under the call, opens in the picture viewer
 and is among voice mode's pictures. The model still gets it, unless it asked for none (`return_image: false`).
 
-They are on by default. Settings → Tools lists them under **pithagoras-blender**, where they can be switched off or made
+They are on by default. Settings → Tools lists them under **@pithagoras/blender**, where they can be switched off or made
 lazy for every chat, and each chat, agent, project or mode can switch them its own way. Their descriptions and the
 instructions cost about 0.8k tokens in every request. Switched off or uninstalled, the extension's tools leave every
 list and every chat.
@@ -117,7 +117,7 @@ Don't add an MCP server named `blender` beside it: its tools would have the same
 - **An unprivileged Blender.** Blender runs as the image's own user (`blender`, uid 10001), not root, with none of the
   kernel's capabilities (`--cap-drop ALL`, raw sockets among them) and no way to gain more (`no-new-privileges`). It
   can write its home, `/tmp` and `/data`; the server and Blender itself are root's.
-- **Behind the portal's sign-in.** The viewer is served through the portal at `/api/x/pithagoras-blender/ui/`, which only
+- **Behind the portal's sign-in.** The viewer is served through the portal at `/api/x/@pithagoras/blender/ui/`, which only
   a signed-in person reaches. Everyone signed in to the portal can use the panel. The proxy drops the portal's cookie
   and any credential the page sent, adds the token, passes no cookie back, and adds `frame-ancestors 'self'` and
   `nosniff`.

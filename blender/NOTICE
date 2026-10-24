@@ -1,4 +1,4 @@
-pithagoras-blender
+@pithagoras/blender
 Copyright 2026 Anirban Kar and Contributors
 
 The extension (its TypeScript, the viewer page src/viewer.html, its build and its Dockerfile) is licensed under the

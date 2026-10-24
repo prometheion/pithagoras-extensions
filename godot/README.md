@@ -1,6 +1,6 @@
 # Godot for Pithagoras
 
-`pithagoras-godot` runs the real Godot 4.7.2 editor in a container on your portal's Docker, rendered on an NVIDIA GPU,
+`@pithagoras/godot` runs the real Godot 4.7.2 editor in a container on your portal's Docker, rendered on an NVIDIA GPU,
 and brings it into Pithagoras in two ways: the agent in every chat gets the editor's 27 tools, and you get the editor's
 live screen in a panel beside the chat, where you can watch the agent work and take the mouse and keyboard at any
 time. Every edit the agent makes happens in that editor, through its undo history.
@@ -28,7 +28,7 @@ In Settings → Extensions → Discover → **Install by name**:
 
 | From | Spec |
 |---|---|
-| npm | `npm:pithagoras-godot` |
+| npm | `npm:@pithagoras/godot` |
 | A built folder, for development | the folder's path on the portal's machine, after `npm run build` in it |
 
 ## The first start
@@ -52,7 +52,7 @@ fit, so a smaller screen is sharper in a narrow panel. Changing it restarts the 
 ## The panel
 
 The chat's header has a **Godot** button once the server is installed; it shows a dot while one of the Godot tools
-runs in that chat. The panel holds the viewer, served by the portal at `/api/x/pithagoras-godot/ui/` behind the
+runs in that chat. The panel holds the viewer, served by the portal at `/api/x/@pithagoras/godot/ui/` behind the
 portal's sign-in, so you never sign in to the server. The viewer's page and Selkies' web client (`pages/` in the
 package) are the extension's own; what they ask of the server (its API, the downloads, the stream's WebSocket) is
 passed on to the container with its token. In it:
@@ -82,7 +82,7 @@ test holds the image to: never what the running server says of itself, since the
 A tool the server lists that the file does not name is not relayed, and one it names that the server does not list
 (an older image) is not offered.
 
-They are on in every chat by default. Settings → Tools lists them under **pithagoras-godot**, where the group or a
+They are on in every chat by default. Settings → Tools lists them under **@pithagoras/godot**, where the group or a
 single tool can be switched off, or made lazy (offered through the `tools` tool instead of in every request: the 27
 cost about 3k tokens a request), for the whole portal, an agent, a project or a mode. They leave every chat when the
 extension is switched off or removed, and while the server is not installed.

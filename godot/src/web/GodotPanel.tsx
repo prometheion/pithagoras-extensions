@@ -13,7 +13,7 @@ import { installed, useGodotState } from "./state";
  * what to do instead.
  */
 
-export const SETTINGS = "/settings/x/pithagoras-godot";
+export const SETTINGS = "/settings/x/@pithagoras/godot";
 
 function Said({ children, settings = true }: { children: string; settings?: boolean }) {
   return (

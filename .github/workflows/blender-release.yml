@@ -1,4 +1,4 @@
-# A release of an extension, on its tag: blender-v<version>, the version in blender/package.json.
+# A release of the Blender extension, on its tag: blender-v<version>, the version in blender/package.json.
 #
 # 1. The image is built from blender/server/Dockerfile (amd64), tagged with the version.
 # 2. Its smoke test (scripts/smoke-blender.sh): it answers MCP with the tools blender/server/tools.json has, and refuses
@@ -19,7 +19,7 @@
 #    already, the step says so and publishes nothing. With the variable NPM_STAGE "true" (the repository's or the
 #    organization's), the version is staged (`npm stage publish`) and published once a maintainer approves it with 2FA
 #    on npmjs.com.
-name: Release
+name: Blender release
 
 on:
   push:

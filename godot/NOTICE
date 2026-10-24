@@ -4,7 +4,7 @@ Copyright 2026 The Pithagoras Flair authors
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 This package is the Godot extension for Pithagoras: its browser half (web/), its server half (lib/server.js), built
-from godot/src and shared/ in https://github.com/thecodacus/pithagoras-flair, and the pages its server half serves
+from godot/src and shared/ in https://github.com/prometheion/pithagoras-extensions, and the pages its server half serves
 (pages/). shared/docker-api.ts there is a copy of types from Pithagoras (https://github.com/thecodacus/pithagoras,
 Apache-2.0). web/client.js bundles icons from react-icons (https://github.com/react-icons/react-icons, MIT), drawn from
 Lucide (https://lucide.dev, ISC).

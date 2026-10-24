@@ -24,7 +24,7 @@ In Settings → Extensions → Discover → Install by name: `npm:pithagoras-ble
 for extensions along where that is not on yet.
 
 For development, build it (`npm ci && npm run build` at the repository's root) and install the folder by its path, for
-example `/path/to/pithagoras-flair/blender`. It then waits until Docker for extensions is installed and on.
+example `/path/to/pithagoras-extensions/blender`. It then waits until Docker for extensions is installed and on.
 
 ## The first start
 

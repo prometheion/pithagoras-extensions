@@ -2,9 +2,9 @@ pithagoras-blender
 Copyright 2026 Anirban Kar and Contributors
 
 The extension (its TypeScript, the viewer page src/viewer.html, its build and its Dockerfile) is licensed under the
-Apache License, Version 2.0 (LICENSE), as the rest of the pithagoras-flair repository is. server/server.py, which runs
-inside Blender and uses its Python API (bpy), is licensed under the GNU General Public License, version 3 or (at your
-option) any later version (server/LICENSE). Of the two, the image holds server.py alone, with its licence in
+Apache License, Version 2.0 (LICENSE), as the rest of the pithagoras-extensions repository is. server/server.py, which
+runs inside Blender and uses its Python API (bpy), is licensed under the GNU General Public License, version 3 or (at
+your option) any later version (server/LICENSE). Of the two, the image holds server.py alone, with its licence in
 /usr/share/doc/pithagoras-blender/LICENSE.GPL-3.0, beside this NOTICE.
 
 This extension is not made or endorsed by the Blender Foundation. Blender is a trademark of the Blender Foundation; the
@@ -28,12 +28,13 @@ The container image (ghcr.io/prometheion/pithagoras-blender) redistributes:
   (LGPL-2.1-or-later); libheif 1.20.2 (LGPL-3.0-or-later); OpenVDB 13.0.0 and Eigen (MPL-2.0). The other libraries
   are under permissive licences; the Python packages in Blender's own Python are in the image as their source.
 
-  Every GitHub release of pithagoras-flair that publishes the image attaches the corresponding source, so it does not
-  depend on blender.org keeping it: blender-5.2.2.tar.xz from https://download.blender.org/source/, checked against
-  its published sum, which holds the build's recipe and the patches it applies to those libraries
-  (build_files/build_environment/); and the source of each library named above, as the official build fetched it
-  from Blender's mirror (https://projects.blender.org/blender/lib-source), checked against the hash Blender's source
-  pins for it (build_files/build_environment/cmake/versions.cmake), listed in blender-5.2.2-libraries.txt.
+  Every GitHub release of pithagoras-extensions (https://github.com/prometheion/pithagoras-extensions/releases) that
+  publishes the image attaches the corresponding source, so it does not depend on blender.org keeping it:
+  blender-5.2.2.tar.xz from https://download.blender.org/source/, checked against its published sum, which holds the
+  build's recipe and the patches it applies to those libraries (build_files/build_environment/); and the source of
+  each library named above, as the official build fetched it from Blender's mirror
+  (https://projects.blender.org/blender/lib-source), checked against the hash Blender's source pins for it
+  (build_files/build_environment/cmake/versions.cmake), listed in blender-5.2.2-libraries.txt.
 
 - Ubuntu 24.04 (the base image ubuntu:24.04) and the packages installed on it: ca-certificates, curl, xz-utils and the
   X11 and GL runtime libraries Blender links against (libx11-6, libxi6, libxxf86vm1, libxfixes3, libxrender1,

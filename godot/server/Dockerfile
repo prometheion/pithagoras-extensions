@@ -9,7 +9,7 @@ ARG VGL_VERSION=3.1.5
 ARG VERSION=0.1.0
 LABEL org.opencontainers.image.title="pithagoras-godot" \
       org.opencontainers.image.description="The Godot ${GODOT_VERSION} editor on the GPU, streamed with Selkies and driven over MCP, for the Pithagoras Godot extension" \
-      org.opencontainers.image.source="https://github.com/thecodacus/pithagoras-flair" \
+      org.opencontainers.image.source="https://github.com/prometheion/pithagoras-extensions" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT AND MPL-2.0 AND GPL-2.0-or-later AND LGPL-2.1-or-later AND LGPL-3.0-or-later AND LGPL-2.0-or-later WITH WxWindows-exception-3.1"
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1

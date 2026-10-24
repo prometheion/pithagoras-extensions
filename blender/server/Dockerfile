@@ -28,7 +28,7 @@ RUN set -eux; \
 
 # The extension's version, which the image is tagged with.
 ARG VERSION=0.1.0
-LABEL org.opencontainers.image.source="https://github.com/thecodacus/pithagoras-flair" \
+LABEL org.opencontainers.image.source="https://github.com/prometheion/pithagoras-extensions" \
       org.opencontainers.image.title="pithagoras-blender" \
       org.opencontainers.image.description="Headless Blender with MCP and the API of its browser viewer, for the pithagoras-blender extension of Pithagoras" \
       org.opencontainers.image.version="${VERSION}" \

@@ -4,14 +4,14 @@
   "description": "Godot for Pithagoras: the real Godot 4.7 editor on the GPU, run in a container through Docker, streamed into a panel beside the chat, with its tools in every chat",
   "type": "module",
   "keywords": ["pi-package", "pithagoras", "godot", "game-engine", "mcp"],
-  "homepage": "https://github.com/thecodacus/pithagoras-flair/tree/main/godot#readme",
+  "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/godot#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thecodacus/pithagoras-flair.git",
+    "url": "git+https://github.com/prometheion/pithagoras-extensions.git",
     "directory": "godot"
   },
   "bugs": {
-    "url": "https://github.com/thecodacus/pithagoras-flair/issues"
+    "url": "https://github.com/prometheion/pithagoras-extensions/issues"
   },
   "pi": {},
   "pithagoras": {

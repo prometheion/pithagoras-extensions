@@ -6,7 +6,7 @@ import { THEME_TOKENS, TRIPLET, type Theme } from "../theme";
 import { msg, portal, t } from "../portal";
 import { api, type CardSummary } from "./api";
 import { CardHost, type Status } from "./host";
-import { currentSettings, know, knows, onData, setSettings, useCard, useSettings } from "./store";
+import { currentSettings, heard, know, knows, onData, setSettings, useCard, useSettings } from "./store";
 
 /** The page's colours now, as the portal's variables hold them, with light or dark. */
 export function pageTheme(mode: "light" | "dark"): Theme {
@@ -107,7 +107,7 @@ function CardView({ chatId, card, waiting }: { chatId: string; card: CardSummary
 
   const close = () => {
     api.close(chatId, card.id).then(
-      (r) => know(chatId, [...[r.card]]),
+      (r) => heard(chatId, { type: "card", card: r.card }),
       () => setStatus({ kind: "dropped", reason: "failed" }),
     );
   };

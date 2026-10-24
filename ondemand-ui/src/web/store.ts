@@ -10,10 +10,8 @@ import type { CardSummary, UiSettings } from "./api";
 const chats = new Map<string, Map<string, CardSummary>>();
 const listeners = new Set<() => void>();
 const dataListeners = new Set<(chatId: string, cardId: string, seq: number, value: unknown) => void>();
-let version = 0;
 
 function changed(): void {
-  version++;
   for (const listener of listeners) listener();
 }
 
@@ -83,4 +81,3 @@ export function useSettings(): UiSettings | null {
   );
 }
 export const currentSettings = () => settings;
-export const storeVersion = () => version;

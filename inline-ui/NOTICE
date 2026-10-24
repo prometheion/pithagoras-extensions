@@ -1,0 +1,6 @@
+@pithagoras/inline-ui
+Copyright 2026 Anirban Kar and Contributors
+
+The extension (its TypeScript, its stylesheet and its build) is licensed under the Apache License, Version 2.0
+(LICENSE). The published package bundles into its browser half the icons it uses from react-icons 5.7.0
+(https://github.com/react-icons/react-icons, MIT), which are Lucide's (https://lucide.dev, ISC).

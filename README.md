@@ -10,13 +10,18 @@ a separate npm package. You install the ones you want into your portal; nothing 
   host, its tools in every chat, and its live viewport in a panel beside the chat.
 - [Godot](godot/README.md) (`@pithagoras/godot`): the real Godot 4.7 editor on the GPU, run in a container through
   Docker for extensions, its 27 tools in every chat and its live screen in a panel beside the chat.
+- [Inline UI](inline-ui/README.md) (`@pithagoras/inline-ui`): the agent shows you an interactive card of its
+  own HTML in the chat, sandboxed and with no network, and what you do in it comes back to the agent as events. It
+  needs no container and no Docker.
 
-Each runs its server in a container that the extension makes through Docker for extensions, from an image tagged with
-the package's version, so an update of the extension updates its server too. The agent gets the server's tools as the
-extension's own tool group, and the panel reaches the server through the portal's sign-in, so nobody signs in to
-anything else.
+Blender and Godot each run their server in a container that the extension makes through Docker for extensions, from an
+image tagged with the package's version, so an update of the extension updates its server too. The agent gets the
+server's tools as the extension's own tool group, and the panel reaches the server through the portal's sign-in, so
+nobody signs in to anything else.
 
 ## What they need
+
+Blender and Godot (Inline UI's README says what it needs):
 
 - Pithagoras 0.3.0 or later.
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
@@ -37,10 +42,11 @@ putting that container on the server's network. Each extension's README says mor
 
 ## Installing
 
-In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/blender` or
-`npm:@pithagoras/godot`. Then open Settings → Blender (or Godot) and press **Install**: the extension picks a card,
-downloads its image (`ghcr.io/prometheion/pithagoras-blender` or `ghcr.io/prometheion/pithagoras-godot`, tagged with
-the package's version), makes a volume for the projects and starts the container.
+In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/blender`,
+`npm:@pithagoras/godot` or `npm:@pithagoras/inline-ui`. For Blender and Godot, then open Settings → Blender (or Godot)
+and press **Install**: the extension picks a card, downloads its image (`ghcr.io/prometheion/pithagoras-blender` or
+`ghcr.io/prometheion/pithagoras-godot`, tagged with the package's version), makes a volume for the projects and starts
+the container.
 
 For development, build the repository (below) and install an extension's folder by its path on the portal's machine,
 for example `/path/to/pithagoras-extensions/blender`. Installed from a folder, an extension does not bring Docker for
@@ -57,6 +63,7 @@ The extensions are npm workspaces of this repository:
 ```sh
 npm ci                     # what every extension is built and tested with
 npm run build              # each extension's browser and server halves
+npx playwright install chromium firefox   # once: Inline UI's card is tested in both
 npm test                   # the unit tests, with Docker, the portal and the server faked
 ./scripts/pithagoras.sh    # Pithagoras at the extension API's version (or PITHAGORAS_REF), into .pithagoras/
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
@@ -66,17 +73,18 @@ PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
 lifecycle, the GPU probe, an MCP client, the tool relay and the proxy). A build bundles what an extension imports of
 it into its server half's one file, so a published package needs nothing beside it.
 
-A release is a tag, `blender-v<version>` or `godot-v<version>`, matching the version in that extension's
-`package.json`. Merging a pull request that changes that version releases it: the extension's release workflow
-(`.github/workflows/blender-release.yml` or `godot-release.yml`) runs on the push to main, puts the tag on the merged
-commit and pushes it, and a push to main whose version already has its tag releases nothing. A tag pushed by hand still
-makes a release. The workflow builds and smoke-tests the image, pushes it to GHCR, makes a GitHub release with the
-sources that go with the image, and then publishes the package to npm under the `@pithagoras` scope, through npm's
-trusted publishing for that workflow, with no token. The first version of a package is published by hand, as only a
-package that is there can be given a trusted publisher; the workflow's header says how. If the repository or the
-organization is given a tag ruleset that limits who may create `*-v*` tags, github-actions[bot] (the GitHub Actions
-app) has to be on its bypass list, or the workflow's push of the tag is refused. Each extension's README says how to
-build its image by hand.
+A release is a tag, `blender-v<version>`, `godot-v<version>` or `inline-ui-v<version>`, matching the version in that
+extension's `package.json`. Merging a pull request that changes that version releases it: the extension's release
+workflow (`.github/workflows/blender-release.yml`, `godot-release.yml` or `inline-ui-release.yml`) runs on the push to
+main, puts the tag on the merged commit and pushes it, and a push to main whose version already has its tag releases
+nothing. A tag pushed by hand still makes a release. For Blender and Godot the workflow builds and smoke-tests the
+image, pushes it to GHCR and makes a GitHub release with the sources that go with the image; for Inline UI, which has
+no image, it builds and tests the package and makes the GitHub release. Each then publishes the package to npm under the
+`@pithagoras` scope, through npm's trusted publishing for that workflow, with no token. The first version of a package
+is published by hand, as only a package that is there can be given a trusted publisher; the workflow's header says how.
+If the repository or the organization is given a tag ruleset that limits who may create `*-v*` tags, github-actions[bot]
+(the GitHub Actions app) has to be on its bypass list, or the workflow's push of the tag is refused. Each extension's
+README says how to build its image by hand.
 
 ## Licences
 

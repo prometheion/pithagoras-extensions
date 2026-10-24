@@ -3,8 +3,8 @@
 #
 # This file runs inside Blender and uses its Python API (bpy), so it is licensed as Blender's scripts are asked to be
 # when they are published: under the GNU General Public License, version 3 or (at your option) any later version.
-# See LICENSE beside it. The rest of the pithagoras-blender extension is Apache-2.0.
-"""Headless Blender server for the pithagoras-blender extension. Runs inside `blender -b --python server.py`.
+# See LICENSE beside it. The rest of the @pithagoras/blender extension is Apache-2.0.
+"""Headless Blender server for the @pithagoras/blender extension. Runs inside `blender -b --python server.py`.
 
 One HTTP port on the address it is given (`BLENDER_SERVER_HOST`, which the extension sets to 0.0.0.0 of the
 container's own network, which only the Pithagoras portal reaches): the API of the extension's viewer (`/api/...`),

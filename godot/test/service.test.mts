@@ -106,7 +106,7 @@ test("a container from before, on the portal's network, is made again on the ext
   const before = (running: boolean) => {
     const old = godotSpec({ card: { uuid: "GPU-bbbb1111" }, optix: "none", network: "container:portal-1", token: "t" }, { port: 3880, volume: "pithagoras-godot-data", image: "ghcr.io/prometheion/pithagoras-godot:0.1.0", display: "1600x900" }) as any;
     old.Env = old.Env.filter((e: string) => !e.startsWith("GODOT_SERVER_HOST="));
-    return { spec: { ...old, Labels: { [SPEC_LABEL]: "0123456789abcdef" } }, owner: "pithagoras-godot", id: "old", running, exitCode: 0, startedAt: "t0", logs: "", restarting: false, restarts: 0, networks: {} };
+    return { spec: { ...old, Labels: { [SPEC_LABEL]: "0123456789abcdef" } }, owner: "@pithagoras/godot", id: "old", running, exitCode: 0, startedAt: "t0", logs: "", restarting: false, restarts: 0, networks: {} };
   };
   const one = await setup();
   one.d.volumes.add("pithagoras-godot-data");
@@ -133,7 +133,7 @@ test("a container on a network that was made again is stale, though its server c
   await settled(svc);
   const first = kept(d).id;
   // Removed and made again under its name: another network, on which the container is not.
-  d.networks.set("pithagoras-godot-net", { id: "net-again", owner: "pithagoras-godot" });
+  d.networks.set("pithagoras-godot-net", { id: "net-again", owner: "@pithagoras/godot" });
   await server.close();
   await svc.maintain();
   for (let i = 0; i < 300 && kept(d).id === first; i++) await delay(10);

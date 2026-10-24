@@ -13,7 +13,7 @@ import type { ContainerInfo, ContainerSpec, Docker, Reach } from "../../shared/d
  * the image is checked against.
  */
 
-export const EXTENSION = "pithagoras-blender";
+export const EXTENSION = "@pithagoras/blender";
 
 /** A temporary folder, removed when the tests end. */
 export function scratch(prefix = "flair-"): string {

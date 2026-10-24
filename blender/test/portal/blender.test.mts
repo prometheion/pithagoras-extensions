@@ -47,7 +47,7 @@ daemon.runs.onStart = (c: { Name: string; out: string; code?: number }) => {
 
 // The extension's token, made before the half starts, so that the stand-in server takes it.
 const TOKEN = "f".repeat(48);
-const data = path.join(process.env.DATA_DIR!, "extension-data", "pithagoras-blender");
+const data = path.join(process.env.DATA_DIR!, "extension-data", "%40pithagoras%2Fblender");
 mkdirSync(data, { recursive: true, mode: 0o700 });
 writeFileSync(path.join(data, "settings.json"), JSON.stringify({ token: TOKEN }), { mode: 0o600 });
 
@@ -102,7 +102,7 @@ const app = express().use("/api/x", host.extensionRoutes);
 const server = http.createServer(app);
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
-const at = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/x/pithagoras-blender`;
+const at = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/x/%40pithagoras/blender`;
 after(async () => {
   await host.stopServerHalves();
   server.closeAllConnections();
@@ -132,10 +132,10 @@ const registered = (chatId: string) => {
 
 test("the half waits for Docker, which it requires", async () => {
   await host.syncServerHalves([own]);
-  assert.match(String(host.serverFailure("pithagoras-blender")), /pithagoras-docker/);
+  assert.match(String(host.serverFailure("@pithagoras/blender")), /pithagoras-docker/);
   await host.syncServerHalves([docker, own]);
-  assert.equal(host.serverFailure("pithagoras-blender"), undefined);
-  assert.equal(host.isServing("pithagoras-blender"), true);
+  assert.equal(host.serverFailure("@pithagoras/blender"), undefined);
+  assert.equal(host.isServing("@pithagoras/blender"), true);
 });
 
 test("Settings → Blender from install to running, through the portal's routes and Docker's own API", async () => {
@@ -155,26 +155,26 @@ test("Settings → Blender from install to running, through the portal's routes 
   assert.equal(made.HostConfig.NetworkMode, "pithagoras-blender-net");
   assert.ok(made.Env.includes("BLENDER_SERVER_HOST=0.0.0.0"));
   assert.deepEqual(made.HostConfig.RestartPolicy, { Name: "unless-stopped" });
-  assert.equal(made.Labels["pithagoras.extension"], "pithagoras-blender", "Docker's API marks it as the extension's");
+  assert.equal(made.Labels["pithagoras.extension"], "@pithagoras/blender", "Docker's API marks it as the extension's");
   assert.ok(daemon.volumes.some((v: { Name: string }) => v.Name === "pithagoras-blender-data"));
   // Its network: Docker's bridge with no way out, the extension's.
   const island = daemon.networks.find((n: { Name: string }) => n.Name === "pithagoras-blender-net")!;
   assert.equal(island.Internal, true);
   assert.equal(island.EnableIPv6, false);
   assert.equal(island.Options!["com.docker.network.bridge.gateway_mode_ipv4"], "isolated");
-  assert.equal(island.Labels["pithagoras.extension"], "pithagoras-blender");
+  assert.equal(island.Labels["pithagoras.extension"], "@pithagoras/blender");
   // The portal is on the host's network, to which Docker adds none: the forwarder publishes the port on 127.0.0.1.
   const forwarder = daemon.containers.find((c: { Name: string }) => c.Name === "pithagoras-blender-forward")!;
   assert.equal(forwarder.State, "running");
-  assert.equal(forwarder.Labels["pithagoras.extension"], "pithagoras-blender");
+  assert.equal(forwarder.Labels["pithagoras.extension"], "@pithagoras/blender");
   assert.deepEqual((forwarder.made as any).HostConfig.PortBindings, { [`${PORT}/tcp`]: [{ HostIp: "127.0.0.1", HostPort: String(PORT) }] });
   assert.deepEqual(Object.keys((forwarder.made as any).NetworkingConfig.EndpointsConfig).sort(), ["pithagoras-blender-forward", "pithagoras-blender-net"]);
   assert.deepEqual(daemon.connects, [], "the portal's container is not connected to anything");
 });
 
 test("the relayed tools are listed in Settings → Tools and registered in a chat's pi, and a call returns the server's parts", async () => {
-  for (let i = 0; i < 200 && !(host.offeredTools().get("pithagoras-blender") ?? []).length; i++) await delay(20);
-  const offered = host.offeredTools().get("pithagoras-blender") ?? [];
+  for (let i = 0; i < 200 && !(host.offeredTools().get("@pithagoras/blender") ?? []).length; i++) await delay(20);
+  const offered = host.offeredTools().get("@pithagoras/blender") ?? [];
   assert.deepEqual(offered.map((t: { name: string }) => t.name).sort(), tools.map((t: { name: string }) => `blender_${t.name}`).sort());
   const inChat = registered(chat());
   assert.equal(inChat.length, tools.length);
@@ -250,7 +250,7 @@ test("the viewer is the extension's page, its API is the server's, sandboxed, an
   assert.equal(answer.status, 200);
   assert.equal((await answer.json()).path, "/api/state");
   assert.equal(answer.headers.get("content-security-policy"), "frame-ancestors 'self', sandbox");
-  assert.equal(host.extensionUpgrade("/api/x/pithagoras-blender/ui/stream"), undefined);
+  assert.equal(host.extensionUpgrade("/api/x/%40pithagoras/blender/ui/stream"), undefined);
 });
 
 test("a change from another page of the same site is refused on the extension's routes, as the portal serves them", async () => {
@@ -282,7 +282,7 @@ test("uninstall with the projects removes the container, its network, the volume
   assert.equal(daemon.networks.some((n: { Name: string }) => n.Name === "pithagoras-blender-net"), false);
   assert.equal(daemon.containers.find((c: { Name: string }) => c.Name === "portal-test")!.Networks?.["pithagoras-blender-net"], undefined, "the portal's container is taken off it");
   assert.equal(daemon.volumes.some((v: { Name: string }) => v.Name === "pithagoras-blender-data"), false);
-  assert.deepEqual(host.offeredTools().get("pithagoras-blender"), []);
+  assert.deepEqual(host.offeredTools().get("@pithagoras/blender"), []);
   assert.deepEqual(registered(chat()), []);
   assert.equal(realpathSync(data).length > 0, true);
 });

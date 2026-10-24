@@ -4,7 +4,7 @@
 This process is the container's supervisor and its only network listener: plain HTTP on GODOT_SERVER_HOST, which
 the extension sets to 0.0.0.0 of the container's own network, which only the portal reaches, and every route but
 /healthz asks for the one credential, `Authorization: Bearer <token>`. Nobody reaches it directly: the Godot
-extension's server half proxies what the viewer asks of it and its stream at /api/x/pithagoras-godot/ui/ behind the
+extension's server half proxies what the viewer asks of it and its stream at /api/x/@pithagoras/godot/ui/ behind the
 portal's own sign-in, and adds the token on the way, and relays the MCP tools to the chats.
 
     /stream/...          the Selkies stream (its WebSocket and its API), piped to Selkies on its Unix socket

@@ -6,9 +6,9 @@ a separate npm package. You install the ones you want into your portal; nothing 
 
 ## Extensions
 
-- [Blender](blender/README.md) (`pithagoras-blender`): a headless Blender 5.2 in a container on the portal's Docker
+- [Blender](blender/README.md) (`@pithagoras/blender`): a headless Blender 5.2 in a container on the portal's Docker
   host, its tools in every chat, and its live viewport in a panel beside the chat.
-- [Godot](godot/README.md) (`pithagoras-godot`): the real Godot 4.7 editor on the GPU, run in a container through
+- [Godot](godot/README.md) (`@pithagoras/godot`): the real Godot 4.7 editor on the GPU, run in a container through
   Docker for extensions, its 27 tools in every chat and its live screen in a panel beside the chat.
 
 Each runs its server in a container that the extension makes through Docker for extensions, from an image tagged with
@@ -37,8 +37,8 @@ putting that container on the server's network. Each extension's README says mor
 
 ## Installing
 
-In the portal, Settings → Extensions → Discover → **Install by name**: `npm:pithagoras-blender` or
-`npm:pithagoras-godot`. Then open Settings → Blender (or Godot) and press **Install**: the extension picks a card,
+In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/blender` or
+`npm:@pithagoras/godot`. Then open Settings → Blender (or Godot) and press **Install**: the extension picks a card,
 downloads its image (`ghcr.io/prometheion/pithagoras-blender` or `ghcr.io/prometheion/pithagoras-godot`, tagged with
 the package's version), makes a volume for the projects and starts the container.
 
@@ -68,8 +68,10 @@ it into its server half's one file, so a published package needs nothing beside 
 
 A release is a tag, `blender-v<version>` or `godot-v<version>`, matching the version in that extension's
 `package.json`. Its workflow builds and smoke-tests the image, pushes it to GHCR, makes a GitHub release with the
-sources that go with the image, and then publishes the package to npm. Each extension's README says how to build its
-image by hand.
+sources that go with the image, and then publishes the package to npm under the `@pithagoras` scope, through npm's
+trusted publishing for that workflow, with no token. The first version of a package is published by hand, as only a
+package that is there can be given a trusted publisher; the workflow's header says how. Each extension's README says
+how to build its image by hand.
 
 ## Licences
 
@@ -78,7 +80,7 @@ Apache-2.0 ([LICENSE](LICENSE)), with two exceptions:
 - `blender/server/server.py`, which runs inside Blender and is GPL-3.0-or-later
   ([blender/server/LICENSE](blender/server/LICENSE)).
 - The files in `godot/pages/stream/` other than `__gs_shim.js`. They are Selkies 2.1.0's web client, copied
-  unchanged, and are MPL-2.0 ([godot/pages/stream/LICENSE](godot/pages/stream/LICENSE)). The `pithagoras-godot`
+  unchanged, and are MPL-2.0 ([godot/pages/stream/LICENSE](godot/pages/stream/LICENSE)). The `@pithagoras/godot`
   package ships them.
 
 Each extension's README and NOTICE say under which licences what its image redistributes is, and where their sources

@@ -22,7 +22,7 @@ const VIEWER = new URL("./viewer.html", import.meta.url);
 /**
  * Blender's server half: a headless Blender run in a container of its own through Docker for extensions
  * (`pithagoras-docker`, which this package requires), its MCP tools relayed as this extension's own tools in every
- * chat (shared/relay.ts), a render shown in the chat as well (server/calls.ts), its viewer served through the portal at /api/x/pithagoras-blender/ui/ (shared/proxy.ts),
+ * chat (shared/relay.ts), a render shown in the chat as well (server/calls.ts), its viewer served through the portal at /api/x/@pithagoras/blender/ui/ (shared/proxy.ts),
  * and the routes of its page in Settings (server/routes.ts). Every request under those routes that changes something
  * is refused unless it comes from the portal's own pages.
  *

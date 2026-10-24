@@ -18,7 +18,7 @@ import { godotSpec, names } from "./server/spec";
 /**
  * Godot's server half: the real Godot editor run in a container of its own through Docker for extensions
  * (`pithagoras-docker`, which this package requires), its MCP tools relayed as this extension's own tools in every
- * chat (shared/relay.ts), its viewer at /api/x/pithagoras-godot/ui/ (from the package: server/pages.ts) with what the
+ * chat (shared/relay.ts), its viewer at /api/x/@pithagoras/godot/ui/ (from the package: server/pages.ts) with what the
  * viewer asks of the server and the editor's stream proxied to the container (shared/proxy.ts), and the routes of its
  * page in Settings (server/routes.ts).
  *

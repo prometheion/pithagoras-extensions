@@ -1,4 +1,4 @@
-# The Blender server of the pithagoras-blender extension: headless Blender with its viewer's API and MCP on one
+# The Blender server of the @pithagoras/blender extension: headless Blender with its viewer's API and MCP on one
 # port of the container's own network, for hosts with Docker, and for the GPU the NVIDIA container toolkit. Built from
 # the extension's folder (`docker build -f server/Dockerfile .`), so that its NOTICE goes into the image; .dockerignore
 # lets nothing else in.

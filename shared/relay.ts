@@ -1,5 +1,5 @@
 import { existsSync, rmSync, writeFileSync } from "node:fs";
-import type { ServerPortal, ToolGuard } from "@pithagoras/extension-api/server";
+import type { Chat, ServerPortal, ToolGuard } from "@pithagoras/extension-api/server";
 import { NotAnswering, type McpClient, type McpTool } from "./mcp";
 
 /**
@@ -23,6 +23,10 @@ import { NotAnswering, type McpClient, type McpTool } from "./mcp";
  * `browser_` in it is held to, and grouped by eye. The instructions are a guideline, which pi prints once however many
  * tools carry it. One call at a time (`sequential`): one server serves every call, on one thread. What a call returns
  * is outside content (`outside`): it comes from a scene or a project, which may have come from anywhere.
+ *
+ * What the extension does around a call of a tool, in the chat it is made in, is its own (`calls`): what it adds to
+ * the arguments the server gets (a file of the chat's, read as its agent), and what it makes of the result for the
+ * model and for the chat (a picture put in the chat's folder, which the chat shows under the call).
  */
 
 /** What the package says of the server's tools: its MCP instructions and its `tools/list`, as server/tools.json has them. */
@@ -32,7 +36,21 @@ export interface Bundled {
 }
 
 /** A tool's result as pi takes it: text and pictures in the order the server gave them. */
-type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+export type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+
+/** What a tool's call answers pi: its parts, for the model, and its `details`, where `files` are what the chat shows. */
+export interface Answer {
+  content: Part[];
+  details: Record<string, unknown>;
+}
+
+/** What the extension does around a call of one of the server's tools, in the chat it is made in. */
+export interface CallHooks {
+  /** The arguments the server is sent, from those the model gave. A throw refuses the call, with its message. */
+  arguments?(params: Record<string, unknown>, chat: Chat): Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** The answer, from what the server answered (`parts`) and the arguments the model gave. */
+  answer?(parts: Part[], params: Record<string, unknown>, chat: Chat): Answer | Promise<Answer>;
+}
 
 /** The guard rule a tool the `acts` table does not name is held to: code from anywhere could be behind it. */
 const UNNAMED: NonNullable<ToolGuard["acts"]> = ["upload"];
@@ -55,6 +73,8 @@ export interface RelayOptions {
   acts: Record<string, NonNullable<ToolGuard["acts"]>>;
   /** Where it is kept that the server's container exists: a file in the extension's own folder. */
   installedFile: string;
+  /** What the extension does around a call, by the server's name for the tool: nothing for one not named. */
+  calls?: Record<string, CallHooks>;
 }
 
 export function relay(options: RelayOptions) {
@@ -75,9 +95,10 @@ export function relay(options: RelayOptions) {
     return parts;
   }
 
-  function register(pi: any): void {
+  function register(pi: any, chat: Chat): void {
     if (!installed) return;
     for (const tool of bundled.tools) {
+      const hooks = options.calls?.[tool.name] ?? {};
       const acts = options.acts[tool.name] ?? UNNAMED;
       const guard: ToolGuard = { outside: true, ...(acts.length ? { acts } : {}) };
       pi.registerTool({
@@ -89,21 +110,24 @@ export function relay(options: RelayOptions) {
         executionMode: "sequential",
         guard,
         async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+          const given = params ?? {};
+          const sent = hooks.arguments ? await hooks.arguments(given, chat) : given;
           let result;
           try {
-            result = await mcp.callTool(tool.name, params ?? {}, signal);
+            result = await mcp.callTool(tool.name, sent, signal);
           } catch (e) {
             if (e instanceof NotAnswering) throw new Error(notRunning);
             throw e;
           }
-          return { content: partsOf(result), details: {} };
+          const parts = partsOf(result);
+          return hooks.answer ? await hooks.answer(parts, given, chat) : { content: parts, details: {} };
         },
       });
     }
   }
 
   portal.tools.offer(() => (installed ? bundled.tools.map((t) => ({ name: `${prefix}_${t.name}`, description: t.description ?? "" })) : []));
-  portal.chats.extend((pi) => register(pi));
+  portal.chats.extend((pi, chat) => register(pi, chat));
 
   /** The difference last said in the log, so that a server that goes on listing it is not said again at each look. */
   let said = "";

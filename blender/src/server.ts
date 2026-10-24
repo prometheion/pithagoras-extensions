@@ -9,6 +9,7 @@ import { serverAddress, service } from "../../shared/service";
 import { openStore } from "../../shared/store";
 import bundled from "../server/tools.json";
 import { ACTS, LABELS, PREFIX } from "./labels";
+import { blenderCalls } from "./server/calls";
 import { blenderRoutes } from "./server/routes";
 import { blenderSpec, names } from "./server/spec";
 
@@ -21,7 +22,7 @@ const VIEWER = new URL("./viewer.html", import.meta.url);
 /**
  * Blender's server half: a headless Blender run in a container of its own through Docker for extensions
  * (`pithagoras-docker`, which this package requires), its MCP tools relayed as this extension's own tools in every
- * chat (shared/relay.ts), its viewer served through the portal at /api/x/pithagoras-blender/ui/ (shared/proxy.ts),
+ * chat (shared/relay.ts), a render shown in the chat as well (server/calls.ts), its viewer served through the portal at /api/x/pithagoras-blender/ui/ (shared/proxy.ts),
  * and the routes of its page in Settings (server/routes.ts). Every request under those routes that changes something
  * is refused unless it comes from the portal's own pages.
  *
@@ -42,7 +43,7 @@ export default function blender(portal: ServerPortal) {
     },
     token: () => store.token(),
   });
-  const tools = relay({ portal, prefix: PREFIX, app: "Blender", mcp, bundled: bundled as Bundled, labels: LABELS, acts: ACTS, installedFile: path.join(data, "installed") });
+  const tools = relay({ portal, prefix: PREFIX, app: "Blender", mcp, bundled: bundled as Bundled, labels: LABELS, acts: ACTS, installedFile: path.join(data, "installed"), calls: blenderCalls(portal) });
   const svc = service({ portal, docker, app: "Blender", names: at, store, relay: tools, mcp, spec: (plan) => blenderSpec(plan, at.port, at.volume, at.image), address });
 
   portal.router.use(writesFromHere);

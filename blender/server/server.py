@@ -849,8 +849,9 @@ MCP_TOOLS = [
                          "the scene: skips the unsaved-changes mark and the browser view refresh"}}, ["code"])),
     ("preview", "Quick Workbench render from the scene camera (or an automatic view if there is none), returned as "
      "an image. Use it to check your work after edits.", _obj({})),
-    ("render", "Full render from the scene camera, saved under renders/ unless `path` is given. Returns the image "
-     "unless return_image is false.",
+    ("render", "Full render from the scene camera, saved under renders/ unless `path` is given. The person sees it in "
+     "the chat, and it is saved in the chat's folder too (blender-renders/); you get the image unless return_image "
+     "is false.",
      _obj({"engine": {"type": "string", "enum": ["CYCLES", "EEVEE", "WORKBENCH"], "default": "CYCLES"},
            "samples": {"type": "integer", "description": "Cycles samples"},
            "resolution": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},

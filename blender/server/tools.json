@@ -67,7 +67,7 @@
     },
     {
       "name": "render",
-      "description": "Full render from the scene camera, saved under renders/ unless `path` is given. Returns the image unless return_image is false.",
+      "description": "Full render from the scene camera, saved under renders/ unless `path` is given. The person sees it in the chat, and it is saved in the chat's folder too (blender-renders/); you get the image unless return_image is false.",
       "inputSchema": {
         "type": "object",
         "properties": {

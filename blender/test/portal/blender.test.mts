@@ -54,6 +54,15 @@ writeFileSync(path.join(data, "settings.json"), JSON.stringify({ token: TOKEN })
 /** The Blender server, as far as the half asks it: MCP with the token, and the viewer's own state. */
 const bundled = JSON.parse(readFileSync(path.join(PACKAGE, "server/tools.json"), "utf8"));
 const tools = bundled.tools;
+/** A whole picture, one pixel, which the portal tells by its bytes. */
+const PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+/** What the stand-in answers a call: a render's file and picture, and for any other tool text and a picture. Each call is kept. */
+const calls: { name: string; arguments: Record<string, unknown> }[] = [];
+const answer = (call: { name: string; arguments: Record<string, unknown> }) => {
+  calls.push(call);
+  if (call.name === "render") return { content: [{ type: "text", text: '{"path": "/data/renders/render_1.png"}' }, { type: "image", data: PIXEL, mimeType: "image/png" }] };
+  return { content: [{ type: "text", text: "pong" }, { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }] };
+};
 const blender = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (c: Buffer) => chunks.push(c));
@@ -65,7 +74,7 @@ const blender = http.createServer((req, res) => {
     const result =
       message.method === "initialize" ? { instructions: "Use Blender.", serverInfo: { version: "5.2.2" } }
       : message.method === "tools/list" ? { tools }
-      : message.method === "tools/call" ? { content: [{ type: "text", text: "pong" }, { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }] }
+      : message.method === "tools/call" ? answer(message.params)
       : {};
     res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
   });
@@ -76,6 +85,7 @@ const PORT = (blender.address() as AddressInfo).port;
 process.env.PITHAGORAS_BLENDER_PORT = String(PORT);
 
 const host = await import(from("core/server/dist/extension-host.js"));
+const { filesFound } = await import(from("core/server/dist/output-files.js"));
 const { requiresOf } = await import(from("core/server/dist/extension-ui.js"));
 const db = await import(from("core/server/dist/db.js"));
 db.getDb();
@@ -173,6 +183,23 @@ test("the relayed tools are listed in Settings → Tools and registered in a cha
   assert.deepEqual(inChat.find((t) => t.name === "blender_execute_code").guard, { outside: true, acts: ["upload"] });
   const result = await ping.execute("call-1", {});
   assert.deepEqual(result.content, [{ type: "text", text: "pong" }, { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
+});
+
+test("a render is put in the chat's folder, and the portal takes the file the call gives as a picture for the chat", async () => {
+  const id = chat();
+  const render = registered(id).find((t) => t.name === "blender_render");
+  const result = await render.execute("call-2", { return_image: false });
+  assert.equal(calls.at(-1)!.arguments.return_image, true, "the server is asked for the picture");
+  assert.deepEqual(result.content.map((p: { type: string }) => p.type), ["text", "text"], "the model asked for none");
+  // The chat's folder: the workspace it was made with.
+  const folder = realpathSync(process.env.WORKSPACE_ROOT!);
+  // What the portal finds of the call's files when it ends, as the chat draws them.
+  const shown = filesFound(folder, result.details);
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].kind, "picture");
+  assert.equal(shown[0].title, "render_1.png");
+  assert.match(shown[0].path, /^blender-renders\/render-.+\.png$/);
+  assert.deepEqual(readFileSync(path.join(folder, shown[0].path)), Buffer.from(PIXEL, "base64"));
 });
 
 test("the viewer is the extension's page, its API is the server's, sandboxed, and a stream is not this extension's", async () => {

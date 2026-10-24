@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -194,7 +194,12 @@ export function memoryDocker(options: { owner?: string } = {}) {
   return { docker, containers, volumes, networks, images, calls, state, foreign };
 }
 
-/** A portal for one server half: an express router behind /api/x/<package>, the tools it offers and registers, a data folder. */
+/**
+ * A portal for one server half: an express router behind /api/x/<package>, the tools it offers and registers, a data
+ * folder, and the folder of the chat its tools are called in (`chatDir`), read and written through `files` as the
+ * portal's own functions do, by a path from that folder. Every read is kept with the options it was asked with
+ * (`reads`); `files.refuse` makes the next read throw a refusal with that code, as the portal's checks do.
+ */
 export function fakePortal(options: { dataDir?: string } = {}) {
   const router = express.Router();
   const offers: (() => { name: string; description?: string }[])[] = [];
@@ -203,7 +208,33 @@ export function fakePortal(options: { dataDir?: string } = {}) {
   let reloads = 0;
   let upgrade: ((req: http.IncomingMessage, socket: any, head: Buffer) => void) | undefined;
   const dataDir = options.dataDir ?? scratch("flair-data-");
+  const chatDir = scratch("flair-chat-");
+  const chat = { id: "chat-1", title: "A chat", workspace: chatDir, status: "running" };
   const uses = new Map<string, unknown>();
+  const reads: { rel: string; options: unknown }[] = [];
+  const refusal = (code: string, message: string) => Object.assign(new Error(message), { code });
+  const files = {
+    refuse: undefined as string | undefined,
+    makeFolder(base: string, rel: string, name: string) {
+      const made = path.join(base, rel, name);
+      if (existsSync(made)) throw refusal("exists", `${name} is there already`);
+      mkdirSync(made);
+      return path.posix.join(rel, name);
+    },
+    create(base: string, rel: string, name: string, data: Buffer) {
+      writeFileSync(path.join(base, rel, name), data, { flag: "wx" });
+      return path.posix.join(rel, name);
+    },
+    read(base: string, rel: string, asked?: unknown) {
+      reads.push({ rel, options: asked });
+      if (files.refuse) throw refusal(files.refuse, `refused: ${rel}`);
+      if (path.isAbsolute(rel) || rel.split(/[/\\]/).includes("..")) throw refusal("invalid", `not inside: ${rel}`);
+      const full = path.join(base, rel);
+      if (!existsSync(full)) throw refusal("missing", `no such file: ${rel}`);
+      const bytes = readFileSync(full);
+      return bytes.includes(0) ? { binary: true, size: bytes.length, mtime: 0 } : { binary: false, size: bytes.length, mtime: 0, content: bytes.toString("utf8") };
+    },
+  };
   const portal = {
     version: 1,
     extension: EXTENSION,
@@ -214,12 +245,17 @@ export function fakePortal(options: { dataDir?: string } = {}) {
     tools: { offer: (fn: () => { name: string; description?: string }[]) => void offers.push(fn) },
     chats: {
       extend: (factory: (pi: any, chat: any) => void) => void factories.push(factory),
+      folder: (id: string) => {
+        if (id !== chat.id) throw new Error(`no chat ${id}`);
+        return chatDir;
+      },
       reload: async () => {
         reloads++;
         return { reloaded: 0, waiting: 0 };
       },
     },
     extensions: { use: (name: string) => uses.get(name) },
+    files,
     dataDir: () => dataDir,
   };
   return {
@@ -227,6 +263,10 @@ export function fakePortal(options: { dataDir?: string } = {}) {
     uses,
     logs,
     dataDir,
+    chat,
+    chatDir,
+    files,
+    reads,
     reloads: () => reloads,
     upgrade: () => upgrade,
     /** What Settings → Tools is offered now. */
@@ -234,7 +274,7 @@ export function fakePortal(options: { dataDir?: string } = {}) {
     /** The tools a chat's pi is given as it loads. */
     registered() {
       const tools: any[] = [];
-      for (const factory of factories) factory({ registerTool: (tool: any) => tools.push(tool) }, { id: "chat-1" });
+      for (const factory of factories) factory({ registerTool: (tool: any) => tools.push(tool) }, chat);
       return tools;
     },
     /** The router served as the portal serves it, at /api/x/<package>. */

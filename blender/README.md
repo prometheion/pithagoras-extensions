@@ -79,9 +79,13 @@ The server's MCP tools, as tools of the extension's own, in every chat:
 | `blender_get_object_info` | One object: transform, materials, mesh |
 | `blender_execute_code` | Python with `bpy` in Blender, printing what it prints |
 | `blender_preview` | A quick Workbench render, returned as a picture |
-| `blender_render` | A full render (Cycles, EEVEE or Workbench), saved and returned as a picture |
+| `blender_render` | A full render (Cycles, EEVEE or Workbench), saved, shown to you in the chat and returned as a picture |
 | `blender_export` | Exports the scene: glb, gltf, fbx, obj, usd or stl |
 | `blender_list_projects`, `blender_open_file`, `blender_save_file`, `blender_new_scene` | The projects in `scenes/` |
+
+A render is yours as well as the model's: the extension puts the picture in the chat's folder, in `blender-renders/`,
+and the call gives it to the chat as any tool gives a file, so it is drawn under the call, opens in the picture viewer
+and is among voice mode's pictures. The model still gets it, unless it asked for none (`return_image: false`).
 
 They are on by default. Settings → Tools lists them under **pithagoras-blender**, where they can be switched off or made
 lazy for every chat, and each chat, agent, project or mode can switch them its own way. Their descriptions and the

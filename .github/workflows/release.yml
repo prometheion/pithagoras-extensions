@@ -2,7 +2,8 @@
 #
 # 1. The image is built from blender/server/Dockerfile (amd64), tagged with the version.
 # 2. Its smoke test (scripts/smoke-blender.sh): it answers MCP with the tools blender/server/tools.json has, and refuses
-#    requests without its token.
+#    requests without its token. Then its live view's (scripts/viewport-blender.py): the view follows what the agent's
+#    code does to the scene, whatever that takes away.
 # 3. It is pushed to GHCR, as a package of the prometheion organization, linked to this repository by its
 #    org.opencontainers.image.source label. A new package starts private: an owner of the organization switches it to
 #    public once, in the package's settings on GitHub (GitHub does not let it go back), or no portal can pull it.
@@ -45,6 +46,8 @@ jobs:
         run: docker build -f blender/server/Dockerfile --build-arg VERSION="$VERSION" -t "$IMAGE:$VERSION" blender
       - name: Smoke test
         run: ./scripts/smoke-blender.sh "$IMAGE:$VERSION"
+      - name: The live view, against the agent's code
+        run: ./scripts/viewport-blender.py "$IMAGE:$VERSION"
       - name: Its size
         run: docker image inspect "$IMAGE:$VERSION" --format '{{.Size}} bytes' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Push to GHCR

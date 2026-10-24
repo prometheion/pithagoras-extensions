@@ -56,7 +56,10 @@ tools runs in that chat. The panel holds the viewer, the extension's own page, w
 portal's language:
 
 - the live viewport, rendered by Blender from where you look: drag to orbit, right-drag or Shift-drag to pan, scroll to
-  zoom; Solid (Workbench), Material preview and Rendered (Cycles, denoised);
+  zoom; Solid (Workbench), Material preview and Rendered (Cycles, denoised). It follows the agent: it is rendered
+  again after each of its changes, also one that failed half way, and between the steps of a long script that calls
+  `refresh_view()`. While Blender is busy with something that holds its frames back, the view says what and for how
+  long, over the picture from before;
 - the scene camera's preview and the last render, the timeline of the scene's frame range, and a picker for an
   object's actions;
 - the outliner and the render panel, folded at first in a narrow panel (T and N, as in Blender);
@@ -74,11 +77,19 @@ The server's MCP tools, as tools of the extension's own, in every chat:
 | `blender_ping` | Blender's version, the GPU devices and the open file |
 | `blender_get_scene_info` | The scene: engine, resolution, frame range, up to 200 objects |
 | `blender_get_object_info` | One object: transform, materials, mesh |
-| `blender_execute_code` | Python with `bpy` in Blender, printing what it prints |
+| `blender_execute_code` | Python with `bpy` in Blender, written inline or a script in the chat's folder run by its path, printing what it prints |
 | `blender_preview` | A quick Workbench render, returned as a picture |
-| `blender_render` | A full render (Cycles, EEVEE or Workbench), saved and returned as a picture |
+| `blender_render` | A full render (Cycles, EEVEE or Workbench), saved, shown to you in the chat and returned as a picture |
 | `blender_export` | Exports the scene: glb, gltf, fbx, obj, usd or stl |
 | `blender_list_projects`, `blender_open_file`, `blender_save_file`, `blender_new_scene` | The projects in `scenes/` |
+
+A script the agent writes once and edits goes to `blender_execute_code` by its `path`, in place of code written into
+every call, with `args` that the script reads as `ARGS`. An error names the file and the line, and a long script can
+call `refresh_view()` between its steps to show you the scene as it takes shape.
+
+A render is yours as well as the model's: the extension puts the picture in the chat's folder, in `blender-renders/`,
+and the call gives it to the chat as any tool gives a file, so it is drawn under the call, opens in the picture viewer
+and is among voice mode's pictures. The model still gets it, unless it asked for none (`return_image: false`).
 
 They are on by default. Settings → Tools lists them under **pithagoras-blender**, where they can be switched off or made
 lazy for every chat, and each chat, agent, project or mode can switch them its own way. Their descriptions and the
@@ -124,6 +135,9 @@ Don't add an MCP server named `blender` beside it: its tools would have the same
   the portal's own port, which asks for its sign-in, and Understory's (3800), which shares the namespace and asks for its
   token. It can still read and change the projects, and what it prints comes back to the chat, which is why the guard
   holds it.
+- **A script by its path is read by the portal, as the agent.** The container never mounts the agent's files. The
+  portal reads the script from the chat's folder with its own file functions, as that chat's agent would (with the
+  sandbox on, a file closed to the agent is refused), refuses a path outside the folder, and sends Blender the text.
 
 ## Data
 
@@ -188,6 +202,8 @@ npm test -w blender        # unit tests, with Docker, the portal and the server 
 ./scripts/pithagoras.sh    # Pithagoras v0.2.0 into .pithagoras/, for the portal-tier tests
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w blender
 docker build -f blender/server/Dockerfile -t pithagoras-blender:dev blender   # the image
+./scripts/smoke-blender.sh pithagoras-blender:dev                              # its smoke test
+./scripts/viewport-blender.py pithagoras-blender:dev                           # its live view, against the agent's code
 ```
 
 `server/tools.json` is what the server lists (`tools/list`) and its MCP instructions, which the extension registers in

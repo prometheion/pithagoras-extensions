@@ -68,8 +68,10 @@ it into its server half's one file, so a published package needs nothing beside 
 
 A release is a tag, `blender-v<version>` or `godot-v<version>`, matching the version in that extension's
 `package.json`. Its workflow builds and smoke-tests the image, pushes it to GHCR, makes a GitHub release with the
-sources that go with the image, and then publishes the package to npm. Each extension's README says how to build its
-image by hand.
+sources that go with the image, and then publishes the package to npm under the `@pithagoras` scope, through npm's
+trusted publishing for that workflow, with no token. The first version of a package is published by hand, as only a
+package that is there can be given a trusted publisher; the workflow's header says how. Each extension's README says
+how to build its image by hand.
 
 ## Licences
 

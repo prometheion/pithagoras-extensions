@@ -1,12 +1,18 @@
 # A release of the Godot extension, on a tag godot-v<version> that is godot/package.json's version: the image is built
 # from godot/server (after fetch-assets.sh has fetched and checked what it is built from), tested with no GPU
 # (smoke-test.sh), and pushed to ghcr.io/prometheion/pithagoras-godot:<version>; then a GitHub release carries the sources
-# the image's GPL parts ask for and the list of its Ubuntu packages; then the package is published to npm. npm comes
-# last, so a version on npm never names an image that is not there.
+# the image's GPL parts ask for and the list of its Ubuntu packages; then the package, @pithagoras/godot, goes to npm.
+# npm comes last, so a version on npm never names an image that is not there.
 #
 # Once, by hand, after the first push: GHCR makes a new package private, and Docker for extensions pulls without a
 # login, so an owner of the prometheion organization switches ghcr.io/prometheion/pithagoras-godot to public in the
-# package's settings (GitHub does not let it go back). npm needs an NPM_TOKEN secret.
+# package's settings (GitHub does not let it go back).
+#
+# npm's trusted publishing signs in with this workflow's identity (`id-token: write`), with no token, and adds
+# provenance. Only a package that is there can be given a trusted publisher, so its first version is published by hand
+# (`npm publish -w godot --auth-type=web`, from a clean checkout of the tag): where npm has the tag's version already,
+# the step says so and publishes nothing. With the variable NPM_STAGE "true" (the repository's or the organization's),
+# the version is staged (`npm stage publish`) and published once a maintainer approves it with 2FA on npmjs.com.
 #
 # The x264, x265 and libde265 sources are the commits pixelflux 2.2.1 (inside Selkies 2.1.0) builds them from, as its
 # pyproject.toml pins them (build_x264, build_x265, build_de265). The LGPL libraries pcmflux 2.2.0 (inside Selkies)
@@ -21,9 +27,13 @@ on:
 permissions:
   contents: write
   packages: write
+  # npm's trusted publishing.
+  id-token: write
 
 env:
   IMAGE: ghcr.io/prometheion/pithagoras-godot
+  # How the package goes to npm: see above.
+  NPM_PUBLISH: ${{ vars.NPM_STAGE == 'true' && 'npm stage publish' || 'npm publish' }} -w godot --access public
   PIXELFLUX: "2.2.1"
   PCMFLUX: "2.2.0"
   X264_SOURCE: https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2
@@ -52,6 +62,10 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+      # Node 22 comes with npm 10: trusted publishing takes 11.5.1 or later, and `npm stage` 11.15. One version, put in
+      # before anything is pushed.
+      - name: npm 11
+        run: npm install -g npm@11.21.0 && npm --version
       - name: The tag is the package's version
         id: version
         run: |
@@ -94,9 +108,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" sources/* --title "Godot ${{ steps.version.outputs.version }}" \
-            --notes "pithagoras-godot ${{ steps.version.outputs.version }}: the package on npm (npm:pithagoras-godot) and the image $IMAGE:${{ steps.version.outputs.version }}. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
+            --notes "@pithagoras/godot ${{ steps.version.outputs.version }}: the package on npm (npm:@pithagoras/godot) and the image $IMAGE:${{ steps.version.outputs.version }}. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
       - run: npm ci
       - name: Publish to npm
-        run: npm publish -w godot --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          NAME=$(node -p "require('./godot/package.json').name")
+          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "$NAME@$VERSION is on npm already: nothing to publish"
+            exit 0
+          fi
+          $NPM_PUBLISH

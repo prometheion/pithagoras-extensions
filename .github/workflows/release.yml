@@ -12,8 +12,13 @@
 #    built with x264 and x265, and the others under the GPL, the LGPL or the MPL: scripts/blender-sources.sh), each
 #    checked against the hash Blender's source pins; and the list of the image's Ubuntu packages (their sources are in
 #    Ubuntu's archive).
-# 5. The package is published to npm (secret NPM_TOKEN), last, so that a version on npm never names an image that is
-#    not there.
+# 5. The package, @pithagoras/blender, goes to npm last, so that a version on npm never names an image that is not
+#    there. npm's trusted publishing signs in with this workflow's identity (`id-token: write`), with no token, and adds
+#    provenance. Only a package that is there can be given a trusted publisher, so its first version is published by
+#    hand (`npm publish -w blender --auth-type=web`, from a clean checkout of the tag): where npm has the tag's version
+#    already, the step says so and publishes nothing. With the variable NPM_STAGE "true" (the repository's or the
+#    organization's), the version is staged (`npm stage publish`) and published once a maintainer approves it with 2FA
+#    on npmjs.com.
 name: Release
 
 on:
@@ -23,6 +28,12 @@ on:
 permissions:
   contents: write
   packages: write
+  # npm's trusted publishing.
+  id-token: write
+
+env:
+  # How the package goes to npm: see 5. above.
+  NPM_PUBLISH: ${{ vars.NPM_STAGE == 'true' && 'npm stage publish' || 'npm publish' }} -w blender --access public
 
 jobs:
   blender:
@@ -37,6 +48,10 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+      # Node 22 comes with npm 10: trusted publishing takes 11.5.1 or later, and `npm stage` 11.15. One version, put in
+      # before anything is pushed.
+      - name: npm 11
+        run: npm install -g npm@11.21.0 && npm --version
       - name: The tag is the package's version
         run: |
           VERSION=$(node -p "require('./blender/package.json').version")
@@ -67,9 +82,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "Blender $VERSION" --notes "pithagoras-blender $VERSION: the extension (npm:pithagoras-blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
+          gh release create "$GITHUB_REF_NAME" --title "Blender $VERSION" --notes "@pithagoras/blender $VERSION: the extension (npm:@pithagoras/blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
       - run: npm ci
       - name: Publish to npm
-        run: npm publish -w blender --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NAME=$(node -p "require('./blender/package.json').name")
+          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "$NAME@$VERSION is on npm already: nothing to publish"
+            exit 0
+          fi
+          $NPM_PUBLISH

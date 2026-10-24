@@ -1,8 +1,23 @@
-# A release of the Godot extension, on a tag godot-v<version> that is godot/package.json's version: the image is built
-# from godot/server (after fetch-assets.sh has fetched and checked what it is built from), tested with no GPU
+# A release of the Godot extension, godot-v<version> where the version is godot/package.json's: the image is built from
+# godot/server (after fetch-assets.sh has fetched and checked what it is built from), tested with no GPU
 # (smoke-test.sh), and pushed to ghcr.io/prometheion/pithagoras-godot:<version>; then a GitHub release carries the sources
 # the image's GPL parts ask for and the list of its Ubuntu packages; then the package, @pithagoras/godot, goes to npm.
 # npm comes last, so a version on npm never names an image that is not there.
+#
+# Merging a pull request that changes the version in godot/package.json releases it, and a tag pushed by hand still
+# does. The gate, a job that is cheap and runs first, works out the tag and the version. On a tag, the tag has to be
+# godot-v<the version in godot/package.json>. On a push to main that changes godot/package.json, the tag is
+# godot-v<its version>: where that tag is there already (the edit left the version as it was, or the version was tagged
+# by hand), the run ends there and releases nothing; otherwise the gate puts the tag on the pushed commit and pushes it
+# with the job's GITHUB_TOKEN. GitHub starts no workflow run for what GITHUB_TOKEN pushes (only workflow_dispatch,
+# repository_dispatch and some pull_request events are exceptions:
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow),
+# so that tag does not start this workflow a second time. One release of the extension runs at a time (the concurrency
+# group), so a merge and a hand-pushed tag of one version cannot both release it: the merge's run finds the tag and
+# stops, and a tag pushed by hand after the gate pushed it is refused, or has nothing to push. If a tag ruleset limits
+# who may create *-v* tags, github-actions[bot] (the GitHub Actions app) has to be on its bypass list, or the gate's push
+# is refused. If the release job fails after the gate pushed the tag, "Re-run failed jobs" runs it again for that tag;
+# re-running all jobs runs the gate again, which finds the tag and stops.
 #
 # Once, by hand, after the first push: GHCR makes a new package private, and Docker for extensions pulls without a
 # login, so an owner of the prometheion organization switches ghcr.io/prometheion/pithagoras-godot to public in the
@@ -23,12 +38,13 @@ name: Godot release
 on:
   push:
     tags: ["godot-v*"]
+    branches: [main]
+    # For the push to main only: GitHub does not look at paths for a tag.
+    paths: [godot/package.json]
 
-permissions:
-  contents: write
-  packages: write
-  # npm's trusted publishing.
-  id-token: write
+concurrency:
+  group: godot-release
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/prometheion/pithagoras-godot
@@ -53,8 +69,53 @@ env:
     BaseOS/Source/Packages/util-linux-2.32.1-48.el8_10.src.rpm
 
 jobs:
-  release:
+  # The gate: see above.
+  gate:
     runs-on: ubuntu-24.04
+    permissions:
+      # To push the tag.
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      release: ${{ steps.tag.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag, and whether there is anything to release
+        id: tag
+        run: |
+          VERSION=$(node -p "require('./godot/package.json').version")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG=$GITHUB_REF_NAME
+            [ "$TAG" = "godot-v$VERSION" ] || { echo "tag $TAG is not godot-v$VERSION" >&2; exit 1; }
+          else
+            TAG=godot-v$VERSION
+            # An assignment, so that a failed ls-remote fails the step rather than reading as no tag.
+            REMOTE=$(git ls-remote --tags origin "refs/tags/$TAG")
+            if [ -n "$REMOTE" ]; then
+              echo "$TAG exists: nothing to release"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          { echo "tag=$TAG"; echo "version=$VERSION"; echo "release=true"; } >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      # The GitHub release.
+      contents: write
+      # The image, to GHCR.
+      packages: write
+      # npm's trusted publishing.
+      id-token: write
+    env:
+      TAG: ${{ needs.gate.outputs.tag }}
+      VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -66,32 +127,26 @@ jobs:
       # before anything is pushed.
       - name: npm 11
         run: npm install -g npm@11.21.0 && npm --version
-      - name: The tag is the package's version
-        id: version
-        run: |
-          version=$(node -p "require('./godot/package.json').version")
-          [ "${GITHUB_REF_NAME#godot-v}" = "$version" ] || { echo "tag $GITHUB_REF_NAME is not godot-v$version" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: What the image is built from
         run: |
           # fetch-assets.sh reads the export templates' zip as it downloads, with bsdtar.
           sudo apt-get update && sudo apt-get install -y --no-install-recommends libarchive-tools
           godot/server/fetch-assets.sh
       - name: The image
-        run: docker build --build-arg VERSION=${{ steps.version.outputs.version }} -t "$IMAGE:${{ steps.version.outputs.version }}" godot/server
+        run: docker build --build-arg VERSION="$VERSION" -t "$IMAGE:$VERSION" godot/server
       - name: Smoke test, with no GPU
-        run: godot/server/smoke-test.sh "$IMAGE:${{ steps.version.outputs.version }}"
+        run: godot/server/smoke-test.sh "$IMAGE:$VERSION"
       - name: Its size
-        run: echo "Image size $(docker image inspect "$IMAGE:${{ steps.version.outputs.version }}" --format '{{.Size}}') bytes" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Image size $(docker image inspect "$IMAGE:$VERSION" --format '{{.Size}}') bytes" >> "$GITHUB_STEP_SUMMARY"
       - name: Push to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:${{ steps.version.outputs.version }}"
+          docker push "$IMAGE:$VERSION"
       - name: The sources the image's GPL and LGPL parts ask for, and its packages
         run: |
           set -eu
           mkdir sources
-          image="$IMAGE:${{ steps.version.outputs.version }}"
+          image="$IMAGE:$VERSION"
           docker run --rm --entrypoint dpkg "$image" -l > sources/ubuntu-packages.txt
           # The pixelflux and pcmflux in the image are the ones these sources are for.
           docker run --rm --entrypoint sh "$image" -c "test -d /opt/selkies/lib/python3.12/site-packages/pixelflux-$PIXELFLUX.dist-info && test -d /opt/selkies/lib/python3.12/site-packages/pcmflux-$PCMFLUX.dist-info"
@@ -107,12 +162,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" sources/* --title "Godot ${{ steps.version.outputs.version }}" \
-            --notes "@pithagoras/godot ${{ steps.version.outputs.version }}: the package on npm (npm:@pithagoras/godot) and the image $IMAGE:${{ steps.version.outputs.version }}. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
+          gh release create "$TAG" --verify-tag sources/* --title "Godot $VERSION" \
+            --notes "@pithagoras/godot $VERSION: the package on npm (npm:@pithagoras/godot) and the image $IMAGE:$VERSION. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
       - run: npm ci
       - name: Publish to npm
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           NAME=$(node -p "require('./godot/package.json').name")
           if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then

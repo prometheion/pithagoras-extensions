@@ -1,5 +1,5 @@
 pithagoras-godot container image
-Copyright 2026 The Pithagoras Flair authors
+Copyright 2026 Anirban Kar and Contributors
 
 This image is what the Pithagoras Godot extension (pithagoras-godot,
 https://github.com/prometheion/pithagoras-extensions) runs. Its own files are under the Apache License 2.0:

@@ -36,6 +36,36 @@ export interface Bundled {
   tools: McpTool[];
 }
 
+/**
+ * The server's words about its tools, with the names the model has them by. The server names them as its own MCP
+ * clients call them (`list_projects`), while a chat offers them as `<prefix>_list_projects`; a model told the bare name
+ * calls it, and a name the request did not declare is not a call. A name with an underscore is one wherever it stands;
+ * a one-word name (`render`, `stop`) only where it is written as a call (`screenshot(`), as it is a word of the
+ * sentence too.
+ */
+export function inChatNames(text: string, names: readonly string[], prefix: string): string {
+  const escape = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const longestFirst = [...names].sort((a, b) => b.length - a.length);
+  const joined = longestFirst.filter((n) => n.includes("_")).map(escape);
+  const words = longestFirst.filter((n) => !n.includes("_")).map(escape);
+  const forms = [
+    ...(joined.length ? [`(?<![\\w-])(?:${joined.join("|")})(?![\\w])`] : []),
+    ...(words.length ? [`(?<![\\w-])(?:${words.join("|")})(?=\\()`] : []),
+  ];
+  return forms.length ? text.replace(new RegExp(forms.join("|"), "g"), (name) => `${prefix}_${name}`) : text;
+}
+
+/** The instructions as a chat's guideline: in the chat's names, and saying the prefix once for the names left as words. */
+export function guidelineOf(instructions: string, names: readonly string[], prefix: string): string {
+  const text = instructions.trim();
+  if (!text) return "";
+  // The example is a name the instructions leave as a word, where there is one: the name the model would otherwise call bare.
+  const words = names.filter((n) => !n.includes("_"));
+  const example = words.find((n) => new RegExp(`(?<![\\w-])${n}(?![\\w(])`).test(text)) ?? words[0] ?? names[0];
+  const said = example ? ` In this chat each of these tools is named with ${prefix}_ in front: ${example} is ${prefix}_${example}.` : "";
+  return `${inChatNames(text, names, prefix)}${said}`;
+}
+
 /** A tool's result as pi takes it: text and pictures in the order the server gave them. */
 export type Part = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
@@ -90,7 +120,8 @@ export function relay(options: RelayOptions) {
   /** Whether the server's container exists, as the service last found it; until it has looked, as it found it before. */
   let installed = existsSync(installedFile);
   const notRunning = `${options.app} is not running. The person can start it in Settings → ${options.app}.`;
-  const guideline = bundled.instructions.trim();
+  const names = bundled.tools.map((t) => t.name);
+  const guideline = guidelineOf(bundled.instructions, names, prefix);
 
   /** A tool's result, from what the server answered: a result it marks as an error is thrown, so pi marks the call failed. */
   function partsOf(result: Awaited<ReturnType<McpClient["callTool"]>>): Part[] {
@@ -112,7 +143,7 @@ export function relay(options: RelayOptions) {
       pi.registerTool({
         name: `${prefix}_${tool.name}`,
         label: options.labels[tool.name] ?? tool.name,
-        description: tool.description ?? "",
+        description: inChatNames(tool.description ?? "", names, prefix),
         parameters: tool.inputSchema,
         ...(guideline ? { promptGuidelines: [guideline] } : {}),
         executionMode: "sequential",
@@ -169,7 +200,7 @@ export function relay(options: RelayOptions) {
         ...[...theirs.keys()].filter((name) => !own.has(name)).map((name) => `${name} is not the extension's`),
         ...[...own.keys()].filter((name) => !theirs.has(name)).map((name) => `${name} is not listed`),
         ...[...own.keys()].filter((name) => theirs.has(name) && theirs.get(name) !== own.get(name)).map((name) => `${name} is described otherwise`),
-        ...(info.instructions.trim() !== guideline ? ["its instructions are others"] : []),
+        ...(info.instructions.trim() !== bundled.instructions.trim() ? ["its instructions are others"] : []),
       ].join("; ");
       if (differ && differ !== said) portal.log(`the ${options.app} server lists other tools than the extension's own (${differ}): the extension's are the ones offered`);
       said = differ;

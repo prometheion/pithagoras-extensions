@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { mcpClient } from "../../shared/mcp.ts";
-import { relay } from "../../shared/relay.ts";
+import { guidelineOf, inChatNames, relay } from "../../shared/relay.ts";
 import { ACTS, LABELS } from "../src/labels.ts";
 import { fakeMcp, fakePortal, LISTED, TOOLS } from "./fakes.mts";
 
@@ -38,10 +38,10 @@ test("the package's tools are Godot's, with the prefix, their schemas, the instr
   assert.deepEqual(fake.listed().map((t) => t.name), registered.map((t) => t.name), "Settings → Tools lists them");
   for (const tool of registered) {
     const source = TOOLS.find((t) => `godot_${t.name}` === tool.name)!;
-    assert.equal(tool.description, source.description);
+    assert.equal(tool.description, inChatNames(source.description ?? "", TOOLS.map((t) => t.name), "godot"));
     assert.deepEqual(tool.parameters, source.inputSchema);
     assert.equal(tool.label, LABELS[source.name]);
-    assert.deepEqual(tool.promptGuidelines, [LISTED.instructions]);
+    assert.deepEqual(tool.promptGuidelines, [guidelineOf(LISTED.instructions, TOOLS.map((t) => t.name), "godot")]);
     assert.equal(tool.executionMode, "sequential");
     assert.deepEqual(tool.guard, ACTS[source.name].length ? { outside: true, acts: ["upload"] } : { outside: true }, tool.name);
   }
@@ -63,8 +63,8 @@ test("what the running server says of itself is never what the model is told; a 
     await tools.check();
     const registered = fake.registered();
     assert.deepEqual(registered.map((t) => t.name), TOOLS.map((t) => `godot_${t.name}`), "no godot_shell");
-    assert.equal(registered.find((t) => t.name === "godot_ping").description, TOOLS[0].description);
-    for (const tool of registered) assert.deepEqual(tool.promptGuidelines, [LISTED.instructions]);
+    assert.equal(registered.find((t) => t.name === "godot_ping").description, inChatNames(TOOLS[0].description ?? "", TOOLS.map((t) => t.name), "godot"));
+    for (const tool of registered) assert.deepEqual(tool.promptGuidelines, [guidelineOf(LISTED.instructions, TOOLS.map((t) => t.name), "godot")]);
     const said = fake.lines.filter((line) => line.includes("lists other tools than the extension's own"));
     assert.equal(said.length, 1);
     assert.match(said[0], /shell is not the extension's; ping is described otherwise; its instructions are others/);
@@ -107,4 +107,12 @@ test("once the server is removed, nothing is offered or registered, and the mark
   assert.deepEqual(fake.listed(), []);
   assert.deepEqual(fake.registered(), []);
   assert.equal(existsSync(marker), false);
+});
+
+test("Godot's instructions name its tools as the chat offers them, so the model calls godot_execute_gdscript, not execute_gdscript", () => {
+  const told = guidelineOf(LISTED.instructions, TOOLS.map((t) => t.name), "godot");
+  for (const t of TOOLS.filter((t) => t.name.includes("_"))) assert.doesNotMatch(told, new RegExp(`(?<![\\w-])${t.name}(?![\\w])`), t.name);
+  assert.match(told, /godot_execute_gdscript runs arbitrary GDScript/);
+  assert.match(told, /godot_screenshot\(target=game\)/);
+  assert.match(told, /In this chat each of these tools is named with godot_ in front: \w+ is godot_\w+\.$/);
 });

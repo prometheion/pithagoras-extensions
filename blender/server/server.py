@@ -73,7 +73,7 @@ def run_on_main(fn, timeout=900):
     def job():
         try:
             box["result"] = fn()
-        except Exception as e:
+        except BaseException as e:   # SystemExit and KeyboardInterrupt too: no job may end the main loop, and Blender with it
             box["error"] = f"{type(e).__name__}: {e}"
             log(f"viewer job failed: {e}")
         finally:
@@ -105,7 +105,8 @@ def drain_jobs():
 
 def log(*a):
     line = time.strftime("%H:%M:%S") + " " + " ".join(str(x) for x in a)
-    print(line, flush=True)
+    # To the process's own output, which is the container's log, also while the agent's code runs with its output caught.
+    print(line, file=sys.__stdout__, flush=True)
     with STATE_LOCK:
         STATE["log"].appendleft(line)
 
@@ -175,39 +176,60 @@ def cmd_get_object_info(p):
 
 def refresh_view():
     """For code the agent runs, between the steps of a long script: the person's live view and outliner show the
-    scene as it is now, while the rest runs. The scene is left on its own frame and actions, as the script had it."""
+    scene as it is now, while the rest runs. The scene is left on its own frame and actions, as the script had it.
+    Like any render, and like the refresh after every call, it evaluates the scene's animation again: a value set on
+    an animated property and not keyed goes back to what its keys say, so the script keys it, or sets it after the
+    last refresh_view()."""
     summarize_scene("execute_code")
     refresh_viewport("execute_code")
     release_frame()
 
 
 class CodeFailed(Exception):
-    """What the agent's code raised, told as Python tells it: the lines of the code it went through, then the error."""
+    """What the agent's code raised, told as Python tells it: the lines of the code it went through, then the error.
+    `error` is that error's own line, for the log; `ran`, whether any of the code ran, and so may have changed the
+    scene: code that does not compile never starts."""
+
+    def __init__(self, told, error, ran):
+        super().__init__(told)
+        self.error, self.ran = error, ran
 
 
 def cmd_execute_code(p):
-    """Runs `code`. With `path` it is the text of a script in the agent's own files, which the portal read as the agent
-    and sent (the server never sees those files), and it runs under that name, so that what it raises names the file
-    and the line. `args`, a JSON object, is what the code reads as ARGS."""
-    code, name, args = p.get("code"), p.get("path") or "<request>", p.get("args", {})
+    """Runs `code`. With `script_name` it is the text of a script in the agent's own files, which the portal read as the
+    agent and sent (the server never sees those files), and it runs under that name, its path in the chat's folder, so
+    that what it raises names the file and the line. `args`, a JSON object, is what the code reads as ARGS."""
+    code, name, args = p.get("code"), p.get("script_name") or "<request>", p.get("args", {})
     if not isinstance(code, str):
-        raise ValueError("code is required: the Python to run, or with path the script's text, which the portal sends")
+        raise ValueError("code is required: the Python to run, or with script_name the script's text, which the portal sends")
     if not isinstance(args, dict):
         raise ValueError("args must be a JSON object")
-    # The code is no file here: its lines, for the traceback to quote.
+    # The code is no file here: its lines, for the traceback to quote, while it runs and its error is told. Not kept
+    # after: one Blender runs every chat's code, and what another's reads of linecache is not this one's.
     linecache.cache[name] = (len(code), None, code.splitlines(True), name)
     out = io.StringIO()
     ns = {"bpy": bpy, "refresh_view": refresh_view, "ARGS": args, "__name__": "__blender_server__"}
+    ran = False
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            exec(compile(code, name, "exec"), ns)
-    except Exception as e:
+            compiled = compile(code, name, "exec")
+            ran = True
+            exec(compiled, ns)
+    # Not only Exception: sys.exit(), exit() and quit() raise SystemExit, which would end Blender, and the open scene
+    # with it, as would a KeyboardInterrupt the code raises. Each is told as any error is, and Blender keeps running.
+    except BaseException as e:
         frames = [f for f in traceback.extract_tb(e.__traceback__) if f.filename == name]
-        told = "".join(traceback.format_exception_only(type(e), e))
+        error = "".join(traceback.format_exception_only(type(e), e))
+        told = error
         if frames:
             told = "Traceback (most recent call last):\n" + "".join(traceback.format_list(frames)) + told
+        if not isinstance(e, Exception):
+            told = told.rstrip() + f"\n(The code stopped itself there with {type(e).__name__}: what came after it did not run. Blender keeps running.)"
         printed = out.getvalue()[-4000:]
-        raise CodeFailed((f"It printed, before the error:\n{printed.rstrip()}\n\n" if printed.strip() else "") + told.rstrip()) from None
+        raise CodeFailed((f"It printed, before the error:\n{printed.rstrip()}\n\n" if printed.strip() else "") + told.rstrip(),
+                         error.strip().splitlines()[-1], ran) from None
+    finally:
+        linecache.cache.pop(name, None)
     return {"output": out.getvalue()[-20000:]}
 
 
@@ -267,7 +289,7 @@ def list_projects():
 
 
 def cmd_new_scene(p):
-    forget_viewport()
+    drop_viewport()
     bpy.ops.wm.read_factory_settings(use_empty=bool(p.get("empty", True)))
     global GPU
     GPU = setup_gpu()   # factory reset also resets preferences
@@ -278,7 +300,7 @@ def cmd_new_scene(p):
 
 
 def cmd_open_file(p):
-    forget_viewport()
+    drop_viewport()   # removed, not only forgotten: a file that cannot be opened leaves the scene as it is
     path = inside_data(p["path"])
     if not os.path.isfile(path):
         raise FileNotFoundError(f"no such project: {p['path']}")
@@ -440,7 +462,7 @@ def action_summary(action):
 def animation_info(scene):
     """Frame range, rate and keyframes for the browser's timeline, and for each object that has more than one
     action made for it, the list to choose from."""
-    objs = [o for o in scene.objects if not o.name.startswith("__")]
+    objs = [o for o in scene.objects if not o.name.startswith(HIDDEN)]
     used, targets = set(), []
     for o in objs:
         own = o.animation_data.action if o.animation_data else None
@@ -477,7 +499,7 @@ def summarize_scene(reason):
 
         walk(bpy.context.scene.collection, None)
         for o in bpy.context.scene.objects:
-            if o.name.startswith("__"):
+            if o.name.startswith(HIDDEN):
                 continue
             pts = [o.matrix_world @ mathutils.Vector(c) for c in o.bound_box] if o.type not in ("CAMERA", "LIGHT", "EMPTY") else [o.matrix_world.translation.copy()]
             lo = [min(p[i] for p in pts) for i in range(3)]
@@ -535,6 +557,18 @@ VIEWPORT_JPG = os.path.join(DATA, "viewport", "live.jpg")
 # which once made every frame after it fail. Looked up again for each use (`kept`), a freed one is simply not there.
 VP = {"scene": None, "cam": None, "dirty": True, "mode": None}
 
+# What the viewport's scene and camera are named: after any name a person gives, as Blender lists datablocks (by name,
+# whatever its case, and `~` after letters and digits). So code that takes the first scene or the first camera there
+# is (`bpy.data.scenes[0]`), and Blender, which puts the window on the scene before the one removed from under it, or
+# else the one after, find the person's own. `__viewport` is what an older server named them, in a project saved then.
+VIEWPORT = "~viewport"
+HIDDEN = ("__", VIEWPORT)   # the server's own objects, which the outliner and the timeline leave out
+
+
+def of_viewport(name):
+    """Whether a datablock is a viewport's: this server's, or one a project was saved with."""
+    return name.startswith((VIEWPORT, "__viewport"))
+
 
 def kept(collection, held):
     """The datablock `held` names, (name, address), if it is still the one in `collection`; None once it is not."""
@@ -553,15 +587,34 @@ def forget_viewport():
     VP.update(scene=None, cam=None, dirty=True, mode=None)
 
 
+def leave(scene):
+    """Moves the person's window off `scene`, a viewport's, where code the agent ran left it there: it removed the scene
+    the window was on, and Blender put the window on the one beside it. It goes to one of the person's own scenes. Where
+    there is none, `scene` is kept as theirs, as that code left it (it holds their collections and objects, and what the
+    code made in it since), with its output a scene's own again rather than the viewport's frame, and the answer is
+    False: it is not to be removed."""
+    window = bpy.context.window
+    if window.scene != scene:
+        return True
+    own = [s for s in bpy.data.scenes if not of_viewport(s.name)]
+    if own:
+        window.scene = own[0]
+        return True
+    scene.name = "Scene"
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.filepath = "//"
+    return False
+
+
 def drop_viewport():
     """Removes the viewport's own scene and camera, where they are still there, and forgets them."""
     vp, cam = kept(bpy.data.scenes, VP["scene"]), kept(bpy.data.objects, VP["cam"])
-    if vp is not None:
-        bpy.data.scenes.remove(vp)
     if cam is not None:
         data = cam.data
         bpy.data.objects.remove(cam)
         bpy.data.cameras.remove(data)
+    if vp is not None and leave(vp):
+        bpy.data.scenes.remove(vp)
     forget_viewport()
 
 
@@ -572,35 +625,60 @@ def forget_viewport_on_load(*_):
     forget_viewport()
 
 
+@bpy.app.handlers.persistent
+def drop_viewports_on_load(*_):
+    """What a file came with of a viewport's, saved in it by code the agent ran or by an older server: not the
+    project's, and removed. A frame makes the viewport's own again."""
+    for cam in [o for o in bpy.data.objects if o.type == "CAMERA" and of_viewport(o.name)]:
+        data = cam.data
+        bpy.data.objects.remove(cam)
+        if not data.users:
+            bpy.data.cameras.remove(data)
+    for scene in [s for s in bpy.data.scenes if of_viewport(s.name)]:
+        if leave(scene):
+            bpy.data.scenes.remove(scene)
+
+
+@bpy.app.handlers.persistent
+def drop_viewport_on_save(*_):
+    """Any save, the server's or one code the agent ran makes (save_as_mainfile): the viewport's own scene and camera
+    are not the project's. The next frame makes them again."""
+    drop_viewport()
+
+
 def viewport_scene(mode):
     """A hidden scene that links the user's objects and owns its own camera and engine settings.
 
     Orbiting only moves the viewport's camera, so nothing the renderer has cached is invalidated: Cycles keeps the scene
     on the GPU between frames (use_persistent_data) and EEVEE keeps its shaders. The user's scene is never modified.
     Rebuilt after an edit (dirty), a shading-mode change, or when code the agent ran took its scene or camera away."""
-    src = bpy.context.scene
     vp, cam = kept(bpy.data.scenes, VP["scene"]), kept(bpy.data.objects, VP["cam"])
     if vp is None or cam is None or VP["dirty"]:
         drop_viewport()
-        vp = bpy.data.scenes.new("__viewport")
+        src = bpy.context.scene   # after the drop, which takes the window off the viewport's scene (see leave)
+        # Each held as soon as it is made, with the viewport still dirty: what a build that fails half way made is
+        # dropped by the next one, and never left in the file.
+        vp = bpy.data.scenes.new(VIEWPORT)
+        VP["scene"] = hold(vp)
+        cam = bpy.data.objects.new(VIEWPORT + "_cam", bpy.data.cameras.new(VIEWPORT + "_cam"))
+        VP["cam"] = hold(cam)
+        vp.collection.objects.link(cam)
+        vp.camera = cam
         for coll in src.collection.children:
             vp.collection.children.link(coll)
         for obj in src.collection.objects:
-            if not obj.name.startswith("__"):
+            if not obj.name.startswith(HIDDEN):
                 vp.collection.objects.link(obj)
         vp.world = src.world
         vp.frame_current = src.frame_current
         for k in ("view_transform", "look", "exposure", "gamma"):
             setattr(vp.view_settings, k, getattr(src.view_settings, k))
         vp.display_settings.display_device = src.display_settings.display_device
-        cam = bpy.data.objects.new("__viewport_cam", bpy.data.cameras.new("__viewport_cam"))
-        vp.collection.objects.link(cam)
-        vp.camera = cam
         vp.render.resolution_percentage = 100
         vp.render.image_settings.file_format = "JPEG"
         vp.render.image_settings.quality = 82
         vp.render.filepath = VIEWPORT_JPG
-        VP.update(scene=hold(vp), cam=hold(cam), dirty=False, mode=None)
+        VP.update(dirty=False, mode=None)
     if VP["mode"] != mode:
         if mode in ("RENDERED", "MATERIAL"):
             # Both are Cycles kept resident on the GPU (use_persistent_data): a camera move costs ~25 ms.
@@ -870,10 +948,11 @@ MCP_TOOLS = [
      "`args` for what changes between runs (the script reads them as the dict ARGS); Blender never sees your files, "
      "only the script's text. An error names the file and the line. The live browser view refreshes afterwards, "
      "also after an error; in a script that takes long, call refresh_view() between its steps so the person sees "
-     "the scene take shape while it runs.",
+     "the scene take shape while it runs. Like that refresh, refresh_view() evaluates the animation again: a value "
+     "set on an animated property and not keyed goes back to what its keys say.",
      _obj({"code": {"type": "string", "description": "Python source, for a one-off step. Give code or path, not both"},
            "path": {"type": "string", "description": "A .py script in your own files, relative to the chat's folder "
-                    "or absolute inside it, run in place of code"},
+                    "or absolute inside it, and not in a hidden folder, run in place of code"},
            "args": {"type": "object", "description": "Values the code reads as ARGS, for a script run by its path"},
            "read_only": {"type": "boolean", "default": False, "description": "Set true when the code only inspects "
                          "the scene: skips the unsaved-changes mark and the browser view refresh"}})),
@@ -1202,8 +1281,9 @@ def handle(req):
             after_scene_change(kind)
         return {"status": "success", "result": result}
     except Exception as e:  # report to the caller, keep serving
-        log(f"{kind} failed: {e}")
-        if changes:   # what the code did before it failed is in the scene too
+        log(f"{kind} failed: {e.error if isinstance(e, CodeFailed) else e}")   # the caller is told the code's lines too
+        # What the code did before it failed is in the scene too; code refused before any of it ran changed nothing.
+        if changes and (kind != "execute_code" or (isinstance(e, CodeFailed) and e.ran)):
             after_scene_change(kind)
         message = str(e) if isinstance(e, CodeFailed) else f"{type(e).__name__}: {e}"
         return {"status": "error", "message": message, "traceback": traceback.format_exc()[-4000:]}
@@ -1225,6 +1305,8 @@ if __name__ == "__main__":
         sys.exit(1)
     signal.signal(signal.SIGTERM, stop)
     bpy.app.handlers.load_pre.append(forget_viewport_on_load)
+    bpy.app.handlers.load_post.append(drop_viewports_on_load)
+    bpy.app.handlers.save_pre.append(drop_viewport_on_save)
     os.makedirs(DATA, exist_ok=True)
     GPU = setup_gpu()
     start_server()

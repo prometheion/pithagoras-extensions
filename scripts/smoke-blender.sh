@@ -4,7 +4,8 @@
 # later, and shows that it starts with no internet), with no GPU and a random token, until MCP answers, asked from
 # inside the container, as nothing else reaches it; its tools/list and its instructions compared with
 # blender/server/tools.json, which the extension offers in their place (a change to the server's tools changes that
-# file, the label and guard tables and their German); a script sent with its path run under that name, with its ARGS;
+# file, the label and guard tables and their German); a script sent with its name, as the portal sends one it read
+# from the agent's files, run under that name, with its ARGS;
 # the viewer's API and MCP refused without the token; Blender run
 # as the image's own user, which cannot change the server; then the container and the network removed.
 #   scripts/smoke-blender.sh <image>        SMOKE_PORT (default 3870) and SMOKE_NAME (default blender-smoke) change them
@@ -52,8 +53,8 @@ if instructions != kept["instructions"]:
 print(len(listed), "tools and the instructions, as blender/server/tools.json has them")
 ' "/tmp/$NAME-tools.json" "/tmp/$NAME-init.json" "$ROOT/blender/server/tools.json"
 
-echo "$(ts) a script sent with its path reads its ARGS, and its error names the file and the line"
-mcp '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"execute_code","arguments":{"path":"scripts/smoke.py","args":{"n":2},"code":"print(ARGS[\"n\"] * 21)\nraise ValueError(\"on purpose\")\n"}}}' > "/tmp/$NAME-script.json"
+echo "$(ts) a script sent with its name reads its ARGS, and its error names the file and the line"
+mcp '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"execute_code","arguments":{"script_name":"scripts/smoke.py","args":{"n":2},"code":"print(ARGS[\"n\"] * 21)\nraise ValueError(\"on purpose\")\n"}}}' > "/tmp/$NAME-script.json"
 python3 -c '
 import json, sys
 result = json.load(open(sys.argv[1]))["result"]

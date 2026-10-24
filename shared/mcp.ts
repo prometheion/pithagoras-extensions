@@ -73,7 +73,7 @@ export function mcpClient(options: { url: () => string; token: () => string }) {
       const result = await call<{ instructions?: string; serverInfo?: { version?: string } }>("initialize", {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: "pithagoras-flair", version: "1" },
+        clientInfo: { name: "pithagoras-extensions", version: "1" },
       });
       return { instructions: result.instructions ?? "", version: result.serverInfo?.version ?? "" };
     },

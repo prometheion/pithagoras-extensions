@@ -20,7 +20,7 @@ import type { Store } from "./store";
  * the server down after a reboot. So it keeps running when the extension is switched off or uninstalled, as the
  * portal has no uninstall hook: the Settings page says to remove the server there first.
  *
- * What the container is made with is hashed into a label of its own (`pithagoras.flair-spec`): everything but its
+ * What the container is made with is hashed into a label of its own (`pithagoras.extension-spec`): everything but its
  * network, which is checked as it is. A container whose label is not the hash of what would be made now (another
  * image after an update, another card) or whose network is not the portal's loopback as it is now (the portal's own
  * container was made again) is stale. A running one is made again at once, the volume kept; a stopped one at its next
@@ -103,7 +103,7 @@ interface Inspected {
   RestartCount?: number;
 }
 
-export const SPEC_LABEL = "pithagoras.flair-spec";
+export const SPEC_LABEL = "pithagoras.extension-spec";
 const RESTART = { Name: "unless-stopped" };
 
 /** What a spec is hashed by: everything but its network, which is compared as it is. */

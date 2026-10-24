@@ -120,9 +120,10 @@ Don't add an MCP server named `blender` beside it: its tools would have the same
 - **The tools.** What they return is outside content to the guard. `blender_execute_code` runs code in Blender, so after
   a suspected prompt injection the guard asks you before it runs, or refuses it where nobody can answer. That code
   reaches nothing outside the container but the forwarder's port, which leads back to the server itself (section above);
-  for a portal in a container of its own, also what that container listens on 0.0.0.0, which is the portal's own port
-  and asks for its sign-in. It can still read and change the projects, and what it prints comes back to the chat, which
-  is why the guard holds it.
+  for a portal in a container of its own, also what is listened for on 0.0.0.0 in that container's network namespace:
+  the portal's own port, which asks for its sign-in, and Understory's (3800), which shares the namespace and asks for its
+  token. It can still read and change the projects, and what it prints comes back to the chat, which is why the guard
+  holds it.
 
 ## Data
 

@@ -32,7 +32,9 @@ export const names = () => namesFrom(process.env, "godot", { container: "pithago
  * What runs in it is the agent's as much as the server's: GDScript it sends, `@tool` scripts and games it writes. So it
  * runs as the image's own user (godot, uid 10001), not root, with no Linux capabilities at all (`CapDrop: ALL`: Xvfb,
  * Selkies and the editor need none) and no way to gain one (`no-new-privileges`, which a setuid program would
- * otherwise get round). Its network has no way out, so what runs in it reaches nothing but the server.
+ * otherwise get round). Its network has no way out, so what runs in it reaches nothing but the server, and, for a
+ * portal in a container of its own, what is listened for on 0.0.0.0 in that container's network namespace (the README
+ * says what).
  */
 export function godotSpec(plan: Plan, server: { port: number; volume: string; image: string; display: Display }): ContainerSpec {
   return {

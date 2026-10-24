@@ -5,8 +5,9 @@
  * since what they return comes from the scene and its files, which may have come from an uploaded .blend.
  *
  * `execute_code` runs Python in Blender, as the container's own unprivileged user, without capabilities, on the
- * extension's own network, which has no way out: it reaches nothing outside the container but the server again, and
- * yet it can read and change the projects, and what it prints comes back to the chat. So once a conversation has read
+ * extension's own network, which has no way out: it reaches nothing outside the container but the server again (and,
+ * for a portal in a container of its own, what is listened for on 0.0.0.0 in that container's network namespace: the
+ * README says what), and yet it can read and change the projects, and what it prints comes back to the chat. So once a conversation has read
  * something that looks like a prompt injection, the guard asks the person before it runs, or refuses it where nobody
  * is there to answer (`upload`). The other tools read the scene, or write only in the container's data folder.
  */

@@ -105,8 +105,9 @@ Don't add an MCP server named `godot` beside this extension: its tools would hav
   in Selkies' place.
 - **What it reaches.** The container is on `pithagoras-godot-net`, which has no way out. What
   `godot_execute_gdscript`, a `@tool` script or a game reaches is the server and, through the forwarder's port, the
-  server again; for a portal in a container of its own, also what that container listens on 0.0.0.0, which is the
-  portal's own port and asks for its sign-in. Not the host, its loopback, the local network or the internet. The
+  server again; for a portal in a container of its own, also what is listened for on 0.0.0.0 in that container's
+  network namespace: the portal's own port, which asks for its sign-in, and Understory's (3800), which shares the
+  namespace and asks for its token. Not the host, its loopback, the local network or the internet. The
   server's token is in the container's environment, which code there can read (the init process is the same user's):
   with it, that code can call the server it already runs in, nothing more.
 - **Nothing it serves runs on the portal's origin.** The viewer and Selkies' web client come from the package, and

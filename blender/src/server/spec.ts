@@ -28,8 +28,9 @@ const NVOPTIX = "/usr/share/nvidia/nvoptix.bin";
  * Blender runs the Python the agent writes, so it is held to what Pithagoras' own Docker tools ask of a container the
  * agent runs: the image's own user (`blender`, not root), none of the kernel's capabilities (`CapDrop: ALL`, raw
  * sockets among them), and no way to gain more (`no-new-privileges`). Its network is the extension's own, with no way
- * out (`plan.network`), so the code Blender runs reaches nothing but the server; the server listens on 0.0.0.0 of the
- * container's own network, which only the portal reaches. The GPU needs none of the capabilities: the container
+ * out (`plan.network`), so the code Blender runs reaches nothing but the server, and, for a portal in a container of
+ * its own, what is listened for on 0.0.0.0 in that container's network namespace (the README says what); the server
+ * listens on 0.0.0.0 of the container's own network, which only the portal reaches. The GPU needs none of the capabilities: the container
  * toolkit hands the card's devices to the container as it starts.
  */
 export function blenderSpec(plan: Plan, port: number, volume: string, image: string): ContainerSpec {

@@ -2,10 +2,10 @@ pithagoras-blender
 Copyright 2026 Anirban Kar and Contributors
 
 The extension (its TypeScript, the viewer page src/viewer.html, its build and its Dockerfile) is licensed under the
-Apache License, Version 2.0 (LICENSE), as the rest of the pithagoras-extensions repository is. server/server.py, which
-runs inside Blender and uses its Python API (bpy), is licensed under the GNU General Public License, version 3 or (at
-your option) any later version (server/LICENSE). Of the two, the image holds server.py alone, with its licence in
-/usr/share/doc/pithagoras-blender/LICENSE.GPL-3.0, beside this NOTICE.
+Apache License, Version 2.0 (LICENSE). server/server.py, which runs inside Blender and uses its Python API (bpy), is
+licensed under the GNU General Public License, version 3 or (at your option) any later version (server/LICENSE). Of
+the two, the image holds server.py alone, with its licence in /usr/share/doc/pithagoras-blender/LICENSE.GPL-3.0,
+beside this NOTICE.
 
 This extension is not made or endorsed by the Blender Foundation. Blender is a trademark of the Blender Foundation; the
 name is used here only to say what the extension runs.

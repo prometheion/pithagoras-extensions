@@ -13,7 +13,7 @@ import { EXTENSION, UI_RECEIVE } from "../src/limits.ts";
  */
 
 /** A temporary folder, removed when the tests end. */
-export function scratch(prefix = "odui-"): string {
+export function scratch(prefix = "iui-"): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), prefix));
   after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
@@ -57,7 +57,7 @@ export function fakePortal() {
   const pushed: { chatId: string; data: any }[] = [];
   const told: { chatId: string; data: any }[] = [];
   const logs: string[] = [];
-  const dataDir = scratch("odui-data-");
+  const dataDir = scratch("iui-data-");
   const chats = new Map<string, { id: string; title: string; workspace: string; status: "idle" | "running" | "error" | "interrupted" }>();
   const pis = new Map<string, ReturnType<typeof fakePi>>();
   /** Whether `chats.tell` reaches a pi: false, as where pi does not run in the portal's process. */

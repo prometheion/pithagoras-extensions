@@ -114,7 +114,7 @@ function CardView({ chatId, card, waiting }: { chatId: string; card: CardSummary
   const said = status ? t(SAID[status.kind === "sent" ? status.delivery : status.reason]) : "";
   const state = !open ? (card.closedBy === "person" ? t("Closed by you") : t("Closed")) : waiting ? t("Waiting for you") : "";
   return (
-    <div ref={shell} className={`odui-card ${open ? "" : "is-closed"} ${full ? "is-full" : ""}`} data-card={card.id}>
+    <div ref={shell} className={`iui-card ${open ? "" : "is-closed"} ${full ? "is-full" : ""}`} data-card={card.id}>
       <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
         <LuAppWindow className="size-3.5 shrink-0 text-fg-subtle" aria-hidden />
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-fg" title={card.title}>
@@ -125,13 +125,13 @@ function CardView({ chatId, card, waiting }: { chatId: string; card: CardSummary
           {card.id}
         </span>
         {(height > maxHeight || expanded) && !full && (
-          <button type="button" className="odui-icon" onClick={() => setExpanded((v) => !v)} title={expanded ? t("Show less") : t("Show all of it")} aria-label={expanded ? t("Show less") : t("Show all of it")} aria-pressed={expanded}>
+          <button type="button" className="iui-icon" onClick={() => setExpanded((v) => !v)} title={expanded ? t("Show less") : t("Show all of it")} aria-label={expanded ? t("Show less") : t("Show all of it")} aria-pressed={expanded}>
             {expanded ? <LuShrink aria-hidden /> : <LuExpand aria-hidden />}
           </button>
         )}
         <button
           type="button"
-          className="odui-icon"
+          className="iui-icon"
           onClick={() => (full ? void document.exitFullscreen() : void shell.current?.requestFullscreen?.())}
           title={full ? t("Leave full screen") : t("Full screen")}
           aria-label={full ? t("Leave full screen") : t("Full screen")}
@@ -139,12 +139,12 @@ function CardView({ chatId, card, waiting }: { chatId: string; card: CardSummary
           {full ? <LuMinimize2 aria-hidden /> : <LuMaximize2 aria-hidden />}
         </button>
         {open && (
-          <button type="button" className="odui-icon" onClick={close} title={t("Close the card")} aria-label={t("Close the card")}>
+          <button type="button" className="iui-icon" onClick={close} title={t("Close the card")} aria-label={t("Close the card")}>
             <LuX aria-hidden />
           </button>
         )}
       </div>
-      <div ref={box} className="odui-frame-box" />
+      <div ref={box} className="iui-frame-box" />
       {(said || !open) && (
         <p className="m-0 border-t border-line px-3 py-1 text-[11px] text-fg-faint" role="status">
           {!open ? t("This card is closed: it takes no input and sends nothing.") : said}
@@ -173,8 +173,8 @@ export function ShowCall({ chat, call, card }: ChatProps & { call: ToolCallView;
   }, [made, chat.id, call.status]);
   let below: ReactNode = null;
   if (made) below = <CardView chatId={chat.id} card={made} waiting={call.status === "running" && !!made.wait && made.status === "open"} />;
-  else if (call.status === "running") below = <p className="odui-note">{t("Opening the card…")}</p>;
-  else if (call.status === "done" && cardId) below = <p className="odui-note">{t("This card is no longer kept.")}</p>;
+  else if (call.status === "running") below = <p className="iui-note">{t("Opening the card…")}</p>;
+  else if (call.status === "done" && cardId) below = <p className="iui-note">{t("This card is no longer kept.")}</p>;
   return (
     <>
       {card}

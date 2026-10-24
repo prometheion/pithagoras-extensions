@@ -1,14 +1,14 @@
 {
-  "name": "@pithagoras/ondemand-ui",
+  "name": "@pithagoras/inline-ui",
   "version": "0.1.0",
-  "description": "On-demand UI for Pithagoras: the agent shows the person an interactive card of its own HTML in the chat, sandboxed and with no network, and what the person does in it comes back to the agent as events",
+  "description": "Inline UI for Pithagoras: the agent shows the person an interactive card of its own HTML in the chat, sandboxed and with no network, and what the person does in it comes back to the agent as events",
   "type": "module",
   "keywords": ["pi-package", "pithagoras", "ui", "generative-ui", "interactive"],
-  "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/ondemand-ui#readme",
+  "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/inline-ui#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/prometheion/pithagoras-extensions.git",
-    "directory": "ondemand-ui"
+    "directory": "inline-ui"
   },
   "bugs": {
     "url": "https://github.com/prometheion/pithagoras-extensions/issues"

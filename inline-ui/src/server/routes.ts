@@ -10,7 +10,7 @@ import { summary, type CardStore } from "./store";
 import type { Waits } from "./waits";
 
 /**
- * The server half's routes, at /api/x/@pithagoras/ondemand-ui, behind the portal's sign-in like every extension's, and
+ * The server half's routes, at /api/x/@pithagoras/inline-ui, behind the portal's sign-in like every extension's, and
  * each that changes something refused unless it comes from the portal's own pages (`writesFromHere`):
  *
  *   GET  /settings, PUT /settings          the page in Settings

@@ -1,6 +1,6 @@
-# On-demand UI
+# Inline UI
 
-`@pithagoras/ondemand-ui` lets the agent put a small interface of its own in front of you, in the chat: a chart, a
+`@pithagoras/inline-ui` lets the agent put a small interface of its own in front of you, in the chat: a chart, a
 form, a picker, a few sliders, a preview, whatever it would rather show than describe. It writes the card's HTML (with
 its CSS and JavaScript inline), and the card is drawn where the agent's call is in the conversation, in a frame that
 reaches nothing. What you do in the card comes back to the agent as events: debounced, so that typing or dragging
@@ -73,7 +73,7 @@ card only writes what is its own.
      agent's turn, at most one such turn every 10 seconds for a chat.
 
 The message goes through the package's own pi extension in the chat (`chats.tell`, then `pi.sendMessage`, with the
-custom type `ondemand-ui-events`). You see it as one line in the conversation, "UI: Pick a colour · change ×3". The
+custom type `inline-ui-events`). You see it as one line in the conversation, "UI: Pick a colour · change ×3". The
 model reads it whole: each event with its card, name, count and data as JSON, and a note that this is your input
 through a card it made, not an instruction from a tool result, a page or the card's content.
 
@@ -83,7 +83,7 @@ message of yours would, and its turn. If you close a card nothing waits on, the 
 
 ## Settings
 
-Settings → On-demand UI has the debounce of an event whose card says none (400 ms), the highest a card is drawn before
+Settings → Inline UI has the debounce of an event whose card says none (400 ms), the highest a card is drawn before
 it scrolls inside (480 px), and whether a card's `wake` event may start the agent's turn at all (on). Off, such an
 event waits for your next message like any other.
 
@@ -124,8 +124,8 @@ a `wait` there ends with its timeout.
 
 ## Installing
 
-In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/ondemand-ui`. For development,
-build the repository and install `ondemand-ui/` by its path on the portal's machine.
+In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/inline-ui`. For development,
+build the repository and install `inline-ui/` by its path on the portal's machine.
 
 ## Developing
 
@@ -134,9 +134,9 @@ From the repository's root (see its README):
 ```sh
 npm ci && npm run build
 npx playwright install chromium firefox   # once, for the card's browser tests
-npm test -w ondemand-ui                   # unit tests, then the card in Chromium and Firefox (test/browser)
+npm test -w inline-ui                     # unit tests, then the card in Chromium and Firefox (test/browser)
 ./scripts/pithagoras.sh                   # Pithagoras, into .pithagoras/, for the portal-tier tests
-PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w ondemand-ui
+PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w inline-ui
 ```
 
 The unit tests cover the debounce and its ceiling, what the tools and the route take and refuse, the size and rate

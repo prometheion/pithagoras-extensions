@@ -14,8 +14,8 @@ import { fakePortal, json } from "./fakes.mts";
 
 async function start() {
   const fake = fakePortal();
-  const { default: ondemandUi } = await import("../src/server.ts");
-  const stop = ondemandUi(fake.portal);
+  const { default: inlineUi } = await import("../src/server.ts");
+  const stop = inlineUi(fake.portal);
   const at = await fake.serve();
   return { fake, at, stop };
 }

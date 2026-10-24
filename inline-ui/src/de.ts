@@ -1,7 +1,7 @@
 import type { Plural } from "@pithagoras/extension-api";
 
 /**
- * On-demand UI's texts in German, each by what the code says in English. Those the portal says the same way are here as
+ * Inline UI's texts in German, each by what the code says in English. Those the portal says the same way are here as
  * well, as the portal has them. What the model is told (the tools' descriptions, the messages that bring a card's
  * events) stays English, as pi's does.
  */
@@ -20,6 +20,7 @@ export const de: Record<string, string | Plural> = {
   "Good to know": "Gut zu wissen",
   "Highest a card is drawn (px)": "Größte Höhe einer Karte (px)",
   "How long a card's event waits for the person to pause before it is sent, where the card does not say: {min} to {max}.": "Wie lange ein Ereignis einer Karte wartet, bis die Person innehält, bevor es gesendet wird, wo die Karte nichts anderes sagt: {min} bis {max}.",
+  "Inline UI": "Inline-UI",
   "Kept for the agent: it gets it with your next message.": "Für den Agenten aufbewahrt: Er bekommt es mit deiner nächsten Nachricht.",
   "Leave full screen": "Vollbild verlassen",
   "Let a card start the agent's turn": "Eine Karte darf den Agenten starten",
@@ -28,7 +29,6 @@ export const de: Record<string, string | Plural> = {
   "Not sent: the card sends too much at once.": "Nicht gesendet: Die Karte sendet zu viel auf einmal.",
   "Not sent: the portal could not be reached.": "Nicht gesendet: Das Portal war nicht erreichbar.",
   "Not sent: what the card sent is too large.": "Nicht gesendet: Was die Karte geschickt hat, ist zu groß.",
-  "On-demand UI": "On-demand UI",
   "Opening the card…": "Karte wird geöffnet…",
   "Past this a card scrolls inside, and its head has a button to show all of it: {min} to {max}.": "Darüber hinaus scrollt eine Karte in sich, und ihr Kopf hat eine Schaltfläche, die alles zeigt: {min} bis {max}.",
   "Save": "Speichern",

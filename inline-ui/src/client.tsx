@@ -8,11 +8,11 @@ import { heard } from "./web/store";
 import "./client.css";
 
 /**
- * On-demand UI: the card a ui_show call makes, drawn live where the call is in the conversation; the portal's own card
+ * Inline UI: the card a ui_show call makes, drawn live where the call is in the conversation; the portal's own card
  * for ui_update and ui_close, in the extension's words; and its page in Settings. What the server half says of a chat's
  * cards is heard here, as the module is called, so that a card drawn later has it. Its texts in German are in de.ts.
  */
-export default function ondemandUi(given: Portal) {
+export default function inlineUi(given: Portal) {
   setPortal(given);
   portal.locale.add("de", de);
   const offServer = portal.server.on(heard);
@@ -39,11 +39,11 @@ export default function ondemandUi(given: Portal) {
   });
 
   portal.slots.register("settings.page", {
-    id: "ondemand-ui",
-    title: msg("On-demand UI"),
+    id: "inline-ui",
+    title: msg("Inline UI"),
     icon: LuAppWindow,
     search: [
-      { title: msg("On-demand UI"), words: "card cards karte karten ui html interactive interaktiv debounce wake height höhe" },
+      { title: msg("Inline UI"), words: "card cards karte karten ui html interactive interaktiv debounce wake height höhe" },
       { title: msg("Starting the agent"), section: msg("Starting the agent"), words: "wake turn start agent starten" },
     ],
     component: () => (

@@ -9,7 +9,7 @@ import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
- * On-demand UI as Pithagoras runs it: its server half started by the portal's own extension host from its source,
+ * Inline UI as Pithagoras runs it: its server half started by the portal's own extension host from its source,
  * its tools in a real pi with the portal's own client, a scripted model (core's fake-model), the portal's session
  * manager carrying a card's event to the chat (`chats.tell`, its pi's bus, `pi.sendMessage`), and the portal's routes in
  * front of the extension's. Against the Pithagoras this repository builds with: fetch and build it with
@@ -24,7 +24,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE = path.resolve(HERE, "../..");
 
 const { inProcessHome } = await import(from("tests/helpers.mts"));
-const home = inProcessHome("odui-portal-");
+const home = inProcessHome("iui-portal-");
 process.env.PORTAL_PASSWORD = "";
 process.env.PORTAL_ALLOW_NO_PASSWORD = "1";
 process.env.EXECUTOR = "host";
@@ -52,7 +52,7 @@ const express = (await import(pathToFileURL(path.join(PITHAGORAS, "node_modules/
 const server = http.createServer(express().use("/api/x", host.extensionRoutes));
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
-const at = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/x/%40pithagoras/ondemand-ui`;
+const at = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/x/%40pithagoras/inline-ui`;
 after(async () => {
   await host.stopServerHalves();
   server.closeAllConnections();
@@ -65,7 +65,7 @@ const json = async (url: string, init?: RequestInit) => {
   return { status: answer.status, body: await answer.json().catch(() => null) };
 };
 const chat = () => {
-  const id = `odui-${Math.random().toString(36).slice(2)}`;
+  const id = `iui-${Math.random().toString(36).slice(2)}`;
   db.createSession({ id, title: id, workspace: process.env.WORKSPACE_ROOT, executor: "host", kind: "task" });
   latest = id;
   return id;

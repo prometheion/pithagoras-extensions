@@ -119,7 +119,7 @@ function waited(card: CardRecord, event: string, outcome: Outcome, timeoutSec: n
     case "stopped":
       return `The run was stopped before the person sent "${event}". The card is still open. ${later} Do not decide it yourself meanwhile.`;
     case "ended":
-      return `The on-demand UI extension was stopped or updated while this call waited. The card is kept; ${later}`;
+      return `The Inline UI extension was stopped or updated while this call waited. The card is kept; ${later}`;
   }
 }
 

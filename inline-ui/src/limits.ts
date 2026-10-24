@@ -5,7 +5,7 @@
  */
 
 /** The package's name: what its routes, its messages and its pi extension's bus messages go by. */
-export const EXTENSION = "@pithagoras/ondemand-ui";
+export const EXTENSION = "@pithagoras/inline-ui";
 
 /** How long the page waits after the last emit of an event before it is sent, unless the event or Settings say otherwise. */
 export const DEBOUNCE_DEFAULT_MS = 400;
@@ -41,7 +41,7 @@ export const HEIGHT_MAX = 2000;
 export const CARDS_PER_CHAT = 200;
 
 /** The customType of the messages that bring a card's events into the chat. */
-export const CUSTOM_TYPE = "ondemand-ui-events";
+export const CUSTOM_TYPE = "inline-ui-events";
 
 /** pi's event bus, between the portal and the package's pi extension in a chat (see the portal's extension-ui.ts). */
 export const UI_RECEIVE = "pithagoras:v1:ui:receive";

@@ -9,7 +9,7 @@ import { registerTools } from "./server/tools";
 import { Waits } from "./server/waits";
 
 /**
- * On-demand UI's server half: the agent's tools (`ui_show`, `ui_update`, `ui_close`) in every chat's pi, each chat's
+ * Inline UI's server half: the agent's tools (`ui_show`, `ui_update`, `ui_close`) in every chat's pi, each chat's
  * cards kept in the extension's own folder and told to the pages open on the chat, the frame each card is drawn in,
  * and what the person does in a card taken from the page and brought to the agent (server/delivery.ts).
  *
@@ -18,7 +18,7 @@ import { Waits } from "./server/waits";
  * (`chats.tell`) into the conversation (`pi.sendMessage`). So it runs where pi runs in the portal's own process (the
  * host executor), and not in a process of its own.
  */
-export default function ondemandUi(portal: ServerPortal) {
+export default function inlineUi(portal: ServerPortal) {
   const data = portal.dataDir();
   const settings = openSettings(data);
   const store = new CardStore(data);

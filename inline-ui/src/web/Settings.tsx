@@ -12,7 +12,7 @@ const whole = (text: string, min: number, max: number): number | undefined => {
 };
 
 /**
- * On-demand UI's page in Settings: how long an event waits for the person to pause when its card says nothing, how tall
+ * Inline UI's page in Settings: how long an event waits for the person to pause when its card says nothing, how tall
  * a card is drawn before it scrolls inside, and whether a card's event may start the agent's turn at all.
  */
 export function UiSettingsPage() {

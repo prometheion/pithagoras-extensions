@@ -96,7 +96,7 @@ export class CardHost {
     frame.setAttribute("sandbox", "allow-scripts allow-forms");
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.setAttribute("title", options.title);
-    frame.className = "odui-frame";
+    frame.className = "iui-frame";
     frame.addEventListener("focus", this.onFocus);
     this.frame = frame;
     container.append(frame);

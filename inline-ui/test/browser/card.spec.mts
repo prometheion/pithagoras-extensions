@@ -6,7 +6,7 @@ import path from "node:path";
 import { build } from "esbuild";
 import express from "express";
 import { expect, test, type Frame, type Page } from "@playwright/test";
-import ondemandUi from "../../src/server.ts";
+import inlineUi from "../../src/server.ts";
 
 /**
  * A card as a browser draws it: a page served with the portal's own policy (its script from its origin, nothing
@@ -15,7 +15,7 @@ import ondemandUi from "../../src/server.ts";
  */
 
 const PORTAL_POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self' https: http:; frame-ancestors 'self'; form-action 'self'";
-const EXT = "/api/x/@pithagoras/ondemand-ui";
+const EXT = "/api/x/@pithagoras/inline-ui";
 
 let server: http.Server;
 let elsewhere: http.Server;
@@ -29,11 +29,11 @@ const posted: { body: { event: string; data: unknown }; at: number }[] = [];
 const THEME = { mode: "dark", colors: { canvas: "10 10 12", surface: "20 20 23", raised: "32 32 36", line: "44 44 50", fg: "1 2 3", "fg-muted": "185 185 195", accent: "34 211 238", "accent-fg": "10 10 12" } };
 
 test.beforeAll(async () => {
-  dataDir = mkdtempSync(path.join(os.tmpdir(), "odui-browser-"));
+  dataDir = mkdtempSync(path.join(os.tmpdir(), "iui-browser-"));
   const factories: ((pi: any, chat: any) => void)[] = [];
   const portal = {
     version: 1,
-    extension: "@pithagoras/ondemand-ui",
+    extension: "@pithagoras/inline-ui",
     executor: "host",
     log: () => {},
     router: express.Router(),
@@ -49,7 +49,7 @@ test.beforeAll(async () => {
       tell: async () => false,
     },
   };
-  ondemandUi(portal as any);
+  inlineUi(portal as any);
   const tools = new Map<string, any>();
   for (const factory of factories) factory({ registerTool: (t: any) => tools.set(t.name, t), on: () => {}, events: { on: () => {} } }, { id: "a" });
 
@@ -75,11 +75,11 @@ test.beforeAll(async () => {
     </script>`;
   await tools.get("ui_show").execute("call-1", { title: "Pick", html: card, events: { change: { debounceMs: 300 } } });
 
-  const hostJs = (await build({ entryPoints: [path.resolve(import.meta.dirname, "../../src/web/host.ts")], bundle: true, format: "iife", globalName: "Odui", write: false, target: "es2022" })).outputFiles[0].text;
+  const hostJs = (await build({ entryPoints: [path.resolve(import.meta.dirname, "../../src/web/host.ts")], bundle: true, format: "iife", globalName: "Iui", write: false, target: "es2022" })).outputFiles[0].text;
   const pageJs = `
     window.statuses = [];
     const theme = ${JSON.stringify(THEME)};
-    window.host = new Odui.CardHost(document.getElementById("card"), {
+    window.host = new Iui.CardHost(document.getElementById("card"), {
       title: "Pick", events: { change: { debounceMs: 300, wake: false } }, defaultDebounceMs: 400, maxHeight: 300, fill: false, open: true,
       src: (nonce) => "${EXT}/frame/a/c1?" + new URLSearchParams({ n: nonce, o: location.origin, lang: "en", theme: JSON.stringify(theme) }),
       theme: () => window.theme ?? theme,
@@ -110,7 +110,7 @@ test.beforeAll(async () => {
   app.use(EXT, portal.router);
   app.get("/portal", (_req, res) => {
     res.set("content-security-policy", PORTAL_POLICY);
-    res.type("html").send(`<!doctype html><html data-theme="dark"><head><style>.odui-frame{display:block;width:100%;border:0}</style><script src="/host.js"></script></head><body><div id="card" style="width:480px"></div><script src="/page.js"></script></body></html>`);
+    res.type("html").send(`<!doctype html><html data-theme="dark"><head><style>.iui-frame{display:block;width:100%;border:0}</style><script src="/host.js"></script></head><body><div id="card" style="width:480px"></div><script src="/page.js"></script></body></html>`);
   });
   app.get("/host.js", (_req, res) => void res.type("js").send(hostJs));
   app.get("/page.js", (_req, res) => void res.type("js").send(pageJs));
@@ -147,7 +147,7 @@ async function cardFrame(page: Page): Promise<Frame> {
   return found!;
 }
 
-const frameHeight = (page: Page) => page.evaluate(() => (document.querySelector("iframe.odui-frame") as HTMLIFrameElement).getBoundingClientRect().height);
+const frameHeight = (page: Page) => page.evaluate(() => (document.querySelector("iframe.iui-frame") as HTMLIFrameElement).getBoundingClientRect().height);
 
 test("the card is drawn with the portal's colours, follows a change of them, and is as tall as it is up to the highest", async ({ page }) => {
   const card = await cardFrame(page);
@@ -197,7 +197,7 @@ test("what the card emits is sent once the person has been in it, debounced, and
 test("messages from any window but the card's are not taken, whatever they say", async ({ page }) => {
   const card = await cardFrame(page);
   await card.locator("h3").click();
-  const nonce = await page.evaluate(() => new URL((document.querySelector("iframe.odui-frame") as HTMLIFrameElement).src).searchParams.get("n"));
+  const nonce = await page.evaluate(() => new URL((document.querySelector("iframe.iui-frame") as HTMLIFrameElement).src).searchParams.get("n"));
   // The page itself, and a frame of its own that is not the card, each with the card's nonce.
   await page.evaluate((n) => window.postMessage({ pithagoras: 1, nonce: n, type: "emit", name: "change", json: '{"i":98}' }, "*"), nonce);
   await page.evaluate((n) => {
@@ -218,7 +218,7 @@ test("data the agent posts reaches the card's script, and a closed card takes no
   await expect.poll(() => card.evaluate(() => (window as any).got)).toEqual([{ progress: 0.5 }]);
   await card.locator("h3").click();
   await page.evaluate(() => (window as any).host.configure({ open: false }));
-  expect(await page.evaluate(() => (document.querySelector("iframe.odui-frame") as HTMLIFrameElement).inert)).toBe(true);
+  expect(await page.evaluate(() => (document.querySelector("iframe.iui-frame") as HTMLIFrameElement).inert)).toBe(true);
   await card.evaluate(() => (window as any).pithagoras.emit("change", { i: 1 }));
   await page.waitForTimeout(700);
   expect(posted).toEqual([]);

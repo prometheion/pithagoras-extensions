@@ -1,7 +1,7 @@
 {
-  "name": "pithagoras-flair",
+  "name": "pithagoras-extensions",
   "private": true,
-  "description": "Cosmetic and opinionated extensions for Pithagoras, each a package of its own",
+  "description": "A wild collection of extensions for the Pithagoras Agent, each a package of its own",
   "license": "Apache-2.0",
   "workspaces": ["blender", "godot"],
   "scripts": {

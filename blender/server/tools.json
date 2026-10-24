@@ -37,7 +37,7 @@
     },
     {
       "name": "execute_code",
-      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. Give `code` inline for a one-off step. For a script that is long or that you will run again, write it once as a .py file in your own files, edit it there, and give its `path` instead, with `args` for what changes between runs (the script reads them as the dict ARGS); Blender never sees your files, only the script's text. An error names the file and the line. The live browser view refreshes afterwards, also after an error; in a script that takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs.",
+      "description": "Run Python in Blender with `bpy` available; returns whatever it prints. Use this to build or change anything in the scene. Give `code` inline for a one-off step. For a script that is long or that you will run again, write it once as a .py file in your own files, edit it there, and give its `path` instead, with `args` for what changes between runs (the script reads them as the dict ARGS); Blender never sees your files, only the script's text. An error names the file and the line. The live browser view refreshes afterwards, also after an error; in a script that takes long, call refresh_view() between its steps so the person sees the scene take shape while it runs. Like that refresh, refresh_view() evaluates the animation again: a value set on an animated property and not keyed goes back to what its keys say.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -47,7 +47,7 @@
           },
           "path": {
             "type": "string",
-            "description": "A .py script in your own files, relative to the chat's folder or absolute inside it, run in place of code"
+            "description": "A .py script in your own files, relative to the chat's folder or absolute inside it, and not in a hidden folder, run in place of code"
           },
           "args": {
             "type": "object",

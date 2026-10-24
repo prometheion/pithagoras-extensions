@@ -1,0 +1,30 @@
+# A pull request that changes the Blender server or the tests of its image: the image built as the release builds it
+# (amd64, from blender/server/Dockerfile) and put through the release's own tests of it, its smoke test and its live
+# view's (scripts/smoke-blender.sh, scripts/viewport-blender.py), so that a change that breaks them is seen before a
+# release is tagged. Nothing is pushed.
+name: Blender image
+
+on:
+  pull_request:
+    paths:
+      - blender/server/**
+      - scripts/smoke-blender.sh
+      - scripts/viewport-blender.py
+      - .github/workflows/blender-image.yml
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: pithagoras-blender:pr
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -f blender/server/Dockerfile -t "$IMAGE" blender
+      - name: Smoke test
+        run: ./scripts/smoke-blender.sh "$IMAGE"
+      - name: The live view, against the agent's code
+        run: ./scripts/viewport-blender.py "$IMAGE"

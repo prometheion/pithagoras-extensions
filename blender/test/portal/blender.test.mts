@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -86,6 +86,7 @@ process.env.PITHAGORAS_BLENDER_PORT = String(PORT);
 
 const host = await import(from("core/server/dist/extension-host.js"));
 const { filesFound } = await import(from("core/server/dist/output-files.js"));
+const { callSubject } = await import(from("core/server/dist/pi/guard.js"));
 const { requiresOf } = await import(from("core/server/dist/extension-ui.js"));
 const db = await import(from("core/server/dist/db.js"));
 db.getDb();
@@ -202,17 +203,43 @@ test("a render is put in the chat's folder, and the portal takes the file the ca
   assert.deepEqual(readFileSync(path.join(folder, shown[0].path)), Buffer.from(PIXEL, "base64"));
 });
 
-test("a script is run by its path, read from the chat's folder through the portal's own files, and refused outside it", async () => {
+test("a render is not written into a link put where its folder is, to another folder of the chat's", async () => {
+  const id = chat();
+  const render = registered(id).find((t) => t.name === "blender_render");
+  const folder = realpathSync(process.env.WORKSPACE_ROOT!);
+  // Inside the chat's folder, where the portal would follow the link: one outside it the portal refuses of itself.
+  const elsewhere = mkdtempSync(path.join(folder, "flair-elsewhere-"));
+  renameSync(path.join(folder, "blender-renders"), path.join(folder, "blender-renders.kept"));
+  symlinkSync(elsewhere, path.join(folder, "blender-renders"));
+  try {
+    const result = await render.execute("call-6", {});
+    assert.deepEqual(result.details, {});
+    assert.match(result.content.at(-1).text, /^The render could not be shown in the chat: /);
+    assert.deepEqual(readdirSync(elsewhere), []);
+  } finally {
+    rmSync(path.join(folder, "blender-renders"));
+    renameSync(path.join(folder, "blender-renders.kept"), path.join(folder, "blender-renders"));
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test("a script is run by its path, read from the chat's folder through the portal's own files before the guard looks, and refused outside it", async () => {
   const id = chat();
   const run = registered(id).find((t) => t.name === "blender_execute_code");
   const folder = realpathSync(process.env.WORKSPACE_ROOT!);
   mkdirSync(path.join(folder, "scripts"), { recursive: true });
-  writeFileSync(path.join(folder, "scripts/tower.py"), "for i in range(ARGS['floors']):\n    bpy.ops.mesh.primitive_cube_add(location=(0, 0, i))\n");
-  await run.execute("call-3", { path: "scripts/tower.py", args: { floors: 4 } });
-  assert.deepEqual(calls.at(-1), { name: "execute_code", arguments: { path: "scripts/tower.py", args: { floors: 4 }, code: "for i in range(ARGS['floors']):\n    bpy.ops.mesh.primitive_cube_add(location=(0, 0, i))\n" } });
+  const tower = "for i in range(ARGS['floors']):\n    bpy.ops.mesh.primitive_cube_add(location=(0, 0, i))\n";
+  writeFileSync(path.join(folder, "scripts/tower.py"), tower);
+  // As pi makes the call: its arguments prepared, then the guard, then the tool. What the guard asks the person about
+  // after a suspected prompt injection is the call as the guard names it: the script's code and its args.
+  const prepared = run.prepareArguments({ path: "scripts/tower.py", args: { floors: 4 } });
+  const subject = callSubject("blender_execute_code", prepared);
+  assert.ok(subject.includes("primitive_cube_add(location=(0, 0, i))") && subject.includes('"floors":4'), subject);
+  await run.execute("call-3", prepared);
+  assert.deepEqual(calls.at(-1), { name: "execute_code", arguments: { args: { floors: 4 }, code: tower, script_name: "scripts/tower.py" } });
   const before = calls.length;
-  await assert.rejects(run.execute("call-4", { path: "../outside.py" }), /is not in this chat's folder/);
-  await assert.rejects(run.execute("call-5", { path: "scripts/none.py" }), /There is no file scripts\/none\.py in this chat's folder/);
+  assert.throws(() => run.prepareArguments({ path: "../outside.py" }), /is not in this chat's folder/);
+  assert.throws(() => run.prepareArguments({ path: "scripts/none.py" }), /There is no file scripts\/none\.py in this chat's folder/);
   assert.equal(calls.length, before, "Blender was asked nothing for those");
 });
 

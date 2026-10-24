@@ -15,9 +15,17 @@ import type { CallHooks, Part } from "../../../shared/relay";
  *
  * `execute_code` with a `path`: a script in the agent's own files, which it writes once and edits there, run in
  * place of code written inline. The file is read here, in the portal, as the chat's agent (`likeParent` for that
- * chat: what the sandbox closes to the agent is refused, as is anything outside the chat's folder), and its text is
- * what the server is sent as `code`, with the path as the name it runs under, so that an error names the file and
- * the line. The container never mounts the agent's files, and reads none of them.
+ * chat: what the sandbox closes to the agent is refused, as is anything outside the chat's folder), before the guard
+ * looks at the call (`prepare`), which is then the script's text, as `code`, and its path in the chat's folder
+ * (`script_name`), the name it runs under on the server, so that an error names the file and the line. So what the
+ * guard holds the call to, and what the person is shown when it asks them about it after a suspected prompt
+ * injection, is the code that runs and its args, not the name of a file that may say anything by the time it runs.
+ * The container never mounts the agent's files, and reads none of them.
+ *
+ * Shown no path, the guard does not hold the call to what it keeps by a path's name from somebody who is not the
+ * primary user (a place secrets are kept: `.env`, `.ssh/`, `.secrets/`, `auth.json`, a `token` or `credentials` file;
+ * the primary user's private notes). So a script is a .py file, in no hidden folder and with no hidden name, which
+ * none of those is.
  */
 
 /** The folder in a chat's folder that Blender's renders are put in, for the chat to show them. */
@@ -43,6 +51,9 @@ function renderedName(parts: Part[]): string | undefined {
   return undefined;
 }
 
+/** Whether a path in the chat's folder, relative to it, is one of a script that is run: see above. */
+const runnable = (rel: string): boolean => rel.endsWith(".py") && !rel.split(path.sep).some((name) => name.startsWith("."));
+
 /**
  * Where `given` is in the chat's folder `base`, relative to it: a path relative to the folder, or absolute inside it,
  * as it really is or as the chat names it (`workspace`, which can reach it through a link). Nothing for a path
@@ -57,11 +68,12 @@ function inFolder(chat: Chat, base: string, given: string): string | undefined {
 }
 
 export function blenderCalls(portal: ServerPortal): Record<string, CallHooks> {
-  /** The text of the script `given`, read as the chat's agent would read it. */
-  function script(chat: Chat, given: string): string {
+  /** The script `given`, read as the chat's agent would read it: its path in the chat's folder, and its text. */
+  function script(chat: Chat, given: string): { rel: string; text: string } {
     const base = portal.chats.folder(chat.id);
     const rel = inFolder(chat, base, given);
     if (!rel) throw new Error(`${given} is not in this chat's folder: only a script there can be run. Save it there first.`);
+    if (!runnable(rel)) throw new Error(`${given} is not a script that can be run: only a .py file is, in no hidden folder and with no hidden name.`);
     let read;
     try {
       read = portal.files.read(base, rel, { likeParent: true, chats: [chat.id] });
@@ -71,26 +83,39 @@ export function blenderCalls(portal: ServerPortal): Record<string, CallHooks> {
       throw new Error(`${given} could not be read: ${(e as Error).message}`);
     }
     if (read.binary) throw new Error(`${given} is not a text file, or is over 1 MB.`);
-    return read.content;
+    return { rel, text: read.content };
   }
 
-  /** Writes the picture into the chat's folder, in `RENDERS`, and returns where, from the folder. */
+  /**
+   * Writes the picture into the chat's folder, in `RENDERS`, and returns where, from the folder. The folder is held to
+   * what the chat's agent may use, as it is for what is read for it: one closed to the agent, which it could have
+   * renamed onto the name, or a link, is refused (`invalid`), and nothing is written in it. Between that look and the
+   * write the folder could still be swapped; `files.create` takes no `FolderUse` to hold it to as it writes.
+   */
   function keep(chat: Chat, bytes: Buffer): string {
     const base = portal.chats.folder(chat.id);
+    const use = { likeParent: true, chats: [chat.id] };
     try {
-      portal.files.makeFolder(base, "", RENDERS);
+      portal.files.makeFolder(base, "", RENDERS, use);
     } catch (e) {
       if (refusal(e) !== "exists") throw e;
     }
+    portal.files.identity(base, RENDERS, { ...use, direct: true });
     return portal.files.create(base, RENDERS, fileName(), bytes);
   }
 
   return {
     execute_code: {
-      arguments(params, chat) {
+      prepare(params, chat) {
         if (params.path === undefined) return params;
         if (params.code !== undefined) throw new Error("Give code or path, not both.");
-        return { ...params, code: script(chat, String(params.path)) };
+        const { path: given, ...rest } = params;
+        const { rel, text } = script(chat, String(given));
+        return { ...rest, code: text, script_name: rel };
+      },
+      arguments(params) {
+        if (typeof params.code !== "string") throw new Error("Give code, the Python to run, or path, a .py script in this chat's folder.");
+        return params;
       },
     },
     render: {

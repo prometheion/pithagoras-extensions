@@ -904,7 +904,10 @@ async function poll() {
     if ($('gallery').dataset.html !== g) { $('gallery').innerHTML = g; $('gallery').dataset.html = g;
       $('gallery').querySelectorAll('figure').forEach(f => f.onclick = () => { const lb = document.createElement('div'); lb.className = 'lightbox'; const big = document.createElement('img'); big.src = f.dataset.src; big.alt = ''; lb.appendChild(big); lb.onclick = () => lb.remove(); document.body.appendChild(lb); }); }
     $('log').textContent = s.log.join('\n');
-  } catch (e) { $('pill').className = 'pill off'; $('pilltext').textContent = tr('disconnected'); }
+  } catch (e) {
+    // No state (Blender is not answering): what it said it was busy with is not current either.
+    $('pill').className = 'pill off'; $('pilltext').textContent = tr('disconnected'); $('busyNote').hidden = true;
+  }
 }
 setInterval(poll, 1000); poll();
 

@@ -3,7 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { mcpClient } from "../../shared/mcp.ts";
-import { relay } from "../../shared/relay.ts";
+import { guidelineOf, inChatNames, relay } from "../../shared/relay.ts";
 import { ACTS, LABELS } from "../src/labels.ts";
 import { BUNDLED, fakeMcp, fakePortal, TOOLS } from "./fakes.mts";
 
@@ -33,9 +33,9 @@ test("the extension's own tools are registered with the prefix, one at a time, h
   for (const tool of registered) {
     const own = TOOLS.find((t) => `blender_${t.name}` === tool.name)!;
     assert.equal(tool.executionMode, "sequential");
-    assert.equal(tool.description, own.description);
+    assert.equal(tool.description, inChatNames(own.description ?? "", TOOLS.map((t) => t.name), "blender"));
     assert.deepEqual(tool.parameters, own.inputSchema);
-    assert.deepEqual(tool.promptGuidelines, [BUNDLED.instructions]);
+    assert.deepEqual(tool.promptGuidelines, [guidelineOf(BUNDLED.instructions, TOOLS.map((t) => t.name), "blender")]);
     assert.equal(tool.label, LABELS[own.name]);
     assert.deepEqual(tool.guard, own.name === "execute_code" ? { outside: true, acts: ["upload"] } : { outside: true });
   }
@@ -66,7 +66,7 @@ test("what the server lists of itself never reaches the chats: a list that diffe
   assert.equal(fake.reloads(), before, "no chat is loaded again");
   const registered = fake.registered();
   assert.deepEqual(registered.map((t) => t.name), TOOLS.map((t) => `blender_${t.name}`));
-  assert.ok(registered.every((t) => t.promptGuidelines[0] === BUNDLED.instructions));
+  assert.ok(registered.every((t) => t.promptGuidelines[0] === guidelineOf(BUNDLED.instructions, TOOLS.map((t) => t.name), "blender")));
 });
 
 test("a call's text and pictures come back one to one, in order", async () => {
@@ -115,4 +115,19 @@ test("a container that comes or goes hands the tools to the open chats or takes 
   tools.setInstalled(true);
   assert.equal(fake.reloads(), before + 2);
   assert.equal(fake.registered().length, TOOLS.length);
+});
+
+test("what the model is told names the tools as the chat offers them: blender_<name>, and the prefix is said once", () => {
+  const names = ["execute_code", "list_projects", "save_file", "preview", "render", "screenshot"];
+  assert.equal(
+    inChatNames("Build with execute_code, check list_projects first; render with render, then screenshot(target=game). blender_save_file stays.", names, "blender"),
+    "Build with blender_execute_code, check blender_list_projects first; render with render, then blender_screenshot(target=game). blender_save_file stays.",
+  );
+  assert.equal(inChatNames("execute_codes and pre_execute_code are other words", names, "blender"), "execute_codes and pre_execute_code are other words");
+  const guideline = guidelineOf("Check your work with preview, then save_file.", names, "blender");
+  assert.equal(guideline, "Check your work with preview, then blender_save_file. In this chat each of these tools is named with blender_ in front: preview is blender_preview.");
+  assert.equal(guidelineOf("   ", names, "blender"), "");
+  // The real instructions: no tool name with an underscore is left bare.
+  const told = guidelineOf(BUNDLED.instructions, TOOLS.map((t) => t.name), "blender");
+  for (const t of TOOLS.filter((t) => t.name.includes("_"))) assert.doesNotMatch(told, new RegExp(`(?<![\\w-])${t.name}(?![\\w])`), t.name);
 });

@@ -1,6 +1,6 @@
 {
   "name": "@pithagoras/blender",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Blender for Pithagoras: a headless Blender 5.2 with GPU rendering run in a container through Docker, its tools in every chat, and its live viewport in a panel beside the chat",
   "type": "module",
   "keywords": ["pi-package", "pithagoras", "blender"],

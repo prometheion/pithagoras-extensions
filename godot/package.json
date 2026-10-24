@@ -1,6 +1,6 @@
 {
   "name": "@pithagoras/godot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Godot for Pithagoras: the real Godot 4.7 editor on the GPU, run in a container through Docker, streamed into a panel beside the chat, with its tools in every chat",
   "type": "module",
   "keywords": ["pi-package", "pithagoras", "godot", "game-engine", "mcp"],

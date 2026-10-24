@@ -71,6 +71,13 @@ image by hand.
 
 ## Licences
 
-Apache-2.0 ([LICENSE](LICENSE)), except `blender/server/server.py`, which runs inside Blender and is
-GPL-3.0-or-later ([blender/server/LICENSE](blender/server/LICENSE)). Each extension's README and NOTICE say under
-which licences what its image redistributes is, and where their sources are.
+Apache-2.0 ([LICENSE](LICENSE)), with two exceptions:
+
+- `blender/server/server.py`, which runs inside Blender and is GPL-3.0-or-later
+  ([blender/server/LICENSE](blender/server/LICENSE)).
+- The files in `godot/pages/stream/` other than `__gs_shim.js`. They are Selkies 2.1.0's web client, copied
+  unchanged, and are MPL-2.0 ([godot/pages/stream/LICENSE](godot/pages/stream/LICENSE)). The `pithagoras-godot`
+  package ships them.
+
+Each extension's README and NOTICE say under which licences what its image redistributes is, and where their sources
+are.

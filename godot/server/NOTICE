@@ -1,0 +1,60 @@
+pithagoras-godot container image
+Copyright 2026 The Pithagoras Flair authors
+
+This image is what the Pithagoras Godot extension (pithagoras-godot, https://github.com/thecodacus/pithagoras-flair)
+runs. Its own files are under the Apache License 2.0: /opt/godot-server/server.py and the editor plugin
+/opt/godot-server/addon/godot_mcp_bridge. The plugin is copied into each Godot project the server opens, and is
+Apache-2.0 there too.
+
+The image also contains, unchanged, software made by others, under their own licences. Their licence texts are in
+this folder (/usr/share/doc/pithagoras-godot):
+
+Godot Engine 4.7.2 (the editor and the web and linux export templates)
+  MIT licence: godot-LICENSE.txt. The third-party code Godot contains, and its licences: godot-COPYRIGHT.txt.
+  https://godotengine.org, source at https://github.com/godotengine/godot/tree/4.7.2-stable
+  Not made or endorsed by the Godot Foundation.
+
+Selkies 2.1.0 (the browser stream)
+  Mozilla Public License 2.0: selkies-LICENSE. Its Python source is installed as it is, in /opt/selkies.
+  Source at https://github.com/selkies-project/selkies/tree/2.1.0
+  Selkies' .deb installs a Python environment of its own in /opt/selkies with about 30 third-party packages (aiohttp,
+  cryptography, pillow, psutil, pylibsrtp, uvloop, watchdog and others). Each keeps its licence in its own
+  /opt/selkies/lib/python3.12/site-packages/<package>-<version>.dist-info folder. Two of them are native code with
+  libraries of their own bundled beside them: pixelflux and pcmflux, below.
+
+pixelflux 2.2.1 (inside Selkies: screen capture and encoding)
+  Mozilla Public License 2.0, with the licences of what it bundles: pixelflux-LICENSES.md. The build Selkies ships
+  bundles libx264 (x264 commit b35605ace3ddf7c1a5d67a2eb553f034aef41d55, core 165) and x265 4.2 (commit
+  e444744c03978c1fb4e037168967020cf2648427), which are under the GNU General Public License, version 2 or later;
+  pixelflux's own notes say that the combined binary is then distributed under the GPL. Each release of this image on
+  GitHub (https://github.com/thecodacus/pithagoras-flair/releases) carries the source of pixelflux 2.2.1 and of those
+  x264 and x265 commits, as pixelflux's pyproject.toml pins them.
+  pixelflux.libs also holds libde265 1.1.3 (commit ba62bf4cfb3242f3bf0a45617ff09e35236e4d82, under the GNU Lesser
+  General Public License, version 3 or later, a separate shared library), and libvpx, dav1d and SVT-AV1 under BSD
+  licences. Each release carries the libde265 source of that commit too.
+
+pcmflux 2.2.0 (inside Selkies: audio capture; the stream's audio is off here, but the library is installed)
+  Mozilla Public License 2.0: /opt/selkies/lib/python3.12/site-packages/pcmflux-2.2.0.dist-info/licenses/LICENSE, with
+  the inventory of what it bundles, LICENSES.md, beside it, and the exact builds in its sboms/auditwheel.cdx.json.
+  Source at https://github.com/selkies-project/pcmflux/tree/2.2.0. Its wheel bundles, as separate shared libraries in
+  pcmflux.libs, libraries built by AlmaLinux 8, among them these under the GNU Lesser General Public License, version
+  2.1 or later: libpulse and libpulsecommon (pulseaudio 14.0-4.el8), libasyncns (0.8-14.el8), libsndfile
+  (1.0.28-17.el8_10), libsystemd (systemd 239-82.el8_10.19), libgcrypt (1.8.5-8.el8_10), libgpg-error (1.31-1.el8),
+  libmount and libblkid (util-linux 2.32.1-48.el8_10). The others there are under permissive licences (libdbus-1 and
+  libcap under the permissive one of their two, libFLAC, libvorbis, libogg, libuuid, libpcre2, liblz4, libgsm, liblzma,
+  libselinux, libX11-xcb, libXi, libXtst), as LICENSES.md says. Each release carries pcmflux's source and the AlmaLinux
+  source RPMs of those LGPL libraries.
+
+VirtualGL 3.1.5 (OpenGL on the GPU for Compatibility-renderer projects)
+  wxWindows Library Licence 3.1 (the GNU Library General Public Licence, version 2 or later, with an exception):
+  virtualgl-LICENSE.txt, and the licence of the FLTK parts it carries: virtualgl-LICENSE-FLTK.txt. Its source tarball
+  is attached to each release of this image too. https://virtualgl.org
+
+Ubuntu 24.04 and the packages installed from its archive (among them Xvfb, Mesa, ffmpeg, xdotool, Python 3)
+  Each under its own licence, in /usr/share/doc/<package>/copyright. Their sources are in Ubuntu's archive
+  (https://archive.ubuntu.com, `apt-get source <package>`); each release of this image lists the packages and
+  their versions (dpkg -l).
+
+The NVIDIA driver is not in the image: the NVIDIA Container Toolkit puts the host's driver into the container when it
+starts. The two loader manifests in /etc/vulkan/icd.d and /usr/share/glvnd/egl_vendor.d are a few lines written when
+the image is built.

@@ -54,6 +54,7 @@ export const SERVER_SAYS = [
   msg("Blender exited. Its log says why."),
   msg("The host fixes the card for this server."),
   msg("That card is not on this host."),
+  msg("The card PITHAGORAS_BLENDER_GPU names is not on this host."),
 ];
 
 export const api = {

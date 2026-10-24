@@ -1,0 +1,569 @@
+{
+  "instructions": "Tools for a real Godot 4 editor running on a GPU in a container. The person may be watching it live in the Godot panel beside the chat, and one editor is shared by every chat and the person, so check list_projects before you replace what is open. Every editor edit you make (add_node, set_property, attach_script, write_file, ...) happens in that editor and goes through its undo history. Typical loop: list_projects / new_project / open_project -> open_scene or new_scene -> add_node / set_property / attach_script -> save_scene -> check_scripts -> run_project -> screenshot(target=game) and get_output -> stop -> record or export. File paths are res:// paths inside the open project; nothing outside it can be read or written. Property values are JSON: [x, y] for Vector2, \"#rrggbb\" for Color, \"res://...\" to load a resource, {\"type\": \"RectangleShape2D\", \"size\": [32, 32]} for a new resource, {\"$expr\": \"...\"} for any Godot expression. execute_gdscript runs arbitrary GDScript in the editor for anything the other tools do not cover. If the editor stops answering, restart_editor restarts it.",
+  "tools": [
+    {
+      "name": "ping",
+      "description": "Versions (Godot, server), the GPU the container renders on, the open project and its renderer, and the editor's own report (graphics adapter, rendering method, open scenes, whether a game is running).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_projects",
+      "description": "Projects on the server (data/projects/<name>), most recently changed first, with each one's renderer and whether it has a web export. `open` names the project the editor has open.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "new_project",
+      "description": "Create a project from a template and (by default) open it in the editor. 2d: a Node2D main scene, Compatibility renderer (what web exports use; lightest on the GPU). 3d: a Node3D main scene with a camera, sun and sky, Forward+ renderer. Both have Web and Linux export presets.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Folder and project name (letters, digits, space, _ - .)"
+          },
+          "template": {
+            "type": "string",
+            "enum": [
+              "2d",
+              "3d"
+            ],
+            "default": "2d"
+          },
+          "renderer": {
+            "type": "string",
+            "enum": [
+              "forward_plus",
+              "mobile",
+              "gl_compatibility"
+            ],
+            "description": "Default: gl_compatibility for 2d, forward_plus for 3d"
+          },
+          "open": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_project",
+      "description": "Open another project. The editor saves its open scenes, restarts on the new project (a few seconds; longer the first time while it imports) and the stream follows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "restart_editor",
+      "description": "Restart the editor on the open project. Use it when the editor stops answering (an endless execute_gdscript or @tool script, a stuck dialog). If it still answers it saves its open scenes and quits first; if not it is killed and unsaved changes are lost. previous_editor says which.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_files",
+      "description": "Files and folders in the open project (the .godot cache, .import and .uid files are left out unless include_meta).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "res://",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          },
+          "recursive": {
+            "type": "boolean",
+            "default": true
+          },
+          "include_meta": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file of the open project: text as content, anything else as content_base64.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          },
+          "max_bytes": {
+            "type": "integer",
+            "default": 1048576
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Create or overwrite a file in the open project. The editor writes it, so it notices at once: a script open in the script editor shows the new text, an open scene reloads. Use attach_script to put a script on a node.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          },
+          "content": {
+            "type": "string",
+            "description": "Text (UTF-8)"
+          },
+          "content_base64": {
+            "type": "string",
+            "description": "Binary content, base64"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_file",
+      "description": "Delete a file of the open project (with its .import / .uid companions). A scene that is open in the editor has its tab closed first (dropping unsaved changes in it), so no later save writes it back.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_scene_tree",
+      "description": "The scene open in the editor as a tree: name, type, path (relative to the root, which is what node arguments take), script, and a few key values (position, size, text, texture, shape).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "max_depth": {
+            "type": "integer",
+            "default": 12
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_scene",
+      "description": "Open a scene (.tscn or .scn) in the editor (it becomes the edited scene; other open scenes stay in their tabs).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "new_scene",
+      "description": "Create a scene file with one root node, save it and open it. set_main makes it the project's main scene (what run_project and exports start).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "res://....tscn"
+          },
+          "root_type": {
+            "type": "string",
+            "default": "Node2D",
+            "description": "Node class or a class_name script"
+          },
+          "root_name": {
+            "type": "string",
+            "description": "Default: the file name in PascalCase"
+          },
+          "set_main": {
+            "type": "boolean",
+            "default": false
+          },
+          "overwrite": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "add_node",
+      "description": "Add a node to the edited scene, through the editor's undo history, and select it so it shows in the Scene dock and Inspector. Give type for a new node or scene to instance a .tscn. Values are JSON: [x, y] for a Vector2, [x, y, z] for a Vector3, \"#rrggbb\" or [r, g, b, a] (0-1) for a Color, \"res://...\" to load a resource, a class name or {\"type\": \"CircleShape2D\", \"radius\": 20} for a new resource, {\"$expr\": \"Vector2(1, 2) * 3\"} for any Godot expression.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Node class (Sprite2D, CharacterBody2D, Label, ...) or a class_name script"
+          },
+          "scene": {
+            "type": "string",
+            "description": "A .tscn to instance instead of type. A res:// path inside the open project (a path relative to the project root also works)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent": {
+            "type": "string",
+            "default": ".",
+            "description": "Path from the scene root (\".\" is the root)"
+          },
+          "properties": {
+            "type": "object",
+            "description": "Property name -> value, set before the node is added"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_property",
+      "description": "Set one or more properties of a node in the edited scene (one undoable action). Sub-properties work with a colon: position:x. Values are JSON: [x, y] for a Vector2, [x, y, z] for a Vector3, \"#rrggbb\" or [r, g, b, a] (0-1) for a Color, \"res://...\" to load a resource, a class name or {\"type\": \"CircleShape2D\", \"radius\": 20} for a new resource, {\"$expr\": \"Vector2(1, 2) * 3\"} for any Godot expression.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "default": ".",
+            "description": "Path from the scene root"
+          },
+          "property": {
+            "type": "string"
+          },
+          "value": {
+            "description": "New value (see above)"
+          },
+          "properties": {
+            "type": "object",
+            "description": "Several at once: name -> value"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_node",
+      "description": "Delete a node (and its children) from the edited scene; undoable.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "Path from the scene root"
+          }
+        },
+        "required": [
+          "node"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "attach_script",
+      "description": "Attach a GDScript to a node (undoable), writing it first when source is given, and open it in the script editor. Returns compiles (Godot's --check-only) and the errors if not.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "default": ".",
+            "description": "Path from the scene root"
+          },
+          "path": {
+            "type": "string",
+            "description": "res://....gd"
+          },
+          "source": {
+            "type": "string",
+            "description": "GDScript source to write to path first"
+          },
+          "open_editor": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "save_scene",
+      "description": "Save the edited scene (to path when given: Save As, a .tscn or .scn path), or every open scene with all.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          },
+          "all": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "reload",
+      "description": "Make the editor pick up files changed outside it: rescan the project (and reload changed open scripts), or reload just the given paths. write_file does this by itself.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "run_project",
+      "description": "Run the project's main scene from the editor, the way the Play button does. The game opens in a window over the editor, visible in the stream. Returns output_mark for get_output, and the errors printed so far. A game that stops in the editor's debugger (a script parse or runtime error) returns playing false and halted with the error and its file:line.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "run_scene",
+      "description": "Run the edited scene, or the scene at path, from the editor.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "A res:// path inside the open project (a path relative to the project root also works)."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stop",
+      "description": "Stop the game the editor is running.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_output",
+      "description": "The editor's output: its own messages and those of the game it runs (print(), errors, warnings, script errors with their line), newest last. Pass since (a mark from run_project or an earlier get_output) to get only what came after it. While the game is stopped in the editor's debugger, playing is false and halted gives the error and its file:line.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 200
+          },
+          "errors_only": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "check_scripts",
+      "description": "Parse and type-check GDScript files (all of the project's, outside addons/, or the given paths) with Godot's --check-only, and return each failing file's errors with line numbers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "screenshot",
+      "description": "An image of the editor (target editor: the whole window; 2d / 3d: that viewport), the running game's window (game), or the whole streamed screen (screen).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": [
+              "editor",
+              "2d",
+              "3d",
+              "game",
+              "screen"
+            ],
+            "default": "editor"
+          },
+          "max_width": {
+            "type": "integer",
+            "description": "Scale editor images down to this width"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "record",
+      "description": "Record the game with Movie Maker on the GPU: a fixed frame rate, so the result is smooth however long each frame takes. Saves data/renders/<project>/<time>/movie.mp4 (or the PNG frames) and returns a frame from the middle.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "seconds": {
+            "type": "number",
+            "default": 3
+          },
+          "frames": {
+            "type": "integer",
+            "description": "Instead of seconds"
+          },
+          "fps": {
+            "type": "integer",
+            "default": 30
+          },
+          "scene": {
+            "type": "string",
+            "description": "Default: the main scene"
+          },
+          "width": {
+            "type": "integer",
+            "description": "Override the window size (with height)"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "mp4",
+              "png"
+            ],
+            "default": "mp4"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "export",
+      "description": "Export the open project (open scenes are saved first). web: a single-threaded HTML5 build under data/exports/<project>/web. linux: an x86_64 binary and .pck under data/exports/<project>/linux. The person downloads either as a .zip from the Godot panel's project menu; to show the game running, use run_project.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string",
+            "enum": [
+              "web",
+              "linux"
+            ],
+            "default": "web"
+          },
+          "debug": {
+            "type": "boolean",
+            "default": false,
+            "description": "Debug build (web only)"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "execute_gdscript",
+      "description": "ARBITRARY CODE: run GDScript inside the editor process (as an EditorScript would) and return what it prints and returns. The code is the body of a function run(); these are in scope: scene_root (the edited scene's root), undo_redo (EditorUndoRedoManager), plugin (EditorPlugin), and EditorInterface. Changes made here bypass the undo history unless you use undo_redo. Prefer the specific tools; use this for anything they do not cover (project settings, input map, signals, bulk edits). The editor does nothing else while the code runs: an endless loop freezes it until restart_editor.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "GDScript statements (or a full script defining func run())"
+          },
+          "timeout": {
+            "type": "integer",
+            "default": 60
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

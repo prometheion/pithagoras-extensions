@@ -199,13 +199,14 @@ export function service(options: ServiceOptions) {
    * The card the server is to be on: the one the host's owner pinned (the probe asked for it alone); else the one chosen
    * on the page, if it is there; else the one the container holds now, so that the most free memory, which the server's
    * own use changes, does not move it; else the card with the most free memory. Without a probe in this run of the half,
-   * the container keeps its card unless another was chosen.
+   * the container keeps its card unless another was chosen. A pinned card the probe did not find leaves a container
+   * on the card it holds (a new one is refused: `install`), and with no pin and no card found, it has none.
    */
   function wantedCard(detail: Inspected | undefined): { uuid: string } | undefined {
     const chosen = names.gpu ? "" : (store.setting("gpu") ?? "");
     const held = heldCard(detail);
     if (!probed) return chosen ? { uuid: chosen } : held ? { uuid: held } : undefined;
-    if (!probed.cards.length) return undefined;
+    if (!probed.cards.length) return names.gpu && held ? { uuid: held } : undefined;
     if (names.gpu) return { uuid: probed.cards[0].uuid };
     const card = probed.cards.find((c) => c.uuid === chosen) ?? probed.cards.find((c) => c.uuid === held) ?? mostFree(probed.cards);
     return card && { uuid: card.uuid };
@@ -279,6 +280,15 @@ export function service(options: ServiceOptions) {
   // --- what the person asks for ---
 
   /**
+   * A card the host's owner pinned (`PITHAGORAS_<APP>_GPU`) that the probe did not find: Docker would not give a
+   * container that card (no card by that UUID or index, or no NVIDIA runtime), so none is made with it, and none is
+   * made without it either, as the owner asked for that card.
+   */
+  function refuseMissingPin(found: Probed): void {
+    if (names.gpu && !found.cards.length) throw new Error(`The card PITHAGORAS_${app.toUpperCase()}_GPU names is not on this host.`);
+  }
+
+  /**
    * Installs the server, or starts it: the GPU probed (once in each run of the half, and again as the page opens),
    * the image downloaded where it is not there yet, the volume made, and the container made where there is none or
    * it is stale, then started. In the background: the page follows it in `status`. A failure is `error` there.
@@ -288,12 +298,13 @@ export function service(options: ServiceOptions) {
     const d = docker();
     if (!(await d.available())) throw new Error("Docker does not answer.");
     if ((await own()) === "foreign") throw new Error(`A container named ${names.container} is there that is not this extension's. Rename or remove it first.`);
+    if (probed) refuseMissingPin(probed);
     pending = true;
     error = "";
     progress = "";
     void (async () => {
       try {
-        if (!probed) await detect();
+        refuseMissingPin(probed ?? (await detect()));
         downloading = true;
         await d.images.ensure(names.image, (state) => {
           if (state.active && state.line !== "starting") progress = state.line;

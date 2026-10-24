@@ -1,0 +1,7 @@
+**/__pycache__
+**/*.part
+data
+client.py
+fetch-assets.sh
+smoke-test.sh
+tools.json

@@ -89,7 +89,9 @@ type Inspected = { State?: { Running?: boolean; ExitCode?: number } };
 /**
  * Runs the probe once: `name` is its container, `pinned` a card the host's owner pinned (a UUID or an index), which is
  * then the only one it asks for. Docker refusing the GPU request, or nvidia-smi finding none, is "no GPU", not a
- * failure. The probe's container is removed afterwards, whatever came of it.
+ * failure; and so is Docker refusing a probe that asks for a pinned card alone, which is that card not being there
+ * (`nvidia-container-cli: device error: 7: unknown device`), with Docker's words. The probe's container is removed
+ * afterwards, whatever came of it.
  */
 export async function probe(docker: Docker, name: string, pinned?: string): Promise<Probed> {
   await docker.images.ensure(PROBE_IMAGE);
@@ -109,7 +111,7 @@ export async function probe(docker: Docker, name: string, pinned?: string): Prom
     try {
       await docker.containers.start(name);
     } catch (e) {
-      if (isNoGpu((e as Error).message)) return { cards: [], optix: "none", error: (e as Error).message };
+      if (pinned || isNoGpu((e as Error).message)) return { cards: [], optix: "none", error: (e as Error).message };
       throw e;
     }
     // Until it has exited: Docker's own wait is not one an extension is given.

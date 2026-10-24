@@ -1,8 +1,9 @@
 {
   "name": "pithagoras-flair",
   "private": true,
+  "description": "Cosmetic and opinionated extensions for Pithagoras, each a package of its own",
   "license": "Apache-2.0",
-  "workspaces": ["blender"],
+  "workspaces": ["blender", "godot"],
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",

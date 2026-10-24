@@ -24,8 +24,8 @@ jobs:
         run: npm run build
       - name: Unit tests
         run: npm test
-      - name: The Blender server's Python compiles
-        run: python3 -m py_compile blender/server/server.py
+      - name: The servers' Python compiles
+        run: python3 -m py_compile blender/server/server.py godot/server/server.py godot/server/client.py
       - name: Pithagoras, for the portal-tier tests
         run: ./scripts/pithagoras.sh
       - name: Portal-tier tests

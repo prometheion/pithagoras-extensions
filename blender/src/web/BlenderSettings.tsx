@@ -198,7 +198,8 @@ export function BlenderSettings() {
             <p className="text-xs text-fg-faint">{t("Choosing another card makes a running server again on it now, and a stopped one at its next start.")}</p>
           </div>
         )}
-        {hardware && !hardware.cards.length && <p className="text-sm text-fg-muted">{t("No NVIDIA GPU found: Blender renders on the CPU.")}</p>}
+        {hardware && !hardware.cards.length && hardware.pinned && <p className="text-sm text-danger">{t("The card PITHAGORAS_BLENDER_GPU names is not on this host.")}</p>}
+        {hardware && !hardware.cards.length && !hardware.pinned && <p className="text-sm text-fg-muted">{t("No NVIDIA GPU found: Blender renders on the CPU.")}</p>}
         <div className="mt-2">
           <Denoiser hardware={hardware} state={state} />
         </div>

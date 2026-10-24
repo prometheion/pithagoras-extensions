@@ -78,6 +78,7 @@ export const de: Record<string, string | Plural> = {
   "Stopped": "Gestoppt",
   "Stopping releases the GPU's memory and keeps the projects. Remove the server here before uninstalling the extension: its container keeps running otherwise.": "Anhalten gibt den Speicher der GPU frei und behält die Projekte. Entferne den Server hier, bevor du die Erweiterung deinstallierst: Sonst läuft sein Container weiter.",
   "That card is not on this host.": "Diese Karte ist nicht auf diesem Host.",
+  "The card PITHAGORAS_BLENDER_GPU names is not on this host.": "Die Karte, die PITHAGORAS_BLENDER_GPU nennt, ist nicht auf diesem Host.",
   "The Blender container is stopped and removed, and its tools leave every chat. Its image stays on disk.": "Der Blender-Container wird gestoppt und entfernt, und seine Tools verschwinden aus jedem Chat. Sein Image bleibt auf der Festplatte.",
   "The Blender view": "Blender-Ansicht",
   "The host fixes the card (PITHAGORAS_BLENDER_GPU).": "Der Host legt die Karte fest (PITHAGORAS_BLENDER_GPU).",

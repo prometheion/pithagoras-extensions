@@ -24,9 +24,10 @@ import { NotAnswering, type McpClient, type McpTool } from "./mcp";
  * tools carry it. One call at a time (`sequential`): one server serves every call, on one thread. What a call returns
  * is outside content (`outside`): it comes from a scene or a project, which may have come from anywhere.
  *
- * What the extension does around a call of a tool, in the chat it is made in, is its own (`calls`): what it adds to
- * the arguments the server gets (a file of the chat's, read as its agent), and what it makes of the result for the
- * model and for the chat (a picture put in the chat's folder, which the chat shows under the call).
+ * What the extension does around a call of a tool, in the chat it is made in, is its own (`calls`): what it makes of
+ * the arguments before the guard looks at them (a file of the chat's, read as its agent, so that the guard is shown
+ * what is sent), what it adds to them as the call runs, and what it makes of the result for the model and for the
+ * chat (a picture put in the chat's folder, which the chat shows under the call).
  */
 
 /** What the package says of the server's tools: its MCP instructions and its `tools/list`, as server/tools.json has them. */
@@ -46,9 +47,16 @@ export interface Answer {
 
 /** What the extension does around a call of one of the server's tools, in the chat it is made in. */
 export interface CallHooks {
-  /** The arguments the server is sent, from those the model gave. A throw refuses the call, with its message. */
+  /**
+   * The call's arguments, from those the model gave: what pi checks against the tool's schema, the guard holds the
+   * call to (and, after a suspected prompt injection, shows the person it asks about it), and the call is run with.
+   * Run by pi before either, as the tool's `prepareArguments`, so synchronously; a throw refuses the call, with its
+   * message. Given only by a half in the portal's own process, where pi may be given a function beside `execute`.
+   */
+  prepare?(params: Record<string, unknown>, chat: Chat): Record<string, unknown>;
+  /** The arguments the server is sent, from those the call has. A throw refuses the call, with its message. */
   arguments?(params: Record<string, unknown>, chat: Chat): Record<string, unknown> | Promise<Record<string, unknown>>;
-  /** The answer, from what the server answered (`parts`) and the arguments the model gave. */
+  /** The answer, from what the server answered (`parts`) and the call's arguments (before `arguments`). */
   answer?(parts: Part[], params: Record<string, unknown>, chat: Chat): Answer | Promise<Answer>;
 }
 
@@ -109,6 +117,7 @@ export function relay(options: RelayOptions) {
         ...(guideline ? { promptGuidelines: [guideline] } : {}),
         executionMode: "sequential",
         guard,
+        ...(hooks.prepare ? { prepareArguments: (args: unknown) => hooks.prepare!((args ?? {}) as Record<string, unknown>, chat) } : {}),
         async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
           const given = params ?? {};
           const sent = hooks.arguments ? await hooks.arguments(given, chat) : given;

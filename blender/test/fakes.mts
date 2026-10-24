@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -197,8 +197,11 @@ export function memoryDocker(options: { owner?: string } = {}) {
 /**
  * A portal for one server half: an express router behind /api/x/<package>, the tools it offers and registers, a data
  * folder, and the folder of the chat its tools are called in (`chatDir`), read and written through `files` as the
- * portal's own functions do, by a path from that folder. Every read is kept with the options it was asked with
- * (`reads`); `files.refuse` makes the next read throw a refusal with that code, as the portal's checks do.
+ * portal's own functions do, by a path from that folder. `chats.folder` gives that folder as the portal does, as it
+ * really is: the chat's workspace with every link on the way resolved, while the chat names it as it was given
+ * (`chat.workspace`, which a test can make a link). Every read is kept with the options it was asked with (`reads`),
+ * and every folder made or held to (`folders`); `files.refuse` makes the next read throw a refusal with that code, as
+ * the portal's checks do, and `files.refuseFolder` the holding of a folder (`identity`), as for one closed to the agent.
  */
 export function fakePortal(options: { dataDir?: string } = {}) {
   const router = express.Router();
@@ -212,14 +215,25 @@ export function fakePortal(options: { dataDir?: string } = {}) {
   const chat = { id: "chat-1", title: "A chat", workspace: chatDir, status: "running" };
   const uses = new Map<string, unknown>();
   const reads: { rel: string; options: unknown }[] = [];
+  const folders: { made?: string; held?: string; options: unknown }[] = [];
   const refusal = (code: string, message: string) => Object.assign(new Error(message), { code });
   const files = {
     refuse: undefined as string | undefined,
-    makeFolder(base: string, rel: string, name: string) {
+    refuseFolder: undefined as string | undefined,
+    makeFolder(base: string, rel: string, name: string, asked?: unknown) {
+      folders.push({ made: path.posix.join(rel, name), options: asked });
       const made = path.join(base, rel, name);
       if (existsSync(made)) throw refusal("exists", `${name} is there already`);
       mkdirSync(made);
       return path.posix.join(rel, name);
+    },
+    /** As with `direct`: a link, or anything but a folder, is refused. */
+    identity(base: string, rel: string, asked?: unknown) {
+      folders.push({ held: rel, options: asked });
+      if (files.refuseFolder) throw refusal(files.refuseFolder, `refused: ${rel}`);
+      const found = lstatSync(path.join(base, rel), { bigint: true });
+      if (!found.isDirectory()) throw refusal("invalid", `not a folder of its own: ${rel}`);
+      return { dev: String(found.dev), ino: String(found.ino) };
     },
     create(base: string, rel: string, name: string, data: Buffer) {
       writeFileSync(path.join(base, rel, name), data, { flag: "wx" });
@@ -247,7 +261,7 @@ export function fakePortal(options: { dataDir?: string } = {}) {
       extend: (factory: (pi: any, chat: any) => void) => void factories.push(factory),
       folder: (id: string) => {
         if (id !== chat.id) throw new Error(`no chat ${id}`);
-        return chatDir;
+        return realpathSync(chat.workspace);
       },
       reload: async () => {
         reloads++;
@@ -267,6 +281,7 @@ export function fakePortal(options: { dataDir?: string } = {}) {
     chatDir,
     files,
     reads,
+    folders,
     reloads: () => reloads,
     upgrade: () => upgrade,
     /** What Settings → Tools is offered now. */

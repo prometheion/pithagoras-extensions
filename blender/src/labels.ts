@@ -9,7 +9,8 @@
  * for a portal in a container of its own, what is listened for on 0.0.0.0 in that container's network namespace: the
  * README says what), and yet it can read and change the projects, and what it prints comes back to the chat. So once a conversation has read
  * something that looks like a prompt injection, the guard asks the person before it runs, or refuses it where nobody
- * is there to answer (`upload`). The other tools read the scene, or write only in the container's data folder.
+ * is there to answer (`upload`); for a script run by its path, about the script's code and args, which are read before
+ * the guard looks (server/calls.ts). The other tools read the scene, or write only in the container's data folder.
  */
 
 /** Marks a text to be translated where it is shown: a label kept in a table. */

@@ -84,8 +84,10 @@ The server's MCP tools, as tools of the extension's own, in every chat:
 | `blender_list_projects`, `blender_open_file`, `blender_save_file`, `blender_new_scene` | The projects in `scenes/` |
 
 A script the agent writes once and edits goes to `blender_execute_code` by its `path`, in place of code written into
-every call, with `args` that the script reads as `ARGS`. An error names the file and the line, and a long script can
-call `refresh_view()` between its steps to show you the scene as it takes shape.
+every call, with `args` that the script reads as `ARGS`: a `.py` file in the chat's folder, in no hidden folder. An
+error names the file and the line, and a long script can call `refresh_view()` between its steps to show you the scene
+as it takes shape. Code that calls `sys.exit()` only ends itself, with an error that says so: Blender, and the open
+scene, go on.
 
 A render is yours as well as the model's: the extension puts the picture in the chat's folder, in `blender-renders/`,
 and the call gives it to the chat as any tool gives a file, so it is drawn under the call, opens in the picture viewer
@@ -138,6 +140,13 @@ Don't add an MCP server named `blender` beside it: its tools would have the same
 - **A script by its path is read by the portal, as the agent.** The container never mounts the agent's files. The
   portal reads the script from the chat's folder with its own file functions, as that chat's agent would (with the
   sandbox on, a file closed to the agent is refused), refuses a path outside the folder, and sends Blender the text.
+  It is read before the guard looks at the call, so the guard holds the call to the script's code and its args, and
+  that is what you are shown when it asks you about it after a suspected prompt injection, and what runs. Shown no path,
+  the guard cannot keep a place secrets are kept from somebody who is not the primary user by its name, so the
+  extension runs only a `.py` file in no hidden folder, which none of those places is.
+- **A render is written for you as the agent may write.** Its folder in the chat's folder, `blender-renders/`, is held
+  to what the chat's agent may use: a folder closed to the agent that it renamed onto the name, or a link, is refused,
+  and the render is then the model's only.
 
 ## Data
 
@@ -198,8 +207,9 @@ ghcr.io/prometheion/pithagoras-blender:<version>` deletes it.
 ```sh
 npm ci                     # at the repository's root
 npm run build -w blender   # web/, server.js and viewer.html
-npm test -w blender        # unit tests, with Docker, the portal and the server faked
-./scripts/pithagoras.sh    # Pithagoras v0.2.0 into .pithagoras/, for the portal-tier tests
+npm test -w blender        # unit tests, with Docker, the portal and the server faked, and server.py with a stand-in for bpy
+./scripts/pithagoras.sh    # Pithagoras v0.2.0 into .pithagoras/, for the portal-tier tests (PITHAGORAS_REF as in
+                           # .github/workflows/test.yml until a release has Docker for extensions 1.3.0)
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w blender
 docker build -f blender/server/Dockerfile -t pithagoras-blender:dev blender   # the image
 ./scripts/smoke-blender.sh pithagoras-blender:dev                              # its smoke test

@@ -6,7 +6,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { usersOf, setUser, setLocked, isLocked, pollState, clearDoc, resetLive, setPresenceTtl, getPresenceTtl } from "../src/live";
+import { usersOf, setUser, setLocked, isLocked, pollState, clearDoc, resetLive, setPresenceTtl, getPresenceTtl, setSession, sessionKeys, agentsOf, nameAgent } from "../src/live";
+import { editorsIn } from "../src/office-ui";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -65,5 +66,23 @@ test("co-edit semantics unchanged: explicit lock flag is independent of presence
   clearDoc("doc-d"); // the DELETE /documents/:id path -- presence AND flag gone at once
   assert.deepEqual(usersOf("doc-d"), []);
   assert.equal(isLocked("doc-d"), false);
+  resetLive();
+});
+
+test("agents' editors: they count for the sessions and agentsOf, not as people: no usersOf, no lock, no badge", () => {
+  resetLive();
+  nameAgent("agent:abc", "Research (agent)");
+  setSession("doc-z", "key-1", ["agent:abc"]);
+  setUser("doc-z", { id: "agent:abc" }, true, { confirmed: true });
+  assert.deepEqual(sessionKeys("doc-z"), ["key-1"]);
+  assert.deepEqual(agentsOf("doc-z"), [{ id: "agent:abc", name: "Research (agent)" }]);
+  assert.deepEqual(usersOf("doc-z"), []);
+  assert.equal(pollState("doc-z", 0).locked, false);
+  assert.equal(isLocked("doc-z"), false);
+  // What the /state route gives the library's badge is usersOf: no agent in it.
+  assert.equal(editorsIn({ "doc-z": usersOf("doc-z") }, "doc-z"), 0);
+  // An agent never named (a callback after a restart) is shown by its id.
+  setUser("doc-z", { id: "agent:def" }, true, { confirmed: true });
+  assert.deepEqual(agentsOf("doc-z").map((a) => a.name), ["Research (agent)", "agent:def"]);
   resetLive();
 });

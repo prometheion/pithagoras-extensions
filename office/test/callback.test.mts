@@ -563,6 +563,33 @@ test("status 1 as the Document Server sends it: users by id strings keep the min
   live.resetLive();
 });
 
+test("status 1 with an agent's editor in the session: its key is a session of the document, the agent is among agentsOf, but no person editing, no lock", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Agent seat", type: "word" }, root);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
+  live.resetLive();
+  live.nameAgent("agent:abc", "Research (agent)");
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  const agentOnly = { key, status: 1, users: ["agent:abc"], actions: [{ type: 1, userid: "agent:abc" }] };
+  assert.deepEqual(json(await post(handler, agentOnly, { headers: dsHeaders(agentOnly) })), { error: 0 });
+  assert.deepEqual(live.sessionKeys(doc.docId), [key], "a person who opens it joins the agent's session");
+  assert.deepEqual(live.usersOf(doc.docId), []);
+  assert.deepEqual(live.agentsOf(doc.docId), [{ id: "agent:abc", name: "Research (agent)" }]);
+  assert.equal(live.isLocked(doc.docId), false);
+  assert.equal(live.pollState(doc.docId, 0).locked, false);
+  // A person joins: they count, the agent still does not.
+  const both = { key, status: 1, users: ["agent:abc", "portal-user"], actions: [{ type: 1, userid: "portal-user" }] };
+  await post(handler, both, { headers: dsHeaders(both) });
+  assert.deepEqual(live.usersOf(doc.docId).map((u) => u.id), ["portal-user"]);
+  assert.equal(live.isLocked(doc.docId), true);
+  // The agent's editor closes: the person stays, and with them the lock.
+  const personOnly = { key, status: 1, users: ["portal-user"], actions: [{ type: 0, userid: "agent:abc" }] };
+  await post(handler, personOnly, { headers: dsHeaders(personOnly) });
+  assert.deepEqual(live.agentsOf(doc.docId), []);
+  assert.equal(live.usersOf(doc.docId).length, 1);
+  live.resetLive();
+});
+
 test("statuses 3 and 7: one log line each, zero file changes, zero downloads", async () => {
   const root = tmpRoot();
   const sink: string[] = [];

@@ -86,15 +86,38 @@ function userMap(docId: string): Map<string, PresenceRecord> {
   return users;
 }
 
-/** Everyone currently tracked as present on the doc (join time ascending), or [] for none. Returns copies --
- * callers may hold onto them freely. Expired entries (TTL passed without a heartbeat) are dropped on sight:
- * they no longer count as "editing now", so tools.ts' "editing now" annotation expires with them. */
-export function usersOf(docId: string): LiveUser[] {
+/** The id an agent's editor goes by in a document (server.ts mints it, `agent:<keyIdOf(home)>`): the Document Server
+ * names it among the session's users like a person, but it is no person editing. */
+export const isAgentId = (id: string): boolean => id.startsWith("agent:");
+
+/** Everyone present on the doc, agents among them, with the expired dropped. */
+function present(docId: string): PresenceRecord[] {
   const users = presence.get(docId);
   if (!users) return [];
   const now = Date.now();
   for (const [id, u] of [...users]) if (isStale(u, now)) users.delete(id);
-  return [...users.values()].map(({ id, name, at }) => ({ id, name, at }));
+  return [...users.values()];
+}
+
+/** Every PERSON currently tracked as present on the doc (join time ascending), or [] for none: the agents' editors in
+ * it are left out (agentsOf), so they neither lock it, nor badge it, nor count as "editing now". Returns copies --
+ * callers may hold onto them freely. Expired entries (TTL passed without a heartbeat) are dropped on sight:
+ * they no longer count as "editing now", so tools.ts' "editing now" annotation expires with them. */
+export function usersOf(docId: string): LiveUser[] {
+  return present(docId).filter((u) => !isAgentId(u.id)).map(({ id, name, at }) => ({ id, name, at }));
+}
+
+/** The names agents' editors were opened with, by their id: the Document Server's callbacks name users by id alone. */
+const agentNames = new Map<string, string>();
+
+/** The name people see for the agent of `id` ("Research (agent)"), as its editor config was minted with it. */
+export function nameAgent(id: string, name: string): void {
+  agentNames.set(id, name);
+}
+
+/** The agents' editors in the document now, as the Document Server says (its status-1 callbacks), for office_list. */
+export function agentsOf(docId: string): { id: string; name: string }[] {
+  return present(docId).filter((u) => isAgentId(u.id)).map((u) => ({ id: u.id, name: agentNames.get(u.id) ?? u.name ?? u.id }));
 }
 
 /** Track a join (joined=true -- inserts or updates the entry, KEEPING the original `at` of an already-tracked
@@ -127,7 +150,7 @@ export function setSession(docId: string, key: string, userIds: string[]): void 
   if (userIds.length) keys.set(key, new Set(userIds));
   else keys.delete(key);
   const still = sessionUsers(docId);
-  for (const tracked of usersOf(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
+  for (const tracked of present(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
   if (!keys.size) sessions.delete(docId);
 }
 
@@ -142,7 +165,7 @@ export function endSession(docId: string, key: string): void {
     return;
   }
   const still = sessionUsers(docId);
-  for (const tracked of usersOf(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
+  for (const tracked of present(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
 }
 
 /** The keys of the editing sessions the Document Server said are open on the document: what an agent's write has it
@@ -204,6 +227,7 @@ export function resetLive(): void {
   presence.clear();
   sessions.clear();
   locked.clear();
+  agentNames.clear();
   resolveMeta = null;
   presenceTtlMs = DEFAULT_PRESENCE_TTL_MS;
 }

@@ -302,6 +302,8 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
     const editorConfig = config.editorConfig as Record<string, unknown>;
     editorConfig.mode = as.mode;
     editorConfig.user = { id: `agent:${callback.keyIdOf(as.home)}`, name: `${as.label} (agent)`, group: "agents" };
+    // Its presence comes from the Document Server's callbacks, as anyone's; its mint is no person opening the document.
+    live.nameAgent(`agent:${callback.keyIdOf(as.home)}`, `${as.label} (agent)`);
     // Live in view mode too: a viewer's default is "strict", which shows nobody's changes until they save.
     editorConfig.coEditing = { mode: "fast", change: false };
     // The one editor with a plugin: Office's own, which makes the agent's edits (seat-page.ts). It runs in the agents'

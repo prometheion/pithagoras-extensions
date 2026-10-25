@@ -16,13 +16,15 @@ import net, { type AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { fakeDocker } from "./fake-docker.mts";
 import * as container from "../src/container";
-import officeServer, { dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept, ticketSecret, ticketSubject } from "../src/server";
+import officeServer, { buildEditorConfig, dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept, ticketSecret, ticketSubject } from "../src/server";
+import * as seat from "../src/seat";
+import { PLUGIN_GUID } from "../src/seat-page";
 import * as store from "../src/store";
 import { commentKeys, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
 import { signJwt, verifyJwt } from "../src/jwt";
-import { docIdOf, followTo, makeKey, parseKey, revHashOf } from "../src/callback";
+import { docIdOf, followTo, keyIdOf, makeKey, parseKey, revHashOf } from "../src/callback";
 
 const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 
@@ -374,6 +376,7 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   assert.deepEqual(ec.user, { id: "portal-user", name: "Portal" });
   // no document macros and no plugins on the portal's origin, and that is signed
   assert.deepEqual(ec.customization, { macros: false, plugins: false });
+  assert.equal(ec.plugins, undefined, "a person's editor is given no plugin");
   // the JWT wrap: payload == the WHOLE plain config (minus token/apiJs), 15-minute life, verifies with the same secret
   const claims = verifyJwt(body.token, secret);
   assert.ok(claims, "the signed config verifies");
@@ -1215,3 +1218,83 @@ test("/ds proxy: an idle long-poll HELD past the old 15s cutoff still comes back
 });
 
 
+
+/* ---------------- the agent's editor config ---------------- */
+
+test("an agent's editor config: its own user, the plugin by its GUID from its own address, live in view mode too, no person's seat taken", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  live.resetLive();
+  const doc = await store.createDoc({ title: "Seated", type: "word" }, b.root);
+  const home = "/homes/research";
+  const built = buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "view", pluginUrl: "http://relay:3891/plugin/0123456789abcdef0123456789abcdef/" });
+  const ec = (built.config as { editorConfig: Record<string, any> }).editorConfig;
+  assert.deepEqual(ec.user, { id: `agent:${keyIdOf(home)}`, name: "Research (agent)", group: "agents" });
+  assert.equal(ec.mode, "view");
+  assert.deepEqual(ec.coEditing, { mode: "fast", change: false }, "a viewer is live too");
+  assert.deepEqual(ec.customization, { macros: false, plugins: true, compactHeader: true });
+  assert.deepEqual(ec.plugins, { pluginsData: ["http://relay:3891/plugin/0123456789abcdef0123456789abcdef/config.json"], autostart: [PLUGIN_GUID] });
+  assert.equal(built.key, makeKey(doc.docId, doc.mtimeMs));
+  assert.equal(ec.callbackUrl, "http://pithagoras-office-ds-relay:3891/callback");
+  assert.deepEqual(live.usersOf(doc.docId), [], "its mint is no person opening the document");
+  // Its name is known for office_list once the Document Server says it is in the document.
+  live.setUser(doc.docId, { id: `agent:${keyIdOf(home)}` }, true, { confirmed: true });
+  assert.deepEqual(live.agentsOf(doc.docId), [{ id: `agent:${keyIdOf(home)}`, name: "Research (agent)" }]);
+  assert.equal(buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "edit", pluginUrl: "http://x/" }).config!.editorConfig && (buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "edit", pluginUrl: "http://x/" }).config!.editorConfig as { mode: string }).mode, "edit");
+  live.resetLive();
+  await b.cleanup();
+});
+
+test("an agent's editor and a person's join each other's open session: the same key, whoever opened it first", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  live.resetLive();
+  const doc = await store.createDoc({ title: "Shared", type: "word" }, b.root);
+  // A session whose key stands for this revision, which an agent's editor opened (its status 1 named it).
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  live.setSession(doc.docId, key, [`agent:${keyIdOf("/homes/a")}`]);
+  const person = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
+  assert.equal(person.document.key, key);
+  // And an agent opens into a session a person opened.
+  live.resetLive();
+  live.setSession(doc.docId, key, ["portal-user"]);
+  const agent = buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home: "/homes/a", label: "A", mode: "edit", pluginUrl: "http://x/" });
+  assert.equal(agent.key, key);
+  live.resetLive();
+  await b.cleanup();
+});
+
+test("no route of the portal's or the listener's hands out an agent's editor config: only the seat page's secret route does", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  live.resetLive();
+  const doc = await store.createDoc({ title: "Walked", type: "word" }, b.root);
+  const marks = [PLUGIN_GUID, "pluginsData", "agent:", "/plugin/"];
+  const leaks: string[] = [];
+  const look = (where: string, body: unknown) => {
+    const text = typeof body === "string" ? body : Buffer.isBuffer(body) ? body.toString("utf8") : JSON.stringify(body ?? null);
+    for (const m of marks) if (text.includes(m)) leaks.push(`${where} holds ${m}`);
+  };
+  // Every route the half registered, with the document's id wherever a route takes one.
+  for (const route of b.router.routes) {
+    const url = typeof route.pattern === "string" ? route.pattern.replace(/:id/g, encodeURIComponent(doc.docId)) + (route.pattern === "/editor-state" ? `?doc=${doc.docId}&key=${makeKey(doc.docId, doc.mtimeMs)}` : route.pattern === "/scope" ? "?chat=c" : "") : "/ds/web-apps/apps/api/documents/api.js";
+    if (route.method === "DELETE" || url === "/container/remove" || url === "/container/stop" || url === "/settings") continue; // they change things, and hand out nothing
+    const res = await b.router.dispatch(route.method, url, { doc: doc.docId, title: "x", type: "word" }).catch((e: Error) => ({ body: e.message, data: undefined }));
+    look(`${route.method} ${url}`, res.body);
+    look(`${route.method} ${url}`, res.data);
+  }
+  // The listener: its routes, and the seat routes without the secret or a token.
+  const port = loopbackPort();
+  for (const [method, p] of [["GET", "/doc/x"], ["POST", "/callback"], ["GET", "/seat/"], ["GET", `/seat/${"0".repeat(64)}/poll`], ["GET", `/plugin/${"0".repeat(32)}/config.json`], ["GET", "/"]]) {
+    const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, body: method === "POST" ? "{}" : undefined });
+    assert.ok(r.status >= 400, `${method} ${p} is refused (${r.status})`);
+    look(`listener ${method} ${p}`, (await r.text()).split(p).join("<path>")); // its 404 names the path it was asked
+  }
+  assert.deepEqual(leaks, []);
+  // The seat page itself is at the secret route, on the listener.
+  const page = await fetch(`http://127.0.0.1:${port}${new URL(seat.pageUrl()).pathname}`);
+  assert.equal(page.status, 200);
+  await page.text();
+  live.resetLive();
+  await b.cleanup();
+});

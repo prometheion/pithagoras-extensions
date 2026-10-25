@@ -17,6 +17,10 @@ import { startingUp } from "../office-ui";
  * refreshFile, which reopens the document in the same frame with the new key. The same happens when the editor asks
  * for it (onRequestRefreshFile: it reconnected to a session that has ended). Where the file changed outside the
  * editor ("behind"), a badge says so, and its button loads the new revision the same way.
+ *
+ * The editor sends what is typed to the Document Server only once the person pauses, and a reload drops what it has
+ * not sent yet: that is in no session, and no copy can keep it. So a reload waits until the editor says everything is
+ * sent (onDocumentStateChange false); then the old session holds it, and its close keeps it as a copy.
  */
 
 /** What DocsAPI leaves on window once api.js has loaded: only what is used, typed as it behaves. */
@@ -83,6 +87,12 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
     /** The document.key the editor has open now. */
     let key = "";
     let reloading = false;
+    /** The editor holds typing it has not sent to the Document Server yet (onDocumentStateChange). */
+    let unsent = false;
+    /** A reload was asked for while there was such typing: it is made once that is sent. */
+    let wanted = false;
+    /** The reload is for an agent's edit: the chip says so once it is loaded. */
+    let forAgent = false;
     setProblem(null);
     setReady(false);
     setSettingUp(false);
@@ -94,7 +104,17 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
     const asConfig = (minted: Awaited<ReturnType<typeof api.editorConfig>>): Record<string, unknown> => {
       const config: Record<string, unknown> = { ...minted };
       delete config.apiJs;
-      config.events = { onRequestRefreshFile: () => void reload.current() };
+      config.events = {
+        // The session it was in has ended, and what it has not sent cannot be sent any more: loaded at once.
+        onRequestRefreshFile: () => {
+          unsent = false;
+          void reload.current();
+        },
+        onDocumentStateChange: (event: { data?: unknown }) => {
+          unsent = event?.data === true;
+          if (!unsent && wanted) void reload.current();
+        },
+      };
       return config;
     };
     const keyOf = (config: Record<string, unknown>) => String((config.document as { key?: unknown } | undefined)?.key ?? "");
@@ -117,11 +137,22 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
     /** The newest revision into the open editor: a fresh config (a new key) through the editor's refreshFile, which
      * keeps the frame and reopens the document in it; an editor without it is made again. */
     reload.current = async () => {
-      if (reloading || !editor.current) return;
+      if (!editor.current) return;
+      if (unsent) {
+        wanted = true;
+        return;
+      }
+      if (reloading) return;
       reloading = true;
+      wanted = false;
       try {
         const config = asConfig(await api.editorConfig(docId));
         if (!alive) return;
+        // Typed while the config was asked for: loaded once that is sent too.
+        if (unsent) {
+          wanted = true;
+          return;
+        }
         if (keyOf(config) !== key) {
           if (typeof editor.current?.refreshFile === "function") {
             editor.current.refreshFile(config);
@@ -134,8 +165,16 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
             }
             build(config);
           }
+          unsent = false;
+          if (forAgent) {
+            setFollowed(true);
+            if (shown !== undefined) clearTimeout(shown);
+            shown = setTimeout(() => setFollowed(false), 8000);
+          }
         }
+        forAgent = false;
         setBehind(false);
+        setProblem(null);
       } catch (e) {
         if (alive) setProblem(sayError(e));
       } finally {
@@ -174,11 +213,8 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
           api.editorState(docId, asked).then(async (answer) => {
             if (!alive || asked !== key) return;
             if (answer.standing === "follow") {
+              forAgent = true;
               await reload.current();
-              if (!alive) return;
-              setFollowed(true);
-              if (shown !== undefined) clearTimeout(shown);
-              shown = setTimeout(() => setFollowed(false), 8000);
             } else {
               setBehind(answer.standing === "behind");
             }

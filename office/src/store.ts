@@ -899,13 +899,20 @@ export function readDoc(doc: DocMeta, root = dataDir()): Buffer {
  */
 function replaceKeeping(file: string, bytes: Buffer, was: fs.Stats): void {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomInt(1e9)}.tmp`);
-  writeNewKeeping(tmp, bytes, was);
+  writeNewKeeping(tmp, bytes, was, true);
   fs.renameSync(tmp, file);
 }
 
+/** How far a new revision's time is set past the one it replaces where the clock gave it the same one (or an earlier
+ * one): a millisecond, then a second and two for a filesystem that keeps times by the second (or by two, as FAT does). */
+const REVISION_STEPS_MS = [1, 1000, 2000];
+
 /** `bytes` as a new file at `file` (never over one there, never through a link), synced, with the owner, group and mode
- * of `was` where it is given. */
-function writeNewKeeping(file: string, bytes: Buffer, was?: fs.Stats): void {
+ * of `was` where it is given. With `newer`, it is the next revision of `was`: its modification time, which is the
+ * revision, is later than the one of `was`. Two writes a few milliseconds apart (the open editor's save, and the
+ * agent's edit on top of it) can get the same time from the kernel's coarse clock, and the revision gate could then not
+ * tell them apart. */
+function writeNewKeeping(file: string, bytes: Buffer, was?: fs.Stats, newer = false): void {
   const mode = was ? was.mode & 0o7777 : 0o644;
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
   try {
@@ -917,6 +924,13 @@ function writeNewKeeping(file: string, bytes: Buffer, was?: fs.Stats): void {
         if ((e as NodeJS.ErrnoException).code !== "EPERM") throw e;
       }
       fs.fchmodSync(fd, mode); // the umask had its say at the open
+    }
+    if (was && newer) {
+      for (const step of REVISION_STEPS_MS) {
+        const now = fs.fstatSync(fd);
+        if (now.mtimeMs > was.mtimeMs) break;
+        fs.futimesSync(fd, now.atime, new Date(was.mtimeMs + step));
+      }
     }
     fs.fsyncSync(fd);
   } catch (e) {

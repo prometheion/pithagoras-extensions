@@ -115,12 +115,6 @@ export function setUser(docId: string, user: { id: string; name?: string }, join
   }
 }
 
-/** Whether the Document Server said somebody is in the document (a confirmed seat): its editing session is open. A
- * seat only minted, which the Document Server never confirmed (an editor that did not load), does not count. */
-export function inSession(docId: string): boolean {
-  return [...(presence.get(docId)?.values() ?? [])].some((u) => u.confirmed);
-}
-
 /** The Document Server's word on who is in the editing session of `key` (a status-1 callback): its users now, an empty
  * list for none left. Presence follows every session of the document together: a user still in another key's session
  * stays. */

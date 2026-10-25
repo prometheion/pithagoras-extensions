@@ -373,7 +373,6 @@ test("two sessions of one document (an editor that loaded a newer revision while
   await post(handler, closed, { headers: dsHeaders(closed) });
   assert.deepEqual(live.sessionKeys(doc.docId), [newKey]);
   assert.deepEqual(live.usersOf(doc.docId).map((u) => u.id), ["portal-user"], "still in the new session");
-  assert.equal(live.inSession(doc.docId), true);
   assert.equal(live.pollState(doc.docId, 0).locked, true);
   // Its users leaving (a status 1 with nobody), and then its close, end it all.
   const left = { key: newKey, status: 1, users: [] };

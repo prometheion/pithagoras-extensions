@@ -58,20 +58,25 @@ as an editor opened before would lose what is typed in it.
   (`office_edit`), the portal first has the Document Server save what is typed there (its command service's
   forcesave), waits for that save, and makes the agent's edit on top of it; the open editor then loads the new
   revision in place, in the same frame (the editor's own refresh, under a new document key), and says that it loaded
-  the agent's edit. Nothing typed is written over: where the editor does not save within 30 seconds, the edit is
-  refused (`error:editor_not_saved`), nothing is written, and the agent tries again. What is typed in the second or
-  so between that save and the reload is kept beside the document as "<title> (conflict <date time>)", as it lacks
-  the agent's edit. Edits of one document run one at a time.
-  Every write goes through a revision check: a document's revision is its file's modification time, `office_read`
-  shows it, and `office_edit` takes it as `baseRevision` and replaces quoted text only if the file is still at that
-  revision (or at the one the open editor's save just wrote on top of it); if it moved on, nothing is written and the
-  tool answers `error:revision_mismatch`. `office_read` reads the saved file: what is typed in an open editor since
-  its last save is not in it. A change made outside the extension (a script, a git pull) is a new revision at once. A
-  save from the editor that would overwrite a newer revision (the file changed on disk while it was open) is not lost
-  and does not overwrite it: it is kept beside the document as "<title> (conflict <date time>)", and the audit log
-  says so. A save the Document Server could not hand over while the portal was away (it keeps such a save as
-  "forgotten") is taken back once the portal runs again. An open editor says within a second or two when the file
-  changed on disk; its button loads the new revision in place.
+  the agent's edit. It loads it only once it has sent what is being typed to the Document Server (it sends at each
+  short pause): a reload drops what it has not sent. Nothing typed is written over: where the editor does not save
+  within 30 seconds, the edit is refused (`error:editor_not_saved`), nothing is written, and the agent tries again; a
+  save that was asked for earlier and is still under way is waited for first. An editor that is closing is waited for
+  until its last save lands, and a last save the Document Server could not hand over is taken back from it first.
+  What is typed between that save and the reload is kept beside the document as "<title> (conflict <date time>)", as
+  it lacks the agent's edit. An editor that opened an older revision than the file has (it changed on disk) does not
+  load the agent's edit by itself: what is typed there is kept as such a copy, its badge says it is behind, and the
+  agent is told so. Edits of one document run one at a time.
+  Every write goes through a revision check: a document's revision is its file's modification time (each write the
+  portal makes moves it on), `office_read` shows it, and `office_edit` takes it as `baseRevision` and replaces quoted
+  text only if the file is still at that revision (or at the one the open editor's save just wrote on top of it); if
+  it moved on, nothing is written and the tool answers `error:revision_mismatch`. `office_read` reads the saved file:
+  what is typed in an open editor since its last save is not in it. A change made outside the extension (a script, a
+  git pull) is a new revision at once. A save from the editor that would overwrite a newer revision (the file changed
+  on disk while it was open) is not lost and does not overwrite it: it is kept beside the document as "<title>
+  (conflict <date time>)", and the audit log says so. A save the Document Server could not hand over while the portal
+  was away (it keeps such a save as "forgotten") is taken back once the portal runs again. An open editor says within
+  a second or two when the file changed on disk; its button loads the new revision in place.
 - **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document, or
   in whose folder it is), or `@<name>` or `@project:<name>` for an agent or project by name, and save, a chat of that
   agent is woken, told which document mentions it, and gets access to that document; it reads the comment itself.
@@ -165,8 +170,10 @@ remove an image, so the images stay on disk: `docker image rm onlyoffice/documen
   before Docker for extensions) is taken over and made again; one of another extension's is refused.
 - Not in this version: copying a document into a chat's folder from the library (the library downloads a copy), and
   expiry for the access a comment grants.
-- What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. A session that
-  saved for an agent's edit before the portal restarted has its later save kept as a conflict copy, not written.
+- What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. An editor that
+  stays open across a restart of the portal, and saved once before it (for an agent's edit, or a Save), is not saved
+  first by an agent's edit after it, as the portal no longer knows its key: what is typed there is kept as a conflict
+  copy, at the latest when it closes. Its later saves are kept as such copies too, not written.
 - The editor's reload for an agent's edit reopens the document in the same frame; where the cursor and the view go
   then is the editor's choice.
 
@@ -186,13 +193,14 @@ tailwindcss, postcss, the extension API, react-icons and jszip).
 ```sh
 npm run build -w office    # web/ and server.js, then the type check of src/ and the tests
 npm test -w office         # the unit and integration tests, with Docker, the portal and the Document Server faked
-./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office   # under the portal's own extension host
+./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office   # under the portal's own extension host; the editor page in Chromium
 ```
 
 The integration tests start nothing in Docker: they run the extension's real loopback listener in the test process,
 with a small server of their own standing in for the Document Server's downloads. The end-to-end test runs the real
 Document Server through Docker for extensions under the portal's own extension host, and opens, edits and saves a
-document in Chromium; it is opt-in, as it needs Docker Engine 28 or later, the image (about 3 GB) and a few minutes:
+document in Chromium, in the Office page's own editor; it is opt-in, as it needs Docker Engine 28 or later, the image
+(about 3 GB) and a few minutes:
 
 ```sh
 ./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office

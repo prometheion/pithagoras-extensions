@@ -485,6 +485,32 @@ test("persistBytes: success writes the bytes, updates the index mtime/size and r
   assert.deepEqual(fs.readFileSync(docFile(root, doc)), saved); // the bytes really landed
 });
 
+test("persistBytes: every write is a revision of its own, also two writes in one tick of a filesystem that keeps times by two seconds", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Quick", type: "word" }, root);
+  for (const name of ["lstatSync", "statSync", "fstatSync"] as const) {
+    const real = fs[name] as (...args: unknown[]) => fs.Stats;
+    mock.method(fs, name, (...args: unknown[]) => {
+      const st = real(...args);
+      if (st) st.mtimeMs = Math.floor(st.mtimeMs / 2000) * 2000;
+      return st;
+    });
+  }
+  try {
+    // At the start of a two-second step, so that the writes below all fall in it.
+    while (Date.now() % 2000 > 1000) await new Promise((resolve) => setTimeout(resolve, 50));
+    const first = { ...getDoc(doc.docId, root)!, mtimeMs: fs.lstatSync(docFile(root, doc)).mtimeMs };
+    const one = persistBytes(first, Buffer.from("the editor's save"), root);
+    const two = persistBytes({ ...first, mtimeMs: one.mtimeMs }, Buffer.from("the agent's edit on top"), root);
+    assert.ok(two.mtimeMs > one.mtimeMs, `${two.mtimeMs} after ${one.mtimeMs}`);
+    // A writer that still holds the first save's revision must not write over the second.
+    assert.throws(() => persistBytes({ ...first, mtimeMs: one.mtimeMs }, Buffer.from("late"), root), (e: Error & { code?: string }) => e.code === "revision_mismatch");
+    assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "the agent's edit on top");
+  } finally {
+    mock.restoreAll();
+  }
+});
+
 test("persistBytes: a stale meta (external write moved the mtime) throws revision_mismatch with currentMtimeMs", async () => {
   const root = tmpRoot();
   const doc = await createDoc({ title: "Contended", type: "word" }, root);

@@ -41,7 +41,7 @@ import { portal } from "./host";
 import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, persistBytes, readDoc, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
 import { parseDocx, parseXlsx, editDocx, readPart, rewriteZip, type EditOp } from "./ooxml";
 import { sessionKeys as liveSessionKeys, usersOf, isLocked } from "./live";
-import { followTo, savedRevision } from "./callback";
+import { followTo, keyStanding, savedRevision } from "./callback";
 import { saveOpenSessions } from "./editing";
 import { drainWakeQueue } from "./ping";
 
@@ -439,17 +439,29 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         };
         if (Math.abs(meta.mtimeMs - base) > 1) throw stale(meta);
 
+        // Written with the portal's rights: only where the agent could have written it itself. Asked before the editor
+        // is made to save, which writes the file too.
+        if (doc.path) assertMayWrite(doc.path, chatId, doc.title);
+
         // Open in the editor: what is typed there is saved first (the Document Server writes it through its callback,
         // under the revision gate), and the edit is made on top of that save. Only that save may have moved the
-        // revision since the gate above: anything else did write over what the agent read, and is a conflict.
+        // revision since the gate above: anything else did write over what the agent read, and is a conflict. A
+        // session that follows an agent's revision already is not asked: what it holds that is not in that revision
+        // can only be kept as a copy, which its close does (and a session closing answers late or not at all).
         const keys = await (cfg.sessionKeys ?? (async (d: DocMeta) => liveSessionKeys(d.docId)))(meta);
-        if (keys.length) {
-          await (cfg.saveSessions ?? ((d: DocMeta, k: string[]) => saveOpenSessions(d.docId, d.title, k)))(meta, keys);
+        const toSave = keys.filter((k) => keyStanding(k, meta!.mtimeMs) !== "follow");
+        if (toSave.length) {
+          await (cfg.saveSessions ?? ((d: DocMeta, k: string[]) => saveOpenSessions(d.docId, d.title, k)))(meta, toSave);
           const saved = refresh(doc.docId, rootDir());
           if (!saved) throw new Refusal("not_found", `"${doc.title}" vanished from the library while the editor saved it`);
-          if (saved.mtimeMs !== meta.mtimeMs && !keys.some((k) => savedRevision(k) === saved.mtimeMs)) throw stale(saved);
+          if (saved.mtimeMs !== meta.mtimeMs && !toSave.some((k) => savedRevision(k) === saved.mtimeMs)) throw stale(saved);
           meta = saved;
         }
+        // Whose editors load the agent's revision: those whose whole save is in the revision the edit is made on. One
+        // that opened an older revision than the file had (it changed outside the editor) had its save kept as a copy
+        // beside it, and stays behind, which its editor says.
+        const following = keys.filter((k) => keyStanding(k, meta!.mtimeMs) !== "behind");
+        const behind = keys.length - following.length;
         // From here to the write nothing waits: no other write of the file (a callback's among them) comes in between.
 
         // word/document.xml out of the archive; damage is `corrupt`, quote problems pass through ooxml's codes.
@@ -466,8 +478,6 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           throw new Refusal("corrupt", `"${doc.title}" could not be opened as a zip archive: ${e instanceof Error ? e.message : String(e)}`);
         }
 
-        // Written with the portal's rights: only where the agent could have written it itself.
-        if (doc.path) assertMayWrite(doc.path, chatId, doc.title);
         const editedXml = editDocx(documentXml, ops as EditOp[]); // throws {code:"quote_not_found"|"quote_ambiguous"} -- surfaced unchanged by failed()
         const out = rewriteZip(buf, { "word/document.xml": editedXml }); // {code:"invalid_zip"} -> corrupt
         let saved: { mtimeMs: number };
@@ -486,10 +496,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           throw e;
         }
         // Everything those sessions had is in this revision now: their editors load it.
-        for (const key of keys) followTo(key, saved.mtimeMs);
-        record({ subject: doc.title, reason: `office_edit: ${ops.length} op(s) applied, revision ${meta.mtimeMs} -> ${saved.mtimeMs}${keys.length ? " (on top of what the open editor saved first)" : ""}`, chatId });
+        for (const key of following) followTo(key, saved.mtimeMs);
+        record({ subject: doc.title, reason: `office_edit: ${ops.length} op(s) applied, revision ${meta.mtimeMs} -> ${saved.mtimeMs}${following.length ? " (on top of what the open editor saved first)" : ""}`, chatId });
         const n = ops.length;
-        const opened = keys.length ? ` It was open in the editor: what was typed there was saved first, your edit made on top of it, and the editor loads this revision now.` : "";
+        let opened = following.length ? ` It was open in the editor: what was typed there was saved first, your edit made on top of it, and the editor loads this revision now.` : "";
+        if (behind) opened += ` It is also open in an editor that opened an older revision than the file had (it changed outside the editor): what is typed there is not in this revision, and is kept beside the document as "${doc.title} (conflict <date time>)".`;
         return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"} made): now at revision ${saved.mtimeMs}.${opened} Pass that as baseRevision for the next edit.`, { action: "edit", id: doc.docId, from: meta.mtimeMs, to: saved.mtimeMs, ops: n });
       });
     }),

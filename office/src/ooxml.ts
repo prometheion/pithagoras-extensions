@@ -204,18 +204,21 @@ export function readPart(buf: Buffer, name: string): string | undefined {
 
 /** A digest of what a document holds: every part of the zip but its properties (`docProps/`, where the Document Server
  * writes the time of each save), by name. Two saves of the same content compare equal, whatever their zip bytes and
- * save times. Null for what is not a zip. */
+ * save times. Null for what is not a zip. Every save from the editor is digested, so the parts are inflated one at a
+ * time, each dropped before the next: what it holds at once is the largest part, not the whole document. */
 export function contentDigest(buf: Buffer): string | null {
-  let parts: Record<string, Buffer>;
+  const hash = createHash("sha256");
   try {
-    parts = readZipParts(buf);
+    // Duplicate names: the last one wins, as everywhere else here (jszip's behaviour).
+    const entries = new Map<string, ZipEntry>();
+    for (const entry of readZip(buf)) entries.set(entry.name, entry);
+    for (const name of [...entries.keys()].sort()) {
+      if (name.startsWith("docProps/")) continue;
+      const data = readEntryData(buf, entries.get(name)!);
+      hash.update(`${name}\0${data.length}\0`).update(data);
+    }
   } catch {
     return null;
-  }
-  const hash = createHash("sha256");
-  for (const name of Object.keys(parts).sort()) {
-    if (name.startsWith("docProps/")) continue;
-    hash.update(`${name}\0${parts[name].length}\0`).update(parts[name]);
   }
   return hash.digest("hex");
 }

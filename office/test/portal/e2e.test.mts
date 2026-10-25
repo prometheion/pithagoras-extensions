@@ -14,13 +14,14 @@ import { chromium } from "@playwright/test";
 import { parseDocx } from "../../src/ooxml.ts";
 import { makeKey } from "../../src/callback.ts";
 import { signJwt } from "../../src/jwt.ts";
+import { EDITOR_HTML, editorPageJs } from "./page.mts";
 
 /**
  * Office end to end, against the real Document Server: its server half started by the portal's own extension host,
  * after Docker for extensions, each from its source, Docker for extensions speaking to the machine's own Docker. The
  * portal is "on the machine" (host network), so the way in is Docker for extensions' forwarder on 127.0.0.1. A
- * Chromium opens a document in the editor as the Office page does, types into it and closes it, and the text must be
- * in the file: what "Download failed", the refused key, the refused callback token and the embed viewer each broke.
+ * Chromium opens a document in the Office page's own editor (office-editor.tsx, bundled with the portal's React:
+ * page.mts), types into it and closes it, and the text must be in the file: what "Download failed", the refused key, the refused callback token and the embed viewer each broke.
  * Then once more through a reverse proxy that ends TLS and sends no forwarded headers, as a plain nginx in front does.
  *
  * Opt-in: it needs Docker Engine 28 or later, the image (about 3 GB, `onlyoffice/documentserver:10.0.0.1` unless
@@ -65,40 +66,10 @@ async function run(PITHAGORAS: string): Promise<void> {
   };
   const express = (await import(pathToFileURL(path.join(PITHAGORAS, "node_modules/express/index.js")).href)).default;
   const app = express().use("/api/x", host.extensionRoutes);
-  // The Office page's part that opens a document, as office-editor.tsx does it: the config from the server half,
-  // api.js through the /ds proxy, and the editor, with what it says kept for the test.
-  app.get("/editor.html", (req: { query: { doc: string } }, res: { type: (t: string) => { send: (b: string) => void } }) =>
-    res.type("html").send(`<!doctype html><html><body style="margin:0"><div id="ph"></div><script>
-window.__events = [];
-(async () => {
-  const r = await fetch("/api/x/%40pithagoras/office/editor-config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: ${JSON.stringify(req.query.doc)} }) });
-  const cfg = await r.json();
-  if (!r.ok) { __events.push(["refused", cfg]); return; }
-  await new Promise((ok, no) => { const s = document.createElement("script"); s.src = cfg.apiJs; s.onload = ok; s.onerror = () => no(new Error("api.js")); document.head.appendChild(s); });
-  const c = { ...cfg, width: "100%", height: "700px" };
-  delete c.apiJs;
-  // As the Office page: every second it asks how its key stands, and loads the agent's revision with the editor's own
-  // refreshFile when it is told to follow (and when the editor asks for it).
-  window.__key = c.document.key;
-  const reload = async () => {
-    const r2 = await fetch("/api/x/%40pithagoras/office/editor-config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: ${JSON.stringify(req.query.doc)} }) });
-    const next = await r2.json();
-    delete next.apiJs;
-    __events.push(["refresh", next.document.key]);
-    window.__editor.refreshFile(next);
-    window.__key = next.document.key;
-  };
-  c.events = { onDocumentReady: () => __events.push(["ready"]), onError: (e) => __events.push(["error", e.data]), onWarning: (e) => __events.push(["warning", e.data]), onRequestRefreshFile: () => { __events.push(["asked to refresh"]); void reload(); } };
-  window.__editor = new DocsAPI.DocEditor("ph", c);
-  setInterval(async () => {
-    const r3 = await fetch("/api/x/%40pithagoras/office/editor-state?doc=" + encodeURIComponent(${JSON.stringify(req.query.doc)}) + "&key=" + encodeURIComponent(window.__key));
-    const standing = (await r3.json()).standing;
-    if (standing !== "current") __events.push(["standing", standing]);
-    if (standing === "follow") await reload();
-  }, 1000);
-})().catch((e) => __events.push(["exception", String(e)]));
-</script></body></html>`),
-  );
+  // The Office page's editor itself, with the portal's React, at the address the portal gives Office's routes.
+  const pageJs = await editorPageJs(PITHAGORAS, "/api/x/%40pithagoras/office");
+  app.get("/editor.html", (_req: unknown, res: { type: (t: string) => { send: (b: string) => void } }) => res.type("html").send(EDITOR_HTML));
+  app.get("/editor-page.js", (_req: unknown, res: { type: (t: string) => { send: (b: string) => void } }) => res.type("js").send(pageJs));
   const server = http.createServer(app);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -180,7 +151,7 @@ window.__events = [];
       }
       assert.equal(locks.length, 1, "the editing seat shows while the editor is open");
 
-      // What office_edit asks after a restart of the half (server.ts sessionOpen): the Document Server's own `info`
+      // What office_edit asks after a restart of the half (server.ts sessionKeys): the Document Server's own `info`
       // for the document's key answers 0 while the session is open.
       const info = async () => {
         const secret = readFileSync(path.join(data, "jwt-secret"), "utf8").trim();
@@ -245,15 +216,20 @@ window.__events = [];
       await delay(3000);
       assert.ok(!(await onDisk()).includes("Typed by the person"));
 
-      // The agent edits what the person typed, on the revision it read before.
+      // The agent edits what the person typed, on the revision it read before, while the person types on without a
+      // pause: what the editor has not sent yet must not be lost to the reload.
       const read = await tools.office_read.execute("r1", { id: docId });
+      const words = Array.from({ length: 40 }, (_, i) => `w${i}`);
+      const typing = page.keyboard.type(` ${words.join(" ")}`, { delay: 40 });
+      await delay(1500);
       const started = Date.now();
       const edited = await tools.office_edit.execute("e1", { id: docId, ops: [{ quote: "Typed by the person", replacement: "Typed by the person, edited by the agent" }], baseRevision: read.details.mtimeMs });
       console.log(`office_edit on the open document took ${Date.now() - started} ms: ${edited.content[0].text}`);
       assert.equal(edited.details.action, "edit", edited.content[0].text);
       assert.match(await onDisk(), /Typed by the person, edited by the agent/, "the edit is on top of what the person typed");
+      await typing;
 
-      // The editor loads the new revision in place, under a new key.
+      // The editor loads the new revision in place, under a new key, once it has sent what was typed.
       let key = firstKey;
       for (let i = 0; i < 30 && key === firstKey; i++) {
         await delay(1000);
@@ -277,8 +253,13 @@ window.__events = [];
       }
       assert.match(text, /Typed by the person, edited by the agent/);
       assert.match(text, /And more after the reload/);
-      const titles = (await json(`${at}/state`)).body.docs.map((d: { title: string }) => d.title);
-      assert.deepEqual(titles.filter((t: string) => t.startsWith("Agent and person")), ["Agent and person"], "no conflict copy: the old session's close held nothing new");
+      // Every word typed through the edit is in the document, or, where it came after the editor's save and before the
+      // reload, in the copy the old session's close was kept as.
+      const docs = (await json(`${at}/state`)).body.docs as { docId: string; title: string }[];
+      const copies = docs.filter((d) => d.title.startsWith("Agent and person (conflict")).map((d) => parseDocx(readFileSync(path.join(data, "docs", d.docId, `${d.title}.docx`))).text);
+      console.log(`the document: ${text}\nits copies: ${JSON.stringify(copies)}`);
+      const lost = words.filter((w) => !new RegExp(`\\b${w}\\b`).test(text) && !copies.some((c) => new RegExp(`\\b${w}\\b`).test(c)));
+      assert.deepEqual(lost, [], "nothing typed was lost");
       console.log(`editor events: ${JSON.stringify(await events())}`);
     } finally {
       await browser.close();

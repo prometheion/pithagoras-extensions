@@ -340,6 +340,22 @@ test("office_edit: a scanned document the agent may read but not change (its fol
   fs.rmSync(s.ws, { recursive: true, force: true });
 });
 
+test("office_edit: a scanned document the agent may not change, open in the editor, is refused before the editor is made to save it (which writes the file too)", async () => {
+  const saved: string[][] = [];
+  const s = await scanned({
+    openFile: (file) => ({ fd: fs.openSync(file, "r"), size: fs.statSync(file).size }),
+    mayWrite: () => {
+      throw Object.assign(new Error("That folder is not one its agent may use"), { code: "invalid" });
+    },
+    sessionKeys: async () => ["the-open-session"],
+    saveSessions: async (_d, keys) => void saved.push(keys),
+  });
+  const msg = await refused(s.find("office_edit").execute("c", { id: s.doc.docId, ops: [{ quote: "New document", replacement: "Changed anyway" }], baseRevision: s.doc.mtimeMs }), "read-only");
+  assert.match(msg, /^error:not_found .*not a file your agent may change/);
+  assert.deepEqual(saved, [], "the open editor was not made to save it");
+  fs.rmSync(s.ws, { recursive: true, force: true });
+});
+
 test("office_read/office_edit: a scanned file that grew past the library's cap since it was indexed is refused before a byte of it is read", async () => {
   let read = false;
   const s = await scanned({

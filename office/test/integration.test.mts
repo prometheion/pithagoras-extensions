@@ -8,12 +8,9 @@
  *   2. A synthetic OnlyOffice callback with status 2 arrives on the loopback POST /callback WITHOUT any
  *      session cookie, persists (bytes on disk changed to exactly what body.url served), bumps the index
  *      revision, and clears the lock AFTER the persist.
- *   3. office_edit against a doc whose editor seat was minted but never confirmed by the Document Server: it does
- *      not hold the edit up, and a revision that moved underneath (a save landing first) surfaces as
- *      error:revision_mismatch CONFLICT -- nothing is overwritten. One the Document Server confirmed refuses the
- *      edit (tools.test.mts).
  *
- * They need no Docker and start none: the real Document Server is test/portal/e2e.test.mts's, opt-in.
+ * The agent's edits go through its own editor (seat.ts), which needs the real Document Server and the agents' browser:
+ * test/portal/e2e.test.mts and spike.test.mts, opt-in. These need no Docker and start none.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -212,67 +209,4 @@ test("synthetic status-2 callback WITHOUT any session cookie: persist happened (
     live.resetLive();
     await b.cleanup();
   }
-});
-
-/* ------------------------------------------------------------------ */
-/* 3. co-editor model: open session + revision gate                    */
-/* ------------------------------------------------------------------ */
-
-test("office_edit with a seat the Document Server never confirmed: proceeds under the revision gate (matching revision succeeds); an external save that moves the revision underneath is refused as a CONFLICT", async () => {
-  __resetToolsForTests(); // this file's process starts clean; be explicit
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-it-tools-"));
-  const home = "chat-aegis-home";
-  const folder = "/workspaces/aegis"; // what owns: the agent's folder
-
-  // Register through the REAL tools seams: an agent folder whose home chat owns what it edits.
-  type ToolDef = { name: string; execute: (callId: unknown, params: Record<string, unknown>) => Promise<unknown> };
-  const tools2: Record<string, ToolDef> = {};
-  registerTools({
-    root,
-    extend: (factory) => factory({ registerTool: (def: ToolDef) => { tools2[def.name] = def; } }, { id: home }),
-    chatFolder: () => "/workspaces/aegis",
-    folders: () => [{ path: "/workspaces/aegis", name: "aegis", kind: "agent" }],
-    record: () => {}, log: () => {},
-  });
-  assert.ok(tools2.office_edit, "office_edit registered into the agent home (ownership scope is real here)");
-
-  /* Scenario A -- a minted seat the Document Server never confirmed (the editor did not load) does not block. */
-  const docA = await store.createDoc({ title: "Order Doc", type: "word", owner: folder }, root); // template says "New document"
-  live.setUser(docA.docId, { id: "u-sam", name: "Sam" }, true); // a fake human with the editor open
-  const fileA = path.join(root, "docs", docA.docId, "Order Doc.docx");
-  // Pin the file mtime to an exact value AND mirror it in the index so the ZERO-tolerance gate is deterministic
-  // (a fresh create can leave a sub-ms stat drift on some filesystems; this guest fs also reports utimes'd
-  // values ~1 µs low, so the index mirrors what stat ACTUALLY reads back).
-  fs.utimesSync(fileA, new Date(Date.now() - 10_000), new Date(Date.now() - 10_000));
-  const baseA = fs.statSync(fileA).mtimeMs;
-  { const ip = path.join(root, "index.json"); const raw = JSON.parse(fs.readFileSync(ip, "utf8")); raw.docs.find((d: { docId?: string }) => d.docId === docA.docId).mtimeMs = baseA; fs.writeFileSync(ip, JSON.stringify(raw, null, 2)); }
-  await tools2.office_edit.execute(null, { id: docA.docId, ops: [{ quote: "New document", replacement: "Edited by the agent" }], baseRevision: baseA });
-  assert.ok(parseDocx(fs.readFileSync(fileA)).text.includes("Edited by the agent"), "the edit landed at a new revision while the human session is still open");
-  assert.notEqual(store.getDoc(docA.docId, root)!.mtimeMs, docA.mtimeMs);
-
-  /* Scenario B -- an EXTERNAL co-editor save (persistBytes, the same path the DS callback persist takes)
-   * moves the revision after the agent read it: office_edit must refuse error:revision_mismatch CONFLICT
-   * and leave the human's bytes on disk. */
-  const docB = await store.createDoc({ title: "Bump Doc", type: "word", owner: folder }, root);
-  live.setUser(docB.docId, { id: "u-sam", name: "Sam" }, true);
-  const fileB = path.join(root, "docs", docB.docId, "Bump Doc.docx");
-  // Same pin as Scenario A: the agent reads at exactly this revision (index mirrors the stat readback)...
-  fs.utimesSync(fileB, new Date(Date.now() - 8000), new Date(Date.now() - 8000));
-  const baseB = fs.statSync(fileB).mtimeMs;
-  { const ip = path.join(root, "index.json"); const raw = JSON.parse(fs.readFileSync(ip, "utf8")); raw.docs.find((d: { docId?: string }) => d.docId === docB.docId).mtimeMs = baseB; fs.writeFileSync(ip, JSON.stringify(raw, null, 2)); }
-  await new Promise((r) => setTimeout(r, 5)); // guarantee >1 ms of drift: mtime-as-revision moves for real
-  store.persistBytes(store.getDoc(docB.docId, root)!, SAVED_DOCX, root); // ...a human co-editor's save lands a NEWER revision under our feet
-  let thrown: unknown;
-  try {
-    await tools2.office_edit.execute(null, { id: docB.docId, ops: [{ quote: "New document", replacement: "should never land" }], baseRevision: baseB });
-  } catch (e) {
-    thrown = e;
-  }
-  assert.ok(thrown instanceof Error, "office_edit refused");
-  assert.match((thrown as Error).message, /^error:revision_mismatch /, `the refusal carries the coded prefix (got: ${(thrown as Error).message})`);
-  assert.match((thrown as Error).message, /CONFLICT/, "the refusal is an explicit conflict message");
-  assert.equal(Buffer.compare(fs.readFileSync(fileB), SAVED_DOCX), 0, "the HUMAN's save is what stayed on disk; the agent edit never wrote");
-
-  __resetToolsForTests();
-  live.resetLive();
 });

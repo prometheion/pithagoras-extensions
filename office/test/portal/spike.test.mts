@@ -159,7 +159,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     const answer = await callback.command({ c: "forcesave", key, userdata });
     assert.equal(answer.error, 0, JSON.stringify(answer));
     const saved = await Promise.race([waiting.done, delay(30_000).then(() => "timeout")]);
-    assert.equal(saved, true, "the forcesave's callback was persisted");
+    assert.equal(saved, "saved", "the forcesave's callback was persisted");
   }
   type Blocks = { blocks: ({ p: string; style?: string } | { table: string[][] })[] };
   const texts = (r: unknown) => (r as Blocks).blocks.map((b) => ("p" in b ? b.p : `table ${JSON.stringify(b.table)}`));

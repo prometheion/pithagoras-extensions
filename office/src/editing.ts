@@ -102,7 +102,7 @@ export async function saveOpenSessions(docId: string, title: string, keys: strin
       const closing = watchClosed(key, until);
       const before = watchLanded(key, earlier, until);
       const ok = await Promise.race([
-        waiting.done,
+        waiting.done.then((outcome) => outcome !== "failed"),
         closing.done.then((gone) => (gone ? true : ("timeout" as const))),
         before.done.then((landed) => (landed ? ("earlier" as const) : new Promise<never>(() => {}))),
       ]);
@@ -195,4 +195,52 @@ async function sessionGone(docId: string, key: string, until: number, title: str
   while (open() && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   if (!open() || (await take()) === "taken") return;
   live.setSession(docId, key, []);
+}
+
+/** How long a save after an agent's edit asks again while the Document Server says there is nothing to save: the
+ * agent's editor sends its edit a moment after it made it (the command sends it at once, `Api.Save`, so this is a
+ * belt). */
+const SENT_WITHIN_MS = 3_000;
+
+/** How a save after an agent's edit came out (callback.ForcesaveOutcome), or: nothing to save ("nothing"), no callback
+ * within the time given ("timeout"), the Document Server could not be asked or refused ("failed"). */
+export type SaveAfterEdit = callback.ForcesaveOutcome | "nothing" | "timeout";
+
+/**
+ * Has the Document Server save the editing session of `key` now (its command service's forcesave) and waits for that
+ * save's callback, which callback.ts persists through the revision gate: after an agent's edit, the edit and whatever
+ * people typed until then are on disk once this answers "saved".
+ */
+export async function saveNow(key: string, deps: SaveDeps = {}): Promise<SaveAfterEdit> {
+  const ask = deps.command ?? ((body: Record<string, unknown>) => callback.command(body));
+  const timeoutMs = deps.timeoutMs ?? SAVE_TIMEOUT_MS;
+  const sentBy = Date.now() + SENT_WITHIN_MS;
+  for (;;) {
+    const userdata = `office-${randomUUID()}`;
+    // Waited for before it is asked: the callback can come before the command's own answer.
+    const waiting = callback.awaitForcesave(userdata, key);
+    let answer: Record<string, unknown>;
+    try {
+      answer = await ask({ c: "forcesave", key, userdata });
+    } catch {
+      waiting.forget();
+      return "failed";
+    }
+    if (answer.error === 4) {
+      waiting.forget();
+      if (Date.now() >= sentBy) return "nothing";
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      continue;
+    }
+    if (answer.error !== 0) {
+      waiting.forget();
+      return "failed";
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([waiting.done, new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), timeoutMs)))]);
+    clearTimeout(timer);
+    // Still under way: a later save of the session holds it, and its callback is persisted when it comes.
+    if (outcome === "timeout") waiting.cancel();
+    return outcome;
+  }
 }

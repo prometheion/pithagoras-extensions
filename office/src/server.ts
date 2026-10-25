@@ -711,6 +711,14 @@ function registerRoutes(dd: string, secret: string): void {
   r.post(/^\/ds\/(.*)$/, proxyDs);
 }
 
+/** Whether Office runs, for the tools: stopped where the person stopped it, switched it off or never started it;
+ * starting while a start is under way or a new Document Server still sets itself up (container.settled). */
+async function officeState(dd: string): Promise<"running" | "starting" | "stopped"> {
+  if (!loadSettings(dd).enabled || container.userStopped(dd)) return "stopped";
+  if (!container.readDsRecord(dd)) return container.starting() ? "starting" : "stopped";
+  return (await container.settled()) ? "running" : "starting";
+}
+
 /* ------------------------------------------------------------------ */
 /* the agents' seats                                                   */
 /* ------------------------------------------------------------------ */
@@ -851,9 +859,9 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   const tickets = ensureSecret(dd, "ticket-secret"); // the document tickets', which the Document Server never sees
   const relayKey = ensureSecret(dd, "relay-secret"); // the key the way back's tunnels open with at the relay
 
-  // the seams, as their module headers describe them (audit lands in portal().audit AND a log line). office_edit on a
-  // document open in the editor has the Document Server save it first (editing.ts), through the command service.
-  registerTools({ root: dd, record: recordAudit, sessionKeys: (doc) => sessionKeys(dd, doc) });
+  // the seams, as their module headers describe them (audit lands in portal().audit AND a log line). The tools read and
+  // edit through the agents' editors (seat.ts) while Office runs; they ask here whether it does.
+  registerTools({ root: dd, record: recordAudit, officeState: () => officeState(dd) });
   // Owners and grants were chat ids before: moved to the folders those chats work in.
   try {
     const moved = store.migrateOwners((chatId) => {

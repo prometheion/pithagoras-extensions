@@ -206,8 +206,16 @@ export function followTo(key: string, mtimeMs: number): void {
 /* forcesaves an agent's write waits for                               */
 /* ------------------------------------------------------------------ */
 
+/** How a forcesave's callback came out: its file written as the new revision ("saved"), kept beside the document as a
+ * conflict copy (its session's key no longer stood), the same as what its session had saved already ("same"), or not
+ * persisted ("failed": the Document Server could not save it, or the persist failed). */
+export type ForcesaveOutcome = "saved" | "copy" | "same" | "failed";
+
+/** What a persist came to: the code the Document Server is answered with, and, for 0, how the save was kept. */
+type Persisted = { code: 0 | 1; kept?: "saved" | "copy" | "same" };
+
 /** userdata of a forcesave asked through the command service -> who waits for its callback. */
-const forcesaves = new Map<string, (ok: boolean) => void>();
+const forcesaves = new Map<string, (outcome: ForcesaveOutcome) => void>();
 
 /** Forcesaves asked through the command service whose save has not landed yet, userdata -> key: one whose wait timed
  * out, or whose persist failed (the Document Server sends that callback again). While one is under way the command
@@ -219,13 +227,13 @@ const unsaved = new Map<string, string>();
  * `cancel` stops waiting (a timeout): the save is still under way, and the next write waits for it (`unsavedOf`).
  * `forget` stops waiting where no save was started (the command was refused or did not answer). A callback that comes
  * later is persisted as any other. */
-export function awaitForcesave(userdata: string, key: string): { done: Promise<boolean>; cancel(): void; forget(): void } {
-  let settle!: (ok: boolean) => void;
-  const done = new Promise<boolean>((resolve) => (settle = resolve));
+export function awaitForcesave(userdata: string, key: string): { done: Promise<ForcesaveOutcome>; cancel(): void; forget(): void } {
+  let settle!: (outcome: ForcesaveOutcome) => void;
+  const done = new Promise<ForcesaveOutcome>((resolve) => (settle = resolve));
   unsaved.set(userdata, key);
-  forcesaves.set(userdata, (ok) => {
+  forcesaves.set(userdata, (outcome) => {
     forcesaves.delete(userdata);
-    settle(ok);
+    settle(outcome);
   });
   return {
     done,
@@ -246,7 +254,8 @@ export function unsavedOf(key: string): string[] {
 
 /** The callback of a forcesave asked through the command service (forcesavetype 0) is settled: tell whoever waits.
  * `over`: nothing more comes of it (saved, or the Document Server gave it up); a persist that failed is sent again. */
-function forcesaveDone(body: Envelope, ok: boolean, over: boolean): void {
+function forcesaveDone(body: Envelope, persisted: Persisted, over: boolean): void {
+  const ok = persisted.code === 0;
   if (body.forcesavetype !== 0 || typeof body.userdata !== "string") return;
   // A save that landed holds everything typed in its session until it was asked for, so one of the same session asked
   // for before it and not landed is not waited for any more: the Document Server gives up a callback it cannot deliver
@@ -258,7 +267,7 @@ function forcesaveDone(body: Envelope, ok: boolean, over: boolean): void {
     }
   }
   if (over) unsaved.delete(body.userdata);
-  forcesaves.get(body.userdata)?.(ok);
+  forcesaves.get(body.userdata)?.(ok ? (persisted.kept ?? "saved") : "failed");
 }
 
 /** One command to the Document Server's command service, signed as it takes them, through Office's own way in (the
@@ -530,7 +539,7 @@ async function handleDispatch(
       // Force-saving error AT DS: same treatment as status 3 (one line each, no disk). An agent's write waiting on this
       // forcesave hears that it failed.
       log(`status-7: document server reported a force-save error for ${docId} (forcesavetype=${JSON.stringify(body.forcesavetype ?? null)})`);
-      forcesaveDone(body, false, true);
+      forcesaveDone(body, { code: 1 }, true);
       respond(res, 200, 0);
       return;
     }
@@ -549,8 +558,8 @@ async function handleDispatch(
       // Ready-for-saving / force-saved: persist (fetch url w/ retries -> persistBytes gate ->
       // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked. A forcesave an agent's write asked for
       // (forcesavetype 0, the command service, with its userdata) is answered to that write once it is settled.
-      const code = await persistSaved(log, cfg, docId, body, status === 2, res);
-      if (status === 6) forcesaveDone(body, code === 0, code === 0);
+      const persisted = await persistSaved(log, cfg, docId, body, status === 2, res);
+      if (status === 6) forcesaveDone(body, persisted, persisted.code === 0);
       return;
     }
 
@@ -595,16 +604,16 @@ async function persistSaved(
   body: Envelope,
   unlockAfter: boolean,
   res: ServerResponse,
-): Promise<0 | 1> {
-  const code = await persistCore(log, cfg, docId, body, unlockAfter);
-  respond(res, 200, code);
-  return code;
+): Promise<Persisted> {
+  const persisted = await persistCore(log, cfg, docId, body, unlockAfter);
+  respond(res, 200, persisted.code);
+  return persisted;
 }
 
 /** The persist itself, for a callback and for a save recovered from the Document Server (`recoverForgotten`): the
  * error code the Document Server is to be answered with, 0 for saved (or kept as a copy), 1 for not. */
-async function persistCore(log: (line: string) => void, cfg: CallbackConfig, docId: string, body: Envelope, unlockAfter: boolean): Promise<0 | 1> {
-  const fail = (): 1 => 1;
+async function persistCore(log: (line: string) => void, cfg: CallbackConfig, docId: string, body: Envelope, unlockAfter: boolean): Promise<Persisted> {
+  const fail = (): Persisted => ({ code: 1 });
   const rootDir = () => cfg.root ?? dataDir();
 
   const meta = store.getDoc(docId, rootDir());
@@ -654,7 +663,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
   /** A save that would overwrite a newer revision is not thrown away: it is kept as a copy beside the document, which
    * the person finds in the library and the audit log, and the Document Server is told it was saved, so it does not
    * hold it as forgotten under a key nobody opens again. */
-  const keepAsCopy = (why: string): 0 | 1 => {
+  const keepAsCopy = (why: string): Persisted => {
     let copy: store.DocMeta;
     try {
       copy = store.saveConflictCopy(meta, bytes, rootDir());
@@ -665,7 +674,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     if (unlockAfter) ended(); // terminal close: the session is over, and what it held is kept
     log(`persist for ${docId}: ${why} -- NOT overwriting it; the save is kept as "${copy.title}" (${copy.docId})`);
     cfg.record?.({ subject: meta.title, reason: `a save from the editor was not written over a newer revision; kept as "${copy.title}.${copy.ext}" (${copy.docId})` });
-    return 0;
+    return { code: 0, kept: "copy" };
   };
   // Nothing this session had not saved already: the same forcesave reported twice (the same file), or, on a revision
   // that moved on, a session closed after its last forcesave with nothing typed since (an agent's edit made on top of
@@ -677,7 +686,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
   if (last && (stale ? last.digest === digest : last.sha === sha)) {
     log(`persist for ${docId}: this session saved exactly this already (at revision ${last.mtimeMs}) -- treating as done`);
     endOrStay();
-    return 0;
+    return { code: 0, kept: "same" };
   }
   if (stale) return keepAsCopy(`stale key (current revision ${meta.mtimeMs}, the session opened another)`);
 
@@ -705,7 +714,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
 
   // Success is only answered once the document AND the lock state are settled -- DS reads this JSON field to
   // decide the save outcome.
-  return 0;
+  return { code: 0, kept: "saved" };
 }
 
 /**
@@ -739,7 +748,7 @@ async function takeBack(config: CallbackConfig, ask: (body: Record<string, unkno
   const log = config.log ?? defaultLog;
   const got = await ask({ c: "getForgotten", key });
   if (got.error !== 0 || typeof got.url !== "string") return false;
-  if ((await persistCore(log, config, docId, { key, url: got.url }, true)) !== 0) return false;
+  if ((await persistCore(log, config, docId, { key, url: got.url }, true)).code !== 0) return false;
   await ask({ c: "deleteForgotten", key });
   log(`recovered a save of ${docId} the document server had kept as forgotten`);
   return true;

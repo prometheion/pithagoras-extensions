@@ -590,6 +590,45 @@ test("status 1 with an agent's editor in the session: its key is a session of th
   live.resetLive();
 });
 
+test("status 1: the last person leaves a session only agents' editors are left in: the Document Server is asked to save it now", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Left to agents", type: "word" }, root);
+  const asked: Record<string, unknown>[] = [];
+  const ds = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      if (req.url === "/command") asked.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.end(JSON.stringify({ error: 0 }));
+    });
+  });
+  await new Promise<void>((r) => ds.listen(0, "127.0.0.1", r));
+  const origin = `http://127.0.0.1:${(ds.address() as { port: number }).port}`;
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, async () => origin, { root, log: () => {} });
+  live.resetLive();
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  const say = async (users: string[]) => {
+    const envelope = { key, status: 1, users };
+    assert.deepEqual(json(await post(handler, envelope, { headers: dsHeaders(envelope) })), { error: 0 });
+    await new Promise((r) => setTimeout(r, 100));
+  };
+  try {
+    await say(["agent:abc"]);
+    await say(["agent:abc", "portal-user"]);
+    assert.deepEqual(asked, [], "nobody left yet");
+    await say(["agent:abc"]);
+    assert.deepEqual((asked as Record<string, unknown>[]).map((c) => [c.c, c.key]), [["forcesave", key]], "saved as the person left");
+    // Everybody leaving closes the session by itself: nothing to ask.
+    await say(["agent:abc", "portal-user"]);
+    await say([]);
+    assert.equal(asked.length, 1);
+  } finally {
+    live.resetLive();
+    ds.closeAllConnections();
+    ds.close();
+  }
+});
+
 test("statuses 3 and 7: one log line each, zero file changes, zero downloads", async () => {
   const root = tmpRoot();
   const sink: string[] = [];

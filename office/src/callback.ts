@@ -451,9 +451,15 @@ async function handleDispatch(
           snapshot.push({ id, name: typeof name === "string" ? name : undefined });
         }
       }
+      const peopleBefore = live.usersOf(docId).length;
       live.setSession(docId, body.key as string, snapshot.map((u) => u.id));
       for (const u of snapshot) live.setUser(docId, u, true, { confirmed: true });
       live.setLocked(docId, live.usersOf(docId).length > 0);
+      // The last person left, and only agents' editors are in the session: it stays open, and what the people typed
+      // would reach the file only when the agents' editors close. Saved now instead.
+      if (peopleBefore > 0 && snapshot.length > 0 && snapshot.every((u) => live.isAgentId(u.id))) {
+        command({ c: "forcesave", key: body.key, userdata: "office-people-left" }, 10_000, cfg).catch((e) => log(`could not save ${docId} after its last person left: ${(e as Error).message}`));
+      }
 
       // Forcesave-click (actions[].type === 2) while the session continues -> persist NOW from body.url and STAY
       // locked (status-6 rules; the canonical result may still arrive as a status-6 callback -- the session's last

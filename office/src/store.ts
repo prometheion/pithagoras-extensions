@@ -222,6 +222,43 @@ export function getDoc(docId: string, root?: string): DocMeta | null {
   return readIndex(rootDir).docs.find((d) => d.docId === docId) ?? null;
 }
 
+/** A document's revision brought up to its file: where the file's mtime or size is not what the index has (something
+ * wrote it outside the extension: an agent's script, a git pull, a copy), the index takes the file's. True where it
+ * changed. A file that is gone is left to pruneMissingDocs. */
+function stampFromDisk(doc: DocMeta, root: string): boolean {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(docPath(doc, root));
+  } catch {
+    return false;
+  }
+  if (st.mtimeMs === doc.mtimeMs && st.size === doc.sizeBytes) return false;
+  doc.mtimeMs = st.mtimeMs;
+  doc.sizeBytes = st.size;
+  doc.updatedAt = Date.now();
+  return true;
+}
+
+/** One document as its file is now (stampFromDisk), or null for none: what every path that hands out a revision asks
+ * (the editor config's key, the tools, the page's state), so that a change made outside the extension is a new
+ * revision at once, not only after a Rescan. */
+export function refresh(docId: string, root = dataDir()): DocMeta | null {
+  const index = readIndex(root);
+  const doc = index.docs.find((d) => d.docId === docId);
+  if (!doc) return null;
+  if (stampFromDisk(doc, root)) writeIndex(root, index);
+  return { ...doc };
+}
+
+/** Every document as its file is now, by title (listDocs after stampFromDisk). */
+export function refreshAll(root = dataDir()): DocMeta[] {
+  const index = readIndex(root);
+  let changed = false;
+  for (const doc of index.docs) if (stampFromDisk(doc, root)) changed = true;
+  if (changed) writeIndex(root, index);
+  return [...index.docs].sort((a, b) => a.title.localeCompare(b.title));
+}
+
 /** The ONE index writer for mention grants (ping.ts used to read-modify-write index.json on its own): fresh
  * read, dedupe by (folder, commentId) -- a re-sent comment never adds a second row -- atomic tmp+rename through
  * the store's writeIndex. Sync like everything here and no logging. Returns "added",

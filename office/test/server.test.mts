@@ -344,6 +344,21 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   await b.cleanup();
 });
 
+test("editor-config: a file written outside the extension is opened at its new revision, under a new key", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  const doc = await store.createDoc({ title: "Pulled", type: "word" }, b.root);
+  const first = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
+  const file = path.join(b.root, "docs", doc.docId, "Pulled.docx");
+  fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+  const second = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
+  assert.notEqual(second.document.key, first.document.key, "the Document Server downloads the file afresh");
+  assert.equal(second.document.key, makeKey(doc.docId, fs.statSync(file).mtimeMs));
+  assert.equal(store.getDoc(doc.docId, b.root)!.mtimeMs, fs.statSync(file).mtimeMs, "and the index has it");
+  live.clearDoc(doc.docId);
+  await b.cleanup();
+});
+
 test("editor-config (xlsx): documentType cell, also for a portal in a container; unconfigured -> 503; unknown doc -> 404", async () => {
   const b = await boot(undefined, fakeDocker({ sharedNetwork: "container:9f3a1c2d", reach: { host: "pithagoras-office-ds-relay", port: 3890 } }));
   writeDsJson(b, "http://pithagoras-office-ds-relay:3890");

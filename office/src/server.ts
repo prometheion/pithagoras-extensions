@@ -7,7 +7,7 @@
  *      configs are signed and callbacks verified with it.
  *   2. registerTools({record}), wirePing({root, record}) -- both audit sinks land in portal().audit AND a log line.
  *   3. callback.configure(...) once, with the Document Server's origin (container.dsOrigin) and the boot secret;
- *      live.setMetaResolver(docId -> store.getDoc(docId, root)?.mtimeMs ?? null).
+ *      live.setMetaResolver(docId -> store.refresh(docId, root)?.mtimeMs ?? null).
  *   4. The UI routes on portal.router (mounted by the portal at /api/x/@pithagoras/office, session-gated there); every
  *      error is JSON {error, message?, code?}.
  *   5. The cookie-free LOOPBACK listener (the Document Server holds no session cookie): http bound to 127.0.0.1 that
@@ -226,7 +226,9 @@ function makeLoopbackHandler(dd: string, secret: string): (req: http.IncomingMes
  * signing rule ("the payload must have the same structure as the config"; since 7.1 sign exactly what you send) --
  * and returned as {...config, token, apiJs}: the page drops `apiJs` before calling DocEditor, everything else goes in. */
 function buildEditorConfig(dd: string, secret: string, docId: string): { res?: unknown; config?: Record<string, unknown>; ticketUrl?: string } {
-  const doc = store.getDoc(docId, dd);
+  // As the file is now: a change made outside the extension is a new revision, so a new key, which the Document
+  // Server downloads afresh, and which a save of the old session cannot overwrite.
+  const doc = store.refresh(docId, dd);
   if (!doc) return { res: { status: 404, body: { error: `no document with id ${docId}`, code: "not_found" } } };
 
   const record = container.readDsRecord(dd);
@@ -280,7 +282,7 @@ function registerRoutes(dd: string, secret: string): void {
       c = { state: "stopped", pull: null } as typeof c; // status() should not throw -- never kill the poller
       logLine(`container.status failed: ${(e as Error).message}`);
     }
-    const docs = store.listDocs(dd);
+    const docs = store.refreshAll(dd);
     const locks: Record<string, { id: string; name?: string }[]> = {};
     for (const d of docs) {
       // every doc gets an entry -- the client badge code reads locks[docId] without a null check
@@ -726,7 +728,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   }
   wirePing({ root: dd, record: recordAudit });
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd });
-  live.setMetaResolver((docId) => store.getDoc(docId, dd)?.mtimeMs ?? null);
+  live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);
 
   registerRoutes(dd, secret);
 

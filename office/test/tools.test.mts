@@ -292,6 +292,24 @@ test("scanned documents: a file the portal refuses to read for the agent (the sa
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("a document written outside the extension: office_read shows its new revision, and office_edit with it goes through", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Scripted", type: "word", owner: "/f/atlas" }, s.root);
+  const file = path.join(s.root, "docs", doc.docId, "Scripted.docx");
+  // An agent's script rewrites the file: the index still has the old revision.
+  fs.writeFileSync(file, rewriteZip(fs.readFileSync(file), { "word/document.xml": '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Written by a script</w:t></w:r></w:p></w:body></w:document>' }));
+  fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+  const now = fs.statSync(file).mtimeMs;
+  const read = (await tool(s, "office_read").execute("c", { id: doc.docId })) as ToolResult;
+  assert.equal(read.details.mtimeMs, now, "the revision of the file as it is");
+  assert.match(read.content[0].text, /Written by a script/);
+  const listed = (await tool(s, "office_list").execute("c", {})) as ToolResult;
+  assert.equal(listed.details.documents[0].mtimeMs, now);
+  const edited = (await tool(s, "office_edit").execute("c", { id: doc.docId, ops: [{ quote: "Written by a script", replacement: "Then edited" }], baseRevision: now })) as ToolResult;
+  assert.equal(edited.details.from, now);
+  assert.match(parseDocx(fs.readFileSync(file)).text, /Then edited/);
+});
+
 /* ------------------------------------------------------------------ */
 /* office_create                                                       */
 /* ------------------------------------------------------------------ */

@@ -34,7 +34,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { jsZip } from "./jszip";
 import { portal } from "./host";
-import { canonical, createDoc, docPath, docsForHome, getDoc, persistBytes, type DocMeta } from "./store";
+import { canonical, createDoc, docPath, docsForHome, persistBytes, refresh, refreshAll, type DocMeta } from "./store";
 import { parseDocx, parseXlsx, editDocx, rewriteZip, type EditOp } from "./ooxml";
 import { usersOf, isLocked } from "./live";
 import { drainWakeQueue } from "./ping";
@@ -210,7 +210,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     if (typeof id !== "string" || !id) throw new Refusal("not_found", "There is no document with that id. Ids come from office_list and office_create");
     const doc = docsForHome(home, rootDir()).find((d) => d.docId === id);
     if (!doc) throw new Refusal("not_found", "There is no document with that id. Ids come from office_list and office_create (a document of another agent/project is invisible to you until it mentions you in a comment)");
-    return doc;
+    // As its file is now: one written outside the extension (a script, a git pull) is at its new revision already.
+    return refresh(doc.docId, rootDir()) ?? doc;
   }
 
   const guarded = (work: (params: Record<string, unknown>) => Promise<unknown> | unknown) => async (_callId: unknown, params: Record<string, unknown>) => {
@@ -231,6 +232,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       properties: {},
     },
     execute: guarded(() => {
+      refreshAll(rootDir());
       const docs = docsForHome(home, rootDir());
       if (!docs.length) return text("No documents in your office library yet. Make one with office_create.", { action: "list", home, documents: [] });
       const lines = docs.map((doc) => {
@@ -352,7 +354,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // GATE FIRST: the meta as it stands now vs what the agent read; >1 ms drift means a save
       // moved since -- refuse with the FRESH mtime in the message, and write nothing. store.persistBytes
       // re-gates strictly at write time too, so this is belt and not only braces.
-      let meta = getDoc(doc.docId, rootDir());
+      let meta = refresh(doc.docId, rootDir());
       if (!meta) throw new Refusal("not_found", `"${doc.title}" vanished from the library between list and edit`);
       // The co-editor model: NO session check here (live.ts presence neither allows nor blocks) -- the revision
       // gate alone decides. When it refuses, say LOUDLY that this is a CONFLICT, name any open human editor so

@@ -24,7 +24,7 @@
   "scripts": {
     "build": "node build.mjs && tsc --noEmit -p .",
     "test": "node --import tsx --test --test-timeout=60000 test/*.test.mts",
-    "test:portal": "node --import tsx --test --test-timeout=120000 test/portal/portal.test.mts test/portal/editor.test.mts",
+    "test:portal": "node --import tsx --test --test-timeout=120000 test/portal/portal.test.mts test/portal/editor.test.mts test/portal/settings.test.mts",
     "test:e2e": "node --import tsx --test --test-timeout=900000 test/portal/e2e.test.mts",
     "prepack": "npm run build"
   },

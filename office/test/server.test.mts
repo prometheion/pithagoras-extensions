@@ -586,7 +586,8 @@ test("/state: settings + container status + docs list + locks for EVERY doc", as
   const res = await b.router.dispatch("GET", "/state");
   assert.equal(res.statusCode, 200);
   const body = res.body as Record<string, unknown>;
-  assert.deepEqual(Object.keys(body).sort(), ["container", "docs", "enabled", "imageTag", "locks"]);
+  assert.deepEqual(Object.keys(body).sort(), ["agent", "container", "docs", "enabled", "imageTag", "locks"]);
+  assert.deepEqual(body.agent, { present: false, pull: null, tag: container.AGENT_IMAGE_TAG }, "the agents' editor is not downloaded yet");
   assert.equal(body.enabled, false); // defaults from a fresh dataDir
   assert.equal(body.imageTag, DEFAULT_TAG);
   const c = body.container as Record<string, unknown>;

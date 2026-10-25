@@ -14,7 +14,7 @@ export interface OfficeDoc {
   createdAt: number;
   updatedAt: number;
   sizeBytes: number;
-  /** The document's current revision: its file's mtimeMs, what office_edit passes back as baseRevision. */
+  /** The document's current revision: its file's mtimeMs. */
   mtimeMs: number;
   /** The folder of the agent or project that made it, or null for one made from the library page or scanned. */
   owner: string | null;
@@ -42,11 +42,19 @@ export interface OfficeContainer {
   pull?: OfficePull | null;
 }
 
-/** GET /state -- the payload of the 5 s poll : settings, container, every doc, who is in what. */
+/** The image of the agents' editor (headless Chromium): whether it is there, and how its download goes. */
+export interface OfficeAgentImage {
+  present: boolean;
+  pull: OfficePull | null;
+  tag: string;
+}
+
+/** GET /state -- the payload of the 5 s poll : settings, container, the agents' editor, every doc, who is in what. */
 export interface OfficeState {
   enabled: boolean;
   imageTag: string;
   container: OfficeContainer;
+  agent: OfficeAgentImage;
   docs: OfficeDoc[];
   /** Every doc has an entry: empty while nobody is editing it, so the badge code needs no null check. */
   locks: Record<string, { id: string; name?: string }[]>;
@@ -86,6 +94,8 @@ export const api = {
   editorState: (docId: string, key: string) =>
     call<{ standing: "current" | "behind" }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
   saveSettings: (patch: SettingsPatch) => call<SettingsAnswer>("/settings", { method: "POST", body: JSON.stringify(patch) }),
+  /** Starts the download of the agents' editor image; its progress comes over /state. */
+  pullAgent: () => call<{ started: true }>("/agent/pull", { method: "POST" }),
   /** Awaits the whole first pull to completion -- the page shows its progress from /state meanwhile. */
   startContainer: () => call<{ started: boolean; container: OfficeContainer }>("/container/start", { method: "POST" }),
   stopContainer: () => call<{ container: OfficeContainer }>("/container/stop", { method: "POST" }),

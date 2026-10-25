@@ -3,7 +3,8 @@
 `@pithagoras/office` lets you and the agent work on the same Word (`.docx`) and Excel (`.xlsx`) documents. You edit
 them in the real [OnlyOffice Document Server](https://github.com/ONLYOFFICE/Docker-DocumentServer) editor, embedded in
 the portal, which the extension runs in a container through Docker for extensions; the agent reads and edits the same
-files through tools of its own. An Office tab holds the library.
+documents through tools of its own, in an editor of its own beside you, so you see its changes as it makes them. An
+Office tab holds the library.
 
 This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" names what it runs.
 
@@ -15,9 +16,12 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
 - About 4 GB of RAM for the Document Server container. The settings page warns before the first start, and shows the
-  container's memory use once it runs.
+  container's memory use once it runs. The agents' editor (below) takes up to 3 GB more while agents work in
+  documents (about 0.9 GB for one open document), and nothing once it has stopped.
 - Disk for the images (`onlyoffice/documentserver`, several GB, and Node's `node:22.23.4-alpine3.23`, about 50 MB,
-  for the relay below), which the portal pulls on the first start, with the progress shown in Settings.
+  for the relay below), which the portal pulls on the first start, with the progress shown in Settings; and for the
+  agents' editor, `chromedp/headless-shell:157.0.8103.15` (Chromium's headless shell, about 540 MB), which the Office
+  page downloads when you ask it to.
 - Behind a reverse proxy (one that ends TLS, say), a browser that says which page a request comes from, as every
   current one does (`Sec-Fetch-Site`), or a proxy that passes `X-Forwarded-Host` and `X-Forwarded-Proto` (or keeps
   `Host`): the Document Server names the addresses it hands the editor (the opened document among them) by the
@@ -32,7 +36,9 @@ tag of the build this version was tested with, never `:latest` or a shorter tag 
 build: a new build can change the editor's callback and token behaviour, so it is yours to change on purpose, in the
 same page). A new Document Server container answers within seconds but then makes its fonts for about two
 minutes and restarts its own services; until it is done, Settings says it is starting and the editor waits for it,
-as an editor opened before would lose what is typed in it.
+as an editor opened before would lose what is typed in it. For the agents to edit, download the agents' editor in the
+same page (**Download** in its row): until it is there, the agents read the saved files and cannot edit. It is pinned
+by its digest: a tag that came to name another build is refused, not run.
 
 ## What you get
 
@@ -54,30 +60,27 @@ as an editor opened before would lose what is typed in it.
   exist. What an agent makes or is granted belongs to its folder, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
   and a link is not followed.
-- **The agent edits what you are typing, live**: when the agent edits a document that is open in the editor
-  (`office_edit`), the portal first has the Document Server save what is typed there (its command service's
-  forcesave), waits for that save, and makes the agent's edit on top of it; the open editor then loads the new
-  revision in place, in the same frame (the editor's own refresh, under a new document key), and says that it loaded
-  the agent's edit. It loads it only once it has sent what is being typed to the Document Server (it sends at each
-  short pause): a reload drops what it has not sent. Nothing typed is written over: where the editor does not save
-  within 30 seconds, the edit is refused (`error:editor_not_saved`), nothing is written, and the agent tries again; a
-  save that was asked for earlier and is still under way is waited for first, and one whose callback the Document
-  Server gave up (it could not reach the portal) is asked for anew. An editor that is closing is waited for
-  until its last save lands, and a last save the Document Server could not hand over is taken back from it first.
-  What is typed between that save and the reload is kept beside the document as "<title> (conflict <date time>)", as
-  it lacks the agent's edit. An editor that opened an older revision than the file has (it changed on disk) does not
-  load the agent's edit by itself: what is typed there is kept as such a copy, its badge says it is behind, and the
-  agent is told so. Edits of one document run one at a time.
-  Every write goes through a revision check: a document's revision is its file's modification time (each write the
-  portal makes moves it on), `office_read` shows it, and `office_edit` takes it as `baseRevision` and replaces quoted
-  text only if the file is still at that revision (or at the one the open editor's save just wrote on top of it); if
-  it moved on, nothing is written and the tool answers `error:revision_mismatch`. `office_read` reads the saved file:
-  what is typed in an open editor since its last save is not in it. A change made outside the extension (a script, a
-  git pull) is a new revision at once. A save from the editor that would overwrite a newer revision (the file changed
-  on disk while it was open) is not lost and does not overwrite it: it is kept beside the document as "<title>
-  (conflict <date time>)", and the audit log says so. A save the Document Server could not hand over while the portal
-  was away (it keeps such a save as "forgotten") is taken back once the portal runs again. An open editor says within
-  a second or two when the file changed on disk; its button loads the new revision in place.
+- **The agent edits beside you, live**: each agent (each agent's or project's folder) that works in a document has an
+  OnlyOffice editor of its own open in it, in a browser on the Document Server's network (the agents' editor), in the
+  same editing session as the people in the document. People see it there as "<folder name> (agent)", with its
+  cursor. `office_read` gives the document as it stands in that editor, with what people typed and have not saved
+  yet; `office_edit` makes its edits there, so they show in your editor at once, and nothing you typed is lost or
+  written over. An edit is one command, made whole or not at all: every quote is checked against the document as it
+  stands first, and a command that fails after it changed something is taken back. After an edit the Document Server
+  is asked to save the session, and the agent hears the new revision; that save holds what you typed until then too.
+  Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph.
+  Excel: write values and formulas into a range (the editor computes the formulas). The agent cannot write comments
+  or tracked changes (it reads comments with `office_comments`). Calls on one document run one at a time.
+  A document nobody has open is opened by the agent's editor alone, and saved when it closes. The agent's editor of a
+  document closes after five minutes without a call; at most three are open at once (the least recently used one
+  closes for a fourth); the browser stops ten minutes after its last editor closed, and starts again with the next
+  call (a few seconds). Where you stopped Office, `office_read` reads the saved file and says so, and `office_edit` is
+  refused until it runs again: there is no other way to write.
+  A save that would overwrite a newer revision (the file changed on disk while it was open: a script, a git pull) is
+  not lost and does not overwrite it: it is kept beside the document as "<title> (conflict <date time>)", and the audit
+  log says so; the agent is told, and its editor of that document closes. A save the Document Server could not hand
+  over while the portal was away (it keeps such a save as "forgotten") is taken back once the portal runs again. An
+  open editor says within a second or two when the file changed on disk; its button loads the new revision in place.
 - **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document, or
   in whose folder it is), or `@<name>` or `@project:<name>` for an agent or project by name, and save, a chat of that
   agent is woken, told which document mentions it, and gets access to that document; it reads the comment itself.
@@ -105,18 +108,35 @@ as an editor opened before would lose what is typed in it.
 - **Two routes are open to the Document Server, on a listener of their own.** The container has no portal session,
   so the two things it needs are served by a small listener bound to `127.0.0.1`, which the way back leads to and
   nothing else: a document fetch with a signed ticket for one document at one revision that expires in 10 minutes
-  (`GET /doc/<ticket>`), and the save callback (`POST /callback`, which must carry a valid HS256 token). Nothing else
-  answers there. The editor configs and callbacks are signed with a secret created once in the extension's data folder
+  (`GET /doc/<ticket>`), and the save callback (`POST /callback`, which must carry a valid HS256 token). Besides
+  them it serves only the agents' editor: its seat page, under a secret the Document Server does not have, and each
+  editor's plugin, under a token that gives that one editor's jobs and nothing else (below). Nothing else answers
+  there. The editor configs and callbacks are signed with a secret created once in the extension's data folder
   (`jwt-secret`, mode 0600), which the Document Server is given; the tickets with another (`ticket-secret`), which it
   is not, so a converter that a hostile file breaks into cannot forge one. A save is downloaded from the Document
   Server itself, from its files (`/cache/files/`) alone, whatever address the callback names. A document's file is
   read and written at its own name only: a link put in its place is refused, never followed.
+- **The agents' editor is a browser of its own on the Document Server's network.** `pithagoras-office-ds-agent`, from
+  `chromedp/headless-shell` pinned by its digest, runs on `pithagoras-office-ds-net` alone, with no port published:
+  it reaches the Document Server and the relay's way back, and nothing else (that network has no way out), never the
+  portal, its pages or anyone's session. It runs as a user that is not root, with none of the kernel's capabilities,
+  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most, and no
+  debugging port. Chromium's own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses:
+  the container is the boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
+  extension's listener through the relay, under a secret that is new at every start of the server half and is only in
+  its command line (`/seat/<secret>/`), and that page opens an editor for each document an agent works in, with a
+  config the server half signs. Those configs are the only ones with a plugin: Office's own (people's editors keep
+  plugins and macros off, signed). The plugin takes the agent's edits from the listener under a token of its editor's
+  (`/plugin/<token>/`), and runs one of four fixed commands with them as data: the model never sends code. Anything
+  else on those paths is answered as an unknown address. The agent's write permission is checked before each edit and
+  when its editor opens (one it may not change opens read-only), and a file in a folder the agent could not read is
+  never opened.
 - **The editor sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame and every
   asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which the portal gates
   like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and only to the
   Document Server, and tells it the address the browser used, which it builds the editor's own addresses from. The
   Document Server's own endpoints are not passed on: its statistics, its cluster switches, its conversion services,
-  and its command service, which the portal alone calls (to save an open editor before the agent edits), over its own
+  and its command service, which the portal alone calls (to save the session after an agent's edit), over its own
   way in.
   The editor therefore runs on the portal's own origin, where a script has the signed-in person's session: a
   document's macros and the editor's plugins are switched off in the signed editor config, which the page cannot
@@ -129,8 +149,9 @@ as an editor opened before would lose what is typed in it.
 - **What the tools return is outside content to the guard**: the text, comments and file names of documents anybody
   may have written. A wake on a mention names the document and nothing of the comment; the agent reads the comment
   with `office_comments`, whose result the guard holds as outside content.
-- **The agent can only write what its revision check allows**, and each document-changing call is recorded in the
-  portal's audit log with the chat that made it.
+- **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
+  document-changing call is recorded in the portal's audit log with the chat that made it, its ops and the revision
+  it saved.
 
 ## Data
 
@@ -138,8 +159,8 @@ Everything is in the extension's own data folder, beside the portal's other data
 default you never changed is not written down, so a later version's default applies), `jwt-secret`, `ticket-secret`,
 `relay-secret`, `ds.json` (the container and image of the last start), `index.json` and `docs/<id>/<title>.<ext>`
 (the library), `.trash/`, and `state/<id>.json` (the comments last seen, so that a comment wakes an agent once). A
-scanned document stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds` and its
-relay `-relay`), the network (`pithagoras-office-ds-net`) and the Document Server's volumes are Docker's, shown in
+scanned document stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds`, its
+relay `-relay` and the agents' editor `-agent`), the network (`pithagoras-office-ds-net`) and the Document Server's volumes are Docker's, shown in
 Settings → Docker under this extension. The volumes are one for each folder its image keeps apart:
 `pithagoras-office-ds-cache` (`/var/lib/onlyoffice`: the cache of open documents, with the saves it could not hand
 over yet, which the portal takes back once it reaches it again), `-data` (`/var/www/onlyoffice/Data`, its own keys),
@@ -151,16 +172,18 @@ The portal's environment can change each name, for a second portal on the same D
 
 | Variable | Default |
 | --- | --- |
-| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relay `<container>-relay`, the volumes `<container>-cache`, `-logs` and `-fonts`) |
+| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relay `<container>-relay`, the agents' editor `<container>-agent`, the volumes `<container>-cache`, `-logs` and `-fonts`) |
 | `PITHAGORAS_OFFICE_VOLUME` | `<container>-data` |
 | `PITHAGORAS_OFFICE_PORT` | `3890`: the relay's port to the Document Server, and for a portal on the host's network the forwarder's on 127.0.0.1 |
 
 ## Removing
 
 Remove the Document Server in Settings → Office first (**Remove**), then uninstall the extension: the portal has no
-uninstall hook, so containers left running keep running. Remove takes the Document Server, its relay, the network
-(and with it the forwarder) and the Document Server's volumes; the library and every document stay. Docker for extensions cannot
-remove an image, so the images stay on disk: `docker image rm onlyoffice/documentserver:<tag>` deletes the big one.
+uninstall hook, so containers left running keep running. Remove takes the Document Server, its relay, the agents'
+editor, the network (and with it the forwarder) and the Document Server's volumes; the library and every document stay.
+Docker for extensions cannot remove an image, so the images stay on disk: `docker image rm
+onlyoffice/documentserver:<tag>` deletes the big one, `docker image rm chromedp/headless-shell:157.0.8103.15` the
+agents' editor.
 
 ## Limits
 
@@ -172,12 +195,13 @@ remove an image, so the images stay on disk: `docker image rm onlyoffice/documen
 - Not in this version: copying a document into a chat's folder from the library (the library downloads a copy), and
   expiry for the access a comment grants.
 - What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. An editor that
-  stays open across a restart of the portal, and saved once before it (for an agent's edit, or a Save), is not saved
-  first by an agent's edit after it, as the portal no longer knows its key: what is typed there is kept as a conflict
-  copy, at the latest when it closes. Its later saves are kept as such copies too, not written.
-- The editor's reload for an agent's edit reopens the document in the same frame; where the cursor and the view go
-  then is the editor's choice (the Document Server 10.0 puts the cursor at the start). Keys pressed in the second
-  while it reopens are not taken: they do not show, and are not in the document.
+  stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
+  not written.
+- The agent edits text, paragraphs, tables and cells; it cannot change formatting beyond a paragraph's style, write
+  comments or make tracked changes. An edit made while a person types in the same paragraph merges as the editor
+  merges two people's typing.
+- The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
+  busy is refused (`error:busy`).
 
 ## Licences
 
@@ -185,7 +209,9 @@ Apache-2.0 ([LICENSE](LICENSE)). The built server half bundles jszip 3.10.2 (MIT
 MIT licence) and the browser half icons from react-icons (MIT), drawn from Lucide (ISC); NOTICE says more, and
 THIRD-PARTY-LICENSES has the licence texts of what is bundled. The
 Document Server image is OnlyOffice's own (AGPL-3.0 for the community edition) and is pulled from Docker Hub by the
-portal, not shipped by this package.
+portal, not shipped by this package; so is the agents' editor, `chromedp/headless-shell`, the chromedp project's
+image of Chromium's headless shell (BSD-3-Clause, with the licences of the components Chromium includes), downloaded
+from the Office page.
 
 ## Building and testing
 
@@ -199,10 +225,12 @@ npm test -w office         # the unit and integration tests, with Docker, the po
 ```
 
 The integration tests start nothing in Docker: they run the extension's real loopback listener in the test process,
-with a small server of their own standing in for the Document Server's downloads. The end-to-end test runs the real
-Document Server through Docker for extensions under the portal's own extension host, and opens, edits and saves a
-document in Chromium, in the Office page's own editor; it is opt-in, as it needs Docker Engine 28 or later, the image
-(about 3 GB) and a few minutes:
+with a small server of their own standing in for the Document Server's downloads; the seats' tests play the agents'
+browser over HTTP. The end-to-end tests run the real Document Server and the agents' editor through Docker for
+extensions under the portal's own extension host, open a document in Chromium in the Office page's own editor, and
+have the agent edit it beside the person (`e2e.test.mts`, and `spike.test.mts`, which pins what the editor's API does
+that the agent's commands rely on); they are opt-in, as they need Docker Engine 28 or later, both images (about
+3.5 GB) and a few minutes:
 
 ```sh
 ./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office

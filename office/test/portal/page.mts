@@ -15,9 +15,50 @@ import { build } from "esbuild";
  * object it puts on window first, so the editor is wrapped where the component reads it, not where api.js puts it.
  */
 export async function editorPageJs(pithagoras: string, base: string): Promise<string> {
-  const office = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-  const portalRequire = createRequire(path.join(pithagoras, "package.json"));
-  const contents = `
+  return bundle(pithagoras, editorPage(base));
+}
+
+/** The Office page in Settings (src/web/settings.tsx) as a page of its own, as editorPageJs makes the editor's: with a
+ * portal whose UI pieces are plain elements, at `base`. */
+export async function settingsPageJs(pithagoras: string, base: string): Promise<string> {
+  return bundle(pithagoras, `
+import { createElement as h } from "react";
+import { createRoot } from "react-dom/client";
+import { setPortal } from "./src/portal";
+import { OfficeSettings } from "./src/web/settings";
+
+const BASE = ${JSON.stringify(base)};
+setPortal({
+  extension: "@pithagoras/office",
+  t: (text, vars) => text.replace(/\\{(\\w+)\\}/g, (m, k) => (vars && k in vars ? String(vars[k]) : m)),
+  locale: { use: () => {} },
+  api: {
+    url: (p) => BASE + p,
+    json: async (url, init) => {
+      const r = await fetch(url, { ...init, headers: { "content-type": "application/json", ...(init && init.headers) } });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(body.error || "HTTP " + r.status), { status: r.status, body });
+      return body;
+    },
+  },
+  ui: {
+    classes: { ghost: "ghost", button: "button", input: "input", primarySmall: "primary" },
+    RowsSkeleton: ({ label }) => h("div", null, label),
+    WarnBanner: ({ children }) => h("div", { role: "note" }, children),
+    ErrorBanner: ({ children }) => h("div", { role: "alert" }, children),
+    SwitchRow: ({ title }) => h("div", null, title),
+    Field: ({ label, children }) => h("label", null, label, children),
+    confirm: async () => false,
+  },
+  navigate: () => {},
+});
+createRoot(document.getElementById("root")).render(h(OfficeSettings));
+`);
+}
+
+/** The editor page's own source: the editor of the page's `?doc=`, its events kept on the page. */
+function editorPage(base: string): string {
+  return `
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { setPortal } from "./src/portal";
@@ -84,8 +125,14 @@ Object.defineProperty(window, "DocsAPI", {
 const doc = new URLSearchParams(location.search).get("doc");
 createRoot(document.getElementById("root")).render(createElement(OfficeEditor, { docId: doc, onBack: () => {} }));
 `;
+}
+
+/** `contents` (a page's source) bundled with the portal's own React. */
+async function bundle(pithagoras: string, contents: string): Promise<string> {
+  const office = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const portalRequire = createRequire(path.join(pithagoras, "package.json"));
   const result = await build({
-    stdin: { contents, resolveDir: office, loader: "jsx", sourcefile: "editor-page.jsx" },
+    stdin: { contents, resolveDir: office, loader: "jsx", sourcefile: "page.jsx" },
     bundle: true,
     format: "iife",
     target: "es2022",
@@ -104,6 +151,9 @@ createRoot(document.getElementById("root")).render(createElement(OfficeEditor, {
   });
   return result.outputFiles[0].text;
 }
+
+/** A page for the Office page in Settings. */
+export const SETTINGS_HTML = `<!doctype html><html><head><meta charset="utf-8"></head><body><div id="root"></div><script src="/settings-page.js"></script></body></html>`;
 
 /** The page around it: the editor's host as the portal's page gives it room. */
 export const EDITOR_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0}.po-host{height:700px}</style></head><body><div id="root"></div><script src="/editor-page.js"></script></body></html>`;

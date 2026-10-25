@@ -167,6 +167,24 @@ test("the tools are in a project's chats, read the project's own document throug
   assert.equal(made("pithagoras-office-ds-agent"), undefined, "a tool never downloads the agents' editor, nor makes it without");
 });
 
+test("the Office page's row for the agents' editor: not there, downloaded through Docker's API by its tag on request, and refused where the tag names another build", async () => {
+  const before = (await json(`${at}/state`)).body.agent;
+  assert.equal(before.present, false);
+  assert.match(before.tag, /^chromedp\/headless-shell:\d+\.\d+\.\d+\.\d+$/);
+  const asked = await json(`${at}/agent/pull`, { method: "POST" });
+  assert.equal(asked.status, 202);
+  let agent = before;
+  for (let i = 0; i < 300 && !agent.pull?.error; i++) {
+    await delay(20);
+    agent = (await json(`${at}/state`)).body.agent;
+  }
+  assert.ok(daemon.pulls.includes(before.tag), "pulled by its tag");
+  // This daemon names no image by its digest, as one would where the tag moved on to another build.
+  assert.equal(agent.present, false);
+  assert.match(agent.pull.error, /is not the build this version of Office runs \(sha256:[0-9a-f]{64}\)/);
+  assert.equal((await fetch(`${at}/agent/pull`, { method: "POST", headers: { origin: "http://elsewhere.example" } })).status, 403, "only from the portal's own pages");
+});
+
 test("a change asked from another page than the portal's own is refused", async () => {
   const res = await fetch(`${at}/container/remove`, { method: "POST", headers: { "content-type": "application/json", origin: "http://elsewhere.example" }, body: "{}" });
   assert.equal(res.status, 403);

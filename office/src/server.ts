@@ -328,7 +328,8 @@ function registerRoutes(dd: string, secret: string): void {
   // the Document Server and change its image.
   r.use(writesFromHere);
 
-  /** GET /state -> settings + container status + the document list + who has what open. The poller's payload. */
+  /** GET /state -> settings + container status + the agents' editor image + the document list + who has what open. The
+   * poller's payload. */
   r.get("/state", async (_req, res) => {
     const s = loadSettings(dd);
     let c: Awaited<ReturnType<typeof container.status>>;
@@ -344,7 +345,18 @@ function registerRoutes(dd: string, secret: string): void {
       // every doc gets an entry -- the client badge code reads locks[docId] without a null check
       locks[d.docId] = live.usersOf(d.docId).map((u) => ({ id: u.id, name: u.name }));
     }
-    res.json({ enabled: s.enabled, imageTag: s.imageTag, container: c, docs, locks });
+    const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG };
+    res.json({ enabled: s.enabled, imageTag: s.imageTag, container: c, agent, docs, locks });
+  });
+
+  /** POST /agent/pull -> { started: true }: downloads the agents' editor image (the Office page's button; a tool never
+   * does). Its progress comes over GET /state (`agent.pull`), as the Document Server's does. */
+  r.post("/agent/pull", async (_req, res) => {
+    void container.pullAgentImage().then(
+      () => recordAudit({ subject: container.AGENT_IMAGE_TAG, reason: "the agents' editor image downloaded" }),
+      (e) => logLine(`could not download the agents' editor image: ${(e as Error).message}`),
+    );
+    res.status(202).json({ started: true });
   });
 
   /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat's folder sees (store.docsForHome, the

@@ -6,8 +6,9 @@ import { refreshOfficeState, useOfficeState } from "./state";
 
 /**
  * The Office page in Settings: a service panel for the Document Server -- where it stands (and what a first pull is
- * doing), start and stop, the pinned image tag, and where the documents live. There is no co-editing switch: the
- * agent is a co-editor under the revision gate (fail loud, re-read + retry) and nothing on this page changes that.
+ * doing), start and stop, the pinned image tag, the agents' editor (its image, downloaded here), and where the
+ * documents live. There is no co-editing switch: an agent edits in an editor of its own beside the people, and nothing
+ * on this page changes that.
  * Enabling goes through
  * POST /settings, which answers without waiting for a first pull to finish (`starting`): the pull progress keeps
  * coming in over the shared 5 s poll, and the server half's lookAfter stays quiet while the person has stopped it.
@@ -20,7 +21,7 @@ function mem(bytes: number): string {
 export function OfficeSettings() {
   portal.locale.use();
   const state = useOfficeState();
-  const [busy, setBusy] = useState<null | "start" | "stop" | "remove" | "settings">(null);
+  const [busy, setBusy] = useState<null | "start" | "stop" | "remove" | "settings" | "agent">(null);
   const [problem, setProblem] = useState<string | null>(null);
   // Null: still saying what the server says. A string: what is in the input now.
   const [tag, setTag] = useState<string | null>(null);
@@ -103,6 +104,29 @@ export function OfficeSettings() {
         )}
       </div>
 
+      {/* The agents' editor: the image of the browser they edit in, downloaded on request (a tool never does). */}
+      <div className="po-service" role="status">
+        <div className="po-service-head">
+          <span className={"h-2 w-2 rounded-full " + (state.agent.present ? "bg-ok" : state.agent.pull?.active ? "po-state-pulling bg-warn" : "bg-fg-subtle")} />
+          {t("The agents' editor")}
+        </div>
+        <div className="po-service-detail">
+          {state.agent.present
+            ? t("Downloaded. Agents edit documents in an editor of their own, beside you: you see their changes as they make them.")
+            : t("Not downloaded. Until it is, agents read the saved files and cannot edit. A headless Chromium of about 540 MB; while agents work in documents it uses up to 3 GB of memory.")}
+        </div>
+        <div className="po-pull-line font-mono">{state.agent.tag}</div>
+        {state.agent.pull?.active && <div className="po-pull-line">{t("Pulling the image")} · {state.agent.pull.line}</div>}
+        {state.agent.pull?.error && !state.agent.present && <div className="po-pull-line text-danger">{state.agent.pull.error}</div>}
+        {!state.agent.present && (
+          <div>
+            <button type="button" className={portal.ui.classes.button} disabled={busy !== null || (state.agent.pull?.active ?? false)} onClick={() => void act("agent", () => api.pullAgent())}>
+              {state.agent.pull?.active ? t("Downloading…") : t("Download")}
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Enabling it: with the memory warning before a first start (~4 GB RAM recommended at runtime). */}
       {!state.enabled && (
         <portal.ui.WarnBanner>
@@ -153,6 +177,7 @@ export function OfficeSettings() {
       <div className="space-y-1">
         <p className="po-exposure">{t("Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.")}</p>
         <p className="po-exposure">{t("The editor loads through this portal's own proxy, behind its sign-in, so remote viewers have the live editor as well. The Document Server runs on a network of its own with no way out: it reaches nothing but the two endpoints where it fetches documents and reports saves, through a relay of this extension's.")}</p>
+        <p className="po-exposure">{t("The agents' editor runs on that same network, in a browser of its own with no way out either: it reaches the Document Server and this extension's seat page, never this portal or your session.")}</p>
       </div>
     </div>
   );

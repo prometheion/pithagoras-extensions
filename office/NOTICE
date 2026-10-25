@@ -13,3 +13,8 @@ THIRD-PARTY-LICENSES.
 The package does not contain the OnlyOffice Document Server. The portal pulls its image (onlyoffice/documentserver) from
 Docker Hub; the community edition is licensed under the GNU Affero General Public License v3.0
 (https://github.com/ONLYOFFICE/DocumentServer).
+
+Nor does it contain the agents' editor. The portal downloads its image (chromedp/headless-shell, the chromedp project's
+image of Chromium's headless shell, https://github.com/chromedp/docker-headless-shell) from Docker Hub when the person
+asks for it on the Office page; Chromium is licensed under a BSD-3-Clause licence, with the licences of the components
+it includes (https://www.chromium.org).

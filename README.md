@@ -13,6 +13,9 @@ a separate npm package. You install the ones you want into your portal; nothing 
 - [Inline UI](inline-ui/README.md) (`@pithagoras/inline-ui`): the agent shows you an interactive card of its
   own HTML in the chat, sandboxed and with no network, and what you do in it comes back to the agent as events. It
   needs no container and no Docker.
+- [Office](office/README.md) (`@pithagoras/office`): Word and Excel documents that you edit in a real OnlyOffice Document
+  Server editor in the portal, which the extension runs in a container through Docker for extensions, and that the
+  agent reads and edits through tools of its own.
 
 Blender and Godot each run their server in a container that the extension makes through Docker for extensions, from an
 image tagged with the package's version, so an update of the extension updates its server too. The agent gets the
@@ -21,7 +24,7 @@ nobody signs in to anything else.
 
 ## What they need
 
-Blender and Godot (Inline UI's README says what it needs):
+Blender and Godot (Inline UI's and Office's READMEs say what they need):
 
 - Pithagoras 0.3.0 or later.
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
@@ -40,13 +43,19 @@ extensions: for a portal on the host's network (both of Pithagoras' Compose file
 container that publishes the server's port on 127.0.0.1; for a portal in a container on a network of its own, by
 putting that container on the server's network. Each extension's README says more under Security.
 
+Office is different: it runs OnlyOffice's own Document Server image, which the portal pulls (it is not built here or
+tagged with the package's version), and the container joins the portal's shared network, so that it and the extension
+reach each other on the loopback. That is not a network without a way out, and on a portal on the host's network the
+Document Server listens on every interface of the machine: Office's README says under Security what to firewall.
+
 ## Installing
 
 In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/blender`,
-`npm:@pithagoras/godot` or `npm:@pithagoras/inline-ui`. For Blender and Godot, then open Settings → Blender (or Godot)
-and press **Install**: the extension picks a card, downloads its image (`ghcr.io/prometheion/pithagoras-blender` or
-`ghcr.io/prometheion/pithagoras-godot`, tagged with the package's version), makes a volume for the projects and starts
-the container.
+`npm:@pithagoras/godot`, `npm:@pithagoras/inline-ui` or `npm:@pithagoras/office`. For Blender and Godot, then open
+Settings → Blender (or Godot) and press **Install**: the extension picks a card, downloads its image
+(`ghcr.io/prometheion/pithagoras-blender` or `ghcr.io/prometheion/pithagoras-godot`, tagged with the package's version),
+makes a volume for the projects and starts the container. For Office, open Settings → Office, switch it on and press
+start: it pulls OnlyOffice's own Document Server image (`onlyoffice/documentserver`) and starts it.
 
 For development, build the repository (below) and install an extension's folder by its path on the portal's machine,
 for example `/path/to/pithagoras-extensions/blender`. Installed from a folder, an extension does not bring Docker for
@@ -65,6 +74,7 @@ npm ci                     # what every extension is built and tested with
 npm run build              # each extension's browser and server halves
 npx playwright install chromium firefox   # once: Inline UI's card is tested in both
 npm test                   # the unit tests, with Docker, the portal and the server faked
+OFFICE_IT_DOCKER=1 npm test -w office   # also Office's three integration tests, which need a Docker CLI that answers
 ./scripts/pithagoras.sh    # Pithagoras at the extension API's version (or PITHAGORAS_REF), into .pithagoras/
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
 ```
@@ -73,13 +83,13 @@ PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
 lifecycle, the GPU probe, an MCP client, the tool relay and the proxy). A build bundles what an extension imports of
 it into its server half's one file, so a published package needs nothing beside it.
 
-A release is a tag, `blender-v<version>`, `godot-v<version>` or `inline-ui-v<version>`, matching the version in that
+A release is a tag, `blender-v<version>`, `godot-v<version>`, `inline-ui-v<version>` or `office-v<version>`, matching the version in that
 extension's `package.json`. Merging a pull request that changes that version releases it: the extension's release
-workflow (`.github/workflows/blender-release.yml`, `godot-release.yml` or `inline-ui-release.yml`) runs on the push to
+workflow (`.github/workflows/blender-release.yml`, `godot-release.yml`, `inline-ui-release.yml` or `office-release.yml`) runs on the push to
 main, puts the tag on the merged commit and pushes it, and a push to main whose version already has its tag releases
 nothing. A tag pushed by hand still makes a release. For Blender and Godot the workflow builds and smoke-tests the
-image, pushes it to GHCR and makes a GitHub release with the sources that go with the image; for Inline UI, which has
-no image, it builds and tests the package and makes the GitHub release. Each then publishes the package to npm under the
+image, pushes it to GHCR and makes a GitHub release with the sources that go with the image; for Inline UI and Office, which have
+no image of their own, it builds and tests the package and makes the GitHub release. Each then publishes the package to npm under the
 `@pithagoras` scope, through npm's trusted publishing for that workflow, with no token. The first version of a package
 is published by hand, as only a package that is there can be given a trusted publisher; the workflow's header says how.
 If the repository or the organization is given a tag ruleset that limits who may create `*-v*` tags, github-actions[bot]
@@ -97,4 +107,5 @@ Apache-2.0 ([LICENSE](LICENSE)), with two exceptions:
   package ships them.
 
 Each extension's README and NOTICE say under which licences what its image redistributes is, and where their sources
-are.
+are. Office's server half bundles jszip (MIT or GPL-3.0-or-later, used under the MIT licence); its README and NOTICE say
+more.

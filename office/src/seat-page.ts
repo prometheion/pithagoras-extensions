@@ -260,8 +260,10 @@ const CELL_EDIT = `function () {
     var cells = 0;
     for (var i = 0; i < ops.length; i++) {
       var sheet = ops[i].sheet ? Api.GetSheet(ops[i].sheet) : first;
+      var values = ops[i].values;
       touched = true;
-      sheet.GetRange(ops[i].range).SetValue(ops[i].values);
+      // One cell takes its value, a range its rows of values.
+      sheet.GetRange(ops[i].range).SetValue(values.length === 1 && values[0].length === 1 ? values[0][0] : values);
       cells += ops[i].values.length * ops[i].values[0].length;
     }
     Api.Save();

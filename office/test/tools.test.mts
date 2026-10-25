@@ -470,6 +470,8 @@ test("office_read with Office stopped (or starting) reads the saved file and say
   assert.match(((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text, /Saved copy \(Office is still starting\)/);
   const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
   assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId })) as ToolResult).content[0].text, /Saved copy .*\n\nSheet "Sheet1":\n\(empty\)/s);
+  assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Sheet1" })) as ToolResult).content[0].text, /Sheet "Sheet1"/);
+  assert.match(await refused(tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Nope" }), "no such sheet"), /^error:not_found there is no sheet named "Nope" \(the sheets: Sheet1\)/);
   assert.deepEqual(s.seat.runs, []);
 });
 
@@ -526,7 +528,7 @@ test("office_edit: the ops go to the agent's editor as one job, the session is s
   assert.deepEqual(s.seat.saves, [`key-of-${doc.docId}`], "the agent's own session was saved");
   const audit = s.seen.records.find((r) => r.reason.startsWith("office_edit"))!;
   assert.equal(audit.chatId, "chat-atlas-home");
-  assert.match(audit.reason, new RegExp(`office_edit: 4 op\\(s\\) \\(replace, insert, table, remove\\) by /f/atlas; saved as revision ${to}`));
+  assert.match(audit.reason, new RegExp(`office_edit: 4 op\\(s\\) \\(replace, insert, table, remove\\) on ${doc.docId} by /f/atlas; saved as revision ${to}`));
 });
 
 test("office_edit (spreadsheet): the range ops go as one cell.edit job", async () => {

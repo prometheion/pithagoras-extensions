@@ -357,17 +357,19 @@ function readHeader(doc: DocMeta, saved?: keyof typeof SAVED_BECAUSE): string {
   return `${head}\nLive: the document as it stands in the editor${n ? `, including what ${people(n)} in it typed and have not saved yet` : ""}.`;
 }
 
-/** A saved file read as office_read shows it when Office does not run. */
-function savedText(doc: DocMeta, chatId: string): string {
+/** A saved file read as office_read shows it when Office does not run (a spreadsheet's `sheet` alone, where named). */
+function savedText(doc: DocMeta, chatId: string, sheet?: string): string {
   const buf = readBytes(doc, chatId);
   if (doc.ext === "xlsx") {
     const parsed = parseXlsx(buf); // throws {code:"invalid_zip"} -> corrupt
+    if (sheet !== undefined && !parsed.sheetNames.includes(sheet)) throw new Refusal("not_found", `there is no sheet named ${JSON.stringify(sheet)} (the sheets: ${parsed.sheetNames.join(", ")})`);
     const col = (n: number) => {
       let s = "";
       for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
       return s;
     };
     return parsed.sheetNames
+      .filter((name) => sheet === undefined || name === sheet)
       .map((name) => {
         const cells = (parsed.sheets[name] ?? []).flatMap((row, r) => row.map((v, c) => (v === "" ? "" : `${col(c)}${r + 1}: ${v}`)).filter(Boolean));
         return `Sheet "${name}":\n${cells.join("\n") || "(empty)"}${parsed.truncatedSheets[name] ? "\n(cells far out were not read)" : ""}`;
@@ -485,9 +487,9 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         } catch (e) {
           // Without its editor the agent still reads the file; an edit waits for the download.
           if ((e as { code?: string } | null)?.code !== "agent_editor_missing") throw e;
-          said = `${readHeader(doc, "missing")}\n\n${savedText(doc, chatId)}`;
+          said = `${readHeader(doc, "missing")}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
         }
-      } else said = `${readHeader(doc, state)}\n\n${savedText(doc, chatId)}`;
+      } else said = `${readHeader(doc, state)}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_read: it exceeds 200,000 characters]";
       return text(said, { action: "read", id: doc.docId, ext: doc.ext, mtimeMs: doc.mtimeMs, live });
     }),
@@ -547,7 +549,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const outcome: SaveAfterEdit = key ? await (cfg.save ?? ((k: string) => saveNow(k)))(key) : "failed";
         const now = refresh(doc.docId, rootDir());
         const to = now?.mtimeMs ?? from;
-        record({ subject: doc.title, reason: `office_edit: ${n} op(s) (${kinds}) by ${home}; ${outcome === "saved" || outcome === "same" ? `saved as revision ${to}` : outcome === "copy" ? "the save was kept as a conflict copy" : `not saved yet (${outcome})`}`, chatId });
+        record({ subject: doc.title, reason: `office_edit: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}; ${outcome === "saved" || outcome === "same" ? `saved as revision ${to}` : outcome === "copy" ? "the save was kept as a conflict copy" : `not saved yet (${outcome})`}`, chatId });
         if (outcome === "copy") {
           seats().closeDoc(doc.docId, "its save was kept as a conflict copy");
           throw new Refusal("behind", `"${doc.title}" changed on disk outside the editor while your editor had it open: your edit is in the editor, and its save was kept beside the document as "${doc.title} (conflict <date time>)" rather than written over the newer file. Read the document again with office_read and redo the edit.`);

@@ -411,6 +411,9 @@ function sweep(): void {
   if (agentRunning && !editors.size && now - lastEditorClosed > limits.agentIdleMs && deps) {
     agentRunning = false;
     pageSeen = 0;
+    // Its page goes with it: a poll it held is not taken for a page that still listens.
+    if (page) noContent(page);
+    page = null;
     deps.stopAgent().catch((e) => log(`could not stop the agents' browser: ${(e as Error).message}`));
   }
 }

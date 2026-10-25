@@ -89,6 +89,8 @@ test("the caps: more than MAX_OPS ops or MAX_ARGS_BYTES of arguments are bad_op"
   assert.throws(() => editJob("docx", Array.from({ length: MAX_OPS + 1 }, () => ({ remove: "x" }))), refused("bad_op"));
   assert.doesNotThrow(() => editJob("docx", Array.from({ length: MAX_OPS }, () => ({ remove: "x" }))));
   assert.throws(() => editJob("docx", [{ paragraphs: ["x".repeat(MAX_ARGS_BYTES)] }]), refused("bad_op"));
+  // Counted in bytes: a text of fewer characters than the cap, but more bytes, is refused too.
+  assert.throws(() => editJob("docx", [{ paragraphs: ["€".repeat(MAX_ARGS_BYTES / 2)] }]), refused("bad_op"));
 });
 
 test("the check: a quote found once passes; not found, or found twice, names its op and code", () => {

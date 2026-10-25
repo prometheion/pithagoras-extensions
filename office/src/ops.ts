@@ -47,7 +47,7 @@ const oneLine = (s: string) => !/[\r\n]/.test(s);
 export function editJob(ext: "docx" | "xlsx", ops: unknown): EditJob {
   if (!Array.isArray(ops) || ops.length === 0) throw new OpError("bad_op", "ops is a non-empty list of edits");
   if (ops.length > MAX_OPS) throw new OpError("bad_op", `one call takes at most ${MAX_OPS} ops (got ${ops.length}); split the edit into several calls`);
-  if (JSON.stringify(ops).length > MAX_ARGS_BYTES) throw new OpError("bad_op", `the ops take more than ${MAX_ARGS_BYTES / 1024} KB; split the edit into several calls`);
+  if (Buffer.byteLength(JSON.stringify(ops)) > MAX_ARGS_BYTES) throw new OpError("bad_op", `the ops take more than ${MAX_ARGS_BYTES / 1024} KB; split the edit into several calls`);
   if (ext === "docx") return { kind: "word.edit", args: { ops: ops.map(wordOp) } };
   return { kind: "cell.edit", args: { ops: ops.map(cellOp) } };
 }

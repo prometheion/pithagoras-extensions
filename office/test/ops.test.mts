@@ -5,7 +5,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editJob, MAX_ARGS_BYTES, MAX_OPS, OpError, parseRange, simulateWord, type WordOp } from "../src/ops";
+import { editJob, MAX_ARGS_BYTES, MAX_OPS, OpError, parseRange, type WordOp } from "../src/ops";
+import { WORD_MODEL_SRC } from "../src/seat-page";
+
+/** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
+ * holds in turn, or the first failure (`quote_not_found` / `quote_ambiguous`, the op's index, a message). */
+const simulateWord: (paras: string[], ops: WordOp[]) => { code: string; op: number; message: string } | null = new Function(`${WORD_MODEL_SRC}\nreturn simulateWord;`)();
 
 const refused = (code: string, op?: number) => (e: unknown) => {
   assert.ok(e instanceof OpError, String(e));

@@ -19,6 +19,7 @@ import * as container from "../src/container";
 import officeServer, { buildEditorConfig, dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept, ticketSecret, ticketSubject } from "../src/server";
 import * as seat from "../src/seat";
 import { PLUGIN_GUID } from "../src/seat-page";
+import { browser } from "./seat-browser.mts";
 import * as store from "../src/store";
 import { commentKeys, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
@@ -1237,7 +1238,8 @@ test("an agent's editor config: its own user, the plugin by its GUID from its ow
   // Its name is known for office_list once the Document Server says it is in the document.
   live.setUser(doc.docId, { id: `agent:${keyIdOf(home)}` }, true, { confirmed: true });
   assert.deepEqual(live.agentsOf(doc.docId), [{ id: `agent:${keyIdOf(home)}`, name: "Research (agent)" }]);
-  assert.equal(buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "edit", pluginUrl: "http://x/" }).config!.editorConfig && (buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "edit", pluginUrl: "http://x/" }).config!.editorConfig as { mode: string }).mode, "edit");
+  const editing = buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "edit", pluginUrl: "http://x/" });
+  assert.equal((editing.config!.editorConfig as { mode: string }).mode, "edit");
   live.resetLive();
   await b.cleanup();
 });
@@ -1294,4 +1296,117 @@ test("no route of the portal's or the listener's hands out an agent's editor con
   await page.text();
   live.resetLive();
   await b.cleanup();
+});
+
+/* ---------------- the agents' seats, wired ---------------- */
+
+const AGENT = "pithagoras-office-ds-agent";
+
+/** A booted half whose Document Server runs, with the agents' browser played by the scripted one (seat-browser.mts):
+ * it starts as the half starts the browser's container, at the page that container was made for, through the loopback
+ * listener, and stops as the container is removed. */
+async function withSeats(dock = fakeDocker()) {
+  dock.state.images.add(container.AGENT_IMAGE);
+  const local = (url: string) => url.replace(/^http:\/\/[^/]+/, `http://127.0.0.1:${loopbackPort()}`);
+  const chromium = browser("", (job) => job.kind, local);
+  const { start, remove } = dock.docker.containers;
+  dock.docker.containers.start = async (name: string) => {
+    await start(name);
+    if (name === AGENT) chromium.start((dock.containers.get(AGENT)!.spec.Cmd as string[]).at(-1)!);
+  };
+  dock.docker.containers.remove = async (name: string) => {
+    if (name === AGENT) chromium.stop();
+    await remove(name);
+  };
+  const b = await boot(undefined, dock);
+  live.resetLive();
+  const res = await b.router.dispatch("POST", "/container/start");
+  assert.equal(res.statusCode, 200);
+  return {
+    b,
+    chromium,
+    async done() {
+      chromium.stop();
+      live.resetLive();
+      await b.cleanup();
+    },
+  };
+}
+
+test("the agents' seats, wired: a trashed document's agent editor closes", async () => {
+  const w = await withSeats();
+  try {
+    const doc = await store.createDoc({ title: "Trashed", type: "word" }, w.b.root);
+    assert.equal(await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} }), "word.read");
+    assert.equal(seat.seats().length, 1);
+    const res = await w.b.router.dispatch("DELETE", `/documents/${doc.docId}`);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(seat.seats(), []);
+  } finally {
+    await w.done();
+  }
+});
+
+test("the agents' seats, wired: Office switched off, and removed, closes every agent editor with the browser", async () => {
+  const w = await withSeats();
+  try {
+    const doc = await store.createDoc({ title: "Open", type: "word" }, w.b.root);
+    fs.writeFileSync(path.join(w.b.root, "settings.json"), JSON.stringify({ enabled: true, imageTag: DEFAULT_TAG }));
+    await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
+    assert.equal((await w.b.router.dispatch("POST", "/settings", { enabled: false })).statusCode, 200);
+    assert.deepEqual(seat.seats(), []);
+    assert.equal(w.b.dock.containers.get(AGENT), undefined);
+    await w.b.router.dispatch("POST", "/container/start");
+    await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
+    assert.equal(seat.seats().length, 1);
+    assert.equal((await w.b.router.dispatch("POST", "/container/remove", {})).statusCode, 200);
+    assert.deepEqual(seat.seats(), []);
+    assert.equal(w.b.dock.containers.get(AGENT), undefined);
+  } finally {
+    await w.done();
+  }
+});
+
+test("the agents' seats, wired: a Document Server started again (revived, a new image) closes every agent editor and stops the browser", async () => {
+  const w = await withSeats();
+  try {
+    const doc = await store.createDoc({ title: "Revived", type: "word" }, w.b.root);
+    await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
+    const ds = w.b.dock.containers.get("pithagoras-office-ds")!;
+    ds.inspect.State = { Status: "exited", Running: false };
+    ds.info.state = "exited";
+    w.b.dock.calls.length = 0;
+    const res = await w.b.router.dispatch("POST", "/container/start");
+    assert.equal((res.body as { started: boolean }).started, true);
+    assert.deepEqual(seat.seats(), []);
+    await until(() => w.b.dock.calls.includes(`remove ${AGENT}`));
+    // The next call starts the browser anew and opens the document in the new Document Server's session.
+    assert.equal(await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} }), "word.read");
+  } finally {
+    await w.done();
+  }
+});
+
+test("the agents' seats, wired: a browser left from the run before is removed at boot", async () => {
+  const dock = fakeDocker();
+  dock.put(AGENT, { Image: container.AGENT_IMAGE }, { state: "running" });
+  const b = await boot(undefined, dock);
+  try {
+    await until(() => !dock.containers.has(AGENT));
+    assert.ok(dock.calls.includes(`remove ${AGENT}`));
+  } finally {
+    await b.cleanup();
+  }
+});
+
+test("the agents' seats, wired: the agents' editors reach the Document Server through the relay's way in, never by its own name", async () => {
+  const w = await withSeats();
+  try {
+    const doc = await store.createDoc({ title: "Where", type: "word" }, w.b.root);
+    await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
+    assert.equal(w.chromium.opened[0].apiJs, "http://pithagoras-office-ds-relay:3890/web-apps/apps/api/documents/api.js");
+    assert.equal(w.chromium.behaviour.configs[0].headers.get("access-control-allow-origin"), "http://pithagoras-office-ds-relay:3890");
+  } finally {
+    await w.done();
+  }
 });

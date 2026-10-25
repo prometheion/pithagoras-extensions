@@ -308,7 +308,8 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
     // Live in view mode too: a viewer's default is "strict", which shows nobody's changes until they save.
     editorConfig.coEditing = { mode: "fast", change: false };
     // The one editor with a plugin: Office's own, which makes the agent's edits (seat-page.ts). It runs in the agents'
-    // browser on the island, on the Document Server's origin, where no person's session is.
+    // browser on its own network, on the Document Server's origin there (the relay's way in), where no person's session
+    // is.
     editorConfig.customization = { macros: false, plugins: true, compactHeader: true };
     editorConfig.plugins = { pluginsData: [`${as.pluginUrl}config.json`], autostart: [PLUGIN_GUID] };
     return { config, ticketUrl: `${base}/doc/${ticket}`, key };
@@ -764,7 +765,7 @@ function wireSeats(dd: string, secret: string): void {
         throw new seat.SeatError(body.code === "ds_not_configured" ? "office_stopped" : body.code ?? "failed", body.error);
       }
       const config = built.config as Record<string, unknown>;
-      return { config: { ...config, token: signJwt(config, CONFIG_TTL_MS, secret, "editor-config") }, apiJs: `http://${container.NAMES.container}/web-apps/apps/api/documents/api.js`, key: built.key as string };
+      return { config: { ...config, token: signJwt(config, CONFIG_TTL_MS, secret, "editor-config") }, apiJs: `${agentsDs()}/web-apps/apps/api/documents/api.js`, key: built.key as string };
     },
     standing: (docId, key) => {
       const doc = store.refresh(docId, dd);
@@ -772,9 +773,16 @@ function wireSeats(dd: string, secret: string): void {
       return callback.keyStanding(key, doc.mtimeMs) === "current" ? "current" : "behind";
     },
     listenerOrigin: () => `http://${container.NAMES.relay}:${container.BACK_PORT}`,
-    dsOrigin: () => `http://${container.NAMES.container}`,
+    dsOrigin: agentsDs,
     log: logLine,
   });
+  // A Document Server (re)started ends every session the agents' editors were in.
+  container.whenDsStarted(() => seat.resetSeats("their Document Server started again"));
+}
+
+/** Where the agents' browser reaches the Document Server: the relay's way in, on the agents' own network. */
+function agentsDs(): string {
+  return `http://${container.NAMES.relay}:${container.NAMES.port}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -933,6 +941,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     clearInterval(timer);
     loopPort = 0;
     seat.stopSeats();
+    container.whenDsStarted(undefined);
     await container.stopAgent().catch(() => {});
     container.whenReached(undefined);
     wayBack.stop();

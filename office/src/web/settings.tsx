@@ -177,7 +177,7 @@ export function OfficeSettings() {
       <div className="space-y-1">
         <p className="po-exposure">{t("Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.")}</p>
         <p className="po-exposure">{t("The editor loads through this portal's own proxy, behind its sign-in, so remote viewers have the live editor as well. The Document Server runs on a network of its own with no way out: it reaches nothing but the two endpoints where it fetches documents and reports saves, through a relay of this extension's.")}</p>
-        <p className="po-exposure">{t("The agents' editor runs on that same network, in a browser of its own with no way out either: it reaches the Document Server and this extension's seat page, never this portal or your session.")}</p>
+        <p className="po-exposure">{t("The agents' editor runs in a browser of its own, on a network of its own with no way out either: it reaches the Document Server and this extension's seat page only through that relay, never this portal or your session.")}</p>
       </div>
     </div>
   );

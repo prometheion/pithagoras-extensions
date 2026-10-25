@@ -11,10 +11,10 @@ import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { closeDoc, configureSeat, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
 import { BRIDGE_JS, PLUGIN_GUID } from "../src/seat-page";
+import { browser, type Handler } from "./seat-browser.mts";
 
 const DS = "http://office-ds";
 
-type Handler = (job: { kind: string; args: unknown }) => unknown;
 
 /** A listener that answers what the seats answer, and 404 for the rest, as the loopback listener does. */
 async function listener() {
@@ -27,81 +27,6 @@ async function listener() {
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   return { server, origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
-}
-
-/**
- * The agents' browser, scripted: its page polls what to open and close, and opens a plugin for each editor that
- * fetches its config, polls its jobs and answers them with `handler`. `dead` editors' plugins never poll; `slow` ones
- * take the job and never answer.
- */
-function browser(origin: string, handler: Handler) {
-  let stop = new AbortController();
-  const opened: { editorId: string; config: Record<string, any>; apiJs: string }[] = [];
-  const closed: string[] = [];
-  const plugins = new Map<string, { base: string; stop: AbortController }>();
-  /** `states`: after an edit's outcome, what the page says of the editor's changes, each after its delay (ms), with
-   * the number the page gave the event where one is given. */
-  const behaviour = { dead: false, slow: false, configs: [] as Response[], states: [] as ([boolean, number] | [boolean, number, number])[] };
-  let page = "";
-  async function plugin(editorId: string, base: string) {
-    const own = new AbortController();
-    plugins.set(editorId, { base, stop: own });
-    const sig = AbortSignal.any([stop.signal, own.signal]);
-    behaviour.configs.push(await fetch(`${base}config.json`, { signal: sig }));
-    if (behaviour.dead) return;
-    while (!sig.aborted) {
-      const r = await fetch(`${base}next`, { method: "POST", signal: sig }).catch(() => null);
-      if (!r || r.status === 404) return;
-      if (r.status === 204) continue;
-      const job = (await r.json()) as { jobId: string; kind: string; args: unknown };
-      if (behaviour.slow) return;
-      let outcome: Record<string, unknown>;
-      try {
-        outcome = { result: await handler(job) };
-      } catch (e) {
-        outcome = { error: e };
-      }
-      const states = job.kind.endsWith(".edit") ? behaviour.states : [];
-      await fetch(`${base}done`, { method: "POST", body: JSON.stringify({ jobId: job.jobId, ...outcome }), signal: sig }).catch(() => {});
-      for (const [unsent, after, seq] of states) {
-        await delay(after);
-        await fetch(`${page}event`, { method: "POST", body: JSON.stringify({ editorId, type: "state", data: unsent, ...(seq !== undefined ? { seq } : {}) }), signal: sig }).catch(() => {});
-      }
-    }
-  }
-  async function loop() {
-    const signal = stop.signal;
-    while (!signal.aborted && page) {
-      const r = await fetch(`${page}poll`, { signal }).catch(() => null);
-      if (!r) return;
-      if (r.status === 404) return;
-      if (r.status !== 200) continue;
-      const order = (await r.json()) as { open?: { editorId: string; config: Record<string, any>; apiJs: string }; close?: string };
-      if (order.open) {
-        opened.push(order.open);
-        void plugin(order.open.editorId, order.open.config.editorConfig.plugins.pluginsData[0].replace(/config\.json$/, ""));
-      }
-      if (order.close) {
-        closed.push(order.close);
-        plugins.get(order.close)?.stop.abort();
-      }
-    }
-  }
-  return {
-    opened,
-    closed,
-    plugins,
-    behaviour,
-    /** The browser started (again): a fresh page. */
-    start(url: string) {
-      stop.abort();
-      stop = new AbortController();
-      page = url;
-      void loop();
-    },
-    /** The browser gone, with its page and plugins. */
-    stop: () => stop.abort(),
-  };
 }
 
 function deps(origin: string, b: ReturnType<typeof browser>, over: Partial<SeatDeps> = {}) {

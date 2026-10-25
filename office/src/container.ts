@@ -15,6 +15,11 @@
  *   portal (back.ts) -> reach(network, relay, port) -> relay :port, held open with the relay's key        (a tunnel)
  *   document server -> relay :3891 -> the next tunnel -> back.ts -> 127.0.0.1:<listener>                 (the way back)
  *
+ * The agents' browser (seat.ts) is on a network of its own (`names.agentNetwork`, as isolated as the island), which the
+ * relay is on too: it reaches the Document Server only through the relay's way in (port 80, where the Document
+ * Server's nginx keeps its own endpoints to itself; never its docservice's port 8000 beside it), the portal only
+ * through the way back, and nothing else. A portal container that `reach` put on the island is not on its network.
+ *
  * `<container>-relay` is on the island, on Node's alpine image (the one Docker for extensions' forwarder runs, so
  * usually there already) and hardened as that forwarder is. On `port` (3890 by default; Blender is 3870 and Godot
  * 3880) it passes each connection on to the Document Server's port 80, except one that opens with its key (a NUL byte,
@@ -50,8 +55,11 @@ import type { ContainerInfo, ContainerSpec, Docker, NetworkInfo, PullState, Reac
 export interface OfficeNames extends Names {
   /** The relay on the island: the way in, and the way back. */
   relay: string;
-  /** The agents' own browser on the island, in which their editors run (seat.ts). */
+  /** The agents' own browser, in which their editors run (seat.ts), on a network of its own. */
   agent: string;
+  /** The agents' browser's network: internal and isolated as the island, with the relay on it too, its only way to the
+   * Document Server (the relay's way in, to port 80 alone) and to the portal (the way back). */
+  agentNetwork: string;
   /** The Document Server's volumes, by the path in its container each is bound at (see DS_PATHS). */
   volumes: Record<string, string>;
 }
@@ -74,7 +82,7 @@ export function officeNames(env: NodeJS.ProcessEnv = process.env): OfficeNames {
   const base = namesFrom(env, "office", { container: "pithagoras-office-ds", port: 3890, image: "" });
   // The data volume keeps its own setting (PITHAGORAS_OFFICE_VOLUME), as it had one before the others were named.
   const volumes = Object.fromEntries(Object.entries(DS_PATHS).map(([at, end]) => [at, end === "data" ? base.volume : `${base.container}-${end}`]));
-  return { ...base, relay: `${base.container}-relay`, agent: `${base.container}-agent`, volumes };
+  return { ...base, relay: `${base.container}-relay`, agent: `${base.container}-agent`, agentNetwork: `${base.container}-agents`, volumes };
 }
 
 export const NAMES = officeNames();
@@ -227,14 +235,17 @@ export function dsSpec(image: string, env: string[], island: string, names: Offi
   return { Image: image, Env: env, HostConfig: { NetworkMode: island, Binds: Object.entries(names.volumes).map(([at, volume]) => `${volume}:${at}`) } };
 }
 
-/** The relay, on the island, with the key a tunnel opens with (the extension's `relay-secret`). */
-export function relaySpec(island: string, key: string, names: OfficeNames = NAMES): ContainerSpec {
+/** The relay, on the island and on the agents' browser's network (`agents`), with the key a tunnel opens with (the
+ * extension's `relay-secret`). */
+export function relaySpec(island: string, key: string, agents: string, names: OfficeNames = NAMES): ContainerSpec {
   return {
     Image: RELAY_IMAGE,
     User: "1000:1000",
     Cmd: ["node", "-e", RELAY_SCRIPT],
     Env: [`IN_PORT=${names.port}`, `DS_HOST=${names.container}`, "DS_PORT=80", `BACK_PORT=${BACK_PORT}`, `TUNNEL_KEY=${key}`],
     HostConfig: { NetworkMode: island, ...HARDENED },
+    // On both from its start: Docker for extensions gives no way to put a container on a network later.
+    NetworkingConfig: { EndpointsConfig: { [island]: {}, [agents]: {} } },
   };
 }
 
@@ -243,7 +254,7 @@ export function relaySpec(island: string, key: string, names: OfficeNames = NAME
 /* ------------------------------------------------------------------ */
 
 /**
- * The agents' browser: Chromium's headless shell, pinned by its digest, on the island beside the Document Server.
+ * The agents' browser: Chromium's headless shell, pinned by its digest, on a network of its own beside the island.
  * The tag names it for a download (Docker for extensions takes an image by its tag), the digest is what a container
  * is made from: a tag that came to name another build since is not run, and the Office page offers the download
  * again. About 540 MB on disk.
@@ -263,7 +274,7 @@ const AGENT_MEMORY = 3 * 1024 ** 3;
  * opens the seat page (`url`, which carries the page's secret) and nothing else, with no debugging port: the portal
  * talks to it only through that page.
  */
-export function agentSpec(island: string, url: string): ContainerSpec {
+export function agentSpec(network: string, url: string): ContainerSpec {
   return {
     Image: AGENT_IMAGE,
     User: "1000:1000",
@@ -271,7 +282,7 @@ export function agentSpec(island: string, url: string): ContainerSpec {
     Cmd: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", url],
     Env: ["HOME=/tmp"],
     HostConfig: {
-      NetworkMode: island,
+      NetworkMode: network,
       ...HARDENED,
       Memory: AGENT_MEMORY,
       PidsLimit: 512,
@@ -311,10 +322,18 @@ export async function agentImage(docker?: Docker): Promise<{ present: boolean; p
 /** Downloads the browser's image (the Office page's button; a tool never does). Refused where the tag names another
  * build than the pinned digest now. */
 export async function pullAgentImage(docker?: Docker): Promise<void> {
+  agentPull = { active: true, line: "" };
+  try {
+    const d = await reachable(docker);
+    await d.images.ensure(AGENT_IMAGE_TAG, (state) => {
+      agentPull = state;
+    });
+  } catch (e) {
+    // Shown on the Office page beside the button (the route answered before the download began).
+    agentPull = { active: false, line: agentPull?.line ?? "", error: (e as Error).message === "no_docker" ? "Docker is not reachable" : (e as Error).message };
+    throw e;
+  }
   const d = await reachable(docker);
-  await d.images.ensure(AGENT_IMAGE_TAG, (state) => {
-    agentPull = state;
-  });
   if (!(await d.images.present(AGENT_IMAGE))) {
     agentPull = { active: false, line: "", error: `${AGENT_IMAGE_TAG} is not the build this version of Office runs (${AGENT_IMAGE_DIGEST})` };
     throw coded("agent_editor_missing", agentPull.error!);
@@ -331,11 +350,11 @@ export async function ensureAgent(url: string, docker?: Docker, root?: string): 
   const d = await reachable(docker);
   if (userStopped(root)) throw coded("office_stopped", "the person stopped Office");
   if (!(await d.images.present(AGENT_IMAGE))) throw coded("agent_editor_missing", `the agent's editor (${AGENT_IMAGE_TAG}) is not downloaded`);
-  const island = await d.networks.get(NAMES.network);
-  if (!island) throw coded("office_stopped", "the Document Server's network is not there: Office was never started, or was removed");
-  const spec = agentStamped(agentSpec(island.name, url));
+  const agents = await d.networks.get(NAMES.agentNetwork);
+  if (!agents) throw coded("office_stopped", "the agents' network is not there: Office was never started, or was removed");
+  const spec = agentStamped(agentSpec(agents.name, url));
   const detail = await claim(d, NAMES.agent);
-  if (!detail || !current(detail, spec, island)) {
+  if (!detail || !current(detail, spec, [agents])) {
     await d.containers.create(NAMES.agent, spec);
     await d.containers.start(NAMES.agent);
   } else if (!running(detail)) await d.containers.start(NAMES.agent);
@@ -433,6 +452,13 @@ export function whenReached(hook: (() => void) | undefined): void {
   onReached = hook;
 }
 
+/** What is told each time a start (re)started the Document Server: the sessions the agents' editors were in are over
+ * (seat.resetSeats). */
+let onDsStarted: (() => void) | undefined;
+export function whenDsStarted(hook: (() => void) | undefined): void {
+  onDsStarted = hook;
+}
+
 /** Forgets the way in, for a removal (the network goes, and the forwarder with it) and for tests. */
 export function forgetReach(): void {
   reached = undefined;
@@ -479,26 +505,26 @@ async function claim(d: Docker, name: string): Promise<Inspected | undefined> {
 const labelOf = (spec: ContainerSpec) => (spec.Labels as Record<string, string>)[SPEC_LABEL];
 const running = (detail: Inspected | undefined) => detail?.State?.Running === true && !detail.State.Restarting;
 
-/** Made as it would be now, and on the network as it is now (by its id). */
-function current(detail: Inspected, spec: ContainerSpec, island: NetworkInfo): boolean {
+/** Made as it would be now, and on the networks as they are now (by their ids). */
+function current(detail: Inspected, spec: ContainerSpec, on: NetworkInfo[]): boolean {
   if (detail.Config?.Labels?.[SPEC_LABEL] !== labelOf(spec)) return false;
-  return detail.NetworkSettings?.Networks?.[island.name]?.NetworkID === island.id;
+  return on.every((n) => detail.NetworkSettings?.Networks?.[n.name]?.NetworkID === n.id);
 }
 
 /** What each container would be made with now, in the order they start. The Document Server's is made with the
  * image a running one has where only that differs (see the module header). */
-async function wanted(d: Docker, r: string, island: NetworkInfo, tag: string): Promise<{ name: string; spec: ContainerSpec; island: NetworkInfo }[]> {
+async function wanted(d: Docker, r: string, island: NetworkInfo, agents: NetworkInfo, tag: string): Promise<{ name: string; spec: ContainerSpec; on: NetworkInfo[] }[]> {
   const env = dsEnv(r);
   let ds = stamped(dsSpec(tag, env, island.name));
   const now = (await d.containers.inspect(NAMES.container).catch(() => undefined)) as Inspected | undefined;
   const image = now?.Config?.Image;
   if (now && running(now) && image && image !== tag) {
     const asItRuns = stamped(dsSpec(image, env, island.name));
-    if (current(now, asItRuns, island)) ds = asItRuns;
+    if (current(now, asItRuns, [island])) ds = asItRuns;
   }
   return [
-    { name: NAMES.container, spec: ds, island },
-    { name: NAMES.relay, spec: stamped(relaySpec(island.name, relayKey(r))), island },
+    { name: NAMES.container, spec: ds, on: [island] },
+    { name: NAMES.relay, spec: stamped(relaySpec(island.name, relayKey(r), agents.name)), on: [island, agents] },
   ];
 }
 
@@ -537,9 +563,10 @@ async function ensureContainerOnce(docker?: Docker, onPull?: (state: PullState) 
   }
   for (const volume of Object.values(NAMES.volumes)) await ensureVolume(d, volume);
   const island = await d.networks.create(NAMES.network);
+  const agents = await d.networks.create(NAMES.agentNetwork);
 
   let started = false;
-  for (const { name, spec, island: on } of await wanted(d, r, island, tag)) {
+  for (const { name, spec, on } of await wanted(d, r, island, agents, tag)) {
     const detail = await claim(d, name);
     if (!detail || !current(detail, spec, on)) {
       // Made again where it is stale: the volumes stay.
@@ -550,6 +577,7 @@ async function ensureContainerOnce(docker?: Docker, onPull?: (state: PullState) 
     } else continue;
     if (name === NAMES.container) started = true;
   }
+  if (started) onDsStarted?.();
   // The portal's way onto the island: its container put on it, or the forwarder made and started.
   await reachAgain(d);
 
@@ -591,6 +619,7 @@ export async function removeContainers(removeData: boolean, docker?: Docker, roo
     if (found && found.owner === ownName()) await d.containers.remove(name);
   }
   await d.networks.remove(NAMES.network);
+  await d.networks.remove(NAMES.agentNetwork);
   forgetReach();
   if (removeData) for (const volume of Object.values(NAMES.volumes)) await d.volumes.remove(volume);
   fs.rmSync(path.join(r, "ds.json"), { force: true });
@@ -742,9 +771,10 @@ export function lookAfter(docker?: Docker, root?: string): Promise<void> {
       const settings = loadSettings(r);
       if (!settings.enabled || userStopped(r)) return;
       const island = await d.networks.get(NAMES.network);
-      let fine = Boolean(island);
-      if (island) {
-        for (const { name, spec, island: on } of await wanted(d, r, island, settings.imageTag)) {
+      const agents = await d.networks.get(NAMES.agentNetwork);
+      let fine = Boolean(island && agents);
+      if (island && agents) {
+        for (const { name, spec, on } of await wanted(d, r, island, agents, settings.imageTag)) {
           const detail = (await d.containers.inspect(name).catch(() => undefined)) as Inspected | undefined;
           if (!detail || !running(detail) || !current(detail, spec, on)) fine = false;
         }

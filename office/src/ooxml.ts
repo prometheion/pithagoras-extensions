@@ -15,7 +15,6 @@ import { deflateRawSync, inflateRawSync } from "node:zlib";
 
 export type Comment = { id: string; author: string; date?: string; text: string };
 
-
 function ooxmlError(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
 }

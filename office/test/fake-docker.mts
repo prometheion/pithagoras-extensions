@@ -42,13 +42,16 @@ export function fakeDocker(options: { sharedNetwork?: string; reach?: Reach; ava
     const host = (spec.HostConfig ?? {}) as Record<string, unknown>;
     const mode = String(host.NetworkMode ?? "default");
     const island = networks.get(mode);
+    // The networks of its endpoints too, as Docker puts a container on each of them from its start.
+    const endpoints = Object.keys(((spec as Record<string, any>).NetworkingConfig?.EndpointsConfig ?? {}) as Record<string, unknown>);
+    const on = Object.fromEntries(endpoints.filter((n) => n !== mode && networks.has(n)).map((n) => [n, { NetworkID: networks.get(n)!.id }]));
     const c: FakeContainer = {
       info: { name, id: `cid-${++ids}`, image: spec.Image, state: "created", status: "", owner: extra.owner ?? OWNER, labels: (spec.Labels as Record<string, string>) ?? {} },
       spec,
       inspect: {
         Config: { Image: spec.Image, Labels: spec.Labels ?? {} },
         HostConfig: host,
-        NetworkSettings: { Networks: island ? { [island.name]: { NetworkID: extra.networkId ?? island.id } } : {} },
+        NetworkSettings: { Networks: { ...on, ...(island ? { [island.name]: { NetworkID: extra.networkId ?? island.id } } : {}) } },
       },
     };
     setState(c, extra.state ?? "created");

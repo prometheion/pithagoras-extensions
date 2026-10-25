@@ -61,8 +61,8 @@ by its digest: a tag that came to name another build is refused, not run.
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
   and a link is not followed.
 - **The agent edits beside you, live**: each agent (each agent's or project's folder) that works in a document has an
-  OnlyOffice editor of its own open in it, in a browser on the Document Server's network (the agents' editor), in the
-  same editing session as the people in the document. People see it there as "<folder name> (agent)", with its
+  OnlyOffice editor of its own open in it, in a browser of Office's own (the agents' editor), in the same editing
+  session as the people in the document. People see it there as "<folder name> (agent)", with its
   cursor. `office_read` gives the document as it stands in that editor, with what people typed and have not saved
   yet; `office_edit` makes its edits there, so they show in your editor at once, and nothing you typed is lost or
   written over. An edit is one command, made whole or not at all: every quote is checked against the document as it
@@ -102,7 +102,7 @@ by its digest: a tag that came to name another build is refused, not run.
   extension keeps a few connections to that port open, each opened with a key of the extension's (`relay-secret`),
   which the Document Server is not given; the relay hands each connection the Document Server makes to its port 3891
   to one of them, and the extension passes it on to its listener on 127.0.0.1. Nothing of Office's shares the portal's
-  network or is on any network but its own. The portal reaches the relay as it reaches Blender and Godot: for a
+  network or is on any network but its own (the relay is on the agents' editor's too, below). The portal reaches the relay as it reaches Blender and Godot: for a
   portal on the host's network, through the forwarder `pithagoras-office-ds-relay-forward`, which publishes port 3890
   on 127.0.0.1; for a portal in a container of its own, by putting that container on the network. Port 80 is never
   published on the machine. A restart of the portal, or of its container, breaks nothing: the portal opens its
@@ -111,17 +111,23 @@ by its digest: a tag that came to name another build is refused, not run.
   so the two things it needs are served by a small listener bound to `127.0.0.1`, which the way back leads to and
   nothing else: a document fetch with a signed ticket for one document at one revision that expires in 10 minutes
   (`GET /doc/<ticket>`), and the save callback (`POST /callback`, which must carry a valid HS256 token). Besides
-  them it serves only the agents' editor: its seat page, under a secret the Document Server does not have, and each
-  editor's plugin, under a token that gives that one editor's jobs and nothing else (below). Nothing else answers
-  there. The editor configs and callbacks are signed with a secret created once in the extension's data folder
+  them it serves only the agents' editor: its seat page, under a secret that keeps out everything else that reaches
+  the listener, and each editor's plugin, under a token that gives that one editor's jobs and nothing else (below).
+  The Document Server's own scripts run in the seat page (its `api.js`, its plugin SDK), so that secret is none to
+  the Document Server, which holds every document and the JWT secret already: nothing on those paths gives more than
+  it has. Nothing else answers there. The editor configs and callbacks are signed with a secret created once in the extension's data folder
   (`jwt-secret`, mode 0600), which the Document Server is given; the tickets with another (`ticket-secret`), which it
   is not, so a converter that a hostile file breaks into cannot forge one. A save is downloaded from the Document
   Server itself, from its files (`/cache/files/`) alone, whatever address the callback names. A document's file is
   read and written at its own name only: a link put in its place is refused, never followed.
-- **The agents' editor is a browser of its own on the Document Server's network.** `pithagoras-office-ds-agent`, from
-  `chromedp/headless-shell` pinned by its digest, runs on `pithagoras-office-ds-net` alone, with no port published:
-  it reaches the Document Server and the relay's way back, and nothing else (that network has no way out), never the
-  portal, its pages or anyone's session. It runs as a user that is not root, with none of the kernel's capabilities,
+- **The agents' editor is a browser of its own, on a network of its own.** `pithagoras-office-ds-agent`, from
+  `chromedp/headless-shell` pinned by its digest, runs on `pithagoras-office-ds-agents` alone, with no port published.
+  That network is made as the Document Server's is (internal, no gateway), and only the relay is on both: the browser
+  reaches the Document Server through the relay's port 3890 alone, which leads to its port 80, where the Document
+  Server's nginx keeps its statistics and cluster switches to itself (its own port 8000 beside it, which does not, is
+  out of reach), and the extension's listener through the relay's way back; nothing else, never the portal, its pages
+  or anyone's session (a portal in a container of its own is on the Document Server's network, not on this one). It
+  runs as a user that is not root, with none of the kernel's capabilities,
   no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most, and no
   debugging port. Chromium's own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses:
   the container is the boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
@@ -133,6 +139,12 @@ by its digest: a tag that came to name another build is refused, not run.
   else on those paths is answered as an unknown address. The agent's write permission is checked before each edit and
   when its editor opens (one it may not change opens read-only), and a file in a folder the agent could not read is
   never opened.
+  What this browser does not keep apart: the editors of every document the agents have open (three at most, of any
+  agent) are in that one page, on one origin, so a document that got a script running in its editor (a bug of
+  OnlyOffice's own; macros are off) reaches the other documents open there at that moment. And `office_read` reads
+  through the editor, so a document an agent reads (one it downloaded, say) is converted by the Document Server and
+  rendered by this browser with nobody opening it, as a person's editor does when they open it. Such a script could
+  also hold the relay's way back, which it shares with the Document Server, until Office is restarted.
 - **The editor sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame and every
   asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which the portal gates
   like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and only to the
@@ -155,7 +167,8 @@ by its digest: a tag that came to name another build is refused, not run.
   with `office_comments`, whose result the guard holds as outside content.
 - **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
   document-changing call is recorded in the portal's audit log with the chat that made it, its ops and the revision
-  it saved.
+  it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
+  as such.
 
 ## Data
 
@@ -164,11 +177,11 @@ default you never changed is not written down, so a later version's default appl
 `relay-secret`, `ds.json` (the container and image of the last start), `index.json` and `docs/<id>/<title>.<ext>`
 (the library), `.trash/`, and `state/<id>.json` (the comments last seen, so that a comment wakes an agent once). A
 scanned document stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds`, its
-relay `-relay` and the agents' editor `-agent`), the network (`pithagoras-office-ds-net`) and the Document Server's volumes are Docker's, shown in
-Settings → Docker under this extension. The volumes are one for each folder its image keeps apart:
-`pithagoras-office-ds-cache` (`/var/lib/onlyoffice`: the cache of open documents, with the saves it could not hand
-over yet, which the portal takes back once it reaches it again), `-data` (`/var/www/onlyoffice/Data`, its own keys),
-`-logs` and `-fonts`. They outlive the container being made again, after an update say.
+relay `-relay` and the agents' editor `-agent`), the networks (`pithagoras-office-ds-net`, and `-agents` for the
+agents' editor) and the Document Server's volumes are Docker's, shown in Settings → Docker under this extension. The
+volumes are one for each folder its image keeps apart: `pithagoras-office-ds-cache` (`/var/lib/onlyoffice`: the
+cache of open documents, with the saves it could not hand over yet, which the portal takes back once it reaches it
+again), `-data` (`/var/www/onlyoffice/Data`, its own keys), `-logs` and `-fonts`. They outlive the container being made again, after an update say.
 
 ## Settings from the environment
 
@@ -176,7 +189,7 @@ The portal's environment can change each name, for a second portal on the same D
 
 | Variable | Default |
 | --- | --- |
-| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relay `<container>-relay`, the agents' editor `<container>-agent`, the volumes `<container>-cache`, `-logs` and `-fonts`) |
+| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relay `<container>-relay`, the agents' editor `<container>-agent` on the network `<container>-agents`, the volumes `<container>-cache`, `-logs` and `-fonts`) |
 | `PITHAGORAS_OFFICE_VOLUME` | `<container>-data` |
 | `PITHAGORAS_OFFICE_PORT` | `3890`: the relay's port to the Document Server, and for a portal on the host's network the forwarder's on 127.0.0.1 |
 
@@ -184,7 +197,7 @@ The portal's environment can change each name, for a second portal on the same D
 
 Remove the Document Server in Settings → Office first (**Remove**), then uninstall the extension: the portal has no
 uninstall hook, so containers left running keep running. Remove takes the Document Server, its relay, the agents'
-editor, the network (and with it the forwarder) and the Document Server's volumes; the library and every document stay.
+editor, the networks (and with them the forwarder) and the Document Server's volumes; the library and every document stay.
 Docker for extensions cannot remove an image, so the images stay on disk: `docker image rm
 onlyoffice/documentserver:<tag>` deletes the big one, `docker image rm chromedp/headless-shell:157.0.8103.15` the
 agents' editor.

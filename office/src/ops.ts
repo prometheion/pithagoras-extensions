@@ -1,8 +1,7 @@
 /**
  * The ops of office_edit, checked before anything reaches the editor: their shapes, that they fit the document's
  * format, and the caps (MAX_OPS, MAX_ARGS_BYTES). What they find in the document is checked by the command itself
- * (seat-page.ts), on the document as it stands when the command runs: `simulateWord` is that check, the same source,
- * for the tests and for reading.
+ * (seat-page.ts, WORD_MODEL_SRC), on the document as it stands when the command runs; ops.test runs that same source.
  *
  * Word ops:
  * - `{quote, replacement}`: the quote's text (exactly once, inside one paragraph) becomes the replacement;
@@ -12,8 +11,6 @@
  * Excel ops: `{sheet?, range, values}`: the values into the range (A1 or A1:B2, on the first sheet where none is
  * named), one row of values per row of the range; a string that starts with "=" is a formula, "" clears the cell.
  */
-import { WORD_MODEL_SRC } from "./seat-page";
-
 export type WordStyle = (typeof STYLES)[number];
 export type WordOp =
   | { quote: string; replacement: string }
@@ -126,7 +123,3 @@ function cellOp(op: unknown, i: number): CellOp {
   }
   return { ...(op.sheet !== undefined ? { sheet: op.sheet as string } : {}), range: (op.range as string).trim().toUpperCase(), values: values as CellValue[][] };
 }
-
-/** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
- * holds in turn, or the first failure (`quote_not_found` / `quote_ambiguous`, the op's index, a message). */
-export const simulateWord: (paras: string[], ops: WordOp[]) => { code: string; op: number; message: string } | null = new Function(`${WORD_MODEL_SRC}\nreturn simulateWord;`)();

@@ -46,6 +46,7 @@ import {
   status,
   stopContainer,
   userStopped,
+  whenDsStarted,
   whenReached,
 } from "../src/container";
 import { hello, holdWayBack } from "../src/back";
@@ -54,6 +55,8 @@ import { fakeDocker } from "./fake-docker.mts";
 const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 const TAG92 = "onlyoffice/documentserver:9.2.1.1";
 const NET = "pithagoras-office-ds-net";
+/** The agents' browser's own network. */
+const AGENTS = "pithagoras-office-ds-agents";
 const RELAY = "pithagoras-office-ds-relay";
 const KEY = "k".repeat(64);
 /** The Document Server's volumes, in the order of DS_PATHS. */
@@ -110,6 +113,7 @@ test("ensure (fresh): both images, the volumes, the island, the Document Server 
     `pull ${RELAY_IMAGE}`,
     ...VOLUMES.map((v) => `volume ${v}`),
     `network ${NET}`,
+    `network ${AGENTS}`,
     `create ${DS_NAME}`,
     `start ${DS_NAME}`,
     `create ${RELAY}`,
@@ -145,6 +149,10 @@ test("ensure (fresh): both images, the volumes, the island, the Document Server 
   assert.equal(relay.HostConfig.Memory, 128 * 1024 ** 2);
   assert.equal(relay.HostConfig.PidsLimit, 64);
   assert.equal(relay.HostConfig.NetworkMode, NET);
+  // On the agents' browser's network too: the browser's one way to the Document Server and to the portal.
+  assert.deepEqual(Object.keys(relay.NetworkingConfig.EndpointsConfig), [NET, AGENTS]);
+  assert.deepEqual(Object.keys(m.containers.get(RELAY)!.inspect.NetworkSettings.Networks).sort(), [AGENTS, NET]);
+  assert.equal(ds.NetworkingConfig, undefined, "the Document Server is on the island alone");
   assert.ok(!ds.Env.some((e: string) => e.includes(KEY)), "the Document Server is not given the relay's key");
 
   assert.deepEqual(readDsRecord(root), { containerId: m.containers.get(DS_NAME)!.info.id, imageTag: TAG92 });
@@ -273,7 +281,7 @@ test("remove: the relay, the Document Server and the network; the Document Serve
   await ensureContainer(m.docker, undefined, root);
   m.calls.length = 0;
   await removeContainers(false, m.docker, root);
-  assert.deepEqual(m.calls, [`remove ${RELAY}`, `remove ${DS_NAME}`, `remove network ${NET}`]);
+  assert.deepEqual(m.calls, [`remove ${RELAY}`, `remove ${DS_NAME}`, `remove network ${NET}`, `remove network ${AGENTS}`]);
   assert.equal(readDsRecord(root), null);
   assert.ok(userStopped(root), "lookAfter does not make it all again");
   await ensureContainer(m.docker, undefined, root);
@@ -297,6 +305,12 @@ test("lookAfter: off -> nothing; on -> all made; all running -> nothing made; th
   m.containers.delete(RELAY);
   await lookAfter(m.docker, root);
   assert.ok(m.calls.includes(`create ${RELAY}`));
+  // An install from before the agents' network: it is made, and the relay made again on it.
+  m.networks.delete(AGENTS);
+  m.calls.length = 0;
+  await lookAfter(m.docker, root);
+  assert.ok(m.calls.includes(`network ${AGENTS}`) && m.calls.includes(`create ${RELAY}`), m.calls.join(", "));
+  assert.ok(!m.calls.includes(`create ${DS_NAME}`), "the Document Server runs on");
 });
 
 test("lookAfter: all running but the Document Server does not answer through the way in: the way in is asked for again", async () => {
@@ -541,12 +555,12 @@ test("the way back goes only where the way in was given, and opens its tunnels a
 const AGENT = "pithagoras-office-ds-agent";
 const PAGE = `http://${RELAY}:${BACK_PORT}/seat/${"a".repeat(64)}/`;
 
-test("the agents' browser: on the island alone, nothing published, hardened, not root, its profile in memory, the image by its digest", () => {
+test("the agents' browser: on a network of its own alone, nothing published, hardened, not root, its profile in memory, the image by its digest", () => {
   assert.equal(NAMES.agent, AGENT);
   assert.match(AGENT_IMAGE_DIGEST, /^sha256:[0-9a-f]{64}$/);
   assert.equal(AGENT_IMAGE, `chromedp/headless-shell@${AGENT_IMAGE_DIGEST}`);
   assert.match(AGENT_IMAGE_TAG, /^chromedp\/headless-shell:\d+\.\d+\.\d+\.\d+$/, "a fixed Chromium build, never latest");
-  const spec = agentSpec(NET, PAGE) as Record<string, any>;
+  const spec = agentSpec(AGENTS, PAGE) as Record<string, any>;
   assert.equal(spec.Image, AGENT_IMAGE);
   assert.equal(spec.User, "1000:1000");
   assert.deepEqual(spec.Entrypoint, ["/headless-shell/headless-shell"], "the image's own start script, which opens a debugging port, is not run");
@@ -554,7 +568,8 @@ test("the agents' browser: on the island alone, nothing published, hardened, not
   assert.ok(spec.Cmd.includes("--headless") && spec.Cmd.includes("--no-sandbox"));
   assert.ok(!spec.Cmd.some((a: string) => /remote-debugging/.test(a)), "no debugging port");
   const host = spec.HostConfig;
-  assert.equal(host.NetworkMode, NET);
+  assert.equal(host.NetworkMode, AGENTS);
+  assert.equal(spec.NetworkingConfig, undefined, "on that one network alone");
   assert.equal(host.PortBindings, undefined);
   assert.equal(host.Privileged, undefined);
   assert.deepEqual(host.CapDrop, ["ALL"]);
@@ -568,7 +583,7 @@ test("the agents' browser: on the island alone, nothing published, hardened, not
   assert.ok(spec.Env.includes("HOME=/tmp"));
 });
 
-test("ensureAgent: made on the island from the pinned image and started; as it is, nothing again; another page secret, made again; stopped, started", async () => {
+test("ensureAgent: made on the agents' network from the pinned image and started; as it is, nothing again; another page secret, made again; stopped, started", async () => {
   const root = tmpRoot({ enabled: true });
   const m = fresh();
   m.state.images.add(AGENT_IMAGE);
@@ -578,7 +593,8 @@ test("ensureAgent: made on the island from the pinned image and started; as it i
   assert.deepEqual(m.calls, [`create ${AGENT}`, `start ${AGENT}`]);
   const spec = made(m, AGENT);
   assert.equal(spec.Image, AGENT_IMAGE);
-  assert.equal(spec.HostConfig.NetworkMode, NET);
+  assert.equal(spec.HostConfig.NetworkMode, AGENTS);
+  assert.deepEqual(Object.keys(m.containers.get(AGENT)!.inspect.NetworkSettings.Networks), [AGENTS], "not on the island");
   assert.deepEqual(spec.HostConfig.RestartPolicy, { Name: "no" }, "never started again by Docker with a page secret of a run gone by");
   m.calls.length = 0;
   await ensureAgent(PAGE, m.docker, root);
@@ -592,7 +608,7 @@ test("ensureAgent: made on the island from the pinned image and started; as it i
   assert.ok(!(m.calls as string[]).some((c) => c.startsWith("pull")));
 });
 
-test("ensureAgent never downloads: without the image it is agent_editor_missing; with Office stopped office_stopped; without the island office_stopped", async () => {
+test("ensureAgent never downloads: without the image it is agent_editor_missing; with Office stopped office_stopped; without its network office_stopped", async () => {
   const root = tmpRoot({ enabled: true });
   const m = fresh();
   await ensureContainer(m.docker, undefined, root);
@@ -650,4 +666,34 @@ test("the browser's image: downloaded by its tag on request, then there by its d
   const after = await agentImage(n.docker);
   assert.equal(after.present, false);
   assert.match(after.pull?.error ?? "", /not the build/);
+});
+
+test("the browser's image: a download that cannot begin says why on the Office page (no Docker, a failing pull)", async () => {
+  const m = fresh({ available: false });
+  await assert.rejects(pullAgentImage(m.docker), (e: Error & { code?: string }) => e.code === "no_docker");
+  assert.deepEqual((await agentImage(m.docker)).pull, { active: false, line: "", error: "Docker is not reachable" });
+  const n = fresh();
+  n.docker.images.ensure = async () => {
+    throw new Error("pull access denied: no internet");
+  };
+  await assert.rejects(pullAgentImage(n.docker), /no internet/);
+  assert.equal((await agentImage(n.docker)).pull?.error, "pull access denied: no internet");
+});
+
+test("a start that (re)started the Document Server tells so (the agents' editors' sessions are over); one that found it running does not", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  let told = 0;
+  whenDsStarted(() => told++);
+  try {
+    await ensureContainer(m.docker, undefined, root);
+    assert.equal(told, 1);
+    await ensureContainer(m.docker, undefined, root);
+    assert.equal(told, 1, "running as it was: nothing ended");
+    m.containers.get(DS_NAME)!.inspect.State = { Status: "exited", Running: false };
+    await lookAfter(m.docker, root);
+    assert.equal(told, 2, "revived after a crash");
+  } finally {
+    whenDsStarted(undefined);
+  }
 });

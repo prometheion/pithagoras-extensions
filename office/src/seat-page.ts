@@ -2,7 +2,7 @@
  * What the agents' browser loads (seat.ts serves it on the loopback listener, through the relay's way back): the seat
  * page, which opens one OnlyOffice editor for each document an agent works in, and the plugin each of those editors
  * runs, which takes the agent's edits from the listener and makes them in the document with one fixed command
- * function each. Static strings, with no build step: the page and the plugin run in the browser on the island, the
+ * function each. Static strings, with no build step: the page and the plugin run in the agents' browser, the
  * command functions inside the editor (the plugin hands their source to `Asc.plugin.callCommand`, which runs it with
  * the document's builder API, `Api`).
  *
@@ -368,8 +368,8 @@ export function pluginConfig(): string {
   });
 }
 
-/** The plugin's page: OnlyOffice's plugin SDK, from the Document Server itself (`ds`, its origin on the island), and
- * the bridge. */
+/** The plugin's page: OnlyOffice's plugin SDK, from the Document Server itself (`ds`, its origin in the agents'
+ * browser: the relay's way in), and the bridge. */
 export function pluginIndex(ds: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><script src="${ds}/sdkjs-plugins/v1/plugins.js"></script><script src="bridge.js"></script></head><body></body></html>`;
 }

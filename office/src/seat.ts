@@ -1,6 +1,6 @@
 /**
  * The agents' seats in the documents: each agent that works in a document (one per agent home and document) has an
- * OnlyOffice editor of its own open in it, in the agents' browser on the island (container.ts), beside the people in
+ * OnlyOffice editor of its own open in it, in the agents' browser on its own network (container.ts), beside the people in
  * the document. A tool call hands its edit to that editor as a job, which the editor's plugin (seat-page.ts) makes
  * with one fixed command, so people see it at once, and what they typed and have not saved yet is read and kept.
  *
@@ -9,12 +9,15 @@
  *
  * The browser opens one page, the seat page (`GET /seat/<secret>/`), from the loopback listener through the relay's
  * way back, as the Document Server reaches it; the page long-polls what to open and close (`GET /seat/<secret>/poll`).
- * `secret` is new in each run of the half and is known only to this module and the browser's command line: anything
- * else that reaches the listener (the Document Server, through the relay) gets the listener's 404 for every /seat
+ * `secret` is new in each run of the half and is in no config: whatever else reaches the listener without the page
+ * (a process on the host's loopback, a request the Document Server makes) gets the listener's 404 for every /seat
  * path. Each editor's plugin is served under a token of its own (`/plugin/<token>/`), which is in that editor's
  * config and so known to the Document Server too: it gives the jobs of that one editor and nothing else, and is gone
- * when the editor closes. The Document Server holds the documents and the JWT secret already; the page's secret,
- * which would hand out every editor's config, is never in a config.
+ * when the editor closes.
+ * The seat page trusts the Document Server: its `api.js` runs in the page, and its plugin SDK in each plugin's frame
+ * on the page's origin, so its code can read the page's address and with it the secret. That gives it nothing it
+ * lacks (it holds every document and the JWT secret), and so nothing under /seat/ or /plugin/ may ever grant more
+ * than the Document Server already has.
  *
  * Limits: MAX_EDITORS across the portal, one per agent home and document; the least recently used idle one closes for
  * a new one, and where all are busy the call is refused (`busy`). An editor closes after IDLE_MS without a job, when

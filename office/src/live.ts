@@ -168,8 +168,8 @@ export function endSession(docId: string, key: string): void {
   for (const tracked of present(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
 }
 
-/** The keys of the editing sessions the Document Server said are open on the document: what an agent's write has it
- * save first. */
+/** The keys of the editing sessions the Document Server said are open on the document: the one an editor opened on
+ * the current revision joins (server.ts buildEditorConfig). */
 export function sessionKeys(docId: string): string[] {
   return [...(sessions.get(docId)?.keys() ?? [])];
 }

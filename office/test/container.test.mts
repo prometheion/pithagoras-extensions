@@ -16,7 +16,15 @@ import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { stamped } from "../../shared/service";
 import {
+  AGENT_IMAGE,
+  AGENT_IMAGE_DIGEST,
+  AGENT_IMAGE_TAG,
   BACK_PORT,
+  agentImage,
+  agentSpec,
+  ensureAgent,
+  pullAgentImage,
+  stopAgent,
   DS_NAME,
   DS_PATHS,
   DS_VOLUME,
@@ -526,4 +534,120 @@ test("the way back goes only where the way in was given, and opens its tunnels a
     whenReached(undefined);
   }
   assert.equal(m.calls.filter((c) => c.startsWith("reach")).length, 1);
+});
+
+/* ---------------- the agents' browser ---------------- */
+
+const AGENT = "pithagoras-office-ds-agent";
+const PAGE = `http://${RELAY}:${BACK_PORT}/seat/${"a".repeat(64)}/`;
+
+test("the agents' browser: on the island alone, nothing published, hardened, not root, its profile in memory, the image by its digest", () => {
+  assert.equal(NAMES.agent, AGENT);
+  assert.match(AGENT_IMAGE_DIGEST, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(AGENT_IMAGE, `chromedp/headless-shell@${AGENT_IMAGE_DIGEST}`);
+  assert.match(AGENT_IMAGE_TAG, /^chromedp\/headless-shell:\d+\.\d+\.\d+\.\d+$/, "a fixed Chromium build, never latest");
+  const spec = agentSpec(NET, PAGE) as Record<string, any>;
+  assert.equal(spec.Image, AGENT_IMAGE);
+  assert.equal(spec.User, "1000:1000");
+  assert.deepEqual(spec.Entrypoint, ["/headless-shell/headless-shell"], "the image's own start script, which opens a debugging port, is not run");
+  assert.equal(spec.Cmd.at(-1), PAGE);
+  assert.ok(spec.Cmd.includes("--headless") && spec.Cmd.includes("--no-sandbox"));
+  assert.ok(!spec.Cmd.some((a: string) => /remote-debugging/.test(a)), "no debugging port");
+  const host = spec.HostConfig;
+  assert.equal(host.NetworkMode, NET);
+  assert.equal(host.PortBindings, undefined);
+  assert.equal(host.Privileged, undefined);
+  assert.deepEqual(host.CapDrop, ["ALL"]);
+  assert.deepEqual(host.SecurityOpt, ["no-new-privileges"]);
+  assert.equal(host.ReadonlyRootfs, true);
+  assert.equal(host.Memory, 3 * 1024 ** 3);
+  assert.equal(host.PidsLimit, 512);
+  assert.deepEqual(Object.keys(host.Tmpfs), ["/tmp"]);
+  assert.equal(host.ShmSize, 512 * 1024 ** 2);
+  assert.ok(host.LogConfig.Config["max-size"]);
+  assert.ok(spec.Env.includes("HOME=/tmp"));
+});
+
+test("ensureAgent: made on the island from the pinned image and started; as it is, nothing again; another page secret, made again; stopped, started", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  m.state.images.add(AGENT_IMAGE);
+  await ensureContainer(m.docker, undefined, root);
+  m.calls.length = 0;
+  await ensureAgent(PAGE, m.docker, root);
+  assert.deepEqual(m.calls, [`create ${AGENT}`, `start ${AGENT}`]);
+  const spec = made(m, AGENT);
+  assert.equal(spec.Image, AGENT_IMAGE);
+  assert.equal(spec.HostConfig.NetworkMode, NET);
+  assert.deepEqual(spec.HostConfig.RestartPolicy, { Name: "no" }, "never started again by Docker with a page secret of a run gone by");
+  m.calls.length = 0;
+  await ensureAgent(PAGE, m.docker, root);
+  assert.deepEqual(m.calls, []);
+  await ensureAgent(PAGE.replace("aaaa", "bbbb"), m.docker, root);
+  assert.deepEqual(m.calls, [`create ${AGENT}`, `start ${AGENT}`]);
+  m.containers.get(AGENT)!.inspect.State = { Status: "exited", Running: false };
+  m.calls.length = 0;
+  await ensureAgent(PAGE.replace("aaaa", "bbbb"), m.docker, root);
+  assert.deepEqual(m.calls, [`start ${AGENT}`]);
+  assert.ok(!(m.calls as string[]).some((c) => c.startsWith("pull")));
+});
+
+test("ensureAgent never downloads: without the image it is agent_editor_missing; with Office stopped office_stopped; without the island office_stopped", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  await ensureContainer(m.docker, undefined, root);
+  m.calls.length = 0;
+  await assert.rejects(ensureAgent(PAGE, m.docker, root), (e: Error & { code?: string }) => e.code === "agent_editor_missing");
+  assert.ok(!m.calls.some((c) => c.startsWith("pull") || c.startsWith("create")), m.calls.join(", "));
+  m.state.images.add(AGENT_IMAGE);
+  await stopContainer(m.docker, root);
+  await assert.rejects(ensureAgent(PAGE, m.docker, root), (e: Error & { code?: string }) => e.code === "office_stopped");
+  assert.equal(m.containers.get(AGENT), undefined);
+  const bare = fresh();
+  bare.state.images.add(AGENT_IMAGE);
+  await assert.rejects(ensureAgent(PAGE, bare.docker, tmpRoot({ enabled: true })), (e: Error & { code?: string }) => e.code === "office_stopped");
+});
+
+test("the browser goes when Office stops, when it is removed (before its network), and by stopAgent; lookAfter never starts it", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  m.state.images.add(AGENT_IMAGE);
+  await ensureContainer(m.docker, undefined, root);
+  await ensureAgent(PAGE, m.docker, root);
+  await stopAgent(m.docker);
+  assert.equal(m.containers.get(AGENT), undefined);
+  await ensureAgent(PAGE, m.docker, root);
+  await stopContainer(m.docker, root);
+  assert.equal(m.containers.get(AGENT), undefined, "stopped with the Document Server");
+  await ensureContainer(m.docker, undefined, root);
+  await ensureAgent(PAGE, m.docker, root);
+  m.calls.length = 0;
+  await removeContainers(false, m.docker, root);
+  assert.deepEqual(m.calls.slice(0, 2), [`remove ${AGENT}`, `remove ${RELAY}`]);
+  // lookAfter makes the Document Server and its relay, never the browser.
+  const n = fresh();
+  n.state.images.add(AGENT_IMAGE);
+  await lookAfter(n.docker, tmpRoot({ enabled: true }));
+  assert.ok(n.containers.get(DS_NAME));
+  assert.equal(n.containers.get(AGENT), undefined);
+});
+
+test("the browser's image: downloaded by its tag on request, then there by its digest; a tag that names another build is refused", async () => {
+  const m = fresh();
+  assert.deepEqual(await agentImage(m.docker), { present: false, pull: null });
+  // Docker has the pinned build under the tag: the digest is there after the download.
+  const ensure = m.docker.images.ensure;
+  m.docker.images.ensure = async (image, onProgress) => {
+    await ensure(image, onProgress);
+    if (image === AGENT_IMAGE_TAG) m.state.images.add(AGENT_IMAGE);
+  };
+  await pullAgentImage(m.docker);
+  assert.ok(m.calls.includes(`pull ${AGENT_IMAGE_TAG}`));
+  assert.deepEqual(await agentImage(m.docker), { present: true, pull: { active: false, line: "done" } });
+  // The tag moved on: what was downloaded is not the pinned build.
+  const n = fresh();
+  await assert.rejects(pullAgentImage(n.docker), (e: Error & { code?: string }) => e.code === "agent_editor_missing" && e.message.includes(AGENT_IMAGE_DIGEST));
+  const after = await agentImage(n.docker);
+  assert.equal(after.present, false);
+  assert.match(after.pull?.error ?? "", /not the build/);
 });

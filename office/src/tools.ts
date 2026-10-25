@@ -248,7 +248,7 @@ class Refusal extends Error {
 /** What each refusal of the agent's editor says to do, after its own message. */
 const SEAT_ADVICE: Record<string, string> = {
   office_stopped: "The person stopped Office: ask them to start it on the Office page. office_read still reads the saved file.",
-  agent_editor_missing: "The agent's editor is not downloaded: ask the person to download it on the Office page.",
+  agent_editor_missing: "Ask the person to download it on the Office page.",
   agent_unavailable: "Try again in a moment; if it keeps failing, ask the person to look at Office on the Office page.",
   editor_not_ready: "Try again in a moment.",
   busy: "",
@@ -342,13 +342,17 @@ function cellText(read: CellSheets): string {
     .join("\n\n");
 }
 
-/** What office_read says first: the document, and where the text comes from. */
-function readHeader(doc: DocMeta, live: boolean, state?: OfficeState): string {
+/** Why office_read reads the saved file: Office does not run, or the agent's editor is not downloaded. */
+const SAVED_BECAUSE = {
+  starting: "Office is still starting",
+  stopped: "Office is stopped",
+  missing: "your editor is not downloaded: the person downloads it on the Office page",
+};
+
+/** What office_read says first: the document, and where the text comes from (`saved`: why it is the saved file). */
+function readHeader(doc: DocMeta, saved?: keyof typeof SAVED_BECAUSE): string {
   const head = `"${doc.title}" (id ${doc.docId}, ${doc.ext}, revision ${doc.mtimeMs})`;
-  if (!live) {
-    const why = state === "starting" ? "Office is still starting" : "Office is stopped";
-    return `${head}\nSaved copy (${why}): what the file holds. What is typed in an open editor is not in it, and office_edit waits until Office runs.`;
-  }
+  if (saved) return `${head}\nSaved copy (${SAVED_BECAUSE[saved]}): what the file holds. What is typed in an open editor is not in it, and office_edit waits until ${saved === "missing" ? "it is there" : "Office runs"}.`;
   const n = usersOf(doc.docId).length;
   return `${head}\nLive: the document as it stands in the editor${n ? `, including what ${people(n)} in it typed and have not saved yet` : ""}.`;
 }
@@ -469,17 +473,21 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       if (sheet !== undefined && (typeof sheet !== "string" || doc.ext !== "xlsx")) throw new Refusal("bad_op", doc.ext === "xlsx" ? "sheet is a sheet's name" : "sheet is for spreadsheets; a Word document has none");
       assertMayRead(doc, chatId);
       const state = await officeState();
-      let said: string;
+      let said = "";
       let live = false;
-      if (state !== "running") {
-        said = `${readHeader(doc, false, state)}\n\n${savedText(doc, chatId)}`;
-      } else {
+      if (state === "running") {
         const mode = doc.path && !mayWrite(doc.path, chatId) ? "view" : "edit";
         const job = doc.ext === "docx" ? { kind: "word.read", args: {} } : { kind: "cell.read", args: sheet ? { sheet } : {} };
-        const read = await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, job, { signal }));
-        said = `${readHeader(doc, true)}\n\n${doc.ext === "docx" ? wordText(read as WordBlocks) : cellText(read as CellSheets)}`;
-        live = true;
-      }
+        try {
+          const read = await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, job, { signal }));
+          said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? wordText(read as WordBlocks) : cellText(read as CellSheets)}`;
+          live = true;
+        } catch (e) {
+          // Without its editor the agent still reads the file; an edit waits for the download.
+          if ((e as { code?: string } | null)?.code !== "agent_editor_missing") throw e;
+          said = `${readHeader(doc, "missing")}\n\n${savedText(doc, chatId)}`;
+        }
+      } else said = `${readHeader(doc, state)}\n\n${savedText(doc, chatId)}`;
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_read: it exceeds 200,000 characters]";
       return text(said, { action: "read", id: doc.docId, ext: doc.ext, mtimeMs: doc.mtimeMs, live });
     }),

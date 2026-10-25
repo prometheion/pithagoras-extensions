@@ -473,6 +473,20 @@ test("office_read with Office stopped (or starting) reads the saved file and say
   assert.deepEqual(s.seat.runs, []);
 });
 
+test("office_read without the agent's editor downloaded reads the saved file and says why; office_edit is refused with what to do", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Saved", type: "word", owner: "/f/atlas" }, s.root);
+  // container.ensureAgent's refusal, as it comes through the seat.
+  s.seat.answer = () => Promise.reject(Object.assign(new Error("the agent's editor (chromedp/headless-shell:1) is not downloaded"), { code: "agent_editor_missing" }));
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.match(t, /\nSaved copy \(your editor is not downloaded: the person downloads it on the Office page\): what the file holds\./);
+  assert.match(t, /\[1\] New document/);
+  assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] })), /^error:agent_editor_missing .*download it on the Office page/);
+  // Anything else the editor says is no reason to read the saved file: it is said.
+  s.seat.answer = () => Promise.reject(new SeatError("agent_unavailable", "the agent's editor did not start within 60 s"));
+  assert.match(await refused(tool(s, "office_read").execute("r", { id: doc.docId })), /^error:agent_unavailable /);
+});
+
 test("office_read: a text past 200,000 characters is cut with a marker", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Long", type: "word", owner: "/f/atlas" }, s.root);

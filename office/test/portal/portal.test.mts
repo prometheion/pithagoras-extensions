@@ -155,16 +155,16 @@ test("the tools are in a project's chats, read the project's own document throug
   const listed = await tool("office_list").execute("c1", {});
   const plan = listed.details.documents.find((d: { title: string }) => d.title === "plan");
   assert.ok(plan, listed.content[0].text);
+  // The agents' editor is not downloaded here: office_read reads the file through the portal's files, as the
+  // project's agent would, and says so; office_edit asks for the download, and nothing of the browser is made.
   const read = await tool("office_read").execute("c2", { id: plan.id });
+  assert.match(read.content[0].text, /Saved copy \(your editor is not downloaded/);
   assert.match(read.content[0].text, /New document/);
   const createdDoc = await tool("office_create").execute("c3", { title: "Minutes", type: "word" });
   const doc = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === createdDoc.details.id);
   assert.equal(doc.owner, project, "owned by the project's folder");
-  // office_edit asks the portal whether the project's agent may change the file's folder (files.identity with
-  // likeParent), then writes it in place.
-  const edited = await tool("office_edit").execute("c4", { id: plan.id, ops: [{ quote: "New document", replacement: "Planned by the agent" }], baseRevision: plan.mtimeMs });
-  assert.equal(edited.details.action, "edit", edited.content[0].text);
-  assert.match((await tool("office_read").execute("c5", { id: plan.id })).content[0].text, /Planned by the agent/);
+  await assert.rejects(tool("office_edit").execute("c4", { id: plan.id, ops: [{ quote: "New document", replacement: "Planned by the agent" }] }), (e: Error) => /^error:agent_editor_missing .*Office page/.test(e.message));
+  assert.equal(made("pithagoras-office-ds-agent"), undefined, "a tool never downloads the agents' editor, nor makes it without");
 });
 
 test("a change asked from another page than the portal's own is refused", async () => {

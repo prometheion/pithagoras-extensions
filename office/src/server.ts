@@ -1,24 +1,22 @@
 /**
- * The server half of pithagoras-office -- the portal start/stop entry (the built server.js behind package.json's
- * `server` field). Boots exactly what the contract's "server.ts" section fixes, over the seams this wave commits:
+ * The server half of @pithagoras/office -- the portal start/stop entry (the built server.js behind package.json's
+ * `server` field). It sets up, in order:
  *
  *   1. setPortal(portal) + the shared HS256 secret file dataDir()/jwt-secret (0600; created ONCE with
  *      crypto.randomBytes(32).toString("hex"), reused on every later boot -- one secret for callback JWTs,
- *      document tickets AND editor-config signing: plan 5.6).
+ *      document tickets AND editor-config signing).
  *   2. registerTools({record}), wirePing({root, record}) -- both audit sinks land in portal().audit AND a log line.
- *   3. The co-editor model (plan 5.7): there is NO co-editing switch and NO hook to wire -- office_edit
+ *   3. The co-editor model: there is NO co-editing switch and NO hook to wire -- office_edit
  *      proceeds under the strict mtime/revision gate no matter who has the editor open, and a stale edit is
  *      refused loudly as a conflict (fail loud, re-read + retry). Nothing here installs any refusal machinery.
  *   4. callback.configure(...) once, with getState = () => container.readDsRecord(root) and the boot secret;
  *      live.setMetaResolver(docId -> store.getDoc(docId, root)?.mtimeMs ?? null).
- *   5. The UI routes on portal.router (mounted by core at /api/x/pithagoras-office, session-gated there): see the
- *      route table in .reports/T-WIRE.md; every error is JSON {error, message?, code?}.
- *   6. The cookie-free LOOPBACK listener (plan 5.2 design decision): http bound to 127.0.0.1 port 0 that serves ONLY
+ *   5. The UI routes on portal.router (mounted by the portal at /api/x/@pithagoras/office, session-gated there); every error is JSON {error, message?, code?}.
+ *   6. The cookie-free LOOPBACK listener (the DS container holds no session cookie): http bound to 127.0.0.1 port 0 that serves ONLY
  *      GET /doc/<ticket> (a fresh document fetch for the editor: verifyTicket -> bytes, no-store) and POST /callback
  *      (the DS callback, callback.handleCallback). Everything else is a 404 JSON. This origin -- not dsOrigin() --
  *      is what document.url and editorConfig.callbackUrl point at in the minted config (a container cannot fetch a
- *      browser-only origin; "container:<id>" origins have no URL at all). Divergence from the contract's one-liner,
- *      documented.
+ *      browser-only origin; "container:<id>" origins have no URL at all).
  *   7. Boot: settleKept() (.trash >7d sweep + index-vs-disk prune) FIRST, then the workspace scan
  *      (store.scanWorkspace over portal().folders.list(): every .docx/.xlsx of the agent homes and projects
  *      indexed IN PLACE -- manual import is gone, the scanned file IS the document; POST /documents/rescan
@@ -27,14 +25,13 @@
  *   8. jszip (the blank document templates) is bundled into server.js by build.mjs, so the package needs nothing
  *      installed beside it.
  *
- * dsOrigin(): ONE function, per the contract -- the origin read straight out of ds.json (network-mode option (a),
- * plan 5.2: host-networked DS at http://127.0.0.1). The BROWSER now reaches it through the portal's GET /ds/ reverse
+ * dsOrigin(): ONE function -- the origin read straight out of ds.json (host-networked DS at http://127.0.0.1). The BROWSER now reaches it through the portal's GET /ds/ reverse
  * proxy (api.js, the editor iframe and every asset -- same-origin, behind the session gate like every route here):
  * apiJs is that root-relative prefix, and api.js' getBasePath() turns it into the editor's base URL. What stays an
  * ABSOLUTE LOOPBACK URL in the signed config is document.url and editorConfig.callbackUrl: those are fetched by the
  * DS server-side (host netns -> loopback works), never by a browser -- leave them exactly as-is. When the recorded
- * origin is a "container:<id>" marker there is NO usable URL in v1: it is returned as-is and /editor-config AND /ds
- * refuse with a clear JSON error saying that deployment shape needs an M0 decision.
+ * origin is a "container:<id>" marker there is NO usable URL yet: it is returned as-is and /editor-config AND /ds
+ * refuse with a clear JSON error saying a portal in a container is not supported yet.
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -64,7 +61,7 @@ const CONFIG_TTL_MS = 15 * 60 * 1000;
 /** A document ticket lives 10 minutes: one editor open-and-fetch window (the tickets module's own default). */
 const TICKET_TTL_MS = 600_000;
 /** The fallback identity the minted config claims: portal exposes no per-route session user in v1, so every
- * co-edited doc shows this seat (plan 5.6 editorConfig.user). */
+ * co-edited doc shows this seat (editorConfig.user). */
 const EDITOR_USER = { id: "portal-user", name: "Portal" } as const;
 
 const DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -92,9 +89,9 @@ function logLine(line: string): void {
   }
 }
 
-/** The ONE audit sink for this wave: every mutating op lands in portal().audit AND as one log line. */
+/** The ONE audit sink: every mutating op lands in portal().audit AND as one log line. */
 function recordAudit(entry: { subject: string; reason?: string; chatId?: string }): void {
-  const line = `pithagoras-office: ${entry.subject}${entry.reason ? ` -- ${entry.reason}` : ""}${entry.chatId ? ` (chat ${entry.chatId})` : ""}`;
+  const line = `@pithagoras/office: ${entry.subject}${entry.reason ? ` -- ${entry.reason}` : ""}${entry.chatId ? ` (chat ${entry.chatId})` : ""}`;
   try {
     portal().audit.record({ subject: entry.subject, reason: entry.reason, chatId: entry.chatId });
   } catch (e) {
@@ -180,7 +177,7 @@ function jsonRaw(res: http.ServerResponse, status: number, body: unknown): void 
 }
 
 /* ------------------------------------------------------------------ */
-/* the loopback listener (plan 5.2)                                    */
+/* the loopback listener                                    */
 /* ------------------------------------------------------------------ */
 
 function makeLoopbackHandler(dd: string, secret: string): (req: http.IncomingMessage, res: http.ServerResponse) => void {
@@ -240,11 +237,11 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
   if (!record) return { res: { status: 503, body: { error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" } } };
   // network-mode option (a): a "container:<id>" origin is a marker with no browser-reachable URL in v1 -- fail clearly.
   if (record.origin.startsWith("container:")) {
-    return { res: { status: 422, body: { error: `the document server runs under ${record.origin}: that deployment shape cannot expose the editor to a browser until the M0 spike-2 decision lands`, code: "unresolvable_ds_origin", origin: record.origin } } };
+    return { res: { status: 422, body: { error: `the document server runs under ${record.origin}: a portal that itself runs in a container is not supported yet, because the browser cannot reach the editor there`, code: "unresolvable_ds_origin", origin: record.origin } } };
   }
 
   const { token: ticket } = mintTicket(doc.docId, TICKET_TTL_MS, secret);
-  // plan 5.2: document.url is the ticketed GET on OUR loopback listener (the container's fetch must reach a URL it
+  // document.url is the ticketed GET on OUR loopback listener (the container's fetch must reach a URL it
   // can actually dial -- never a browser-only origin); callbackUrl sits right next door.
   const base = `http://127.0.0.1:${loopPort}`;
   const config: Record<string, unknown> = {
@@ -269,7 +266,7 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
 }
 
 /* ------------------------------------------------------------------ */
-/* the UI routes (core mounts portal.router at /api/x/pithagoras-office)*/
+/* the UI routes (the portal mounts portal.router at /api/x/@pithagoras/office)*/
 /* ------------------------------------------------------------------ */
 
 function registerRoutes(dd: string, secret: string): void {
@@ -407,13 +404,13 @@ function registerRoutes(dd: string, secret: string): void {
       return res.status(rr.status).json(rr.body);
     }
     const config = built.config as Record<string, unknown>;
-    // purpose "editor-config" (S3): the signed typ claim tags this token's family for any future in-portal
+    // purpose "editor-config": the signed typ claim tags this token's family for any future in-portal
     // verification; DS itself checks only the HMAC/expiry and ignores the extra claim.
     // apiJs: ROOT-RELATIVE through this extension's /ds proxy. The browser resolves it against its own page origin
     // (exactly where the user reached the portal, session-gated) -- and api.js' getBasePath() takes everything before
     // "api/documents/api.js" in its script src as the editor iframe base, so the whole editor runs under that prefix.
     // It is NOT part of the signed payload (the client drops it before calling DocEditor).
-    res.json({ ...config, token: signJwt(config, CONFIG_TTL_MS, secret, "editor-config"), apiJs: `/api/x/${encodeURIComponent(portal().extension)}/ds/web-apps/apps/api/documents/api.js` });
+    res.json({ ...config, token: signJwt(config, CONFIG_TTL_MS, secret, "editor-config"), apiJs: `/api/x/${portal().extension.split("/").map(encodeURIComponent).join("/")}/ds/web-apps/apps/api/documents/api.js` });
   });
 
   /** POST /settings {enabled?, imageTag?} -> saved + side effects: enabling fires ensureContainer WITHOUT
@@ -437,7 +434,7 @@ function registerRoutes(dd: string, secret: string): void {
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "no known setting in the body -- send { enabled?, imageTag? }" });
 
     const settings = saveSettings(patch, dd);
-    recordAudit({ subject: "pithagoras-office settings", reason: `enabled=${settings.enabled} imageTag=${settings.imageTag}` });
+    recordAudit({ subject: "@pithagoras/office settings", reason: `enabled=${settings.enabled} imageTag=${settings.imageTag}` });
 
     let starting = false;
     if (patch.enabled === true && !before.enabled) {
@@ -495,9 +492,9 @@ function registerRoutes(dd: string, secret: string): void {
    * iframe and its assets -- AND the socket.io POLLING channel). The editor app talks to docserver over engine.io:
    * GET <app>/10.0.0-<buildhash>/doc/<key>/c/?EIO=4&transport=polling handshakes, then the client's packets (the
    * "40" connect packet, user state, ...) arrive as POSTs to the same path while its next-poll GETs stay open until
-   * the server has something to send. A GET-only proxy answered every POST with the core's 404 and the channel never
-   * opened: the editor white-loads forever even though DS is healthy (reproduced by wire replay, see PR307 notes).
-   * Core mounts us at /api/x/<extension> BEHIND THE SESSION GATE (core/server/src/extension-host.ts), so only
+   * the server has something to send. A GET-only proxy answered every POST with the portal's 404 and the channel never
+   * opened: the editor white-loads forever even though DS is healthy (reproduced by wire replay).
+   * The portal mounts us at /api/x/<extension> BEHIND THE SESSION GATE, so only
    * signed-in browsers may reach this -- and it forwards to ONE origin only: the recorded DS origin from ds.json,
    * never anywhere else. The upstream path is recomputed from the RAW request URL with its query string included
    * (express params may be decoded; an iframe's ?dockey=... must pass verbatim). The upstream ask carries
@@ -514,7 +511,7 @@ function registerRoutes(dd: string, secret: string): void {
    * so "websocket" is stripped from every outbound handshake, pinning the client to polling for good (engine.io's
    * fallback on a failed upgrade works, but a deterministic single transport has no double-connection churn).
    * Refusals mirror /editor-config: 503 ds_not_configured (no ds.json), 422 unresolvable_ds_origin (a
-   * "container:<id>" marker has no URL until M0), 503 ds_unavailable (the origin did not answer). Nothing below
+   * "container:<id>" marker has no URL yet), 503 ds_unavailable (the origin did not answer). Nothing below
    * this route mutates portal state: POSTs only ever forward to the DS. */
   const proxyDs = async (req: any, res: any): Promise<void> => {
     const raw = typeof req.url === "string" ? req.url : "";
@@ -526,7 +523,7 @@ function registerRoutes(dd: string, secret: string): void {
       return res.status(503).json({ error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" });
     }
     if (origin.startsWith("container:")) {
-      return res.status(422).json({ error: `the document server runs under ${origin}: that deployment shape cannot expose the editor to a browser until the M0 spike-2 decision lands`, code: "unresolvable_ds_origin", origin });
+      return res.status(422).json({ error: `the document server runs under ${origin}: a portal that itself runs in a container is not supported yet, because the browser cannot reach the editor there`, code: "unresolvable_ds_origin", origin });
     }
     const fwdHeaders: Record<string, string> = { "accept-encoding": "identity" };
     let body: Buffer | undefined;
@@ -599,7 +596,7 @@ function registerRoutes(dd: string, secret: string): void {
 /* ------------------------------------------------------------------ */
 
 /** dsOrigin(): the browser-facing origin of the DS read from ds.json (option (a)). "" when unconfigured; a
- * "container:<id>" marker is returned AS-IS -- it is the clear signal that /editor-config must refuse with the M0 note. */
+ * "container:<id>" marker is returned AS-IS -- it is the clear signal that /editor-config must refuse with the "not supported yet" note. */
 export function dsOrigin(root?: string): string {
   return container.readDsRecord(root ?? dataDir())?.origin ?? "";
 }
@@ -607,9 +604,9 @@ export function dsOrigin(root?: string): string {
 export default async function officeServer(portalObj: ServerPortal): Promise<() => Promise<void>> {
   setPortal(portalObj);
   const dd = portal().dataDir();
-  const secret = ensureJwtSecret(dd); // the one HS256 secret: callbacks, tickets and configs all sign with it (plan 5.6)
+  const secret = ensureJwtSecret(dd); // the one HS256 secret: callbacks, tickets and configs all sign with it
 
-  // the seams, exactly as their module headers contract them (audit lands in portal().audit AND a log line).
+  // the seams, as their module headers describe them (audit lands in portal().audit AND a log line).
   // NOTE: there is NO co-editing switch and no flush-before-write hook to install here -- office_edit runs under
   // the strict mtime/revision gate with human editor sessions open or not (co-editor model; fail loud, re-read + retry).
   registerTools({ root: dd, record: recordAudit });
@@ -619,7 +616,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
 
   registerRoutes(dd, secret);
 
-  // the cookie-free loopback listener (plan 5.2): 127.0.0.1, port 0 -> a private ephemeral port per boot
+  // the cookie-free loopback listener: 127.0.0.1, port 0 -> a private ephemeral port per boot
   const server = http.createServer(makeLoopbackHandler(dd, secret));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -642,7 +639,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   } catch (e) {
     logLine(`workspace scan at boot failed: ${(e as Error).message}`);
   }
-  container.lookAfter(undefined, dd); // fire-and-forget by contract; logs its own failures
+  container.lookAfter(undefined, dd); // fire-and-forget; logs its own failures
 
   let stopped = false;
   const timer = setInterval(() => {

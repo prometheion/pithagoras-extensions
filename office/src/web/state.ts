@@ -4,7 +4,7 @@ import { api, type OfficeState } from "./api";
 /**
  * How the office stands, as the server half last said -- shared by the library page, the per-home chat panels,
  * the tool cards and the editor badges. One question at a time, one poll while any of them is on screen:
- * GET /state every 5 s (plan 5.7 tier 1), asked again straight after whatever changed it.
+ * GET /state every 5 s, asked again straight after whatever changed it.
  */
 
 let known: OfficeState | null = null;

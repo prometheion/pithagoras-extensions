@@ -1,10 +1,10 @@
 /**
- * Integration tests for pithagoras-office (contract "tests (W5)" / plan 7 "Integration"), each skipped
- * with a clear reason when the gate below does not hold. What they assert, exactly as the contract lists:
+ * Integration tests for @pithagoras/office, each skipped with a clear reason when the gate below does not hold.
+ * What they assert:
  *
  *   1. A ticketed GET on the REAL loopback listener serves a document LARGER than 1 MB byte-for-byte
  *      (the whole reason the cookie-free listener exists is that portal-managed files cap at MAX_EDIT_BYTES
- *      = 1 MB -- core/server/src/workspace-files.ts:47) and rejects an expired ticket.
+ *      = 1 MB in the portal) and rejects an expired ticket.
  *   2. A synthetic OnlyOffice callback with status 2 arrives on the loopback POST /callback WITHOUT any
  *      session cookie, persists (bytes on disk changed to exactly what body.url served), bumps the index
  *      revision, writes history/<doc>/<rev>.zip from changesurl, and clears the lock AFTER the persist.
@@ -13,16 +13,16 @@
  *      revision that moved underneath (an external co-editor save) surfaces as error:revision_mismatch
  *      CONFLICT -- nothing is overwritten.
  *
- * The gate (why it is an env flag + a docker CLI probe instead of host.docker()): the contract says these
- * tests are "docker-gated on docker.available()", but src/host.ts' docker() mirrors the portal's
+ * The gate (why it is an env flag + a docker CLI probe instead of host.docker()): these tests need a docker,
+ * but src/host.ts' docker() mirrors the portal's
  * extensions.use("pithagoras-docker") -- it only exists inside a RUNNING portal process, and this file (like
  * every unit test) must never reach portal(). The closest honest probe OUTSIDE a portal is: the operator
  * has declared intent via OFFICE_IT_DOCKER=1 AND `docker info` answers from the CLI. When both hold we
- * assume the operator pre-started the DS container per the plan's M0 procedure; these three assertions
+ * assume the operator pre-started the DS container; these three assertions
  * themselves run against a tmp dataDir + the real in-process loopback listener, with a tiny second ephemeral
  * server standing in for the DS download endpoint (body.url / changesurl), so they exercise exactly the
- * HTTP boundary a real DS crosses. The full save-loop-with-real-DS-url and the DocEditor browser assertions
- * of plan 7 stay deferred to a Playwright/CI environment with a running portal -- not invented here.
+ * HTTP boundary a real DS crosses. The full save loop with a real DS url and the DocEditor browser assertions
+ * need a running portal and are not covered here.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -56,7 +56,7 @@ const SAVED_DOCX = fs.readFileSync(`${FIXTURES}sample.docx`);
 /** Reason every test below must be skipped, or undefined when the gate holds. */
 function gateReason(): string | undefined {
   if (process.env.OFFICE_IT_DOCKER !== "1") {
-    return 'docker-gated integration test: set OFFICE_IT_DOCKER=1 to run it (plan M0 procedure -- the operator starts the DS container first; host.docker() is unusable outside a running portal process)';
+    return 'docker-gated integration test: set OFFICE_IT_DOCKER=1 to run it (the operator starts the DS container first; host.docker() is unusable outside a running portal process)';
   }
   const probe = spawnSync("docker", ["info"], { encoding: "utf8", timeout: 20_000 });
   if (probe.error) return `docker-gated: the docker CLI is unreachable (${(probe.error as Error).code ?? (probe.error as Error).message})`;

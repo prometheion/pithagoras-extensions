@@ -6,8 +6,9 @@ The extension (its TypeScript, its stylesheet and its build) is licensed under t
 extensions come from, is a copy of types from Pithagoras (https://github.com/thecodacus/pithagoras, Apache-2.0); no
 code of it is in the package. The published package bundles into its server half jszip 3.10.2
 (https://github.com/Stuk/jszip, MIT OR GPL-3.0-or-later, used under the MIT licence) and its dependencies (pako,
-lie, readable-stream and others, MIT and Zlib), and into its browser half the icons it uses from react-icons 5.7.0
-(https://github.com/react-icons/react-icons, MIT), which are Lucide's (https://lucide.dev, ISC).
+lie, readable-stream and others: MIT, Zlib for pako, and ISC for inherits), and into its browser half the icons it uses from react-icons 5.7.0
+(https://github.com/react-icons/react-icons, MIT), which are Lucide's (https://lucide.dev, ISC). The licence texts of the packages bundled into the server half are in
+THIRD-PARTY-LICENSES.
 
 The package does not contain the OnlyOffice Document Server. The portal pulls its image (onlyoffice/documentserver) from
 Docker Hub; the community edition is licensed under the GNU Affero General Public License v3.0

@@ -1,15 +1,14 @@
 /**
- * OOXML primitives for pithagoras-office: parse docx/xlsx into text and comments, apply quote-based
+ * OOXML primitives for @pithagoras/office: parse docx/xlsx into text and comments, apply quote-based
  * edits to a document.xml string, and rewrite the zip around changed parts. All functions here are
- * pure over Buffers/strings (no fs, no settings, no network), per the contracts file; store.ts owns
+ * pure over Buffers/strings (no fs, no settings, no network); store.ts owns
  * disk, tools.ts owns the tool surface.
  *
- * ZIP I/O is a small synchronous reader/writer on node:zlib rather than jszip: the contract gives
- * parseDocx/parseXlsx/rewriteZip synchronous signatures (the ping diff and the office_* tools run
+ * ZIP I/O is a small synchronous reader/writer on node:zlib rather than jszip: parseDocx/parseXlsx/rewriteZip
+ * are synchronous (the ping diff and the office_* tools run
  * them inline), and jszip only exposes async load/generate. The writer keeps entry order and is
  * content-preserving -- every untouched entry re-extracts byte-identical -- but recompresses, so an
- * output zip is NOT compression-byte-identical to its input (accepted deviation from the plan's
- * "byte-for-byte", noted in .office-contracts.md). node builtins only; jszip stays for templates.
+ * output zip is NOT compression-byte-identical to its input. node builtins only; jszip stays for templates.
  */
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 
@@ -244,7 +243,7 @@ function wtSpans(content: string, base: number): Span[] {
 type Para = { contentStart: number; contentEnd: number }; // paragraph-content offsets in the XML string (self-closing w:p: equal)
 
 /** Every top-level w:p of a document.xml body in order. Nested paragraphs (text boxes, w:txbxContent) are out of scope
- *  by contract ("w:p > w:r > w:t"); such content would be read as the outer paragraph's trailing run and editing it is unsupported. */
+ *  (only "w:p > w:r > w:t" is read); such content would be read as the outer paragraph's trailing run and editing it is unsupported. */
 function findParagraphs(xml: string): Para[] {
   const paras: Para[] = [];
   for (const m of xml.matchAll(/<w:p(?:\s[^>]*?)?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) {
@@ -270,7 +269,7 @@ function paragraphText(content: string): string {
  * Extract a docx: paragraph texts (one entry per w:p, in order, empty paragraphs kept as "") joined with
  * "\n" into `text`, plus the word/comments.xml comments. Missing word/document.xml throws {code:"missing_part"};
  * a missing comments part is simply no comments. Runs are read as plain text: w:tab/w:br and other run children
- * contribute nothing (simplification per contract).
+ * contribute nothing (a simplification).
  */
 export function parseDocx(buf: Buffer): { text: string; paragraphs: string[]; comments: Comment[] } {
   const parts = readZipParts(buf);
@@ -392,7 +391,7 @@ function columnOf(ref: string): number { // "AB12" -> 27 (zero-based), -1 when t
 
 /**
  * Extract an xlsx: sheet names in workbook order, and per sheet a dense grid of cell strings -- sparse cells
- * are filled to the farthest used row/column with "" (plan simplicity note: grids, not sparse maps). The
+ * are filled to the farthest used row/column with "" (grids, not sparse maps). The
  * materialized grid is bounded (see MAX_GRID_ROWS/MAX_GRID_COLS/MAX_SHEET_CELLS/MAX_TOTAL_GRID_CELLS): a sheet
  * that would densify past its share of the cell budget gets only the affordable leading rows, and truncatedSheets
  * names it so callers can say "those far-out cells were not read". Values:
@@ -465,7 +464,7 @@ function parseSheet(xml: string, sharedStrings: string[], budget: { left: number
   for (const m of sheetData[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
     if (m.index === undefined) continue;
     const attrs = parseAttributes(m[1]);
-    if (!attrs["r"]) continue; // no reference: position unknown, skip (kept simple per plan)
+    if (!attrs["r"]) continue; // no reference: position unknown, skip (kept simple)
     const row = Number.parseInt(attrs["r"].replace(/^[A-Z]+/, ""), 10);
     const col = columnOf(attrs["r"]);
     if (col < 0 || !Number.isFinite(row) || row < 1) continue;
@@ -515,7 +514,7 @@ function asBuffer(value: string | Buffer): Buffer {
  * collide only by case are deduped last-one-wins, jszip behavior): OOXML part names are treated case-tolerantly
  * in several of Word/DS' code paths, so a key like "WORD/DOCUMENT.XML" over an archive holding word/document.xml
  * OVERWRITES the existing part IN PLACE (its original name is kept) instead of creating a shadow duplicate that
- * could win on load. Accepted deviation (noted in the contracts file): the output is CONTENT-preserving -- every
+ * could win on load. The output is CONTENT-preserving -- every
  * untouched entry re-extracts byte-identical to its original uncompressed bytes, entry order is kept where this
  * writer allows (replacements stay put, new parts are appended) -- but the zip as a whole is NOT
  * compression-byte-identical to the input: unchanged deflate entries are recompressed and rewritten with fresh

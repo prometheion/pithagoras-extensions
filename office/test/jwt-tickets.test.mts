@@ -112,7 +112,7 @@ test("tickets: malformed tokens -> null (never throws)", () => {
   assert.equal(verifyTicket(Buffer.from("|1700000000000|abcdef").toString("base64url"), SECRET), null); // empty docId section
 });
 
-/* ---------------- purpose separation (S3) ---------------- */
+/* ---------------- purpose separation ---------------- */
 
 test("jwt: a signed typ claim separates token families; each verifier pins its own purpose", () => {
   const cfg = signJwt({ docId: "d1" }, 60_000, SECRET, "editor-config");

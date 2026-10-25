@@ -1,6 +1,6 @@
 /**
  * Unit tests for src/live.ts' presence TTL: a tracked (server-minted or heartbeat-fed) user auto-expires after
- * the TTL instead of holding the lock forever (S2 stuck-lock DoS); a live session stays by heartbeating;
+ * the TTL instead of holding the lock forever; a live session stays by heartbeating;
  * co-edit semantics are otherwise unchanged (a fresh open still locks, the explicit flag is independent).
  * Pure in-memory module -- no portal, no fs; short real timers only.
  */

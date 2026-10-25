@@ -1,4 +1,4 @@
-/* pithagoras-office -- its own chrome. Deliberately NOT the portal card look: an office suite reads as a
+/* @pithagoras/office -- its own chrome. Deliberately NOT the portal card look: an office suite reads as a
    workbench -- a thin bar, a list of files like a file manager, chips that say who is in what. The colours are
    the portal's theme variables, so a chosen theme paints it too (the same tokens its Tailwind utilities use). */
 
@@ -210,7 +210,7 @@
   color: rgb(var(--fg));
 }
 
-/* "The agent changed it while you had it open" -- the tier-1 badge of plan 5.7, until the refresh handshake lands. */
+/* "The agent changed it while you had it open" -- a badge until the editor can reload the file by itself. */
 .po-chip-stale {
   border-color: rgb(var(--danger) / 0.6);
   background: rgb(var(--danger) / 0.12);

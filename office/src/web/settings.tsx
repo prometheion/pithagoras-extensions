@@ -92,7 +92,7 @@ export function OfficeSettings() {
         )}
       </div>
 
-      {/* Enabling it: with the memory warning before a first start (plan 2.4/5.1: ~4 GB RAM recommended at runtime). */}
+      {/* Enabling it: with the memory warning before a first start (~4 GB RAM recommended at runtime). */}
       {!state.enabled && (
         <portal.ui.WarnBanner>
           {t("About 4 GB of RAM is recommended for the Document Server while it runs. Its image is pulled on the first start and takes a while; its working data keeps in a container volume, every save comes back to the library.")}
@@ -138,7 +138,7 @@ export function OfficeSettings() {
       {/* Where the things live, and who can reach them: said once, as fact. */}
       <div className="space-y-1">
         <p className="po-exposure">{t("Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.")}</p>
-        <p className="po-exposure">{t("The editor itself loads from the Document Server's own origin on this machine, so it works from here over plain HTTP; remote viewers reach the library, but not the live editor (a portal-side proxy would unlock that). The server-facing document fetch and callback endpoints are bound to 127.0.0.1 only.")}</p>
+        <p className="po-exposure">{t("The editor loads through this portal's own proxy, behind its sign-in, so remote viewers have the live editor as well. The endpoints where the Document Server fetches documents and reports saves are bound to 127.0.0.1 only.")}</p>
       </div>
     </div>
   );

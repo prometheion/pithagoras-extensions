@@ -1,13 +1,12 @@
 /**
- * Cross-check of the zip reader/writer against NON-TRIVIAL committed files (plan 7 "docx fixture
- * round-trip", contract tests W5): parse fixtures/sample.docx and fixtures/sample.xlsx with
+ * Cross-check of the zip reader/writer against NON-TRIVIAL committed files : parse fixtures/sample.docx and fixtures/sample.xlsx with
  * ooxml.parseDocx/parseXlsx and assert the exact structure, then edit a quote that SPANS two w:t runs
  * in the docx through ooxml.editDocx + rewriteZip and re-parse the output.
  *
  * The fixtures are binary files committed in this extension's fixtures/ directory; they were generated
  * by scripts/make-fixtures.mjs (hand-written OOXML parts zipped through OUR OWN ooxml.writeZip, so these
  * tests read back material our own writer produced -- if the reader and writer disagree, that shows here).
- * Re-generate with: env -u NODE_ENV node scripts/make-fixtures.mjs  (deterministic output).
+ * Re-generate with: node scripts/make-fixtures.mjs (run in office/).
  * jszip is used below ONLY to pull a part's raw bytes out for editDocx input -- parsing and editing go
  * through ooxml exclusively, exactly as the runtime paths do.
  */
@@ -46,7 +45,7 @@ test("sample.docx: five paragraphs in order (the third empty), cross-run text jo
     // p4: numeric (&#8212;) and hex (&#x20AC;) character references decoded via fromCodePoint
     "Footnote: \u2014 total is \u20AC42,300.",
   ]);
-  // `text` is the paragraphs joined with "\n" (parseDocx contract) -- exactly one newline where p2 sits empty
+  // `text` is the paragraphs joined with "\n" -- exactly one newline where p2 sits empty
   assert.equal(d.text, d.paragraphs.join("\n"));
   assert.ok(d.text.includes("discrepancy.\n\nNote:"), "the empty paragraph contributes a blank line to text");
 });
@@ -72,7 +71,7 @@ test("sample.docx: editDocx replaces a quote that SPANS two runs; the rewritten 
   // ("the audit found a discrepancy.") -- a classic Word run-split that naive substring edits corrupt.
   const edited = editDocx(xml, [
     { quote: "revised after the", replacement: "walked back before any" },
-    // a second op on the RESULT (ops are sequential per contract): single-run target in paragraph 0
+    // a second op on the RESULT (ops apply one after the other): single-run target in paragraph 0
     { quote: "Quarterly & annual report", replacement: "Quarterly and annual report" },
   ]);
 
@@ -85,7 +84,7 @@ test("sample.docx: editDocx replaces a quote that SPANS two runs; the rewritten 
     "Note: 5 & 7 were checked against the ledger (see <Appendix B>).",
     "Footnote: \u2014 total is \u20AC42,300.",
   ]);
-  // untouched parts survive byte-for-byte in CONTENT (rewriteZip contract), comments included
+  // untouched parts survive byte-for-byte in CONTENT, comments included
   assert.deepEqual(after.comments, parseDocx(DOCX).comments);
 
   const beforeParts = await JSZip.loadAsync(DOCX);

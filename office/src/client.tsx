@@ -3,23 +3,24 @@ import { Suspense, useState } from "react";
 import type { ChatProps, PanelProps, Portal, ToolCallView } from "@pithagoras/extension-api";
 import { LuFileText, LuPresentation, LuTable } from "react-icons/lu";
 import type { ReactNode } from "react";
-import { officeUrl, portal, setPortal, t } from "./portal";
+import { msg, officeUrl, portal, setPortal, t } from "./portal";
 import { refreshOfficeState, useOfficeState } from "./web/state";
 import { api, sayError } from "./web/api";
 import { compareDocs, loadSort, saveSort, SortBar, type SortChoice } from "./web/sort";
 import { editorsIn } from "./office-ui";
+import { de } from "./de";
 
 /**
- * pithagoras-office: its browser half. The Office tab -- the full library with its own workbench chrome (style.css),
+ * @pithagoras/office: its browser half. The Office tab -- the full library with its own workbench chrome (style.css),
  * opened documents in a full-bleed OnlyOffice editor; the office panel beside an agent/project's home chat, the tool
- * cards of its office_* calls, and its page in Settings where the Document Server is run. The docs extension's slot
- * shape is mirrored: nav.page + chat.panel + chat.tool entries + settings.page (docs/web/client.js). Its heavy parts
+ * cards of its office_* calls, and its page in Settings where the Document Server is run. It registers
+ * nav.page + chat.panel + chat.tool entries + settings.page. Its heavy parts
  * load as chunks, the way Understory's do (ui.lazy + Suspense).
  */
 
 /** A document beside a home chat: every UNOWNED one (workspace-scanned or human-made -- shared by all chats),
  * plus ones it owns or a comment mention granted it -- derived from GET /state (the server half keeps no per-chat
- * route; owner and grants ride in every doc's meta, plan 2.1). The sort choice is the one of web/sort.tsx,
+ * route; owner and grants ride in every doc's meta). The sort choice is the one of web/sort.tsx,
  * persisted under "po-sort" so this panel and the full Office page share it. */
 function OfficePanel({ chat }: PanelProps) {
   portal.locale.use();
@@ -189,18 +190,29 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
   );
 }
 
+function PageFallback() {
+  portal.locale.use();
+  return <div className="flex flex-1 items-center justify-center text-sm text-fg-subtle">{t("Loading…")}</div>;
+}
+
+function SettingsFallback() {
+  portal.locale.use();
+  return <p className="text-sm text-fg-subtle">{t("Loading…")}</p>;
+}
+
 export default function office(given: Portal): void {
   setPortal(given);
+  portal.locale.add("de", de);
   // Its heavy parts, fetched only when they are opened (the Understory idiom).
   const Page = portal.ui.lazy(() => import("./web/library"), "OfficePage");
   const Settings = portal.ui.lazy(() => import("./web/settings"), "OfficeSettings");
-  const fallback = <div className="flex flex-1 items-center justify-center text-sm text-fg-subtle">{t("Loading…")}</div>;
+  const fallback = <PageFallback />;
 
-  // The Office tab: the full library at /x/pithagoras-office/office, its chrome its own (style.css), a document
+  // The Office tab: the full library at /x/@pithagoras/office/office, its chrome its own (style.css), a document
   // open as ?doc=<id> in the whole page.
   portal.slots.register("nav.page", {
     id: "office",
-    title: t("Office"),
+    title: msg("Office"),
     icon: LuPresentation,
     component: () => (
       <Suspense fallback={fallback}>
@@ -209,15 +221,18 @@ export default function office(given: Portal): void {
     ),
   });
 
-  // Beside every chat -- shown for all, as the docs' panel is: every unowned (workspace-scanned / human-made) doc
+  // Beside every chat -- shown for all: every unowned (workspace-scanned / human-made) doc
   // is shared by every chat, plus what this one owns or was granted; where there is nothing at all, it says so.
   portal.slots.register("chat.panel", {
     id: "office",
     name: "office",
-    title: t("Office"),
+    title: msg("Office"),
     icon: LuPresentation,
     component: OfficePanel,
-    useButton: () => ({ title: t("The office documents this chat owns or was granted") }),
+    useButton: () => {
+      portal.locale.use();
+      return { title: t("The office documents this chat owns or was granted") };
+    },
   });
 
   // A call of one of the tools, in place of the portal's card for a finished one that names its document.
@@ -228,13 +243,13 @@ export default function office(given: Portal): void {
   // Its page in Settings: the Document Server's service panel.
   portal.slots.register("settings.page", {
     id: "office",
-    title: t("Office"),
+    title: msg("Office"),
     icon: LuPresentation,
     search: [
-      { title: t("Office"), words: "office document docx xlsx word sheet spreadsheet onlyoffice document server container image tag pull co-editing library workspace scan rescan export trash" },
+      { title: msg("Office"), words: "office document docx xlsx word sheet spreadsheet onlyoffice document server container image tag pull co-editing library workspace scan rescan export trash" },
     ],
     component: () => (
-      <Suspense fallback={<p className="text-sm text-fg-subtle">{t("Loading…")}</p>}>
+      <Suspense fallback={<SettingsFallback />}>
         <Settings />
       </Suspense>
     ),

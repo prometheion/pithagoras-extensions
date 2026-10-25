@@ -1,21 +1,21 @@
 /**
  * In-memory co-editing registry, shared by src/callback.ts (DS status-1 presence + the lock commands of the
- * plan 5.3 state machine), src/server.ts (the /state poller and editor-config minting) and later src/ping.ts.
+ * callback state machine), src/server.ts (the /state poller and editor-config minting) and later src/ping.ts.
  *
  * Deliberately dependency-free -- no fs, no node:fs, no portal(), no store import: pure process memory keyed by
  * docId, so every module (and every unit test) can import it anywhere without a started server half or a data
  * dir. The ONE piece of external knowledge pollState needs (the document's current mtimeMs revision) is injected
  * through setMetaResolver: server.ts registers `docId -> store.getDoc(docId)?.mtimeMs ?? null` once at boot, and
- * until then (or in tests without a resolver) pendingRev stays null. The contract's two-argument pollState shape
- * is kept exactly for that reason -- the resolver lives at module scope instead of becoming a third parameter.
+ * until then (or in tests without a resolver) pendingRev stays null. pollState keeps its two
+ * arguments for that reason -- the resolver lives at module scope instead of becoming a third parameter.
  *
  * State is process-local by design: after a portal restart nobody is known to be editing until the DS session's
  * next status-1 callback or the next editor-config mint calls setUser again, which is the correct reading of
  * "closed with no changes" for a fresh process.
  *
- * Lock model (plan 5.3 table): an EXPLICIT flag carries the command-based entries -- status 2 "unlock after
- * persist", status 4 "unlock", status 6 "keep locked" -- while status 1's row says "set users[] from body
- * (lock = users.length>0)", so presence itself also counts as a lock: someone who opened the editor (a
+ * Lock model: an EXPLICIT flag carries the command-based entries -- status 2 "unlock after
+ * persist", status 4 "unlock", status 6 "keep locked" -- while status 1 says "set users[] from the body
+ * (locked while users.length > 0)", so presence itself also counts as a lock: someone who opened the editor (a
  * server-minted setUser before any callback, or a DS connect we are about to hear about) keeps the doc locked
  * until they leave. pollState therefore reports `locked` when EITHER holds; unlocking never hides a user that is
  * still tracked as present. Conservative on purpose: a false "still editing" badge beats a false "free to edit".
@@ -36,7 +36,7 @@
 export type LiveUser = { id: string; name?: string; at: number };
 
 /** A tracked entry plus its expiry (internal: usersOf returns LiveUser copies without it).
- * The TTL closes the stuck-lock DoS of S2: presence is minted at editor-config time (a single shared seat,
+ * The TTL closes the stuck-lock problem: presence is minted at editor-config time (a single shared seat,
  * EDITOR_USER id "portal-user") and only cleared unconditionally on a terminal DS close -- so a failed or
  * abandoned open (api.js never loads, tab closed before DS connects) left the doc locked FOREVER. With a TTL
  * such a stuck entry auto-expires; a LIVE session keeps itself fresh because every status-1 heartbeat re-calls
@@ -108,7 +108,7 @@ export function setUser(docId: string, user: { id: string; name?: string }, join
   }
 }
 
-/** The explicit lock flag (plan 5.3: statuses 1/2/4/6 set it). */
+/** The explicit lock flag (callback statuses 1/2/4/6 set it). */
 export function setLocked(docId: string, isLocked: boolean): void {
   if (isLocked) locked.add(docId);
   else locked.delete(docId);
@@ -120,7 +120,7 @@ export function isLocked(docId: string): boolean {
 }
 
 /**
- * The poll answer of the /state route (plan 5.7 tier-1 fallback, polled every 5 s by the editor page):
+ * The poll answer of the /state route (polled every 5 s by the editor page):
  * `locked` -- an explicit lock flag OR at least one tracked present user (see module header for the model);
  * `pendingRev` -- the document's current mtimeMs when a resolver is registered and reports it as strictly
  * NEWER than clientMtimeMs (an agent revision landed since the client opened it; same number = same revision

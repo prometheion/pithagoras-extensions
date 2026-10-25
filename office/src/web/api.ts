@@ -2,7 +2,7 @@ import { portal } from "../portal";
 
 /**
  * What the browser half asks of its server half: the routes under the address the portal gives the package
- * (portal.api.url, core-mounted at /api/x/pithagoras-office, session-gated there). A request made while the
+ * (portal.api.url, mounted by the portal at /api/x/@pithagoras/office, session-gated there). A request made while the
  * server half is not running is refused as one the server refused is.
  */
 
@@ -40,7 +40,7 @@ export interface OfficeContainer {
   pull?: OfficePull | null;
 }
 
-/** GET /state -- the payload of the 5 s poll (plan 5.7 tier 1): settings, container, every doc, who is in what. */
+/** GET /state -- the payload of the 5 s poll : settings, container, every doc, who is in what. */
 export interface OfficeState {
   enabled: boolean;
   imageTag: string;
@@ -87,7 +87,7 @@ export const api = {
   exportUrl: (id: string) => portal.api.url(`/documents/${encodeURIComponent(id)}/export`),
 };
 
-/** A refusal of the server half, in words for where it says the rest. The ApiError of core's json() carries
+/** A refusal of the server half, in words for where it says the rest. The ApiError of the portal's json() carries
  * exactly that message (the { error } field), so a failure of POST /documents reaches an ErrorBanner
  * verbatim, never a dead click. */
 export function sayError(e: unknown): string {

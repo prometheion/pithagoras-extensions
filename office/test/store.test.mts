@@ -31,7 +31,7 @@ test("templateDocx: minimal docx parses with ooxml.parseDocx and carries real co
   const parsed = parseDocx(buf); // throws if the zip or word/document.xml is missing/broken
   assert.deepEqual(parsed.paragraphs, ["New document"]);
   assert.equal(parsed.comments.length, 0);
-  // every part the contract names must be present in the archive
+  // every part a docx needs must be present in the archive
   const zip = await JSZip.loadAsync(buf);
   for (const name of ["[Content_Types].xml", "_rels/.rels", "word/document.xml", "word/styles.xml"]) assert.ok(zip.file(name), `missing ${name}`);
 });

@@ -1,5 +1,5 @@
 /**
- * pithagoras-office settings: dataDir()/settings.json, merged over defaults field by field.
+ * @pithagoras/office settings: dataDir()/settings.json, merged over defaults field by field.
  *
  * Pure over a root directory -- no portal calls happen here except through the `root` default
  * (dataDir()), and no logging: a missing or corrupt file yields the defaults SILENTLY. The server

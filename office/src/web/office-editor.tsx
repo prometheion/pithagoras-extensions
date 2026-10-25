@@ -8,9 +8,9 @@ import { useOfficeState } from "./state";
  * The Office editor's host: the page's half of `new DocsAPI.DocEditor`. It asks POST /editor-config for its
  * document, loads the Document Server's api.js ONCE (the script is not idempotent -- a second load on the same
  * page breaks it), drops ONLY apiJs from the answered config and hands the rest to DocsAPI as-is: the JWT covers
- * exactly that object (plan 5.6 signs what is sent, so nothing is added to it). The lock badge ("N editing now")
- * and the "agent updated this document" badge come from the shared 5 s poll of /state -- plan 5.7 tier 1; the
- * real refreshFile handshake that would replace the page refresh is deferred (M0/M4).
+ * exactly that object (the JWT signs what is sent, so nothing is added to it). The lock badge ("N editing now")
+ * and the "agent updated this document" badge come from the shared 5 s poll of /state; the
+ * editor's own refreshFile handshake, which would replace the page refresh, is not used yet.
  */
 
 /** What DocsAPI leaves on window once api.js has loaded: only what is used, typed as it behaves. */
@@ -109,7 +109,7 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   }, [docId]);
 
   const users = state?.locks[docId] ?? [];
-  // An agent wrote a newer revision than the one this view opened on (plan 5.7 tier-1 badge).
+  // An agent wrote a newer revision than the one this view opened on.
   const stale = openedAt.current !== null && !!doc && doc.mtimeMs > openedAt.current;
 
   return (

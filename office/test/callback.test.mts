@@ -1,5 +1,5 @@
 /**
- * Unit tests for src/callback.ts (+ src/live.ts): the DS callback state machine of plan 5.3. Everything is
+ * Unit tests for src/callback.ts (+ src/live.ts): the DS callback state machine. Everything is
  * self-contained -- tmp data dirs, self-minted HS256 JWTs, a LOCAL node:http server standing in for the
  * Document Server's saved-file/changes endpoints, and synthetic IncomingMessage/ServerResponse pairs (a
  * Readable stream + a recording object). Nothing here reaches portal() or the real data dir: every handler is
@@ -237,7 +237,7 @@ test("stale key (revHash of an older mtime): document NOT overwritten, JSON erro
 
   await server.close();
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(json(res), { error: 1 }); // non-zero -> the editor shows a save failure, per plan 4
+  assert.deepEqual(json(res), { error: 1 }); // non-zero -> the editor shows a save failure
   assert.ok(fs.readFileSync(docFile(root, doc)).equals(original), "file untouched");
   const after = getDoc(doc.docId, root)!;
   assert.equal(after.mtimeMs, before.mtimeMs);
@@ -499,7 +499,7 @@ test("retry: all attempts fail -> JSON error, doc untouched, lock left as-is", a
   const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
 
   await server.close();
-  assert.equal(res.statusCode, 200); // DS reads the JSON error field, not the HTTP code (plan 4)
+  assert.equal(res.statusCode, 200); // DS reads the JSON error field, not the HTTP code
   assert.deepEqual(json(res), { error: 1 });
   assert.equal(server.savedAttempts, 3, "1 + retryDelaysMs.length attempts");
   assert.ok(fs.readFileSync(docFile(root, doc)).equals(original), "existing file never deleted or replaced");
@@ -545,7 +545,7 @@ test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key ->
 });
 
 /* ------------------------------------------------------------------ */
-/* the bare module-level handler + configure (T-WIRE wiring)           */
+/* the bare module-level handler + configure (server wiring)              */
 /* ------------------------------------------------------------------ */
 
 test("bare handleCallback: 503 until configure; after configure it serves requests", async () => {

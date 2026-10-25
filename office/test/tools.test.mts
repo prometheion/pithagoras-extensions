@@ -1,6 +1,6 @@
 /**
- * Unit tests for src/tools.ts (the agent's office_* tools, plan 5.4/5.5). Run from the repo ROOT:
- *   env -u NODE_ENV node --import tsx --test extensions/office/test/tools.test.mts
+ * Unit tests for src/tools.ts (the agent's office_* tools). Run from office/:
+ *   node --import tsx --test test/tools.test.mts
  * Self-contained: tmp dataDir per test, real docx/xlsx via store.createDoc (real templates), comment
  * XML injected with ooxml.rewriteZip, every portal bit (extend registrar, chat->folder, folders list,
  * inFolder, root, record, log) injected through registerTools -- the tests NEVER reach portal().
@@ -221,7 +221,7 @@ test("scope: owned and granted docs visible; another home's doc invisible to lis
   assert.equal(foreign, missing);
   assert.match(foreign, /^error:not_found /);
 
-  // the granted doc IS readable (xlsx grid path per plan 5.5)
+  // the granted doc IS readable (xlsx grid path)
   const shared = (await tool(s, "office_read").execute("c", { id: granted.docId })) as ToolResult;
   assert.ok(shared.content[0].text.includes('"Shared One"'));
 });
@@ -287,7 +287,7 @@ test("office_edit: applies ops to the stored bytes, bumps the revision; old base
   assert.match(qnf, /^error:quote_not_found /);
   assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "Final words"); // still nothing written
 
-  // spreadsheets cannot be edited in v1 (plan 5.5: document.xml run-level edits are Word-only)
+  // spreadsheets cannot be edited in v1 (document.xml run-level edits are Word-only)
   const sheet = await createDoc({ title: "Grid", type: "cell", owner: "chat-atlas-home" }, s.root);
   assert.match(await refused(t.execute("e5", { id: sheet.docId, ops: [{ quote: "a", replacement: "b" }], baseRevision: getDoc(sheet.docId, s.root)!.mtimeMs }), "xlsx edit"), /^error:unsupported_format /);
 
@@ -363,7 +363,7 @@ test("office_comments: docx lists comment ids/authors/text + grants; xlsx -> uns
   const bareRes = (await tool(s, "office_comments").execute("cm2", { id: bare.docId })) as ToolResult;
   assert.match(bareRes.content[0].text, /Comments \(0\):\n\(none\)/);
 
-  // xlsx: the unsupported note with the docs-style code prefix (comments arrive in M4)
+  // xlsx: the unsupported note with the code prefix (xlsx comments are not read yet)
   const sheet = await createDoc({ title: "Sheet", type: "cell", owner: "chat-atlas-home" }, s.root);
   assert.match(await refused(tool(s, "office_comments").execute("cm3", { id: sheet.docId }), "xlsx comments"), /^error:unsupported_format /);
 });
@@ -407,7 +407,7 @@ test("every refusal the agent reads starts with \"error:<code> \"", async () => 
 });
 
 /* ------------------------------------------------------------------ */
-/* the wake drain side (plan 5.4 step 4)                                */
+/* the wake drain side                                */
 /* ------------------------------------------------------------------ */
 
 test("the factory also registers the UI_RECEIVE ping drain for office chats only", () => {

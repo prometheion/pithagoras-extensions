@@ -1,27 +1,27 @@
 /**
- * pithagoras-office container lifecycle: the OnlyOffice Document Server container behind every edit.
+ * @pithagoras/office container lifecycle: the OnlyOffice Document Server container behind every edit.
  *
  * The container is plain Docker (pithagoras-docker) with:
- * - a pinned image tag from settings (never :latest -- plan 5.1),
+ * - a pinned image tag from settings (never :latest),
  * - the portal's shared network (`HostConfig.NetworkMode = await docker.sharedNetwork()`), so the DS container
- *   and the in-process loopback listener reach each other on 127.0.0.1 in BOTH deployment shapes (plan 5.1/5.2),
- * - a named volume for /var/www/onlyoffice/Data (DS's internal storage; plan 5.1),
- * - exactly the four JWT env vars the 10.x community image documents (plan 4): one secret covers config tokens
+ *   and the in-process loopback listener reach each other on 127.0.0.1 in BOTH deployment shapes,
+ * - a named volume for /var/www/onlyoffice/Data (DS's internal storage),
+ * - exactly the four JWT env vars the 10.x community image documents: one secret covers config tokens
  *   AND callback verification in every direction, so a per-direction setup is unnecessary.
  *
  * The DS origin -- where the editor page and document.url point -- is fixed by the deployment shape (there are no
  * published ports under shared networking; the stock nginx listens on :80 of the whole shared netns) and is
  * recorded in ds.json at create time, which stays the single source of truth for it:
  * - host mode  -> "http://127.0.0.1" (DS sits on the machine's own loopback).
- * - container:<id> mode -> the recorded origin is the string `container:<id>` itself -- NOT a URL yet. The plan
- *   defers browser reach in that shape to the M0 spike-2 decision (nginx bind override vs portal reverse-proxy vs
- *   declared local-only), so there is no honest browser-facing URL to write at create time; this marker carries the
- *   portal container id so a later wave can turn it into one. DS-side fetches (document.url, callback) use the
+ * - container:<id> mode -> the recorded origin is the string `container:<id>` itself -- NOT a URL. The browser
+ *   cannot reach the editor in that shape yet (it would take an nginx bind override or a reverse proxy in the portal),
+ *   so there is no honest browser-facing URL to write at create time; this marker carries the portal container id so
+ *   a later version can turn it into one. DS-side fetches (document.url, callback) use the
  *   loopback listener's own address and never read this field.
  *
- * What the plan does NOT mandate here: a HostConfig.Memory cap. The ~4 GB number in the plan is a RAM RECOMMENDATION
- * ("system requirements RAM >= 4 GB", surfaced as a warning before first start), not an enforced limit -- no cap is
- * set, so a document save under load cannot be OOM-killed mid-write. (Documented divergence.)
+ * No HostConfig.Memory cap is set. The ~4 GB figure is a RAM RECOMMENDATION ("system requirements RAM >= 4 GB",
+ * surfaced as a warning before first start), not an enforced limit, so a document save under load cannot be
+ * OOM-killed mid-write.
  *
  * Container identity/adopt: `containers.get(DS_NAME)` finds one the extension made; if it is there we NEVER recreate
  * or restart it -- a running one yields { started: false }, a stopped one is simply started. A container the portal
@@ -29,14 +29,14 @@
  * extension's ownership is left to the Docker Settings page (out of scope for the lifecycle here).
  *
  * User intent: `stopContainer` records a user-stopped marker FILE in the data dir (`user-stopped`) -- a file, not
- * memory, so a portal restart does not revive what the user stopped (plan 5.1: "lookAfter keeps a user-started
- * container alive but never resurrects one the user stopped"). Any `ensureContainer` success clears it: an explicit
+ * memory, so a portal restart does not revive what the user stopped (lookAfter keeps a user-started
+ * container alive but never resurrects one the user stopped). Any `ensureContainer` success clears it: an explicit
  * ensure is by definition a user start request (settings enable / POST /container/start), so self-clearing keeps the
  * two functions consistent without a second "unstop" call.
  *
  * Module state: `pullState` (the last pull progress reported to status()) is plain module scope on purpose. The
- * server half outlives re-imports within one process, and the in-memory pull position is ephemeral by contract
- * ("held in memory", plan 5.1) -- a restart simply starts with no progress to show until the next ensure.
+ * server half outlives re-imports within one process, and the in-memory pull position is ephemeral by design
+ * (held in memory) -- a restart simply starts with no progress to show until the next ensure.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -58,16 +58,16 @@ export const USER_STOPPED_FILE = "user-stopped";
 
 type DsRecord = { containerId: string; origin: string; imageTag: string };
 
-/** The last pull progress, in memory only, so status() can report it without re-pulling (contract + plan 5.1). */
+/** The last pull progress, in memory only, so status() can report it without re-pulling */
 let pullState: PullState | null = null;
 
 /** One log line: portal().log where the server half started it, console.error elsewhere -- lazy, so unit tests that
  * pass explicit docker/root never touch portal() at all. */
 function log(line: string): void {
   try {
-    portal().log(`pithagoras-office: ${line}`);
+    portal().log(`@pithagoras/office: ${line}`);
   } catch {
-    console.error(`[pithagoras-office] ${line}`);
+    console.error(`[@pithagoras/office] ${line}`);
   }
 }
 
@@ -75,7 +75,7 @@ function noDocker(): Error {
   return Object.assign(new Error("no_docker"), { code: "no_docker" });
 }
 
-/** docker ?? host.docker(), guarded: undefined or unreachable -> the no_docker error, as the contract fixes it. */
+/** docker ?? host.docker(), guarded: undefined or unreachable -> the no_docker error. */
 async function reachable(docker?: Docker): Promise<Docker> {
   const d = docker ?? hostDocker();
   if (!d || !(await d.available())) throw noDocker();
@@ -86,8 +86,8 @@ function resolvedRoot(root?: string): string {
   return root ?? dataDir();
 }
 
-/** The exact JWT env of the DS container (plan 4: four vars, one secret, covering every direction). The secret is
- * the trimmed content of dataDir()/jwt-secret, read HERE independently (contract amendment; server.ts creates the
+/** The exact JWT env of the DS container (four vars, one secret, covering every direction). The secret is
+ * the trimmed content of dataDir()/jwt-secret, read HERE independently (server.ts creates the
  * file at boot, so a missing file surfaces as its plain fs error). */
 function dsEnv(root: string): string[] {
   const secret = fs.readFileSync(path.join(root, "jwt-secret"), "utf8").trim();
@@ -190,7 +190,7 @@ async function ensureContainerOnce(
   });
 
   // The deployment shape decides both the NetworkMode and the recorded origin (host: "http://127.0.0.1",
-  // container:<id>: that string itself, turned into a real URL by whatever M0 spike-2 picks).
+  // container:<id>: that string itself, which has no browser URL yet).
   const networkMode = await d.sharedNetwork();
 
   let containerId: string;
@@ -241,8 +241,7 @@ export async function stopContainer(docker?: Docker, root?: string): Promise<voi
 
 /**
  * The running version: exactly `cat /var/www/onlyoffice/documentserver/GitVersion.json` in the container -- the
- * build file the stock image ships, whose DocEditorVersion is what DS reports about itself (the plan only says
- * "exec into container"; M0 re-verifies the path on the pinned tag). Never an error: a probe failure just leaves
+ * build file the stock image ships, whose DocEditorVersion is what DS reports about itself (the path is that of the pinned image tag). Never an error: a probe failure just leaves
  * `version` absent.
  */
 async function probeVersion(d: Docker): Promise<string | undefined> {

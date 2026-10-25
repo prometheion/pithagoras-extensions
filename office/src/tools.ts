@@ -1,20 +1,19 @@
 /**
- * The agent's office tools (plan 5.5): list, create, read, edit and list the comments of the documents
+ * The agent's office tools: list, create, read, edit and list the comments of the documents
  * in this home's office-library scope (store.docsForHome -- every UNOWNED doc: the workspace-scanned and
- * human-made docs are shared by all homes -- plus what this home owns or was granted), docs-extension-style
- * -- named by id, base-revision writes, coded error prefixes ("error:<code> <message>", the exact
- * docs convention with the "error:" prefix the office contract fixes).
+ * human-made docs are shared by all homes -- plus what this home owns or was granted), in the style of the
+ * portal's document tools -- named by id, base-revision writes, coded error prefixes ("error:<code> <message>").
  *
- * Ownership scope (plan 2.1): `registerTools` walks every chat through portal.chats.extend; for a
+ * Ownership scope: `registerTools` walks every chat through portal.chats.extend; for a
  * chat it resolves the workspace folder (chats.folder(chat.id)), finds it in folders.list() by path
  * and REGISTER ONLY when its kind is "agent" or "project". The tool scope is then docsForHome(home),
  * where `home` is the folder's home chat: the sessions working in that folder (chats.inFolder) are
  * its home chats, deterministically picked as the lowest id -- exactly ping.ts' resolveMention rule,
  * so a doc created here is owned by the same chat a mention wakes it to. Docs outside the scope are
  * invisible to every tool: office_read asks for them and hears the same "no document with that id"
- * as for a nonexistent one (docs convention -- no other chat's documents leak through).
+ * as for a nonexistent one (no other chat's documents leak through).
  *
- * Revision model (plan 5.5/5.7): the mtimeMs of the library file IS the revision. office_edit
+ * Revision model: the mtimeMs of the library file IS the revision. office_edit
  * takes baseRevision (= the mtimeMs office_read showed), GATES FIRST (>1 ms drift ->
  * "error:revision_mismatch ..." with the fresh mtime, nothing written), and store.persistBytes re-
  * gates strictly at write time anyway (ZERO tolerance: stat-vs-meta must match exactly). The agent is
@@ -24,18 +23,18 @@
  * ("error:revision_mismatch ...", naming the open editor session when one stands) -- re-read and retry.
  * A stale baseRevision always fails that way.
  *
- * Wakes (plan 5.4 step 4 -- "the drain side"): ping.ts only QUEUES wakes server-side and rings the
+ * Wakes (the drain side): ping.ts only QUEUES wakes server-side and rings the
  * bell with chats.tell(chatId, {type:"ping"}). The office pi extension registered from THIS factory
- * listens on the UI_RECEIVE bus event ("pithagoras:v1:ui:receive", the core/docs constant) and drains
+ * listens on the UI_RECEIVE bus event ("pithagoras:v1:ui:receive", the portal's UI event for a chat's extension) and drains
  * the queue per entry via pi.sendMessage({customType:"office-comment-ping", ...},
- * {deliverAs:"followUp", triggerTurn:true}), docs' hearPings pattern.
+ * {deliverAs:"followUp", triggerTurn:true}).
  *
  * Injection seams (unit tests must never reach portal()): registerTools(opts) takes the portal bits
  * -- chats.extend registrar, chat->folder lookup, folders list, folder->sessions, store root, audit
  * record fn, log fn. EVERY one defaults LAZY: the real portal() is read only when a default is used
  * (in production). Mutating ops (office_create, office_edit) call record({subject, reason, chatId})
- * after the write; the default seam is a one-line log via portal().log (ping.ts pattern -- T-WIRE may
- * pass a real audit sink).
+ * after the write; the default seam is a one-line log via portal().log (ping.ts pattern; a real audit sink can
+ * be passed).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -46,10 +45,10 @@ import { parseDocx, parseXlsx, editDocx, rewriteZip, type EditOp } from "./ooxml
 import { usersOf, isLocked } from "./live";
 import { drainWakeQueue } from "./ping";
 
-/** The UI_RECEIVE bus event chats.tell rings (core server extension-ui.ts and docs/ping.js use the same name). */
+/** The UI_RECEIVE bus event chats.tell rings (the portal's own document tools listen on the same name). */
 const UI_RECEIVE = "pithagoras:v1:ui:receive";
 
-/** An audit line recorded after every mutating op. `subject` is the doc title, `chatId` the acting home chat. T-WIRE may route this to a real audit sink. */
+/** An audit line recorded after every mutating op. `subject` is the doc title, `chatId` the acting home chat. */
 export type OfficeAuditEntry = { subject: string; reason: string; chatId: string };
 
 /** The folders list entries the factory resolves against (the shape of portal.folders.list() minus nothing it needs). */
@@ -63,7 +62,7 @@ export type ToolsDeps = {
   chatFolder?: (chatId: string) => string;
   /** The folders the agents work in. Default: () => portal().folders.list(). */
   folders?: () => ToolsFolderInfo[];
-  /** The sessions working in a folder path (home-chat resolution, plan 2.1). Default: (p) => portal().chats.inFolder(p). */
+  /** The sessions working in a folder path (home-chat resolution). Default: (p) => portal().chats.inFolder(p). */
   inFolder?: (folderPath: string) => { id: string }[];
   /** Store/state root override. Default: lazy portal().dataDir(). */
   root?: string;
@@ -100,7 +99,7 @@ function logLine(line: string): void {
   (cfg.log ?? ((l: string) => portal().log(l)))(line);
 }
 function record(entry: OfficeAuditEntry): void {
-  // Lazy default is a one-line log (T-WIRE may pass a real audit sink later via registerTools({record})).
+  // Lazy default is a one-line log (a real audit sink can be passed via registerTools({record})).
   (cfg.record ?? ((e: OfficeAuditEntry) => logLine(`office audit: ${e.subject}: ${e.reason} (chat ${e.chatId})`)))(entry);
 }
 
@@ -119,7 +118,7 @@ export function registerTools(opts?: ToolsDeps): void {
   registrar((pi, chat) => installForChat(pi, chat));
 }
 
-/** The chats.extend factory body (contract): resolve the chat's folder via chats.folder -> folders.list() by path -> kind; RETURN UNLESS "agent" or "project"; then register the tools on that chat's pi. */
+/** The chats.extend factory body: resolve the chat's folder via chats.folder -> folders.list() by path -> kind; RETURN UNLESS "agent" or "project"; then register the tools on that chat's pi. */
 function installForChat(pi: unknown, chat: { id: string }): void {
   let folderPath: string;
   try {
@@ -129,23 +128,23 @@ function installForChat(pi: unknown, chat: { id: string }): void {
     return; // gone chat or folder: nothing to register into
   }
   const folder = folders().find((f) => f.path === folderPath);
-  if (!folder || (folder.kind !== "agent" && folder.kind !== "project")) return; // not an agent/project home: contract says return, no tools
+  if (!folder || (folder.kind !== "agent" && folder.kind !== "project")) return; // not an agent/project home: no tools
   const home = homeChatFor(folder, chat.id);
   installTools(pi, home);
-  hearOfficePings(pi, chat.id); // plan 5.4 step 4: the same factory owns the drain side of the wake queue
+  hearOfficePings(pi, chat.id); // the same factory owns the drain side of the wake queue
 }
 
-/** The folder's home chat id (plan 2.1 -- meta.owner "is" the creating agent/project's home chat): the sessions working in the folder are its home chats, lowest id stands for them all (ping.ts' resolveMention rule). `fallback` covers a folder with no listed sessions -- the calling chat itself is in it by construction. */
+/** The folder's home chat id (meta.owner is the creating agent/project's home chat): the sessions working in the folder are its home chats, lowest id stands for them all (ping.ts' resolveMention rule). `fallback` covers a folder with no listed sessions -- the calling chat itself is in it by construction. */
 function homeChatFor(folder: ToolsFolderInfo, fallback: string): string {
   const chats = [...inChats(folder.path)].sort((a, b) => a.id.localeCompare(b.id));
   return chats.length ? chats[0]!.id : fallback;
 }
 
 /* ------------------------------------------------------------------ */
-/* refusals + tool plumbing (docs/tools.js idiom)                        */
+/* refusals + tool plumbing                                           */
 /* ------------------------------------------------------------------ */
 
-/** A refusal the agent reads: it starts with its code, "error:<code> <message>" (the office contract's fix of docs' `<code>: <message>`). */
+/** A refusal the agent reads: it starts with its code, "error:<code> <message>". */
 class Refusal extends Error {
   constructor(public readonly code: string, message: string) {
     super(`error:${code} ${message}`);
@@ -168,11 +167,11 @@ function failed(e: unknown): unknown {
   return new Refusal("failed", String(e));
 }
 
-/** `text` with a details side-channel, exactly docs' shape. */
+/** `text` with a details side-channel (the same shape as the portal's document tools). */
 const text = (content: string, details?: unknown) => ({ content: [{ type: "text", text: content }], ...(details !== undefined ? { details } : {}) });
 
 /** One office_* tool result must not blow the agent context on a huge grid or document; both office_read and
- * office_read's sibling office_comments truncate at this length with an explicit marker (docs' shape). */
+ * office_read's sibling office_comments truncate at this length with an explicit marker. */
 const MAX_READ_CHARS = 200_000;
 
 /** The library file of a doc (docs/<docId>/<title>.<ext>), or a not_found refusal. */
@@ -201,7 +200,7 @@ const lockLine = (doc: DocMeta) => {
 /* ------------------------------------------------------------------ */
 
 function installTools(pi: unknown, home: string): void {
-  const p = pi as any; // portal's extend factory hands a pi that carries registerTool (host mode) or not; docs' own tools use it untyped too.
+  const p = pi as any; // portal's extend factory hands a pi that carries registerTool (host mode) or not.
 
   /** A doc in THIS home's scope by id -- owner === home OR granted to home (docsForHome); anything else is `not_found` with the SAME words as a nonexistent id, so another home's docs do not leak into view. */
   function visibleDoc(id: unknown): DocMeta {
@@ -284,7 +283,7 @@ function installTools(pi: unknown, home: string): void {
       const buf = readBytes(doc);
       const lock = lockLine(doc);
       if (doc.ext === "xlsx") {
-        // Plan 5.5: office_read returns a grid of cell values for xlsx; its COMMENTS are not in v1 (xl/commentsN.xml + VML, M4).
+        // office_read returns a grid of cell values for xlsx; its COMMENTS are not read yet (xl/commentsN.xml + VML).
         const parsed = parseXlsx(buf); // throws {code:"invalid_zip"} -> corrupt
         const sheets = parsed.sheetNames.map((name) => {
           const rows = parsed.sheets[name] ?? [];
@@ -347,7 +346,7 @@ function installTools(pi: unknown, home: string): void {
       const base = Number(baseRevision);
       if (baseRevision === undefined || baseRevision === null || !Number.isFinite(base)) throw new Refusal("invalid", "baseRevision is the mtimeMs revision office_list/office_read showed you");
 
-      // GATE FIRST (contract): the meta as it stands now vs what the agent read; >1 ms drift means a save
+      // GATE FIRST: the meta as it stands now vs what the agent read; >1 ms drift means a save
       // moved since -- refuse with the FRESH mtime in the message, and write nothing. store.persistBytes
       // re-gates strictly at write time too, so this is belt and not only braces.
       let meta = getDoc(doc.docId, rootDir());
@@ -412,7 +411,7 @@ function installTools(pi: unknown, home: string): void {
     },
     execute: guarded(async ({ id }) => {
       const doc = visibleDoc(id);
-      if (doc.ext === "xlsx") throw new Refusal("unsupported_format", `"${doc.title}" is an .xlsx spreadsheet: its comments live in a different part layout and are not read in v1 (they arrive in M4)`);
+      if (doc.ext === "xlsx") throw new Refusal("unsupported_format", `"${doc.title}" is an .xlsx spreadsheet: its comments live in a different part layout and are not read yet`);
       const parsed = parseDocx(readBytes(doc)); // corrupt mapping via failed()
       const commentLines = parsed.comments.length ? parsed.comments.map((c) => `- ${c.id}  ${c.author}${c.date ? `  ${c.date}` : ""}: ${c.text.replace(/\n/g, " ")}`).join("\n") : "(none)";
       const grantLines = doc.grants.length ? doc.grants.map((g) => `- ${g.chatId}  via comment ${g.commentId}  at ${new Date(g.at).toISOString()}`).join("\n") : "(none -- only the owner can see this document)";
@@ -428,11 +427,11 @@ function installTools(pi: unknown, home: string): void {
 }
 
 /**
- * The drain side of plan 5.4 step 4 (docs' hearPings): on the UI_RECEIVE bell with data.type "ping"
+ * The drain side of the wake queue: on the UI_RECEIVE bell with data.type "ping"
  * -- which ping.ts rings per woken home via chats.tell(chatId, {type:"ping"}) -- take this chat's queued
  * wake entries off ping.ts' server-side queue and hand each to pi: shown to the person, delivered as a
  * follow-up that triggers a turn, carrying {docId, commentId} in details. A reloaded pi keeps the bus:
- * the handler of the one that went is removed on session shutdown (docs does exactly this).
+ * the handler of the one that went is removed on session shutdown.
  */
 function hearOfficePings(pi: unknown, chatId: string): void {
   const p = pi as any;

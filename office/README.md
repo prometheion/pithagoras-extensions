@@ -33,8 +33,8 @@ purpose, in the same page).
   with **Rescan**, **in place**: the scanned file is the document, and editing it edits that file. Deleting one moves
   its real file into the library's trash (`.trash/` in the data folder), where it is kept for 7 days and then removed;
   there is no button to restore it, but the file can be moved back by hand.
-- **A panel beside each chat** with the documents that chat's agent owns or was granted, and a card in the chat for each
-  call of the agent's tools that names its document.
+- **A panel beside each chat** with the documents nobody owns (the ones scanned or made by you) and the ones that
+  chat's agent owns or was granted, and a card in the chat for each call of the agent's tools that names its document.
 - **The agent's tools**, in the chats of agents and projects: `office_list`, `office_create`, `office_read`,
   `office_edit` and `office_comments`. An agent sees the documents nobody owns (the ones scanned or made by you), the
   ones it owns and the ones it was granted; another agent's are not there for it, and asking for one gets the same
@@ -54,8 +54,9 @@ purpose, in the same page).
 ## Security
 
 - **The Document Server sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame
-  and every asset) only through `GET /api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which
-  the portal gates like all of them. It forwards to one origin, the Document Server this extension started (recorded
+  and every asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which
+  the portal gates like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and
+  only to one origin, the Document Server this extension started (recorded
   in `ds.json`). A portal whose Docker is reached through a container-to-container network, where there is no such
   origin to forward to, is refused with a message that says so.
 - **Two routes are open to the container, on a listener of their own.** The container has no portal session, so the
@@ -93,7 +94,8 @@ are Docker's, shown in Settings → Docker under this extension.
 ## Licences
 
 Apache-2.0 ([LICENSE](LICENSE)). The built server half bundles jszip 3.10.2 (MIT or GPL-3.0-or-later, used under the
-MIT licence) and the browser half icons from react-icons (MIT), drawn from Lucide (ISC); NOTICE says more. The
+MIT licence) and the browser half icons from react-icons (MIT), drawn from Lucide (ISC); NOTICE says more, and
+THIRD-PARTY-LICENSES has the licence texts of what is bundled. The
 Document Server image is OnlyOffice's own (AGPL-3.0 for the community edition) and is pulled from Docker Hub by the
 portal, not shipped by this package.
 
@@ -110,5 +112,6 @@ OFFICE_IT_DOCKER=1 npm test -w office   # also the three integration tests that 
 
 The integration tests start nothing in Docker: they run the extension's real loopback listener in the test process,
 with a small server of their own standing in for the Document Server's downloads. `scripts/make-fixtures.mjs` makes
-`fixtures/sample.docx` and `fixtures/sample.xlsx` again, byte for byte (`node scripts/make-fixtures.mjs` in `office/`).
+`fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ
+but not what the files contain).
 The test files are not type-checked by the build (`tsconfig.json` covers `src/`).

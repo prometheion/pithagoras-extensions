@@ -1,15 +1,15 @@
 /**
- * Wake on comment mention (plan 5.4). Server-side only.
+ * Wake on comment mention. Server-side only.
  *
  * On every docx persist (callback status 2/6 fires the `onPersisted` hooks), the saved buffer is
  * re-parsed (`parseDocx`) and its word/comments.xml comments are diffed against the last-seen set
  * kept in `<root>/state/<docId>.json`. Each NEW comment is scanned for mentions (grammar below);
  * per resolved mention, per target chat: a grant on this one doc (deduped by comment id), an audit
  * line, a queued wake text (`officeWakeMessage`), and `chats.tell(chatId, {type:"ping"})` so the
- * target's pi extension drains the queue off its UI_RECEIVE bell (drain side = T-TOOLS' factory,
- * plan 5.4 step 4; this module only QUEUES). The seen set is written back AFTER processing.
+ * target's pi extension drains the queue off its UI_RECEIVE bell (drain side = the tools' factory in
+ * tools.ts; this module only QUEUES). The seen set is written back AFTER processing.
  *
- * First-save decision (plan leaves it open): an IMPORTED document arrives with its own comment history -- importFile records
+ * First-save decision: an IMPORTED document arrives with its own comment history -- importFile records
  * the file's comment ids in DocMeta.importedBaseline AT IMPORT TIME, and a persist with NO prior state file baselines exactly
  * those ids WITHOUT resolving mentions (they predate this library and must not ring bells). A comment that appears AFTER the
  * import but BEFORE the first save is NEW to this library and IS processed on that first save, so its wake is not lost. When
@@ -22,8 +22,7 @@
  * an already-seen comment adds nothing (pure id diff), so normal re-saves never double-ping or
  * double-grant.
  *
- * v1 wakes docx ONLY: xlsx comments live in xl/commentsN.xml + VML anchors (plan 5.4 wording
- * correction -- "xlsx has no comments" was false), deferred to M4, so the hook is a no-op for
+ * v1 wakes docx ONLY: xlsx comments live in xl/commentsN.xml + VML anchors (not read yet), so the hook is a no-op for
  * non-docx docs. onPersisted hands over (docId, buffer) only, so this module resolves the meta
  * itself via store.getDoc(docId, root) and checks meta.ext.
  */
@@ -34,7 +33,7 @@ import { addGrant as storeAddGrant, getDoc } from "./store";
 import { parseDocx, diffComments, type Comment } from "./ooxml";
 import { onPersisted } from "./callback";
 
-/** A line the audit seam records per resolved mention (subject = doc title; reason carries what happened; chatId = woken home). T-WIRE may swap in a real audit sink later. */
+/** A line the audit seam records per resolved mention (subject = doc title; reason carries what happened; chatId = woken home). */
 export type PingAuditEntry = { subject: string; reason: string; chatId: string };
 
 /** Injection seams for wirePing. Every function form is LAZY by design: the defaults read portal() only when actually used, and tests pass plain fns so they never reach the real portal. `root` overrides dataDir() for the store/state layout. */
@@ -47,12 +46,12 @@ export type PingDeps = {
   log?: (line: string) => void;
 };
 
-/** One queued wake entry, docs' `wakes` pattern: text is what pi is handed, details ride along for the drain side. */
+/** One queued wake entry: text is what pi is handed, details ride along for the drain side. */
 export type WakeEntry = { text: string; details: { docId: string; commentId: string } };
 
 let cfg: PingDeps = {};
 let hookRegistered = false;
-/** chatId -> wake entries queued server-side (docs' `wakes` pattern). Drained by the office pi extension on UI_RECEIVE. */
+/** chatId -> wake entries queued server-side. Drained by the office pi extension on UI_RECEIVE. */
 const wakes = new Map<string, WakeEntry[]>();
 
 function root(): string {
@@ -68,7 +67,7 @@ function logLine(line: string): void {
   (cfg.log ?? ((l) => portal().log(l)))(line);
 }
 function record(entry: PingAuditEntry): void {
-  // Lazy default is a one-line log (T-WIRE may pass a real audit sink later via wirePing({record})).
+  // Lazy default is a one-line log (a real audit sink can be passed via wirePing({record})).
   (cfg.record ?? ((e: PingAuditEntry) => logLine(`office ping: ${e.subject}: ${e.reason} (woken ${e.chatId})`)))(entry);
 }
 
@@ -88,7 +87,7 @@ export function __resetPingForTests(): void {
   wakes.clear();
 }
 
-/** Remove and return what is queued for a chat (the office pi extension calls this on its UI_RECEIVE bell, docs' hearPings pattern). */
+/** Remove and return what is queued for a chat (the office pi extension calls this on its UI_RECEIVE bell). */
 export function drainWakeQueue(chatId: string): WakeEntry[] {
   const entries = wakes.get(chatId);
   if (!entries) return [];
@@ -96,7 +95,7 @@ export function drainWakeQueue(chatId: string): WakeEntry[] {
   return entries;
 }
 
-/** The exact plan-5.4 wake text shape, following docs' wakeMessage(): doc title, quoted comment (every line prefixed "> "), and the grant sentence with the office_* pointer -- "given access", NOT "for this task": the added grants are permanent in v1 (per-comment expiry is deferred), so the text must not promise a scope that does not exist. The doc id is NOT embedded in the text: it rides in WakeEntry.details ({docId, commentId}) per plan 5.4 step 2, which the drain side hands to pi's sendMessage. `author` is included because an office mention is one specific person's ask (docs' template omits it; the office one does not). */
+/** The wake text shape, following the portal's document wake text: doc title, quoted comment (every line prefixed "> "), and the grant sentence with the office_* pointer -- "given access", NOT "for this task": the added grants are permanent in v1 (per-comment expiry is deferred), so the text must not promise a scope that does not exist. The doc id is NOT embedded in the text: it rides in WakeEntry.details ({docId, commentId}), which the drain side hands to pi's sendMessage. `author` is included because an office mention is one specific person's ask (the portal's document template omits it; the office one does not). */
 export function officeWakeMessage(docTitle: string, author: string, commentText: string): string {
   return [
     `${author} asked you in a comment on the office document "${docTitle}":`,
@@ -105,10 +104,10 @@ export function officeWakeMessage(docTitle: string, author: string, commentText:
   ].join("\n");
 }
 
-/** The mention grammar (plan 5.4, user decision):
+/** The mention grammar:
  *  - literal "@agent" token -> the doc's OWNER home chat (meta.owner); ownerless docs: logged + skipped.
- *  - "@project:<name>" and any other bare "@<name>" -> case-insensitive EXACT display-name match among folders of kind "project"|"agent". The contract supersedes the plan's narrower split ("@project:" -> projects, bare -> agents): both forms search both kinds; names are non-whitespace runs, so folder names containing spaces cannot be mentioned in v1 (documented limitation).
- *  Unresolvable names and DUPLICATE names (two folders sharing a display name, e.g. agent "Twin" and project "Twin") get no wake and a log line -- no silent disambiguation (plan risk item). */
+ *  - "@project:<name>" and any other bare "@<name>" -> case-insensitive EXACT display-name match among folders of kind "project"|"agent". Both forms search both kinds; names are non-whitespace runs, so folder names containing spaces cannot be mentioned in v1 (documented limitation).
+ *  Unresolvable names and DUPLICATE names (two folders sharing a display name, e.g. agent "Twin" and project "Twin") get no wake and a log line -- no silent disambiguation. */
 const MENTION_RE = /(?<![\w.])(?:@(project:(\S+)|agent(?![\w-])|([A-Za-z0-9_][\w-]*)))/g;
 
 type Mention = { owner: boolean; name: string | null };
@@ -149,7 +148,7 @@ function writeSeen(rootDir: string, docId: string, ids: Iterable<string>): void 
 }
 
 /** The store's index writer (its ONE path for index.json -- fresh read, dedupe by (chatId, commentId), atomic
- * temp+rename): plan 5.4 requires the grant persisted BEFORE the bell rings (the woken pi's office_* tools read
+ * temp+rename): the grant must be persisted BEFORE the bell rings (the woken pi's office_* tools read
  * docsForHome, which reads index.json). This wrapper keeps this module's log lines: a vanished doc is logged,
  * a duplicate adds nothing; "added"/"duplicate" are both fine to ring the bell for. */
 function addGrant(rootDir: string, docId: string, chatId: string, commentId: string, at: number): void {
@@ -164,7 +163,7 @@ function resolveMention(mention: Mention, metaOwner: string | null): string | nu
       logLine("office ping: @agent in a comment on an ownerless document -- no wake");
       return null;
     }
-    return metaOwner; // plan 2.1: meta.owner IS the creating agent/project's home chat id
+    return metaOwner; // meta.owner IS the creating agent/project's home chat id
   }
   const name = mention.name;
   if (!name) return null;
@@ -177,7 +176,7 @@ function resolveMention(mention: Mention, metaOwner: string | null): string | nu
     logLine(`office ping: @${name} is ambiguous (${matches.map((f) => `${f.kind}:${f.name}`).join(", ")}) -- no silent disambiguation, no wake`);
     return null;
   }
-  // Home chat per plan 2.1 (and the tools contract's own resolution): a folder's workspace path is exactly what
+  // Home chat: a folder's workspace path is exactly what
   // chats.folder(id) resolves to, so the sessions working in that folder (chats.inFolder) are its home chats.
   // Deterministic pick: lowest id (the extension queues wakes per chat; any session of the home answers).
   const chats = inFolder(matches[0]!.path).sort((a, b) => a.id.localeCompare(b.id));
@@ -214,7 +213,7 @@ export function handlePersisted(docId: string, buffer: Buffer): void {
     const rootDir = cfg.root ?? portal().dataDir();
     const meta = getDoc(docId, rootDir);
     if (!meta) return; // deleted between fetch and persist -- nothing to diff
-    if (meta.ext !== "docx") return; // v1: docx only, xlsx comments deferred to M4
+    if (meta.ext !== "docx") return; // v1: docx only, xlsx comments are not read yet
     const { comments } = parseDocx(buffer);
     const prev = readSeen(rootDir, docId);
     if (prev === null && meta.imported) { // imported with its own comment history: baseline what importFile recorded at IMPORT time --

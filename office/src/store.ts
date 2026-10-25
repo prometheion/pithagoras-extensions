@@ -13,7 +13,7 @@
  * library's .trash (7-day sweep); a scanned file already gone out-of-band is pruned, not an error.
  *
  * Every exported function takes a trailing optional `root = dataDir()` so unit tests can pass a tmp
- * dir (per the wave-2 amendments); production callers just omit it. The ONLY async functions are
+ * dir; production callers just omit it. The ONLY async functions are
  * templateDocx/templateXlsx and createDoc, because jszip -- the only zip writer allowed in
  * this package -- generates buffers asynchronously; everything that touches existing files is sync.
  */
@@ -129,8 +129,8 @@ const DOCX_ROOT_RELS =
 
 const W_NS = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"`;
 
-// word/_rels/document.xml.rels is beyond the contract's four-part list but standard in every real docx and keeps
-// Word/OnlyOffice happy (the styles part is referenced from it, not dangling) -- noted as an addition in the report.
+// word/_rels/document.xml.rels is not strictly required but standard in every real docx and keeps
+// Word/OnlyOffice happy (the styles part is referenced from it, not dangling).
 const DOCX_DOC_RELS =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
   `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
@@ -218,7 +218,7 @@ export function getDoc(docId: string, root?: string): DocMeta | null {
 
 /** The ONE index writer for mention grants (ping.ts used to read-modify-write index.json on its own): fresh
  * read, dedupe by (chatId, commentId) -- a re-sent comment never adds a second row -- atomic tmp+rename through
- * the store's writeIndex. Sync like everything here and no logging (module contract). Returns "added",
+ * the store's writeIndex. Sync like everything here and no logging. Returns "added",
  * "duplicate" (already granted: nothing written), or null when the doc is not in the index any more.
  * A corrupt index throws the usual {code:"index_corrupt"} -- a bad file, not a vanished doc. */
 export function addGrant(docId: string, chatId: string, commentId: string, at: number, root = dataDir()): "added" | "duplicate" | null {
@@ -232,7 +232,7 @@ export function addGrant(docId: string, chatId: string, commentId: string, at: n
   return "added";
 }
 
-/** The documents a home chat sees in its panel and office tools (plan 2.1, extended): every UNOWNED doc -- the
+/** The documents a home chat sees in its panel and office tools: every UNOWNED doc -- the
  * workspace-scanned and human-made docs (owner null), shared by definition and visible to all homes -- plus ones it
  * OWNS or holds a mention-GRANT for; deduped by docId (a doc owned and granted to the same home appears once). */
 export function docsForHome(homeChatId: string, root = dataDir()): DocMeta[] {
@@ -311,8 +311,7 @@ export async function createDoc(input: { title: string; type: "word" | "cell"; o
 /** Retitle a document and rename its file on disk (docs/<docId>/<newTitle>.<ext>). The docId is stable across the
  * whole lifetime of the doc (tickets, history paths, state files key off it), and rename preserves the content's
  * mtimeMs -- that IS the revision tools gate on, so a retitle is never a new revision. updatedAt bumps. A title
- * already held by ANOTHER document throws {code:"exists"} (the plan does not specify retitle collisions; an
- * exists refusal is the safe reading). */
+ * already held by ANOTHER document throws {code:"exists"} (refusing is the safe reading of a retitle collision). */
 export function renameDoc(docId: string, newTitle: string, root = dataDir()): DocMeta {
   const rootDir = root ?? dataDir();
   assertSafeTitle(newTitle);

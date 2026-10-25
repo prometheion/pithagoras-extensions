@@ -3,7 +3,7 @@
  * loopback listener's GET /doc/<ticket>, which carries no session cookie (the portal gates every /api
  * route, and the DS holds none). The token is self-authenticating -- base64url("docId|expMs|hmac") with
  * a 10-minute default expiry -- verified here in constant time. Pure: no fs, no portal; the caller owns
- * the secret string (the same jwt-secret value as jwt.ts, per plan 5.6). Purpose separation (S3): the ticket
+ * the secret string (the same jwt-secret value as jwt.ts). Purpose separation: the ticket
  * has no JWT claims to carry a family marker in, so the marker lives INSIDE the MAC'd message -- the HMAC
  * is computed over "document-ticket|docId|expMs" and only a verifier of this same family knows to prefix it.
  */

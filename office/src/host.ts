@@ -13,14 +13,14 @@ export function setPortal(portal: ServerPortal): void {
 }
 
 export function portal(): ServerPortal {
-  if (!current) throw new Error("pithagoras-office's server half has not started");
+  if (!current) throw new Error("@pithagoras/office's server half has not started");
   return current;
 }
 
 /** This extension's own data folder (settings, jwt-secret, the document library). */
 export const dataDir = (): string => portal().dataDir();
 
-/** Docker, which pithagoras-office requires (`pithagoras.requires` in its package.json): there whenever this half runs. */
+/** Docker, which @pithagoras/office requires (`pithagoras.requires` in its package.json): there whenever this half runs. */
 export function docker(): Docker | undefined {
   return portal().extensions.use("pithagoras-docker");
 }

@@ -1,17 +1,17 @@
 /**
- * The OnlyOffice Document Server callback handler (plan 5.3): a plain node:http req/res function served by the
- * loopback listener's POST /callback (server.ts, wave T-WIRE) -- NOT a portal route, because every portal route
- * is session-gated and the DS container holds no cookie (plan 5.2 design decision).
+ * The OnlyOffice Document Server callback handler: a plain node:http req/res function served by the loopback
+ * listener's POST /callback (server.ts) -- NOT a portal route, because every portal route is session-gated and the
+ * DS container holds no cookie.
  *
- * Flow (per plan 5.3/5.6): verify the HS256 JWT BEFORE dispatch, parse the envelope, branch on status exactly
- * per the plan 5.3 table. The token arrives in the X-Auth-Token header -- that is where it lives because the
- * container env we mint sets JWT_HEADER=X-Auth-Token and JWT_IN_BODY=false (src/container.ts dsEnv, plan 4); an
- * embedded body.token is accepted ONLY as a defensive fallback for DS builds that ignore those vars.
+ * Flow: verify the HS256 JWT BEFORE dispatch, parse the envelope, branch on the status. The token arrives in the
+ * X-Auth-Token header -- that is where it lives because the container env we mint sets JWT_HEADER=X-Auth-Token and
+ * JWT_IN_BODY=false (src/container.ts dsEnv); an embedded body.token is accepted ONLY as a defensive fallback for DS
+ * builds that ignore those vars.
  *
- * document.key format (FIXED by the contract): "office|" + docId + "|" + base64url-no-pad(sha256(String(expectedMtimeMs))).
+ * document.key format: "office|" + docId + "|" + base64url-no-pad(sha256(String(expectedMtimeMs))).
  * The hash pins the revision the config was minted against, so a stale session's save-back can never clobber a
- * newer revision (plan 5.3: "the file's mtime/sha is the revision tools compare against"). The persist path
- * re-derives the hash from the CURRENT store.getDoc(docId) meta and refuses on mismatch -- see persistSaved.
+ * newer revision (the file's mtime is the revision the tools compare against). The persist path re-derives the
+ * hash from the CURRENT store.getDoc(docId) meta and refuses on mismatch -- see persistSaved.
  *
  * Persistence (statuses 2/6 + the status-1 forcesave action): fetch body.url with retries (the DS can lag after
  * a save), run store.persistBytes through its mtime gate, store the changesurl archive at
@@ -19,18 +19,17 @@
  * every onPersisted(docId, buffer) hook (src/ping.ts registers its comment-mention wake through wirePing later),
  * then apply the status's lock rule: 2 unlocks AFTER persist, 6 STAYS locked. Everything happens BEFORE the
  * {"error":0} answer -- DS acts on the JSON error field, and any non-zero makes the editor show a save error /
- * retry (plan 4).
+ * retry.
  *
- * JWT for fetching body.url: plan 4 verifies the official example's plain fetch(req.body.url) and plan 5.3 just
- * says "fetch url" -- the plan is SILENT on auth headers for that GET, though our image-wide env sets
- * JWT_ENABLED=true. Belt-and-braces: we send a fresh 60 s HS256 token (claims {docId, key}) in X-Auth-Token --
- * harmless if DS's own download path is not gated, correct if it is. Documented choice, not a plan mandate.
+ * JWT for fetching body.url: OnlyOffice's official example fetches it plainly and documents no auth header for that
+ * GET, though our image-wide env sets JWT_ENABLED=true. Belt-and-braces: we send a fresh 60 s HS256 token (claims
+ * {docId, key}) in X-Auth-Token -- harmless if DS's own download path is not gated, correct if it is.
  *
- * Wiring chosen here (the contract allows either): BOTH the contracted factory AND a bare module-level handler.
+ * Wiring: BOTH a factory AND a bare module-level handler.
  * - createCallbackHandler(getState, getSecret, opts?) returns an isolated handler -- tests build instances with
  *   their own tmp root/secret/retry budget and no global state at all.
- * - configure({ getState, getSecret, root?, retryDelaysMs?, log? }) + export const handleCallback: T-WIRE's
- *   server.ts calls configure ONCE at boot with getState = () => container.readDsRecord() (ds.json is the single
+ * - configure({ getState, getSecret, root?, retryDelaysMs?, log? }) + export const handleCallback: server.ts
+ *   calls configure ONCE at boot with getState = () => container.readDsRecord() (ds.json is the single
  *   source of truth), getSecret = () => the jwt-secret string read once from dataDir()/jwt-secret, and the
  *   loopback listener dispatches `POST /callback -> callback.handleCallback(req, res)`. Before configure runs --
  *   or whenever getState/getSecret answer null (container never ensured, no ds.json / no secret yet) -- every
@@ -52,7 +51,7 @@ export interface CallbackHandlerOptions {
   /** Document-library root; production leaves it undefined (= host.dataDir()), unit tests pass a tmp dir. */
   root?: string;
   /** Fixed backoff schedule BETWEEN attempts of the body.url / changesurl fetches. Default [100, 250] ms -> at
-   * most 3 attempts and ~350 ms of total waiting (plan 5.3: "retry fetch a few times (DS can lag)"; kept tiny on
+   * most 3 attempts and ~350 ms of total waiting (the DS can lag; kept tiny on
    * purpose so unit tests stay fast). */
   retryDelaysMs?: number[];
   /** Log sink for the status-3/7 lines and every failure; defaults to portal().log with a console.error fallback. */
@@ -61,7 +60,7 @@ export interface CallbackHandlerOptions {
 
 type CallbackConfig = { getState: () => CallbackState | null; getSecret: () => string | null } & CallbackHandlerOptions;
 
-/** The factory the contract fixes: an isolated handler around these two lookups (+ optional test knobs). */
+/** The factory: an isolated handler around these two lookups (+ optional test knobs). */
 export function createCallbackHandler(
   getState: () => CallbackState | null,
   getSecret: () => string | null,
@@ -70,14 +69,14 @@ export function createCallbackHandler(
   return makeHandler({ getState, getSecret, ...opts });
 }
 
-/** Module-level configuration for the BARE handler below; T-WIRE's server.ts calls this exactly once at boot. */
+/** Module-level configuration for the BARE handler below; server.ts calls this exactly once at boot. */
 export function configure(config: CallbackConfig): void {
   configured = config;
 }
 
 let configured: CallbackConfig | null = null;
 
-/** The contracted bare handler (loopback listener POST /callback). 503 {"error":1} while unconfigured or until
+/** The bare handler (loopback listener POST /callback). 503 {"error":1} while unconfigured or until
  * the DS record/secret exist. Fire-and-forget on purpose: all disk work completes before res.end, which is how
  * callers (and tests) observe completion -- via the response. */
 export const handleCallback = (req: IncomingMessage, res: ServerResponse): void => {
@@ -135,9 +134,9 @@ export function onPersisted(fn: (docId: string, buffer: Buffer) => void): void {
  * against the OLD mtime, so its revHash no longer matches the meta WE just wrote; without this memo that pass
  * would look like an external agent edit and answer {error:1} (a spurious save-failure in the editor). The memo
  * fires only when BOTH the document's current revision AND the download url equal ours -- a newer change at a
- * different url still gets refused (plan 5.3: never overwrite a newer revision). Known accepted limit (report):
+ * different url still gets refused (a newer revision is never overwritten). Known accepted limit:
  * typing between our forcesave and session close is dropped on that refusal -- exactly the stale-overwrite
- * protection the plan demands; the user reloads via refreshFile (plan 5.7 tier 1).
+ * protection we want; the user reloads the page to pick up the newer file.
  */
 const lastPersist = new Map<string, { url: string; mtimeMs: number }>();
 
@@ -149,9 +148,9 @@ const lastPersist = new Map<string, { url: string; mtimeMs: number }>();
  * by passing their own). Same lazy pattern as src/container.ts. */
 function defaultLog(line: string): void {
   try {
-    portal().log(`pithagoras-office: callback: ${line}`);
+    portal().log(`@pithagoras/office: callback: ${line}`);
   } catch {
-    console.error(`[pithagoras-office callback] ${line}`);
+    console.error(`[@pithagoras/office callback] ${line}`);
   }
 }
 
@@ -257,7 +256,7 @@ async function handleDispatch(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
-  // Route guard: the loopback listener serves exactly POST /callback (plan 5.2); reject anything else before
+  // Route guard: the loopback listener serves exactly POST /callback; reject anything else before
   // reading a byte of body. The listener itself routes, so this only ever fires for misdirected probes.
   if (req.method !== "POST") {
     respond(res, 405, 1);
@@ -291,7 +290,7 @@ async function handleDispatch(
     return;
   }
 
-  // JWT BEFORE dispatch (plan 5.6): header X-Auth-Token (env pins JWT_HEADER=X-Auth-Token, JWT_IN_BODY=false),
+  // JWT BEFORE dispatch: header X-Auth-Token (env pins JWT_HEADER=X-Auth-Token, JWT_IN_BODY=false),
   // embedded body.token only as a defensive fallback. No token or any verification failure -> 401 {error:1},
   // and nothing below ever touches the disk.
   const headerToken = req.headers["x-auth-token"];
@@ -343,7 +342,7 @@ async function handleDispatch(
 
   switch (status) {
     case 1: {
-      // Being edited: set presence from body.users (plan 5.3: "lock = users.length>0") and apply the lock rule.
+      // Being edited: set presence from body.users (locked while users.length > 0) and apply the lock rule.
       const snapshotIds = new Set<string>();
       if (Array.isArray(body.users)) {
         for (const u of body.users) {
@@ -356,7 +355,7 @@ async function handleDispatch(
         }
       }
       for (const tracked of live.usersOf(parsed.docId)) if (!snapshotIds.has(tracked.id)) live.setUser(parsed.docId, { id: tracked.id }, false);
-      live.setLocked(parsed.docId, live.usersOf(parsed.docId).length > 0); // plan 5.3, status-1 row
+      live.setLocked(parsed.docId, live.usersOf(parsed.docId).length > 0);
 
       // Forcesave-click (actions[].type === 2) while the session continues -> persist NOW from body.url and STAY
       // locked (status-6 rules; the canonical result may still arrive as a status-6 callback -- lastPersist
@@ -371,8 +370,8 @@ async function handleDispatch(
     }
 
     case 3: {
-      // Document saving error AT DS: log + audit only (audit.record is wired by T-WIRE; this log line IS the
-      // record until then). No disk write. We did not fail internally -> answer 0 so DS does not loop.
+      // Document saving error AT DS: log only, no disk write. We did not fail internally -> answer 0 so DS does not
+      // loop.
       log(`status-3: document server reported a save error for ${parsed.docId}`);
       respond(res, 200, 0);
       return;
@@ -396,7 +395,7 @@ async function handleDispatch(
     case 2:
     case 6: {
       // Ready-for-saving / force-saved: persist (fetch url w/ retries -> persistBytes gate -> history zip ->
-      // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked (plan 5.3 rows).
+      // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked.
       await persistSaved(log, cfg, parsed.docId, parsed.revHash, body, status === 2, res);
       return;
     }
@@ -412,7 +411,7 @@ async function handleDispatch(
 /**
  * The shared persist path (status 2, status 6 and the status-1 forcesave action). ALWAYS answers `res` itself:
  * success -> 200 {"error":0}; every failure -> 200 {"error":1}. DS decides save outcomes from the JSON error
- * field (plan 4: "must answer {\"error\":0}; anything else makes the editor show an error"), which is why the
+ * field (DS must be answered {\"error\":0}; anything else makes the editor show an error), which is why the
  * HTTP status stays 200 even for persist failures.
  */
 async function persistSaved(
@@ -433,7 +432,7 @@ async function persistSaved(
     return fail();
   }
 
-  // STALE-GATE (plan 5.3): the key pins the revision the config was minted against; the CURRENT meta must match,
+  // STALE-GATE: the key pins the revision the config was minted against; the CURRENT meta must match,
   // else something already moved the revision and we must NOT overwrite it. The double-save memo below tells
   // "we already wrote exactly this save" apart from "someone else won".
   if (revHashOf(meta.mtimeMs) !== keyRevHash) {
@@ -458,8 +457,8 @@ async function persistSaved(
     return fail();
   }
 
-  // JWT for the outbound GET (documented choice -- plan silent, see module header): a fresh 60 s HS256 token,
-  // purpose-tagged "fetch" (S3) so it can never masquerade as an editor-config or a callback in any verifier.
+  // JWT for the outbound GET (see the module header): a fresh 60 s HS256 token,
+  // purpose-tagged "fetch" so it can never masquerade as an editor-config or a callback in any verifier.
   const fetchToken = signJwt({ docId, key: body.key }, 60_000, secretOrThrow(cfg), "fetch");
   let bytes: Buffer;
   try {
@@ -510,7 +509,7 @@ async function persistSaved(
   else live.setLocked(docId, true); // status 6: editing continues, stay locked
 
   // Success is only answered once the document AND the lock state are settled -- DS reads this JSON field to
-  // decide the save outcome (plan 4). Every earlier branch already answered itself.
+  // decide the save outcome. Every earlier branch already answered itself.
   respond(res, 200, 0);
 }
 

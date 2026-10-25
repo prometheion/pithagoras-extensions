@@ -1,5 +1,5 @@
 /**
- * Unit tests for src/server.ts (T-WIRE): the boot wiring, the loopback listener, and every UI route -- against a
+ * Unit tests for src/server.ts: the boot wiring, the loopback listener, and every UI route -- against a
  * FAKE portal (mini router + recorded log/audit/extensions.use) with real tmp dataDirs and a recording fake Docker
  * literal. Nothing here reaches the real portal(), the Docker socket, or any network host but 127.0.0.1 loopback
  * (the listener itself). Booted instances are cleaned up at the end of each test; live-module presence is reset for
@@ -150,7 +150,7 @@ async function boot(root?: string, docker?: Docker): Promise<Booted> {
   const router = new MiniRouter();
   const ddock = docker ?? makeDocker().docker; // ONE instance per boot: extensions.use() resolves the same fake every time
   const portalObj = {
-    extension: "pithagoras-office",
+    extension: "@pithagoras/office",
     dataDir: () => rootDir,
     log: (l: unknown) => logs.push(String(l)),
     audit: { record: (e: Record<string, unknown>) => audits.push(e) },
@@ -293,13 +293,13 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   const parsed = parseKey(String(document.key)) as { docId: string; revHash: string };
   assert.equal(parsed.docId, doc.docId);
   assert.equal(parsed.revHash, revHashOf(doc.mtimeMs));
-  // url: on OUR loopback listener (plan 5.2), ticketed, and the ticket verifies with the boot secret
+  // url: on OUR loopback listener, ticketed, and the ticket verifies with the boot secret
   const url = String(document.url);
   assert.ok(url.startsWith(`http://127.0.0.1:${loopbackPort()}/doc/`), `url uses the loopback origin: ${url}`);
   const ticket = url.split("/doc/")[1];
   assert.ok(ticket.length > 0 && !ticket.includes("/"));
   assert.equal(verifyTicket(ticket, secret)?.docId, doc.docId, "the minted ticket verifies with the boot secret");
-  // editorConfig per plan 5.6
+  // editorConfig
   const ec = body.editorConfig as Record<string, unknown>;
   assert.equal(ec.callbackUrl, `http://127.0.0.1:${loopbackPort()}/callback`);
   assert.equal(ec.mode, "edit");
@@ -316,7 +316,7 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   // api.js src: ROOT-RELATIVE through this extension's own /ds proxy (resolved by the browser against the page
   // origin it reached the portal at); getBasePath() turns that prefix into the editor iframe base. The loopback
   // document.url/callbackUrl above are what STAY absolute for DS-side fetches.
-  assert.equal(body.apiJs, "/api/x/pithagoras-office/ds/web-apps/apps/api/documents/api.js");
+  assert.equal(body.apiJs, "/api/x/%40pithagoras/office/ds/web-apps/apps/api/documents/api.js");
   // and minting claimed the seat in live presence
   assert.deepEqual(live.usersOf(doc.docId).map((u) => ({ id: u.id, name: u.name })), [{ id: "portal-user", name: "Portal" }]);
 
@@ -324,7 +324,7 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   await b.cleanup();
 });
 
-test("editor-config (xlsx): documentType cell; a container:<id> origin refuses with the M0 error", async () => {
+test("editor-config (xlsx): documentType cell; a container:<id> origin refuses as not supported yet", async () => {
   const b = await boot();
   writeDsJson(b.root);
   const cell = await store.createDoc({ title: "Budget", type: "cell" }, b.root);
@@ -340,7 +340,7 @@ test("editor-config (xlsx): documentType cell; a container:<id> origin refuses w
   assert.equal(res.statusCode, 422);
   const body = res.body as Record<string, unknown>;
   assert.equal(body.code, "unresolvable_ds_origin");
-  assert.match(String(body.error), /M0/);
+  assert.match(String(body.error), /not supported yet/);
 
   // and with no ds.json at all: 503 not-configured; unknown doc: 404
   fs.rmSync(path.join(b.root, "ds.json"));
@@ -705,7 +705,7 @@ test("/ds proxy: an upstream 404 passes through as a 404 with the upstream body"
 });
 
 test("/ds proxy: an identity request answered with GZIP bytes + LYING headers still delivers the FULL original payload", async () => {
-  // The exact PR #307 bug, replayed against a hostile upstream: it honours NOTHING -- it answers our
+  // The bug of the first version of the /ds proxy, replayed against a hostile upstream: it honours NOTHING -- it answers our
   // accept-encoding: identity ask with a gzip body while declaring content-encoding: gzip and a
   // content-length sized to the COMPRESSED bytes. undici auto-decodes the gzip; the handler must not copy
   // either lying header, so the client reads every original byte intact -- no truncation, no manual gunzip.

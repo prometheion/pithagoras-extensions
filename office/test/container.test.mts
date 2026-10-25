@@ -152,8 +152,8 @@ test("ensure (fresh): pulls image with progress, creates volume + container host
   assert.deepEqual(m.calls.volumeCreate, [DS_VOLUME]);
   assert.ok(m.state.volumes.some((v) => v.name === DS_VOLUME));
 
-  // container created under the exact name with the spec the contract fixes (no Memory cap -- plan says 4 GB
-  // recommended, no enforced limit; NetworkMode from sharedNetwork(); the volume bound at the DS data path)
+  // container created under the exact name with its spec (no Memory cap -- 4 GB is a
+  // recommendation, not an enforced limit; NetworkMode from sharedNetwork(); the volume bound at the DS data path)
   assert.equal(m.calls.create.length, 1);
   const [name, spec] = m.calls.create[0];
   assert.equal(name, DS_NAME);
@@ -207,7 +207,7 @@ test("ensure (container-mode origin): networkMode container:<id> is recorded ver
   const m = makeDocker({ networkMode: "container:9f3a1c2d" });
   await ensureContainer(m.docker, undefined, root);
   const ds = JSON.parse(fs.readFileSync(path.join(root, "ds.json"), "utf8"));
-  assert.equal(ds.origin, "container:9f3a1c2d"); // marker string a later wave turns into a URL
+  assert.equal(ds.origin, "container:9f3a1c2d"); // marker string a later version turns into a URL
   const [name, spec] = m.calls.create[0];
   assert.equal(name, DS_NAME);
   assert.equal((spec.HostConfig as Record<string, unknown>).NetworkMode, "container:9f3a1c2d");

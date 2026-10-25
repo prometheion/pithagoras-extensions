@@ -3,16 +3,15 @@
  *
  * Run manually (from the extension directory):
  *
- *   env -u NODE_ENV node scripts/make-fixtures.mjs
+ *   node scripts/make-fixtures.mjs
  *
- * (NODE_ENV=production is set globally in this environment; the .ts import below rides Node's built-in
- * type stripping, so plain `node` works -- no tsx needed. Re-run any time; the output is deterministic.)
+ * (The .ts import below rides Node's built-in type stripping, so plain `node` works -- no tsx needed. The zip
+ * entries carry the time of the run, so a re-run changes the bytes of the files, not what they contain.)
  *
  * The parts are hand-written XML strings, but the ZIP bytes themselves come out of THIS extension's own
  * writer (ooxml.writeZip): the fixtures therefore double as round-trip material for our zip reader and
  * the ooxml parsers and editDocx, not just for any zip tool. The docx is deliberately richer than
- * the blank template in store.ts
- * template: multiple paragraphs (one empty), a sentence whose words sit in several w:t runs (the quote
+ * the blank template in store.ts: multiple paragraphs (one empty), a sentence whose words sit in several w:t runs (the quote
  * "revised after the" spans two of them -- test/fixtures.test.mts edits exactly that), entity-encoded
  * characters (&amp; &lt; &gt; &#8212; &#x20AC;), and word/comments.xml with two comments from different
  * authors. The xlsx carries a sharedStrings part (including a multi-run <si> and an entity) AND inline

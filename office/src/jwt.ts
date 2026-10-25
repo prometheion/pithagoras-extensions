@@ -1,9 +1,9 @@
 /**
- * Minimal HS256 JWT for pithagoras-office -- config signing (minted in /editor-config) and callback
+ * Minimal HS256 JWT for @pithagoras/office -- config signing (minted in /editor-config) and callback
  * verification share ONE secret: a random hex value the server keeps 0600 at dataDir()/jwt-secret and
  * passes to the DS container as JWT_SECRET. This module is pure: no file access, no fs, no portal;
- * the caller owns the secret string (per the wave-2 amendments). node:crypto only -- there is no jwt
- * dependency in the monorepo lockfile.
+ * the caller owns the secret string. node:crypto only -- there is no jwt
+ * dependency in the lockfile.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -27,11 +27,10 @@ function sign(signingInput: string, secret: string): string {
 /** HS256-sign a payload. When `ttlMs` is given, iat (now, seconds precision) and exp (now + ttl, rounded up to the
  * second so the token outlives its ttl) are added automatically; when `ttlMs` is undefined NO exp claim is written
  * (the token then never expires on its own). A caller-supplied iat is kept. When `purpose` is given it is embedded
- * as a signed "typ" CLAIM (purpose separation, S3): every verifier of that family passes the same purpose to
+ * as a signed "typ" CLAIM (purpose separation): every verifier of that family passes the same purpose to
  * verifyJwt and refuses tokens minted for another one -- without changing the key or breaking DS-side verification,
- * which ignores unknown claims. The contract shape is signJwt(payload, ttlMs?, secret?); TS forbids a required
- * parameter after an optional one, so the call forms are exposed as overloads and resolved in the implementation.
- * Callers type-check exactly against the contract. */
+ * which ignores unknown claims. The call shape is signJwt(payload, ttlMs?, secret?); TS forbids a required
+ * parameter after an optional one, so the call forms are exposed as overloads and resolved in the implementation. */
 export function signJwt(payload: Record<string, unknown>, secret: string): string;
 export function signJwt(payload: Record<string, unknown>, ttlMs?: number, secret?: string, purpose?: string): string;
 export function signJwt(payload: Record<string, unknown>, maybeTtlOrSecret: number | string | undefined = undefined, secret: string | undefined = undefined, purpose: string | undefined = undefined): string {

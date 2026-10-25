@@ -1,6 +1,6 @@
 /**
- * Unit tests for src/ping.ts (wake on comment mention, plan 5.4). Run from the repo ROOT:
- *   env -u NODE_ENV node --import tsx --test extensions/office/test/ping.test.mts
+ * Unit tests for src/ping.ts (wake on comment mention). Run from office/:
+ *   node --import tsx --test test/ping.test.mts
  * Self-contained: tmp dataDir per test, real docx created via store.createDoc, comment XML injected
  * with ooxml.rewriteZip, every side effect (folders/inFolder/tell/record/log) injected through
  * wirePing so the tests NEVER reach portal().
@@ -90,7 +90,7 @@ const stateFile = (root: string, docId: string) => path.join(root, "state", `${d
 /* officeWakeMessage                                                   */
 /* ------------------------------------------------------------------ */
 
-test("officeWakeMessage renders the exact plan 5.4 template", () => {
+test("officeWakeMessage renders the exact template", () => {
   const msg = officeWakeMessage("Budget 2026", "Alice", "first line @agent\nsecond line");
   assert.equal(
     msg,
@@ -172,7 +172,7 @@ test("second persist: @agent wakes the owner; @project:<name> matches case-insen
   const c3: C = { id: "3", author: "Bob", text: "hand off to @project:acme when ready" };
   persistWith(root, meta.docId, meta.title, meta.ext, [{ id: "1", author: "Alice", text: "baseline" }, c2, c3]);
 
-  // owner wake with the EXACT template text, and project home resolved per plan 2.1 via inFolder(folder.path)
+  // owner wake with the EXACT template text, and project home resolved via inFolder(folder.path)
   assert.deepEqual(seen.tells, [
     ["chat-atlas-home", { type: "ping" }],
     ["chat-acme-home", { type: "ping" }],

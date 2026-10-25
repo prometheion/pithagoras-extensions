@@ -29,6 +29,10 @@ jobs:
         run: npx playwright install --with-deps chromium firefox
       - name: Unit tests
         run: npm test
+        env:
+          # Office's three integration tests: they run in-process against a stand-in for the Document Server and need
+          # only a Docker CLI that answers, which the runner has.
+          OFFICE_IT_DOCKER: "1"
       - name: The servers' Python compiles
         run: python3 -m py_compile blender/server/server.py godot/server/server.py godot/server/client.py
       - name: Pithagoras, for the portal-tier tests

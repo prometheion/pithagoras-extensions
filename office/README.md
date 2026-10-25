@@ -57,9 +57,9 @@ same page).
   revision (the file changed on disk while it was open) is not lost and does not overwrite it: it is kept beside the
   document as "<title> (conflict <date time>)", and the audit log says so. An open editor says within about 5
   seconds when the file changed on disk; reloading it opens the new revision.
-- **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document), or
-  `@<name>` or `@project:<name>` for an agent or project by name, and save, that agent's home chat is woken with the
-  quoted comment and gets access to that document.
+- **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document, or
+  in whose folder it is), or `@<name>` or `@project:<name>` for an agent or project by name, and save, a chat of that
+  agent is woken, told which document mentions it, and gets access to that document; it reads the comment itself.
 
 ## Security
 
@@ -97,6 +97,9 @@ same page).
   document's macros and the editor's plugins are switched off in the signed editor config, which the page cannot
   change, as OnlyOffice holds macros apart only by a guard inside the page. A Document Server on an origin of its own
   would be the full answer; it is not done here.
+- **What the tools return is outside content to the guard**: the text, comments and file names of documents anybody
+  may have written. A wake on a mention names the document and nothing of the comment; the agent reads the comment
+  with `office_comments`, whose result the guard holds as outside content.
 - **The agent can only write what its revision check allows**, and each document-changing call is recorded in the
   portal's audit log with the chat that made it.
 

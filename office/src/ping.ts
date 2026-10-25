@@ -6,7 +6,7 @@
  * last-seen set kept in `<root>/state/<docId>.json`, by their keys (ooxml.commentKeys: author and text, as the
  * Document Server numbers the comments anew at every save). Each NEW comment is scanned for mentions (grammar below);
  * per resolved mention, per target folder: a grant on this one doc (deduped by comment key), an audit line, a queued
- * wake text (`officeWakeMessage`) for a chat of that folder, and `chats.tell(chatId, {type:"ping"})` so the target's
+ * wake text (`officeWakeMessage`, which names the document and not what the comment says) for a chat of that folder, and `chats.tell(chatId, {type:"ping"})` so the target's
  * pi extension drains the queue off its UI_RECEIVE bell (drain side = the tools' factory in tools.ts; this module
  * only QUEUES). The seen set is written back AFTER processing.
  *
@@ -95,12 +95,17 @@ export function drainWakeQueue(chatId: string): WakeEntry[] {
   return entries;
 }
 
-/** The wake text shape, following the portal's document wake text: doc title, quoted comment (every line prefixed "> "), and the grant sentence with the office_* pointer -- "given access", NOT "for this task": the added grants are permanent in v1 (per-comment expiry is deferred), so the text must not promise a scope that does not exist. The doc id is NOT embedded in the text: it rides in WakeEntry.details ({docId, commentId}), which the drain side hands to pi's sendMessage. `author` is included because an office mention is one specific person's ask (the portal's document template omits it; the office one does not). */
-export function officeWakeMessage(docTitle: string, author: string, commentText: string): string {
+/**
+ * The wake text: that a comment on a document mentions the agent, by the document's id, and where to read it. Nothing
+ * of the comment itself, nor its author or the document's title (a file name): a comment is anybody's text, in any
+ * file found in a folder, and a wake message is not held as outside content, so it would reach the model as an
+ * instruction. The agent reads the comment with office_comments, whose result the guard holds as outside content.
+ * "given access", NOT "for this task": the grant is permanent in v1, so the text must not promise a scope.
+ */
+export function officeWakeMessage(docId: string): string {
   return [
-    `${author} asked you in a comment on the office document "${docTitle}":`,
-    ...commentText.split("\n").map((line) => `> ${line}`),
-    "You have been given edit access to this document; answer with the office_* tools.",
+    `You were mentioned in a comment on the office document ${docId}.`,
+    `Read the comment with office_comments (id ${docId}) and the document with office_read; you have been given edit access to it.`,
   ].join("\n");
 }
 
@@ -218,7 +223,7 @@ function processComment(docId: string, meta: { title: string; owner: string | nu
     record({ subject: meta.title, reason: `comment mention ${key} by ${c.author}: access to this document granted and home woken`, chatId });
     const queue = wakes.get(chatId) ?? [];
     if (!queue.some((e) => e.details.docId === docId && e.details.commentId === key)) {
-      queue.push({ text: officeWakeMessage(meta.title, c.author, c.text), details: { docId, commentId: key } });
+      queue.push({ text: officeWakeMessage(docId), details: { docId, commentId: key } });
       wakes.set(chatId, queue);
     }
     const told = (cfg.tell ?? ((id: string, data: unknown) => portal().chats.tell(id, data)))(chatId, { type: "ping" });

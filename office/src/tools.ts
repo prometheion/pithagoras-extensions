@@ -43,6 +43,33 @@ import { drainWakeQueue } from "./ping";
 /** The UI_RECEIVE bus event chats.tell rings (the portal's own document tools listen on the same name). */
 const UI_RECEIVE = "pithagoras:v1:ui:receive";
 
+/** Marks a text to be translated where it is shown: a label kept in a table (de.ts has its German). */
+const msg = <T extends string>(text: T): T => text;
+
+/** What a call of each tool is labelled with in pi, and on its card in the chat while it runs, in English. */
+export const LABELS: Record<string, string> = {
+  office_list: msg("Listing office documents"),
+  office_create: msg("Creating an office document"),
+  office_read: msg("Reading an office document"),
+  office_edit: msg("Editing an office document"),
+  office_comments: msg("Reading the comments of a document"),
+};
+
+/**
+ * What the guard holds each tool to. What they return is outside content: the text and comments of files found in
+ * the agents' folders, written by anybody, and their titles (file names). None of them is the shape of one of the
+ * guard's rules after a suspected prompt injection (`acts`): office_create makes a blank document in the extension's
+ * own library, and office_edit replaces quoted text in a document of the agent's own scope, under the revision check,
+ * which runs nothing, carries nothing out and lands nowhere a later run reads as instructions.
+ */
+export const GUARDS: Record<string, { outside: boolean; acts: string[] }> = {
+  office_list: { outside: true, acts: [] },
+  office_create: { outside: true, acts: [] },
+  office_read: { outside: true, acts: [] },
+  office_edit: { outside: true, acts: [] },
+  office_comments: { outside: true, acts: [] },
+};
+
 /** An audit line recorded after every mutating op. `subject` is the doc title, `chatId` the acting home chat. */
 export type OfficeAuditEntry = { subject: string; reason: string; chatId: string };
 
@@ -229,7 +256,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
 
   p.registerTool({
     name: "office_list",
-    label: "List office documents",
+    label: LABELS.office_list,
+    guard: GUARDS.office_list,
     description: "List the office documents of your library: every Word (.docx) and spreadsheet (.xlsx) document in your folder, the ones you made or were granted (by being mentioned in one of its comments), and the ones the person made in the library. Each line has the id, title, format, owner, how many grants it holds, its current revision (mtimeMs -- pass that back as baseRevision to office_edit) and whether a human is editing it right now.",
     promptSnippet: "List the office documents you own or were granted",
     parameters: {
@@ -254,7 +282,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
 
   p.registerTool({
     name: "office_create",
-    label: "Create an office document",
+    label: LABELS.office_create,
+    guard: GUARDS.office_create,
     description: "Make a new blank office document in the shared library: type \"word\" (a .docx) or \"cell\" (an .xlsx sheet), both starting from a minimal template you edit with office_edit or open in the editor. It is owned by you, so every chat of your home sees it; other agents get access only when it mentions them in a comment. A title+type pair already taken is refused.",
     promptSnippet: "Create a blank Word or spreadsheet document",
     executionMode: "sequential",
@@ -278,7 +307,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
 
   p.registerTool({
     name: "office_read",
-    label: "Read an office document",
+    label: LABELS.office_read,
+    guard: GUARDS.office_read,
     description: "Read a document of your library by its id: the extracted text (paragraph-delimited for Word; a per-sheet grid of cell values for spreadsheets) plus, for Word, its comments (id, author, date, text). The revision line shows mtimeMs -- hand it to office_edit as baseRevision. It also says whether a human is editing right now.",
     promptSnippet: "Read the text and comments of an office document by id",
     parameters: {
@@ -322,7 +352,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
 
   p.registerTool({
     name: "office_edit",
-    label: "Edit an office document",
+    label: LABELS.office_edit,
+    guard: GUARDS.office_edit,
     description: `Change a Word document of your library by replacing quoted text, as office_read shows it. Each op is {quote, replacement}: the quote must appear in the extracted text (empty replacement removes it), ops apply one after another. While a person has the document open in the editor, the edit is refused (error:open_in_editor): what they type is saved when they close it, so wait and try again then. Every edit goes through the revision gate: baseRevision is the mtimeMs you read (or that your last edit returned), and if the document moved on since NOTHING is written and you hear a CONFLICT with the fresh revision -- re-read and retry. You never clobber a newer revision. Spreadsheets cannot be edited in v1 (a later milestone). All ops are made or none.`,
     promptSnippet: "Edit a Word document: quoted replacements on the revision you read",
     executionMode: "sequential",
@@ -414,7 +445,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
 
   p.registerTool({
     name: "office_comments",
-    label: "List document comments and grants",
+    label: LABELS.office_comments,
+    guard: GUARDS.office_comments,
     description: "Read-only: the comments of a Word document (id, author, date, text) plus its grants -- which other agent/project homes hold access to it by mention. Spreadsheets have no comment reading in v1.",
     promptSnippet: "List the comments and grants of an office document",
     parameters: {

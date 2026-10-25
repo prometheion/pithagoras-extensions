@@ -16,7 +16,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import { registerTools, __resetToolsForTests } from "../src/tools";
+import { GUARDS, LABELS, registerTools, __resetToolsForTests } from "../src/tools";
+import { de } from "../src/de";
 import { createDoc, getDoc } from "../src/store";
 import { parseDocx, rewriteZip } from "../src/ooxml";
 import { setUser, resetLive } from "../src/live";
@@ -187,6 +188,18 @@ test("registers office_* only in agent and project home chats", () => {
   });
   assert.equal(ghost.registered.length, 0);
   assert.ok(s.seen.logs.some((l) => l.includes("no workspace folder for chat chat-gone")));
+});
+
+test("every tool has its label from the translated table and a guard decided for it: what it returns is outside content", () => {
+  const s = setup();
+  (setup as any).__run();
+  assert.deepEqual(s.pi.registered.map((t) => t.name).sort(), Object.keys(LABELS).sort());
+  assert.deepEqual(Object.keys(GUARDS).sort(), Object.keys(LABELS).sort());
+  for (const t of s.pi.registered) {
+    assert.equal(t.label, LABELS[t.name], t.name);
+    assert.ok(t.label in de, `${t.name}'s label has its German`);
+    assert.deepEqual(t.guard, { outside: true, acts: [] }, t.name);
+  }
 });
 
 test("a document is owned by the project's folder, whichever of its sessions made it", async () => {

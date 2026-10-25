@@ -71,7 +71,9 @@ by its digest: a tag that came to name another build is refused, not run.
   Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph.
   Excel: write values and formulas into a range (the editor computes the formulas). The agent cannot write comments
   or tracked changes (it reads comments with `office_comments`). Calls on one document run one at a time.
-  A document nobody has open is opened by the agent's editor alone, and saved when it closes. The agent's editor of a
+  A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
+  is in a document its session stays open after the people left it, so it is saved as the last person leaves: what
+  they typed is in the file then, not only once the agent's editor closes. The agent's editor of a
   document closes after five minutes without a call; at most three are open at once (the least recently used one
   closes for a fourth); the browser stops ten minutes after its last editor closed, and starts again with the next
   call (a few seconds). Where you stopped Office, `office_read` reads the saved file and says so, and `office_edit` is

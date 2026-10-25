@@ -443,25 +443,52 @@ export function renameDoc(docId: string, newTitle: string, root = dataDir()): Do
   return { ...doc };
 }
 
-/** Delete a document: its docs/<docId> folder is moved to .trash/<Date.now()>-<docId> (a hard delete would not be
- * undoable) and the index entry removed. A scanned doc's REAL FILE (not a library folder) is what moves -- deleting
- * one moves the workspace file into this library's trash, exactly as reversible as everything else here. A scanned
- * file already gone from its workspace (deleted out-of-band since the last scan) is NOT an error: only the index
- * entry drops, which is what pruneMissingDocs would have done at the next settleKept anyway. sweepTrash (server boot /
- * settleKept) reclaims trash older than 7 days. Throws {code:"not_found"} for an unknown id. */
+/**
+ * Delete a document: it is moved into the trash as one entry, `.trash/<Date.now()>-<docId>/`, that holds its file
+ * (`<title>.<ext>`), what was kept for it (the comments seen, `state.json`; an older version's `history/`), and
+ * `document.json`, its index entry with where it was (`path`, for a scanned one): what is needed to put it back by
+ * hand. Then the index entry goes. A scanned doc's real file moves out of its folder; where the trash is on another
+ * file system than that folder (a portal in a container with the workspace bound in), it is copied and the original
+ * removed. A link put in the file's place is removed as the link. A scanned file already gone is NOT an error: only
+ * the index entry drops. sweepTrash (server boot / settleKept) removes entries older than 7 days, whole. Throws
+ * {code:"not_found"} for an unknown id.
+ */
 export function deleteDoc(docId: string, root = dataDir()): void {
   const rootDir = root ?? dataDir();
   const index = readIndex(rootDir);
   const doc = index.docs.find((d) => d.docId === docId);
   if (!doc) throw notFound(`no document with id ${docId}`);
-  const from = doc.path ? doc.path : path.join(rootDir, "docs", doc.docId);
-  fs.mkdirSync(trashDir(rootDir), { recursive: true });
-  try {
-    fs.renameSync(from, path.join(trashDir(rootDir), `${Date.now()}-${docId}`)); // the real file (scanned) or the folder (library)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    // the file left its workspace on its own: nothing to move, the index drop below IS the deletion
+  const entry = path.join(trashDir(rootDir), `${Date.now()}-${docId}`);
+  fs.mkdirSync(entry, { recursive: true });
+  const moveIn = (from: string, name: string) => {
+    try {
+      fs.renameSync(from, path.join(entry, name));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return; // left on its own: nothing to move
+      if (code !== "EXDEV") throw err;
+      fs.cpSync(from, path.join(entry, name), { recursive: true, dereference: false });
+      fs.rmSync(from, { recursive: true, force: true });
+    }
+  };
+  if (doc.path) {
+    let plain = true;
+    try {
+      plainFile(doc, doc.path);
+    } catch (err) {
+      if ((err as { code?: string }).code !== "invalid") plain = false; // gone
+      else {
+        fs.rmSync(doc.path, { force: true }); // a link in its place: removed as the link, never followed
+        plain = false;
+      }
+    }
+    if (plain) moveIn(doc.path, `${doc.title}.${doc.ext}`);
+  } else {
+    moveIn(path.join(rootDir, "docs", doc.docId), "docs");
   }
+  moveIn(path.join(rootDir, "state", `${docId}.json`), "state.json");
+  moveIn(path.join(rootDir, "history", docId), "history");
+  fs.writeFileSync(path.join(entry, "document.json"), JSON.stringify({ ...doc, deletedAt: Date.now() }, null, 2) + "\n");
   writeIndex(rootDir, { version: 1, docs: index.docs.filter((d) => d.docId !== docId) });
 }
 

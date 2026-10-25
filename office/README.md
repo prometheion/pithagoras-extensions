@@ -34,9 +34,10 @@ same page).
   the agents' and projects' folders (what the portal lists as folders) is indexed when the extension starts, and again
   with **Rescan**, **in place**: the scanned file is the document, and editing it edits that file. One whose file is
   gone (a git checkout of another branch, say) stays listed for a week, marked, with its owner and grants, and is the
-  same document again when the file comes back. Deleting one moves
-  its real file into the library's trash (`.trash/` in the data folder), where it is kept for 7 days and then removed;
-  there is no button to restore it, but the file can be moved back by hand.
+  same document again when the file comes back. Deleting one moves its real file into the library's trash
+  (`.trash/<time>-<id>/` in the data folder), with `document.json`, which says where it was, and what was kept for
+  it; the entry is kept for 7 days and then removed. There is no button to restore it, but the file can be moved back
+  by hand.
 - **A panel beside each chat** with the documents that chat's agent or project sees (below), and a card in the chat
   for each call of the agent's tools that names its document.
 - **The agent's tools**, in the chats of agents and projects: `office_list`, `office_create`, `office_read`,
@@ -105,9 +106,8 @@ Everything is in the extension's own data folder, beside the portal's other data
 `ticket-secret`,
 `ds.json` (the container and image of the last start), `listener-port` (the listener's port, taken again at the
 next start), `index.json` and `docs/<id>/<title>.<ext>` (the library),
-`.trash/`, `state/<id>.json` (the comments last seen, so that a comment wakes an agent once) and
-`history/<id>/<revision>.zip` (the changes kept for the editor's version history). A scanned document stays where it
-is; only its entry is in the index. The containers (`pithagoras-office-ds` and its relays `-relay` and `-portal`), the
+`.trash/`, and `state/<id>.json` (the comments last seen, so that a comment wakes an agent once). A scanned document
+stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds` and its relays `-relay` and `-portal`), the
 network (`pithagoras-office-ds-net`) and the volumes (`pithagoras-office-ds-data`, the Document Server's cache of open
 documents, and `pithagoras-office-ds-relay-sock`) are Docker's, shown in Settings → Docker under this extension.
 

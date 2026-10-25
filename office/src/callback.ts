@@ -15,8 +15,8 @@
  * hash from the CURRENT store.getDoc(docId) meta and refuses on mismatch -- see persistSaved.
  *
  * Persistence (statuses 2/6 + the status-1 forcesave action): fetch body.url with retries (the DS can lag after
- * a save) from the Document Server itself (`onDocumentServer`: the envelope names the browser's address), run store.persistBytes through its mtime gate, store the changesurl archive at
- * dataDir/history/<docId>/<newMtimeMs>.zip (mkdir -p; best-effort -- the document write is what matters), fire
+ * a save) from the Document Server itself (`onDocumentServer`: the envelope names the browser's address), run
+ * store.persistBytes through its mtime gate (a save it refuses is kept as a conflict copy), fire
  * every onPersisted(docId, buffer) hook (src/ping.ts registers its comment-mention wake through wirePing later),
  * then apply the status's lock rule: 2 unlocks AFTER persist, 6 STAYS locked. Everything happens BEFORE the
  * {"error":0} answer -- DS acts on the JSON error field, and any non-zero makes the editor show a save error /
@@ -37,8 +37,6 @@
  *   request gets 503 {"error":1} and nothing else happens.
  */
 import { createHash } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dataDir, portal } from "./host";
 import { signJwt, verifyJwt } from "./jwt";
@@ -51,7 +49,7 @@ export type CallbackState = { containerId: string; imageTag: string };
 export interface CallbackHandlerOptions {
   /** Document-library root; production leaves it undefined (= host.dataDir()), unit tests pass a tmp dir. */
   root?: string;
-  /** Fixed backoff schedule BETWEEN attempts of the body.url / changesurl fetches. Default [100, 250] ms -> at
+  /** Fixed backoff schedule BETWEEN attempts of the body.url fetch. Default [100, 250] ms -> at
    * most 3 attempts and ~350 ms of total waiting (the DS can lag; kept tiny on
    * purpose so unit tests stay fast). */
   retryDelaysMs?: number[];
@@ -226,12 +224,6 @@ async function fetchWithRetry(url: string, token: string, retryDelaysMs: number[
   }
 }
 
-function writeAtomic(dest: string, bytes: Buffer): void {
-  fs.mkdirSync(path.dirname(dest), { recursive: true }); // mkdir -p history/<docId>/
-  const tmp = path.join(path.dirname(dest), `.${path.basename(dest)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, bytes);
-  fs.renameSync(tmp, dest);
-}
 
 /* ------------------------------------------------------------------ */
 /* the status machine                                                  */
@@ -429,7 +421,7 @@ async function handleDispatch(
 
     case 2:
     case 6: {
-      // Ready-for-saving / force-saved: persist (fetch url w/ retries -> persistBytes gate -> history zip ->
+      // Ready-for-saving / force-saved: persist (fetch url w/ retries -> persistBytes gate ->
       // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked.
       await persistSaved(log, cfg, docId, parsed.revHash, body, status === 2, res);
       return;
@@ -444,7 +436,7 @@ async function handleDispatch(
 }
 
 /**
- * Where a file the Document Server names in a callback (`url`, `changesurl`) is downloaded from: always the Document
+ * Where a file the Document Server names in a callback (`url`) is downloaded from: always the Document
  * Server itself (`origin`, through the relay), at the path from `/cache/files/` on and with the query as it came. The
  * Document Server builds those addresses from where the browser reached it (the /ds proxy's forwarded headers), so
  * they name the portal's public, sign-in-gated address, which the server half cannot fetch. The query's `md5` signs
@@ -555,18 +547,6 @@ async function persistSaved(
   }
 
   lastPersist.set(docId, { url: body.url, mtimeMs: newMtimeMs });
-
-  // Changes archive -> dataDir/history/<docId>/<newRevision>.zip (rev = the NEW post-persist mtimeMs; the index
-  // carries that number now too, so history entries line up with what office_edit and tools gate against).
-  // Best-effort: a lost archive costs the editor's version-history view, never the document.
-  if (typeof body.changesurl === "string" && body.changesurl !== "") {
-    try {
-      const zip = await fetchWithRetry(onDocumentServer(body.changesurl, await cfg.getOrigin()), fetchToken, cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS);
-      writeAtomic(path.join(rootDir(), "history", docId, `${newMtimeMs}.zip`), zip);
-    } catch (err) {
-      log(`persist for ${docId}: could not store the changes archive: ${(err as Error).message}`);
-    }
-  }
 
   // Wake hooks (ping.ts comment mentions register here): exact saved bytes; one bad hook must not kill the rest.
   for (const hook of persistedHooks) {

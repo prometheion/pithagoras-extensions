@@ -258,9 +258,60 @@ test("deleteDoc: moves docs/<docId> into .trash, prunes the index; unknown id ->
   const trash = fs.readdirSync(path.join(root, ".trash"));
   assert.equal(trash.length, 1);
   assert.match(trash[0], new RegExp(`^\\d+-${doc.docId}$`));
-  assert.ok(fs.existsSync(path.join(root, ".trash", trash[0], "Doomed.docx"))); // content kept for the TTL
+  assert.ok(fs.existsSync(path.join(root, ".trash", trash[0], "docs", "Doomed.docx"))); // content kept for the TTL
   assert.equal(getDoc(doc.docId, root), null);
   assert.throws(() => deleteDoc(doc.docId, root), (err: Error) => err.code === "not_found");
+});
+
+test("deleteDoc: the trash entry says where the file was, and takes what was kept for the document with it", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-del-meta-")));
+  fs.mkdirSync(path.join(ws, "q3"));
+  fs.writeFileSync(path.join(ws, "q3", "Q3 report.docx"), await templateDocx());
+  scanWorkspace([ws], root);
+  const doc = listDocs(root)[0]!;
+  fs.mkdirSync(path.join(root, "state"), { recursive: true });
+  fs.writeFileSync(path.join(root, "state", `${doc.docId}.json`), JSON.stringify({ keys: ["k"] }));
+  fs.mkdirSync(path.join(root, "history", doc.docId), { recursive: true });
+  fs.writeFileSync(path.join(root, "history", doc.docId, "1.zip"), "an older version's archive");
+  deleteDoc(doc.docId, root);
+  const [entry] = fs.readdirSync(path.join(root, ".trash"));
+  const at = path.join(root, ".trash", entry!);
+  assert.deepEqual(fs.readdirSync(at).sort(), ["Q3 report.docx", "document.json", "history", "state.json"]);
+  const was = JSON.parse(fs.readFileSync(path.join(at, "document.json"), "utf8"));
+  assert.equal(was.path, path.join(ws, "q3", "Q3 report.docx"), "where to put it back");
+  assert.equal(was.title, "Q3 report");
+  assert.ok(!fs.existsSync(path.join(root, "state", `${doc.docId}.json`)));
+  assert.ok(!fs.existsSync(path.join(root, "history", doc.docId)));
+  // Swept after 7 days: the whole entry.
+  const old = path.join(root, ".trash", `${Date.now() - 8 * 24 * 60 * 60 * 1000}-${doc.docId}`);
+  fs.renameSync(at, old);
+  assert.equal(sweepTrash(root), 1);
+  assert.deepEqual(fs.readdirSync(path.join(root, ".trash")), []);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("deleteDoc: a workspace on another file system than the trash (EXDEV) is copied over and removed, not refused", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-del-xdev-")));
+  fs.writeFileSync(path.join(ws, "far.docx"), "on another mount");
+  scanWorkspace([ws], root);
+  const doc = listDocs(root)[0]!;
+  const rename = fs.renameSync;
+  const crossing = mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+    if (String(from).startsWith(ws)) throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+    return rename(from, to);
+  });
+  try {
+    deleteDoc(doc.docId, root);
+  } finally {
+    crossing.mock.restore();
+  }
+  assert.ok(!fs.existsSync(path.join(ws, "far.docx")));
+  const [entry] = fs.readdirSync(path.join(root, ".trash"));
+  assert.equal(fs.readFileSync(path.join(root, ".trash", entry!, "far.docx"), "utf8"), "on another mount");
+  assert.equal(listDocs(root).length, 0);
+  fs.rmSync(ws, { recursive: true, force: true });
 });
 
 test("sweepTrash: removes only entries older than 7 days", () => {
@@ -583,7 +634,7 @@ test("deleteDoc on a scanned doc moves its REAL file to the office trash; an alr
   assert.ok(!fs.existsSync(path.join(ws, "doomed.docx")), "the workspace file is gone from its folder");
   const trash = fs.readdirSync(path.join(root, ".trash"));
   assert.equal(trash.length, 1, "exactly one entry landed in the office trash -- recoverable for 7 days");
-  assert.equal(fs.readFileSync(path.join(root, ".trash", trash[0]), "utf8"), "soon to be trashed");
+  assert.equal(fs.readFileSync(path.join(root, ".trash", trash[0], "doomed.docx"), "utf8"), "soon to be trashed");
   assert.equal(listDocs(root).length, 0);
 
   // a file deleted OUT-OF-BAND (no one asked the library): deleting its index entry must not ENOENT

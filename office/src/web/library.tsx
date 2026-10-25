@@ -101,7 +101,7 @@ function DocRow({ doc }: { doc: OfficeDoc }) {
     if (busy) return;
     const ok = await portal.ui.confirm({
       title: t("Delete “{title}”?", { title: doc.title }),
-      message: t("The document is moved to the office trash, which is swept after 7 days. Its revisions and history go with it."),
+      message: t("The document is moved to the office trash with what was kept for it, and where it was; the trash is swept after 7 days."),
       confirmLabel: t("Delete"),
       danger: true,
       deletes: true,

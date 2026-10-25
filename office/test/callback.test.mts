@@ -193,7 +193,7 @@ test("parseKey: null for anything this package did not mint", () => {
 const hookLog: { docId: string; buffer: Buffer }[] = [];
 onPersisted((docId, buffer) => hookLog.push({ docId, buffer })); // single module-level collector, cleared per test
 
-test("status 2 happy path: persists bytes, bumps index, stores history zip, fires onPersisted, unlocks", async () => {
+test("status 2 happy path: persists bytes, bumps index, fires onPersisted, unlocks; the changes archive, which nothing reads, is not kept", async () => {
   const root = tmpRoot();
   const sink: string[] = [];
   const doc = await createDoc({ title: "Quarterly Report", type: "word" }, root);
@@ -227,9 +227,9 @@ test("status 2 happy path: persists bytes, bumps index, stores history zip, fire
   const after = getDoc(doc.docId, root)!;
   assert.notEqual(after.mtimeMs, before.mtimeMs);
   assert.equal(after.sizeBytes, newBytes.length);
-  // the changes archive landed at history/<doc>/<newRev>.zip (rev = the NEW post-persist mtime)
-  const zipPath = path.join(root, "history", doc.docId, `${after.mtimeMs}.zip`);
-  assert.ok(fs.readFileSync(zipPath).equals(zipBytes), "changes zip stored under the new revision");
+  // no version history is offered in the editor, so the changes archive is neither fetched nor kept
+  assert.ok(!fs.existsSync(path.join(root, "history")));
+  assert.equal(zipBytes.length > 0, true);
   // onPersisted fired once for this doc with the exact buffer (ping's wake hook will see these bytes)
   const mine = hookLog.filter((h) => h.docId === doc.docId);
   assert.equal(mine.length, 1);
@@ -658,7 +658,7 @@ test("status 2: the save the Document Server names at the browser's address is d
   const res = await post(handler, envelope, { headers: dsHeaders(envelope) });
   await server.close();
   assert.deepEqual(json(res), { error: 0 });
-  assert.deepEqual(server.urls, ["/cache/files/saved?md5=Ab-Cd_1&expires=1792000000&filename=output.docx", "/cache/files/changes.zip?md5=Ef&expires=1792000000"]);
+  assert.deepEqual(server.urls, ["/cache/files/saved?md5=Ab-Cd_1&expires=1792000000&filename=output.docx"]);
   assert.ok(fs.readFileSync(docFile(root, doc)).equals(saved));
 });
 

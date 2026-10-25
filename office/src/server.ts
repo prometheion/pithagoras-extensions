@@ -532,6 +532,7 @@ function registerRoutes(dd: string, secret: string): void {
     const i = raw.indexOf("/ds/");
     if (i === -1) return res.status(404).json({ error: "bad proxy path", code: "not_found" });
     const rest = raw.slice(i + 4); // everything after /ds/, query string included, untouched
+    if (!dsPathAllowed(rest)) return res.status(404).json({ error: "not a path of the editor", code: "not_found" });
     if (!container.readDsRecord(dd)) {
       return res.status(503).json({ error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" });
     }
@@ -544,7 +545,8 @@ function registerRoutes(dd: string, secret: string): void {
       let total = 0;
       for await (const c of req) {
         total += c.length;
-        if (total > 128 * 1024 * 1024) break; // the handshake advertises maxPayload 100MB; stay above it
+        // The handshake advertises maxPayload 100MB; above this a body is refused whole, never sent on cut short.
+        if (total > MAX_DS_BODY) return res.status(413).json({ error: `a request to the document server may carry at most ${MAX_DS_BODY / 1024 ** 2} MB`, code: "too_large" });
         chunks.push(c);
       }
       body = Buffer.concat(chunks);
@@ -644,6 +646,30 @@ async function listenLoopback(server: http.Server, dd: string): Promise<number> 
 /* ------------------------------------------------------------------ */
 /* boot + cleanup                                                      */
 /* ------------------------------------------------------------------ */
+
+/** The most a request to the Document Server may carry: above engine.io's maxPayload (100 MB) of the handshake. */
+const MAX_DS_BODY = 128 * 1024 * 1024;
+
+/** The Document Server's own endpoints that no browser needs: its statistics and licence (`info`), its cluster
+ * switches (`internal`), its command and conversion services for integrators, and its AI proxy. The rest of what
+ * its nginx serves (the editor's files, the socket.io channel, the converted files, downloadas, upload, print...) is
+ * the editor's. */
+const DS_DENIED = new Set(["info", "internal", "coauthoring", "converter", "convertservice.ashx", "docbuilder", "ai-proxy"]);
+
+/** Whether the /ds proxy passes `rest` (the path after /ds/, with its query) on: as the Document Server's nginx reads a
+ * path -- decoded, slashes merged, dot segments resolved, the versioned prefix (`/10.0.0-169/`) taken off -- its first
+ * segment must not be one of DS_DENIED. A path that does not decode is refused. */
+export function dsPathAllowed(rest: string): boolean {
+  let pathname: string;
+  try {
+    pathname = path.posix.normalize(`/${decodeURIComponent(rest.split("?")[0])}`);
+  } catch {
+    return false;
+  }
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length && /^\d+\.\d+\.\d+[.|-]\w+$/.test(segments[0])) segments.shift();
+  return !DS_DENIED.has((segments[0] ?? "").toLowerCase());
+}
 
 /** The first of a header's values: a header given twice, or a list a chain of proxies made ("a, b"). */
 function first(value: unknown): string | undefined {

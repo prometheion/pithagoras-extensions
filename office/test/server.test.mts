@@ -16,7 +16,7 @@ import type { AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { fakeDocker } from "./fake-docker.mts";
 import * as container from "../src/container";
-import officeServer, { forwardedFor, jwtSecret, loopbackPort, settleKept } from "../src/server";
+import officeServer, { dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept } from "../src/server";
 import * as store from "../src/store";
 import { rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
@@ -836,6 +836,40 @@ test("/ds proxy: a redirect of the Document Server reaches the browser as one, n
     assert.equal(res.statusCode, 302);
     assert.equal(res.headers.location, "http://portal.example/api/x/%40pithagoras/office/ds/10.0.0-169/web-apps/apps/documenteditor/main/index.html");
     assert.equal(ds.seen.length, 1, "the proxy did not follow it");
+  } finally {
+    ds.server.close();
+    await b.cleanup();
+  }
+});
+
+test("/ds proxy: the Document Server's own endpoints are not passed on, however the path is spelled; the editor's are", async () => {
+  const b = await boot();
+  const ds = await startFakeDs();
+  try {
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
+    for (const p of ["info/info.json", "internal/cluster/inactive", "10.0.0-169/info/info.json", "INFO/info.json", "%69nfo/info.json", "web-apps/../info/info.json", "web-apps/%2e%2e/internal/connections/edit", "//internal/x", "coauthoring/CommandService.ashx", "ConvertService.ashx", "ai-proxy/x", "%zz"]) {
+      const res = await b.router.dispatch("GET", `/ds/${p}`);
+      assert.equal(res.statusCode, 404, p);
+    }
+    assert.deepEqual(ds.urls, [], "none reached the Document Server");
+    for (const p of ["web-apps/apps/api/documents/api.js", "10.0.0-169/web-apps/apps/documenteditor/main/index.html", "cache/files/data/k/Editor.bin/Editor.bin?md5=x", "10.0.0-169/doc/k/c/?EIO=4", "downloadas/k?cmd=x", "fonts/x", "sdkjs/x", "meta/formats", "healthcheck"]) {
+      assert.equal(dsPathAllowed(p), true, p);
+    }
+  } finally {
+    ds.server.close();
+    await b.cleanup();
+  }
+});
+
+test("/ds proxy: a body above the cap is refused with 413, never sent on cut short", async () => {
+  const b = await boot();
+  const ds = await startFakeEngineIo();
+  try {
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
+    const big = Buffer.alloc(64 * 1024 * 1024 + 1);
+    const res = await b.router.dispatch("POST", "/ds/c/?EIO=4&transport=polling", Buffer.concat([big, big]), { "content-type": "text/plain" });
+    assert.equal(res.statusCode, 413);
+    assert.deepEqual(ds.posts, []);
   } finally {
     ds.server.close();
     await b.cleanup();

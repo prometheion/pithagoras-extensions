@@ -9,7 +9,7 @@ import { useOfficeState } from "./state";
  * document, loads the Document Server's api.js ONCE (the script is not idempotent -- a second load on the same
  * page breaks it), drops ONLY apiJs from the answered config and hands the rest to DocsAPI as-is: the JWT covers
  * exactly that object (the JWT signs what is sent, so nothing is added to it). The lock badge ("N editing now")
- * and the "agent updated this document" badge come from the shared 5 s poll of /state; the
+ * and the "changed on disk" badge come from the shared 5 s poll of /state; the
  * editor's own refreshFile handshake, which would replace the page refresh, is not used yet.
  */
 
@@ -109,7 +109,8 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   }, [docId]);
 
   const users = state?.locks[docId] ?? [];
-  // An agent wrote a newer revision than the one this view opened on.
+  // A newer revision than the one this view opened on, written outside the editor (a script, a git pull): the
+  // agent's own tools wait while the document is open. What was typed here is then saved as a copy beside it.
   const stale = openedAt.current !== null && !!doc && doc.mtimeMs > openedAt.current;
 
   return (
@@ -128,10 +129,10 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
         )}
         {stale && (
           <span className="po-chip po-chip-stale">
-            {t("The agent updated this document")}
+            {t("This document changed on disk since it opened")}
             {" — "}
             <button type="button" className="po-refresh" onClick={() => window.location.reload()}>
-              {t("refresh to see their changes")}
+              {t("reload it (what you typed here since is kept as a copy)")}
             </button>
           </span>
         )}

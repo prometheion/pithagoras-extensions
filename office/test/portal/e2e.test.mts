@@ -10,6 +10,8 @@ import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "@playwright/test";
 import { parseDocx } from "../../src/ooxml.ts";
+import { makeKey } from "../../src/callback.ts";
+import { signJwt } from "../../src/jwt.ts";
 
 /**
  * Office end to end, against the real Document Server: its server half started by the portal's own extension host,
@@ -139,6 +141,17 @@ window.__events = [];
       }
       assert.equal(locks.length, 1, "the editing seat shows while the editor is open");
 
+      // What office_edit asks after a restart of the half (server.ts sessionOpen): the Document Server's own `info`
+      // for the document's key answers 0 while the session is open.
+      const info = async () => {
+        const secret = readFileSync(path.join(data, "jwt-secret"), "utf8").trim();
+        const meta = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === doc.docId);
+        const body = { c: "info", key: makeKey(doc.docId, meta.mtimeMs) };
+        const answer = await fetch(`http://127.0.0.1:${process.env.PITHAGORAS_OFFICE_PORT}/command`, { method: "POST", headers: { "content-type": "application/json", "X-Auth-Token": `Bearer ${signJwt(body, 60_000, secret)}` }, body: JSON.stringify(body) });
+        return ((await answer.json()) as { error: number }).error;
+      };
+      assert.equal(await info(), 0, "the Document Server says the session is open");
+
       await frame.locator("#editor_sdk").click({ position: { x: 300, y: 150 } });
       await page.keyboard.type("Typed end to end", { delay: 30 });
       await delay(3000);
@@ -152,6 +165,7 @@ window.__events = [];
       }
       assert.match(text, /Typed end to end/, "the Document Server's save was taken and written to the file");
       assert.deepEqual((await json(`${at}/state`)).body.locks[doc.docId], [], "nobody is in it once it closed");
+      assert.equal(await info(), 1, "and that none is open once it closed");
     } finally {
       await browser.close();
     }

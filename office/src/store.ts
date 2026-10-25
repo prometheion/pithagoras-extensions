@@ -829,24 +829,70 @@ function plainFile(doc: DocMeta, file: string): fs.Stats {
  */
 function replaceKeeping(file: string, bytes: Buffer, was: fs.Stats): void {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomInt(1e9)}.tmp`);
-  const mode = was.mode & 0o7777;
-  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
+  writeNewKeeping(tmp, bytes, was);
+  fs.renameSync(tmp, file);
+}
+
+/** `bytes` as a new file at `file` (never over one there, never through a link), synced, with the owner, group and mode
+ * of `was` where it is given. */
+function writeNewKeeping(file: string, bytes: Buffer, was?: fs.Stats): void {
+  const mode = was ? was.mode & 0o7777 : 0o644;
+  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
   try {
     fs.writeFileSync(fd, bytes);
-    try {
-      fs.fchownSync(fd, was.uid, was.gid);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EPERM") throw e;
+    if (was) {
+      try {
+        fs.fchownSync(fd, was.uid, was.gid);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EPERM") throw e;
+      }
+      fs.fchmodSync(fd, mode); // the umask had its say at the open
     }
-    fs.fchmodSync(fd, mode); // the umask had its say at the open
     fs.fsyncSync(fd);
   } catch (e) {
     fs.closeSync(fd);
-    fs.rmSync(tmp, { force: true });
+    fs.rmSync(file, { force: true });
     throw e;
   }
   fs.closeSync(fd);
-  fs.renameSync(tmp, file);
+}
+
+/**
+ * A save the revision gate refused, kept as a document of its own rather than lost: "<title> (conflict <date time>)",
+ * beside a scanned document in its folder (as its file is: owner, group and mode) and in the library for a library
+ * document, with the original's owner and grants, so the same agents see it. Its comments are taken as seen
+ * (`importedBaseline`): they were in the document already and must not wake anyone again.
+ */
+export function saveConflictCopy(doc: DocMeta, bytes: Buffer, root = dataDir()): DocMeta {
+  const index = readIndex(root);
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", ".");
+  const folder = doc.path ? path.dirname(doc.path) : null;
+  const taken = (title: string) =>
+    index.docs.some((d) => d.title === title && d.ext === doc.ext) || (folder !== null && fs.existsSync(path.join(folder, `${title}.${doc.ext}`)));
+  let title = "";
+  for (let n = 1; !title || taken(title); n++) {
+    const tag = ` (conflict ${stamp}${n > 1 ? ` ${n}` : ""})`;
+    title = doc.title.slice(0, 200 - tag.length) + tag;
+  }
+  const now = Date.now();
+  const copy: DocMeta = { docId: freshDocId(index.docs, title), title, ext: doc.ext, createdAt: now, updatedAt: now, sizeBytes: 0, mtimeMs: 0, owner: doc.owner, grants: doc.grants.map((g) => ({ ...g })), imported: true };
+  try {
+    if (doc.ext === "docx") copy.importedBaseline = parseDocx(bytes).comments.map((c) => c.id);
+  } catch {
+    // not a docx that parses: ping.ts baselines what its first save holds
+  }
+  if (doc.path && folder !== null) {
+    const was = plainFile(doc, doc.path);
+    const file = path.join(folder, `${title}.${doc.ext}`);
+    writeNewKeeping(file, bytes, was);
+    const st = fs.statSync(file);
+    Object.assign(copy, { path: file, sizeBytes: st.size, mtimeMs: st.mtimeMs, ...(doc.workspace !== undefined ? { workspace: doc.workspace } : {}) });
+  } else {
+    storeDoc(copy, bytes, root);
+  }
+  index.docs.push(copy);
+  writeIndex(root, index);
+  return { ...copy };
 }
 
 /** Persist saved document bytes (the callback's status-2/6 path) under the REVISION GATE -- the whole point of

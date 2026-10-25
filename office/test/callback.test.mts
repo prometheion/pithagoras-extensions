@@ -19,7 +19,7 @@ import { signJwt, verifyJwt } from "../src/jwt";
 import {
   CallbackState, configure, createCallbackHandler, docIdOf, handleCallback, keyIdOf, makeKey, onDocumentServer, onPersisted, parseKey, revHashOf,
 } from "../src/callback";
-import { createDoc, getDoc } from "../src/store";
+import { createDoc, getDoc, listDocs, scanWorkspace } from "../src/store";
 import * as live from "../src/live";
 
 const SECRET = "unit-test-secret-0123456789abcdef";
@@ -242,36 +242,54 @@ test("status 2 happy path: persists bytes, bumps index, stores history zip, fire
   assert.equal(live.pollState(doc.docId, 0).locked, false);
 });
 
-test("stale key (revHash of an older mtime): document NOT overwritten, JSON error, one log line", async () => {
+test("stale key (revHash of an older mtime): the document is NOT overwritten, the save is kept as a copy beside it, and the person can find it", async () => {
   const root = tmpRoot();
   const sink: string[] = [];
-  const doc = await createDoc({ title: "Stale Doc", type: "word" }, root);
+  const records: { subject: string; reason: string }[] = [];
+  const doc = await createDoc({ title: "Stale Doc", type: "word", owner: "/homes/a" }, root);
   const before = getDoc(doc.docId, root)!;
   const original = fs.readFileSync(docFile(root, doc));
   hookLog.length = 0;
 
-  const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("should-never-land") }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
+  const typed = Buffer.from("what the person typed in the session that opened the older revision");
+  const server = await startFileServer(() => ({ status: 200, bytes: typed }), null);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l), record: (e) => records.push(e) });
+  live.setUser(doc.docId, { id: "portal-user" }, true, { confirmed: true });
 
   // key minted from an OLDER mtime than the one currently in the index
-  const envelope = {
-    key: makeKey(doc.docId, before.mtimeMs - 60_000),
-    status: 2,
-    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
-  };
+  const envelope = { key: makeKey(doc.docId, before.mtimeMs - 60_000), status: 2, url: `${server.base}/cache/files/saved?md5=m1&expires=9` };
   const res = await post(handler, envelope, { headers: dsHeaders(envelope) });
-
   await server.close();
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(json(res), { error: 1 }); // non-zero -> the editor shows a save failure
-  assert.ok(fs.readFileSync(docFile(root, doc)).equals(original), "file untouched");
-  const after = getDoc(doc.docId, root)!;
-  assert.equal(after.mtimeMs, before.mtimeMs);
-  assert.equal(after.sizeBytes, original.length);
-  assert.equal(server.savedAttempts, 0, "stale gate refuses BEFORE the download");
-  assert.equal(hookLog.filter((h) => h.docId === doc.docId).length, 0);
-  assert.ok(!fs.existsSync(path.join(root, "history", doc.docId)));
-  assert.ok(sink.some((l) => l.includes("stale key") && l.includes(doc.docId)), `a stale-key line was logged: ${sink.join("; ")}`);
+  assert.deepEqual(json(res), { error: 0 }, "saved, as a copy: the Document Server keeps nothing as forgotten");
+  assert.ok(fs.readFileSync(docFile(root, doc)).equals(original), "the newer revision is untouched");
+  assert.equal(getDoc(doc.docId, root)!.mtimeMs, before.mtimeMs);
+  assert.equal(hookLog.filter((h) => h.docId === doc.docId).length, 0, "no wake from a save that was not taken");
+  const copy = listDocs(root).find((d) => d.docId !== doc.docId)!;
+  assert.match(copy.title, /^Stale Doc \(conflict \d{4}-\d\d-\d\d \d\d\.\d\d\)$/);
+  assert.equal(copy.owner, "/homes/a", "the same agents see it");
+  assert.ok(fs.readFileSync(docFile(root, copy)).equals(typed), "what was typed is all there");
+  assert.ok(sink.some((l) => l.includes("stale key") && l.includes(copy.title)));
+  assert.ok(records.some((r) => r.subject === "Stale Doc" && r.reason.includes(copy.docId)), "recorded where the person looks");
+  assert.deepEqual(live.usersOf(doc.docId), [], "the session is over");
+});
+
+test("a save refused beside a scanned document is kept in its folder, as its file is", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-copy-")));
+  fs.writeFileSync(path.join(ws, "plan.docx"), await (await import("../src/store")).templateDocx());
+  fs.chmodSync(path.join(ws, "plan.docx"), 0o640);
+  scanWorkspace([ws], root);
+  const doc = listDocs(root)[0]!;
+  const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("typed") }), null);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+  const envelope = { key: makeKey(doc.docId, doc.mtimeMs - 1), status: 2, url: `${server.base}/cache/files/saved?md5=m1&expires=9` };
+  assert.deepEqual(json(await post(handler, envelope, { headers: dsHeaders(envelope) })), { error: 0 });
+  await server.close();
+  const copy = listDocs(root).find((d) => d.docId !== doc.docId)!;
+  assert.equal(path.dirname(copy.path!), ws);
+  assert.equal(fs.readFileSync(copy.path!, "utf8"), "typed");
+  assert.equal(fs.statSync(copy.path!).mode & 0o777, 0o640);
+  fs.rmSync(ws, { recursive: true, force: true });
 });
 
 test("duplicate force-save pass (same url + our revision): treated as done, no second write", async () => {

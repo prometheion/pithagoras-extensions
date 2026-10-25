@@ -379,44 +379,48 @@ test("office_edit: applies ops to the stored bytes, bumps the revision; old base
   assert.equal(s.seen.records.filter((r) => r.reason.includes("office_edit")).length, 2);
 });
 
-test("office_edit co-editor model: a live human session neither blocks nor gates; a stale revision is refused with a loud CONFLICT", async () => {
+test("office_edit while the document is open in the editor: refused, nothing written; a seat the Document Server never confirmed does not hold it up", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Open One", type: "word", owner: "/f/atlas" }, s.root);
+  bumpRevision(s.root, doc.docId, Date.now() - 5000);
+  const base = getDoc(doc.docId, s.root)!.mtimeMs;
+  // The Document Server said somebody is in it.
+  setUser(doc.docId, { id: "portal-user", name: "Portal" }, true, { confirmed: true });
+  const msg = await refused(tool(s, "office_edit").execute("f1", { id: doc.docId, ops: [{ quote: "New document", replacement: "Too early" }], baseRevision: base }), "open in the editor");
+  assert.match(msg, /^error:open_in_editor /);
+  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "New document");
+  assert.equal(getDoc(doc.docId, s.root)!.mtimeMs, base);
+  // Closed: the edit goes through.
+  resetLive();
+  setUser(doc.docId, { id: "portal-user", name: "Portal" }, true); // minted only: the editor never loaded
+  await tool(s, "office_edit").execute("f2", { id: doc.docId, ops: [{ quote: "New document", replacement: "After closing" }], baseRevision: base });
+  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "After closing");
+});
+
+test("office_edit asks the session check it is given (the Document Server's own answer after a restart)", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Asked", type: "word", owner: "/f/atlas" }, s.root);
+  const asked: string[] = [];
+  registerTools({ sessionOpen: async (d) => (asked.push(d.docId), true) });
+  const msg = await refused(tool(s, "office_edit").execute("f1", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }], baseRevision: getDoc(doc.docId, s.root)!.mtimeMs }), "open");
+  assert.match(msg, /^error:open_in_editor /);
+  assert.deepEqual(asked, [doc.docId]);
+});
+
+test("office_edit: a stale revision is refused with a loud CONFLICT and the fresh revision; re-read and retry goes through", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Co Edit", type: "word", owner: "/f/atlas" }, s.root);
-  // Pin the file mtime to an exact value AND mirror it in the index so the ZERO-tolerance gate is deterministic
-  // (a fresh create can leave a sub-ms stat drift on some filesystems).
-  const REV1 = Date.now() - 5000;
-  bumpRevision(s.root, doc.docId, REV1);
-  setUser(doc.docId, { id: "human-1", name: "Ada" }, true); // a human has the editor open RIGHT NOW
-
-  // Case A (INVERTED from v1's refuse-while-a-session-is-open model): matching revision + an open human
-  // session -> the edit SUCCEEDS. No settings.json write needed any more: there is no switch; presence never blocks.
-  const ok = (await tool(s, "office_edit").execute("f1", { id: doc.docId, ops: [{ quote: "New document", replacement: "Co-edited" }], baseRevision: getDoc(doc.docId, s.root)!.mtimeMs })) as ToolResult;
-  assert.ok(!ok.content[0].text.startsWith("error:"), ok.content[0].text);
-  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "Co-edited"); // the agent edit landed alongside the open session
-
-  // Case B: an external co-editor save advanced the file mtime after the agent read it -> refused with a CONFLICT
-  // (code stays revision_mismatch), the FRESH mtime in the message, the open editor named so the agent learns a
-  // human is co-editing -- and NOTHING written.
+  bumpRevision(s.root, doc.docId, Date.now() - 5000);
   const baseB = getDoc(doc.docId, s.root)!.mtimeMs;
-  bumpRevision(s.root, doc.docId, Date.now() + 5000); // guaranteed >1 ms ahead of base: an external save moved the revision
-  const freshAfterBump = getDoc(doc.docId, s.root)!.mtimeMs; // the value every gate now sees
-  const refusedMsg = await refused(tool(s, "office_edit").execute("f2", { id: doc.docId, ops: [{ quote: "Co-edited", replacement: "late" }], baseRevision: baseB }), "stale revision must refuse");
+  bumpRevision(s.root, doc.docId, Date.now() + 5000); // an external save moved the revision after the agent read it
+  const fresh = getDoc(doc.docId, s.root)!.mtimeMs;
+  const refusedMsg = await refused(tool(s, "office_edit").execute("f2", { id: doc.docId, ops: [{ quote: "New document", replacement: "late" }], baseRevision: baseB }), "stale revision must refuse");
   assert.match(refusedMsg, /^error:revision_mismatch /);
   assert.ok(refusedMsg.includes("CONFLICT"), `the refusal is an explicit CONFLICT: ${refusedMsg}`);
-  assert.ok(refusedMsg.includes(String(freshAfterBump)), `the fresh mtime ${freshAfterBump} must be in the message: ${refusedMsg}`);
-  assert.match(refusedMsg, /human editor \(Ada\)/, "the open session is named so the agent knows a human is co-editing");
-  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "Co-edited"); // NOTHING written by the stale edit
-
-  // Case C: same stale revision with NOBODY in the editor -> still refused (the gate is the safety mechanism,
-  // never a session check), but without the human-editor note.
-  resetLive();
-  const refusedC = await refused(tool(s, "office_edit").execute("f3", { id: doc.docId, ops: [{ quote: "Co-edited", replacement: "still late" }], baseRevision: baseB }), "stale revision with no session must refuse too");
-  assert.match(refusedC, /^error:revision_mismatch /);
-  assert.ok(!refusedC.includes("human editor"), "no open session -> no human-editor note");
-
-  // Case D: re-read first (fresh base) and the same edit succeeds again -- fail loud, re-read + retry is the loop.
-  const okD = (await tool(s, "office_edit").execute("f4", { id: doc.docId, ops: [{ quote: "Co-edited", replacement: "Retried after re-read" }], baseRevision: freshAfterBump })) as ToolResult;
-  assert.ok(!okD.content[0].text.startsWith("error:"), okD.content[0].text);
+  assert.ok(refusedMsg.includes(String(fresh)), `the fresh mtime ${fresh} must be in the message: ${refusedMsg}`);
+  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "New document"); // NOTHING written by the stale edit
+  const ok = (await tool(s, "office_edit").execute("f4", { id: doc.docId, ops: [{ quote: "New document", replacement: "Retried after re-read" }], baseRevision: fresh })) as ToolResult;
+  assert.ok(!ok.content[0].text.startsWith("error:"), ok.content[0].text);
   assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "Retried after re-read");
 });
 

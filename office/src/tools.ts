@@ -16,7 +16,9 @@
  *
  * Revision model: the mtimeMs of the library file IS the revision. office_edit takes baseRevision (= the mtimeMs
  * office_read showed), GATES FIRST (>1 ms drift -> "error:revision_mismatch ..." with the fresh mtime, nothing
- * written), and store.persistBytes re-gates strictly at write time anyway (ZERO tolerance).
+ * written), and store.persistBytes re-gates strictly at write time anyway (ZERO tolerance). While the document is open
+ * in the editor, office_edit refuses (error:open_in_editor): the Document Server saves what was typed only as the
+ * last editor closes, under the revision it opened, and an agent's edit landing first would turn that save stale.
  *
  * Wakes (the drain side): ping.ts only QUEUES wakes server-side and rings the
  * bell with chats.tell(chatId, {type:"ping"}). The office pi extension registered from THIS factory
@@ -36,7 +38,7 @@ import { jsZip } from "./jszip";
 import { portal } from "./host";
 import { canonical, createDoc, docPath, docsForHome, persistBytes, refresh, refreshAll, type DocMeta } from "./store";
 import { parseDocx, parseXlsx, editDocx, rewriteZip, type EditOp } from "./ooxml";
-import { usersOf, isLocked } from "./live";
+import { inSession, usersOf, isLocked } from "./live";
 import { drainWakeQueue } from "./ping";
 
 /** The UI_RECEIVE bus event chats.tell rings (the portal's own document tools listen on the same name). */
@@ -61,6 +63,10 @@ export type ToolsDeps = {
   readFile?: (file: string, chatId: string) => Buffer;
   /** Store/state root override. Default: lazy portal().dataDir(). */
   root?: string;
+  /** Whether the Document Server has an editing session open on the document at its current revision. Default:
+   * a seat the Document Server confirmed (live.inSession); server.ts gives its own, which also asks the Document
+   * Server. */
+  sessionOpen?: (doc: DocMeta) => Promise<boolean>;
   /** The audit sink for mutating ops. Default: a one-line log via the log seam (ping.ts pattern). */
   record?: (entry: OfficeAuditEntry) => void;
   /** Log line. Default: lazy portal().log. */
@@ -318,7 +324,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
   p.registerTool({
     name: "office_edit",
     label: "Edit an office document",
-    description: `Change a Word document of your library by replacing quoted text, as office_read shows it. Each op is {quote, replacement}: the quote must appear in the extracted text (empty replacement removes it), ops apply one after another. You are a CO-EDITOR alongside any human who has the document open -- there is no session check and no switch; the edit always proceeds under the revision gate: baseRevision is the mtimeMs you read (or that your last edit returned), and if the document moved on since (for example a co-editor's save) NOTHING is written and you hear a CONFLICT with the fresh revision -- re-read and retry. You never clobber a newer revision. Spreadsheets cannot be edited in v1 (a later milestone). All ops are made or none.`,
+    description: `Change a Word document of your library by replacing quoted text, as office_read shows it. Each op is {quote, replacement}: the quote must appear in the extracted text (empty replacement removes it), ops apply one after another. While a person has the document open in the editor, the edit is refused (error:open_in_editor): what they type is saved when they close it, so wait and try again then. Every edit goes through the revision gate: baseRevision is the mtimeMs you read (or that your last edit returned), and if the document moved on since NOTHING is written and you hear a CONFLICT with the fresh revision -- re-read and retry. You never clobber a newer revision. Spreadsheets cannot be edited in v1 (a later milestone). All ops are made or none.`,
     promptSnippet: "Edit a Word document: quoted replacements on the revision you read",
     executionMode: "sequential",
     parameters: {
@@ -356,9 +362,13 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // re-gates strictly at write time too, so this is belt and not only braces.
       let meta = refresh(doc.docId, rootDir());
       if (!meta) throw new Refusal("not_found", `"${doc.title}" vanished from the library between list and edit`);
-      // The co-editor model: NO session check here (live.ts presence neither allows nor blocks) -- the revision
-      // gate alone decides. When it refuses, say LOUDLY that this is a CONFLICT, name any open human editor so
-      // the agent learns somebody is co-editing, and point at the fresh revision to re-read + retry.
+      // Not while the document is open in the editor: the Document Server saves what is typed there only when the
+      // last editor closes, under the revision it opened, and an edit landing first would make that save stale --
+      // the person's whole session would be refused. So the agent waits until it is closed.
+      if (await (cfg.sessionOpen ?? (async (d: DocMeta) => inSession(d.docId)))(meta)) {
+        throw new Refusal("open_in_editor", `"${meta.title}" is open in the editor right now: what is typed there is saved when it is closed, and an edit now would be in its way. Nothing was written. Try again once it is closed (office_list says when nobody is editing it).`);
+      }
+      // When the revision gate refuses, say LOUDLY that this is a CONFLICT and point at the fresh revision to re-read + retry.
       const stale = (fresh: DocMeta) => {
         const humans = usersOf(fresh.docId);
         const openEditorNote = humans.length > 0 ? ` A human editor (${humans.map((h) => h.name ?? h.id).join(", ")}) still has the document open, so a co-editor is likely behind the change.` : "";

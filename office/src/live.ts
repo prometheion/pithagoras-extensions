@@ -111,6 +111,12 @@ export function setUser(docId: string, user: { id: string; name?: string }, join
   }
 }
 
+/** Whether the Document Server said somebody is in the document (a confirmed seat): its editing session is open. A
+ * seat only minted, which the Document Server never confirmed (an editor that did not load), does not count. */
+export function inSession(docId: string): boolean {
+  return [...(presence.get(docId)?.values() ?? [])].some((u) => u.confirmed);
+}
+
 /** The explicit lock flag (callback statuses 1/2/4/6 set it). */
 export function setLocked(docId: string, isLocked: boolean): void {
   if (isLocked) locked.add(docId);

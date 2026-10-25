@@ -625,6 +625,33 @@ function registerRoutes(dd: string, secret: string): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* is the document open in the editor                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Whether the Document Server has an editing session open on `doc` at its current revision: a seat it confirmed
+ * through its callbacks, or, as a half that started again since knows of none, its own answer to the `info` command
+ * for the document's key (error 0: a session with that key is open; 1: none). Where the Document Server cannot be
+ * asked, the seats alone say.
+ */
+async function sessionOpen(dd: string, secret: string, doc: store.DocMeta): Promise<boolean> {
+  if (live.inSession(doc.docId)) return true;
+  if (!container.readDsRecord(dd)) return false;
+  const body = { c: "info", key: callback.makeKey(doc.docId, doc.mtimeMs) };
+  try {
+    const res = await fetch(`${await container.dsOrigin()}/command`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Auth-Token": `Bearer ${signJwt(body, 60_000, secret)}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+    return ((await res.json()) as { error?: unknown }).error === 0;
+  } catch {
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* the loopback listener's port                                        */
 /* ------------------------------------------------------------------ */
 
@@ -712,7 +739,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   // the seams, as their module headers describe them (audit lands in portal().audit AND a log line).
   // NOTE: there is NO co-editing switch and no flush-before-write hook to install here -- office_edit runs under
   // the strict mtime/revision gate with human editor sessions open or not (co-editor model; fail loud, re-read + retry).
-  registerTools({ root: dd, record: recordAudit });
+  registerTools({ root: dd, record: recordAudit, sessionOpen: (doc) => sessionOpen(dd, secret, doc) });
   // Owners and grants were chat ids before: moved to the folders those chats work in.
   try {
     const moved = store.migrateOwners((chatId) => {
@@ -727,7 +754,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     logLine(`@pithagoras/office: owners could not be moved to folders: ${(e as Error).message}`);
   }
   wirePing({ root: dd, record: recordAudit });
-  callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd });
+  callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd, record: recordAudit });
   live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);
 
   registerRoutes(dd, secret);

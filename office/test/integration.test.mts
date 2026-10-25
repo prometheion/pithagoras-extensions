@@ -8,10 +8,10 @@
  *   2. A synthetic OnlyOffice callback with status 2 arrives on the loopback POST /callback WITHOUT any
  *      session cookie, persists (bytes on disk changed to exactly what body.url served), bumps the index
  *      revision, writes history/<doc>/<rev>.zip from changesurl, and clears the lock AFTER the persist.
- *   3. office_edit against a doc with a live human session present: the co-editor model means the session
- *      neither blocks nor gates the edit -- a matching revision succeeds alongside the open editor, and a
- *      revision that moved underneath (an external co-editor save) surfaces as error:revision_mismatch
- *      CONFLICT -- nothing is overwritten.
+ *   3. office_edit against a doc whose editor seat was minted but never confirmed by the Document Server: it does
+ *      not hold the edit up, and a revision that moved underneath (a save landing first) surfaces as
+ *      error:revision_mismatch CONFLICT -- nothing is overwritten. One the Document Server confirmed refuses the
+ *      edit (tools.test.mts).
  *
  * The gate (why it is an env flag + a docker CLI probe instead of host.docker()): these tests need a docker,
  * but src/host.ts' docker() mirrors the portal's
@@ -251,7 +251,7 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
 /* 3. co-editor model: open session + revision gate                    */
 /* ------------------------------------------------------------------ */
 
-IT("office_edit with a live human session: proceeds under the revision gate (matching revision succeeds); an external save that moves the revision underneath is refused as a CONFLICT", async () => {
+IT("office_edit with a seat the Document Server never confirmed: proceeds under the revision gate (matching revision succeeds); an external save that moves the revision underneath is refused as a CONFLICT", async () => {
   __resetToolsForTests(); // this file's process starts clean; be explicit
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-it-tools-"));
   const home = "chat-aegis-home";
@@ -269,7 +269,7 @@ IT("office_edit with a live human session: proceeds under the revision gate (mat
   });
   assert.ok(tools2.office_edit, "office_edit registered into the agent home (ownership scope is real here)");
 
-  /* Scenario A -- the open session must NEITHER block NOR gate: a matching revision succeeds alongside it. */
+  /* Scenario A -- a minted seat the Document Server never confirmed (the editor did not load) does not block. */
   const docA = await store.createDoc({ title: "Order Doc", type: "word", owner: home }, root); // template says "New document"
   live.setUser(docA.docId, { id: "u-sam", name: "Sam" }, true); // a fake human with the editor open
   const fileA = path.join(root, "docs", docA.docId, "Order Doc.docx");

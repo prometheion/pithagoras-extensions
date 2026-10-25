@@ -44,14 +44,16 @@ same page).
   exist. What an agent makes or is granted belongs to its folder, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
   and a link is not followed.
-- **Co-editing, with no switch**: the agent is a co-editor like any other. You and the agent can have the same
-  document open and edited at once. Every write goes through a revision check: a document's revision is its file's
-  modification time, `office_read` shows it, and `office_edit` takes it as `baseRevision` and replaces quoted text
-  only if the file is still at that revision. If it moved on (you saved in the meantime), nothing is written and the
-  tool answers `error:revision_mismatch`, naming the open editor session where there is one; the agent reads again
-  and retries. The Document Server's own saves are held to the same check, so nobody overwrites a newer revision.
-  An open editor sees an external change within about 5 seconds. Every revision the agent writes is kept for the
-  editor's version history.
+- **The agent and the editor take turns**: while a document is open in the editor, `office_edit` refuses
+  (`error:open_in_editor`) and the agent tries again once it is closed: the Document Server saves what is typed only
+  as the last editor closes, under the revision it opened, and an edit landing first would make that save stale.
+  Every write goes through a revision check: a document's revision is its file's modification time, `office_read`
+  shows it, and `office_edit` takes it as `baseRevision` and replaces quoted text only if the file is still at that
+  revision; if it moved on, nothing is written and the tool answers `error:revision_mismatch`. A change made outside
+  the extension (a script, a git pull) is a new revision at once. A save from the editor that would overwrite a newer
+  revision (the file changed on disk while it was open) is not lost and does not overwrite it: it is kept beside the
+  document as "<title> (conflict <date time>)", and the audit log says so. An open editor says within about 5
+  seconds when the file changed on disk; reloading it opens the new revision.
 - **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document), or
   `@<name>` or `@project:<name>` for an agent or project by name, and save, that agent's home chat is woken with the
   quoted comment and gets access to that document.

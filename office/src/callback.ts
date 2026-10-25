@@ -57,6 +57,8 @@ export interface CallbackHandlerOptions {
   retryDelaysMs?: number[];
   /** Log sink for the status-3/7 lines and every failure; defaults to portal().log with a console.error fallback. */
   log?: (line: string) => void;
+  /** The audit sink: a save kept as a copy rather than written over a newer revision is recorded there. */
+  record?: (entry: { subject: string; reason: string }) => void;
 }
 
 type CallbackConfig = {
@@ -485,24 +487,20 @@ async function persistSaved(
     return fail();
   }
 
-  // STALE-GATE: the key pins the revision the config was minted against; the CURRENT meta must match,
-  // else something already moved the revision and we must NOT overwrite it. The double-save memo below tells
-  // "we already wrote exactly this save" apart from "someone else won".
-  if (revHashOf(meta.mtimeMs) !== keyRevHash) {
+  // STALE-GATE: the key pins the revision the config was minted against; the CURRENT meta must match, else
+  // something already moved the revision and this save must NOT overwrite it. The double-save memo tells "we
+  // already wrote exactly this save" apart from "someone else won".
+  const stale = revHashOf(meta.mtimeMs) !== keyRevHash;
+  if (stale) {
     const ours = lastPersist.get(docId);
-    const sameUrl = typeof body.url === "string" && ours?.url === body.url;
-    if (ours && ours.mtimeMs === meta.mtimeMs && sameUrl) {
+    if (ours && ours.mtimeMs === meta.mtimeMs && typeof body.url === "string" && ours.url === body.url) {
       // The duplicate pass of a force-save we already persisted: report SUCCESS, apply the status's lock rule.
       log(`persist for ${docId}: this save was already persisted at revision ${meta.mtimeMs} -- treating as done`);
       if (unlockAfter) live.clearDoc(docId); // a status-2 re-send closes the session
       else live.setLocked(docId, true); // status 6: editing continues, stay locked
       respond(res, 200, 0);
       return;
-    } else {
-      log(`persist for ${docId}: stale key (current revision ${meta.mtimeMs}, expected hash ${keyRevHash}) -- NOT overwriting a newer revision`);
-      if (unlockAfter) live.clearDoc(docId); // terminal close: the session is over, drop flag AND presence
     }
-    return fail();
   }
 
   if (typeof body.url !== "string" || body.url === "") {
@@ -529,16 +527,30 @@ async function persistSaved(
     return fail();
   }
 
+  /** A save that would overwrite a newer revision is not thrown away: it is kept as a copy beside the document, which
+   * the person finds in the library and the audit log, and the Document Server is told it was saved, so it does not
+   * hold it as forgotten under a key nobody opens again. */
+  const keepAsCopy = (why: string): void => {
+    if (unlockAfter) live.clearDoc(docId); // terminal close: the session is over, drop flag AND presence
+    let copy: store.DocMeta;
+    try {
+      copy = store.saveConflictCopy(meta, bytes, rootDir());
+    } catch (err) {
+      log(`persist for ${docId}: ${why}, and the save could not be kept as a copy either: ${(err as Error).message}`);
+      return fail();
+    }
+    log(`persist for ${docId}: ${why} -- NOT overwriting it; the save is kept as "${copy.title}" (${copy.docId})`);
+    cfg.record?.({ subject: meta.title, reason: `a save from the editor was not written over a newer revision; kept as "${copy.title}.${copy.ext}" (${copy.docId})` });
+    respond(res, 200, 0);
+  };
+  if (stale) return keepAsCopy(`stale key (current revision ${meta.mtimeMs}, the session opened another)`);
+
   let newMtimeMs: number;
   try {
     newMtimeMs = store.persistBytes(meta, bytes, rootDir()).mtimeMs;
   } catch (err) {
-    if ((err as { code?: string }).code === "revision_mismatch") {
-      log(`persist for ${docId}: revision moved between read and write -- NOT overwriting`);
-      if (unlockAfter) live.clearDoc(docId); // terminal close, same rule as the stale gate above
-    } else {
-      log(`persist for ${docId}: store failure: ${(err as Error).message}`);
-    }
+    if ((err as { code?: string }).code === "revision_mismatch") return keepAsCopy("the revision moved between read and write");
+    log(`persist for ${docId}: store failure: ${(err as Error).message}`);
     return fail();
   }
 

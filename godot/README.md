@@ -33,7 +33,7 @@ In Settings → Extensions → Discover → **Install by name**:
 
 ## The first start
 
-Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/prometheion/pithagoras-godot:0.2.0`,
+Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/prometheion/pithagoras-godot:0.2.1`,
 about 0.6 GB unpacked), makes a volume for the projects and a network of its own (`pithagoras-godot-net`), makes the
 container on it and starts it, and opens the portal's way to it (below, under Security). The page shows the download,
 then the server starting, then the editor's own state ("Editor ready: starter"). The first start makes a 3D project
@@ -241,7 +241,7 @@ card or a port.
 **Remove** on the Settings page first, then uninstall the extension: the container is restarted by Docker unless
 stopped (`unless-stopped`), and outlives the extension, which has no say once it is uninstalled. Remove asks whether to
 delete the projects too, and also removes the network and the forwarder. The image stays on disk, as other containers
-may use it: `docker image rm ghcr.io/prometheion/pithagoras-godot:0.2.0` deletes it.
+may use it: `docker image rm ghcr.io/prometheion/pithagoras-godot:0.2.1` deletes it.
 
 ## Limits
 

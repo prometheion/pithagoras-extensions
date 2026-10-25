@@ -32,7 +32,8 @@ export function stream(dir: string) {
     if (req.method !== "GET" && req.method !== "HEAD") return next();
     if (req.path === "/stream/" || req.path === "/stream/index.html") return void res.set(HEADERS).type("html").send(index);
     const file = req.path.startsWith("/stream/") ? req.path.slice("/stream/".length) : "";
-    if (files.has(file)) return res.sendFile(path.join(folder, file), { headers: HEADERS });
+    // Sent from the folder (`root`), as send refuses a path with a dot folder in it: an npm install is under ~/.pi.
+    if (files.has(file)) return res.sendFile(file, { root: folder, headers: HEADERS });
     next();
   };
 }

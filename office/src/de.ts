@@ -31,6 +31,7 @@ export const de: Record<string, string | Plural> = {
   "Listed the office documents": "Die Office-Dokumente aufgelistet",
   "Listing office documents": "Office-Dokumente auflisten",
   "Loading the editor — the first start of a Document Server can take a while…": "Der Editor wird geladen – der erste Start eines Document Servers kann eine Weile dauern…",
+  "The Document Server is still setting itself up after its first start, which takes about two minutes. The editor opens once it is done…": "Der Document Server richtet sich nach seinem ersten Start noch ein, das dauert etwa zwei Minuten. Der Editor öffnet sich, sobald er fertig ist…",
   "Loading…": "Lädt…",
   "Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.": "Erstellte Dokumente liegen im eigenen Datenverzeichnis dieser Erweiterung (dem Ordner docs mit Index und Papierkorb), nie im Ordner eines Chats; Dateien aus dem Arbeitsbereich bleiben, wo sie sind – die Bibliothek erfasst sie an Ort und Stelle, und ein Download oder Export ist eine Kopie.",
   "Modified": "Geändert",

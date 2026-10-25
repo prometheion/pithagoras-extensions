@@ -25,7 +25,9 @@ In Settings → Extensions → Discover → Install by name: `npm:@pithagoras/of
 on and press start. The image is pulled on the first start (`onlyoffice/documentserver:10.0.0.1` by default, the full
 tag of the build this version was tested with, never `:latest` or a shorter tag like `10.0`, which move to each new
 build: a new build can change the editor's callback and token behaviour, so it is yours to change on purpose, in the
-same page).
+same page). A new Document Server container answers within seconds but then makes its fonts for about two
+minutes and restarts its own services; until it is done, Settings says it is starting and the editor waits for it,
+as an editor opened before would lose what is typed in it.
 
 ## What you get
 

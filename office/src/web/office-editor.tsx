@@ -3,6 +3,7 @@ import { LuUsers } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, sayError } from "./api";
 import { useOfficeState } from "./state";
+import { startingUp } from "../office-ui";
 
 /**
  * The Office editor's host: the page's half of `new DocsAPI.DocEditor`. It asks POST /editor-config for its
@@ -50,6 +51,8 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   const [problem, setProblem] = useState<string | null>(null);
   /** The Document Server has filled its iframe into the placeholder: the loading state is done. */
   const [ready, setReady] = useState(false);
+  /** A new Document Server is still making its fonts (the server half's ds_starting): asked again until it is done. */
+  const [settingUp, setSettingUp] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const editor = useRef<DestroyableEditor | null>(null);
   // What mtimeMs was in effect when this view opened (the revision the minted key carries, as near as the page
@@ -64,11 +67,24 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   useEffect(() => {
     let alive = true;
     let watch: ReturnType<typeof setInterval> | undefined;
+    let again: ReturnType<typeof setTimeout> | undefined;
     setProblem(null);
     setReady(false);
-    void (async () => {
+    setSettingUp(false);
+    const open = async () => {
       try {
-        const minted = await api.editorConfig(docId);
+        let minted: Awaited<ReturnType<typeof api.editorConfig>>;
+        try {
+          minted = await api.editorConfig(docId);
+        } catch (e) {
+          if (!startingUp(e)) throw e;
+          if (alive) {
+            setSettingUp(true);
+            again = setTimeout(() => void open(), 3000);
+          }
+          return;
+        }
+        setSettingUp(false);
         if (!alive || !box.current) return;
         await loadScript(minted.apiJs);
         if (!alive || !box.current) return;
@@ -94,10 +110,12 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
       } catch (e) {
         if (alive) setProblem(sayError(e));
       }
-    })();
+    };
+    void open();
     return () => {
       alive = false;
       if (watch !== undefined) clearInterval(watch);
+      if (again !== undefined) clearTimeout(again);
       try {
         editor.current?.destroyEditor?.(); // where the loaded api.js exposes it
       } catch {
@@ -152,7 +170,9 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
       <div className="po-host" ref={box}>
         {!ready && !problem && (
           <div className="po-loading">
-            {t("Loading the editor — the first start of a Document Server can take a while…")}
+            {settingUp
+              ? t("The Document Server is still setting itself up after its first start, which takes about two minutes. The editor opens once it is done…")
+              : t("Loading the editor — the first start of a Document Server can take a while…")}
           </div>
         )}
       </div>

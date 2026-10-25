@@ -442,6 +442,41 @@ async function probe(d: Docker, id: string): Promise<{ version?: string; memByte
 /** Drops what the probe kept, for tests. */
 export function forgetProbe(): void {
   probed = undefined;
+  settledRun = undefined;
+}
+
+/**
+ * A new Document Server container answers its health check within seconds, but its start script then makes its fonts,
+ * themes and script caches in the background (about two minutes) and restarts its own services at the end. An editor
+ * opened meanwhile loses its connection at that restart: what is typed is not saved, and the editor shows errors.
+ * It is set up once AllFonts.js is there and the script that makes it no longer runs (the bracket keeps pgrep from
+ * finding this shell, whose command line names it too).
+ */
+const SETTLED_CHECK = 'test -s /var/www/onlyoffice/documentserver/sdkjs/common/AllFonts.js && ! pgrep -f "documentserver-generate-allfont[s]" >/dev/null';
+
+/** The run of the container (its id and when it started) last found set up: that stays so until it starts again. */
+let settledRun: string | undefined;
+
+/**
+ * Whether the running Document Server is done setting itself up (see SETTLED_CHECK). False only where the check says it
+ * is still at it; where it cannot be asked (no Docker, no container, the exec failed), true, and what is wrong is
+ * said where it is (the status, the editor's own errors).
+ */
+export async function settled(docker?: Docker): Promise<boolean> {
+  try {
+    const d = await reachable(docker);
+    const detail = (await d.containers.inspect(NAMES.container)) as (Inspected & { Id?: string; State?: { StartedAt?: string } }) | undefined;
+    if (!detail || !running(detail)) return true;
+    const run = `${detail.Id ?? ""}@${detail.State?.StartedAt ?? ""}`;
+    if (settledRun === run) return true;
+    const res = await d.containers.exec(NAMES.container, ["sh", "-c", SETTLED_CHECK], { timeoutMs: 10_000 });
+    if (res.timedOut || res.exitCode === null) return true;
+    if (res.exitCode !== 0) return false;
+    settledRun = run;
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -480,6 +515,8 @@ export async function status(docker?: Docker): Promise<{ state: string; version?
     return out;
   }
   out.state = st.Status === "running" && st.Starting ? "starting" : st.Status === "exited" ? "stopped" : st.Status;
+  // Running, but still making its fonts: an editor opened now would lose its connection (see settled).
+  if (out.state === "running" && !(await settled(d))) out.state = "starting";
   if (out.state === "running") Object.assign(out, await probe(d, existing.id));
   return out;
 }

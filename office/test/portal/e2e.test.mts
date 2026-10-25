@@ -110,6 +110,14 @@ window.__events = [];
       answer = await fetch(`${at}/ds/healthcheck`).then((r) => (r.ok ? r.text() : ""), () => "");
     }
     assert.equal(answer, "true", "the Document Server answers its health check through the relay");
+    // It answers long before it is set up: a new container makes its fonts and then restarts its services, which an
+    // editor opened before would not survive. Running, in the status, is after that.
+    let state = "";
+    for (let i = 0; i < 150 && state !== "running"; i++) {
+      state = (await json(`${at}/container/status`)).body.state;
+      if (state !== "running") await delay(2000);
+    }
+    assert.equal(state, "running", "the Document Server is set up");
     const inspect = (name: string) => JSON.parse(execFileSync("docker", ["inspect", name], { encoding: "utf8" }))[0];
     assert.equal(inspect(PREFIX).HostConfig.NetworkMode, `${PREFIX}-net`);
     assert.deepEqual(inspect(PREFIX).HostConfig.PortBindings ?? {}, {}, "nothing of the Document Server's is published");

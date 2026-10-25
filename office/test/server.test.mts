@@ -392,6 +392,25 @@ test("editor-config: a file written outside the extension is opened at its new r
   await b.cleanup();
 });
 
+test("editor-config while a new Document Server still makes its fonts: 503 ds_starting, no seat taken; once it is done, the config", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  b.dock.put("pithagoras-office-ds", { Image: DEFAULT_TAG }, { state: "running" });
+  container.forgetProbe();
+  let making = true;
+  b.dock.state.answer = (cmd) => (cmd.join(" ").includes("AllFonts.js") ? { output: "", exitCode: making ? 1 : 0, timedOut: false } : undefined);
+  const doc = await store.createDoc({ title: "Early", type: "word" }, b.root);
+  let res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
+  assert.equal(res.statusCode, 503);
+  assert.equal((res.body as Record<string, unknown>).code, "ds_starting");
+  assert.deepEqual(live.usersOf(doc.docId), [], "nobody is shown editing a document whose editor did not open");
+  making = false;
+  res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
+  assert.equal(res.statusCode, 200);
+  live.clearDoc(doc.docId);
+  await b.cleanup();
+});
+
 test("editor-config (xlsx): documentType cell, also for a portal in a container; unconfigured -> 503; unknown doc -> 404", async () => {
   const b = await boot(undefined, fakeDocker({ sharedNetwork: "container:9f3a1c2d", reach: { host: "pithagoras-office-ds-relay", port: 3890 } }));
   writeDsJson(b, "http://pithagoras-office-ds-relay:3890");

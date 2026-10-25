@@ -433,11 +433,17 @@ function registerRoutes(dd: string, secret: string): void {
 
   /** POST /editor-config {doc} -> the config object for `new DocsAPI.DocEditor(el, cfg)`: the plain fields plus
    * token = signJwt(the WHOLE plain config minus the token itself, 15 min) and apiJs (the script src -- drop it
-   * before calling DocEditor). On a mint the seat joins live presence. See buildEditorConfig for the refusals. */
+   * before calling DocEditor). On a mint the seat joins live presence. See buildEditorConfig for the refusals, and
+   * 503 ds_starting while a new Document Server is still setting itself up (container.settled). */
   r.post("/editor-config", json, async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const docId = typeof body.doc === "string" && body.doc !== "" ? body.doc : "";
     if (!docId) return res.status(400).json({ error: 'the body needs { doc: "<document id>" }' });
+    // Not while a new Document Server is still making its fonts: it restarts its services at the end, and an editor
+    // opened before loses what is typed in it. The page asks again until it is done.
+    if (container.readDsRecord(dd) && !(await container.settled())) {
+      return res.status(503).json({ error: "the document server is still setting itself up after its first start (about two minutes); the editor opens once it is done", code: "ds_starting" });
+    }
     const built = buildEditorConfig(dd, secret, docId);
     if (built.res) {
       const rr = built.res as { status: number; body: Record<string, unknown> };

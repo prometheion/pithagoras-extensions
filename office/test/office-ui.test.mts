@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { editorsIn, floatingTag, parseDocQuery } from "../src/office-ui";
+import { editorsIn, floatingTag, parseDocQuery, startingUp } from "../src/office-ui";
 
 test("parseDocQuery: ?doc=<id> is the opened document; encoded ids come back decoded", () => {
   assert.equal(parseDocQuery("?doc=my-report"), "my-report");
@@ -36,4 +36,13 @@ test("editorsIn: every doc has a locks entry (empty when nobody is in it); missi
   assert.equal(editorsIn(locks, "a"), 0);
   assert.equal(editorsIn(locks, "b"), 2);
   assert.equal(editorsIn(undefined, "a"), 0);
+});
+
+test("startingUp: only the server half's 503 ds_starting is waited out; any other refusal is said", () => {
+  const refusal = (status: number, body: Record<string, unknown>) => Object.assign(new Error("refused"), { status, body });
+  assert.equal(startingUp(refusal(503, { code: "ds_starting" })), true);
+  assert.equal(startingUp(refusal(503, { code: "ds_not_configured" })), false);
+  assert.equal(startingUp(refusal(404, { code: "ds_starting" })), false);
+  assert.equal(startingUp(new Error("network")), false);
+  assert.equal(startingUp(null), false);
 });

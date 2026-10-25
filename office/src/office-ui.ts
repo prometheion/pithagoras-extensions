@@ -29,3 +29,10 @@ export function floatingTag(tag: string): boolean {
 export function editorsIn(locks: Record<string, { id: string; name?: string }[]> | undefined, docId: string): number {
   return (locks?.[docId] ?? []).length;
 }
+
+/** The server half's refusal while a new Document Server is still setting itself up (POST /editor-config answers 503
+ * ds_starting, as the portal's ApiError carries it): the editor page waits and asks again instead of saying it. */
+export function startingUp(e: unknown): boolean {
+  const refused = e as { status?: unknown; body?: { code?: unknown } } | null;
+  return refused?.status === 503 && refused.body?.code === "ds_starting";
+}

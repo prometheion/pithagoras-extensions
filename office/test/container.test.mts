@@ -33,6 +33,7 @@ import {
   readDsRecord,
   removeContainers,
   setBackPort,
+  settled,
   status,
   stopContainer,
   userStopped,
@@ -133,6 +134,7 @@ test("ensure (fresh): both images, both volumes, the island, the Document Server
 
   assert.deepEqual(readDsRecord(root), { containerId: m.containers.get(DS_NAME)!.info.id, imageTag: TAG92 });
   assert.equal(await dsOrigin(m.docker), "http://127.0.0.1:3890");
+  m.state.exec = { output: "", exitCode: 0, timedOut: false }; // done setting itself up (see settled)
   const s = await status(m.docker);
   assert.equal(s.state, "running");
   assert.deepEqual(s.pull, { active: false, line: "done" });
@@ -302,7 +304,7 @@ test("status: absent -> stopped; running -> the version and the memory use read 
   assert.ok(m.calls.some((c) => c.startsWith(`exec ${DS_NAME} sh -c dpkg-query`) && c.includes("memory.current")));
   // Kept for a while: the page polls every 5 s.
   await status(m.docker);
-  assert.equal(m.calls.filter((c) => c.startsWith("exec")).length, 1);
+  assert.equal(m.calls.filter((c) => c.includes("dpkg-query")).length, 1);
 
   m.containers.get(DS_NAME)!.inspect.State = { Status: "running", Running: true, Starting: true };
   assert.equal((await status(m.docker)).state, "starting");
@@ -318,6 +320,50 @@ test("status: an answer that is no version or number leaves both out", async () 
   const s = await status(m.docker);
   assert.equal(s.version, undefined);
   assert.equal(s.memBytes, undefined);
+});
+
+test("a new Document Server that still makes its fonts is starting, and refused to an editor, until its set-up script is done", async () => {
+  const m = fresh();
+  const ds = m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+  ds.inspect.Id = "cid-ds";
+  ds.inspect.State = { Status: "running", Running: true, StartedAt: "2026-10-25T13:50:58Z" };
+  // Its start script makes AllFonts.js and the rest in the background, then restarts the Document Server's services.
+  let making = true;
+  m.state.answer = (cmd) => {
+    const script = cmd.join(" ");
+    if (script.includes("AllFonts.js")) {
+      assert.match(script, /pgrep -f "documentserver-generate-allfont\[s\]"/, "the bracket keeps pgrep from finding the shell that asks");
+      return { output: "", exitCode: making ? 1 : 0, timedOut: false };
+    }
+    return { output: "10.0.0-169\n9175040\n", exitCode: 0, timedOut: false };
+  };
+  let s = await status(m.docker);
+  assert.equal(s.state, "starting", "it answers its health check, but would restart under an editor");
+  assert.equal(s.version, undefined);
+  assert.equal(await settled(m.docker), false);
+
+  making = false;
+  s = await status(m.docker);
+  assert.equal(s.state, "running");
+  assert.equal(s.version, "10.0.0-169");
+  // Set up stays set up for this run of the container: not asked again at every poll.
+  const asked = () => m.calls.filter((c) => c.includes("AllFonts.js")).length;
+  const before = asked();
+  assert.equal(await settled(m.docker), true);
+  await status(m.docker);
+  assert.equal(asked(), before);
+  // Started again (or made again): asked again.
+  ds.inspect.State = { Status: "running", Running: true, StartedAt: "2026-10-25T14:10:00Z" };
+  making = true;
+  assert.equal(await settled(m.docker), false);
+
+  // Where it cannot be asked, nothing is held back: what is wrong is said where it is.
+  m.state.answer = () => ({ output: "", exitCode: null, timedOut: true });
+  assert.equal(await settled(m.docker), true);
+  assert.equal(await settled(fresh({ available: false }).docker), true);
+  const stopped = fresh();
+  stopped.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "exited" });
+  assert.equal(await settled(stopped.docker), true);
 });
 
 /* ---------------- the relays' programs ---------------- */

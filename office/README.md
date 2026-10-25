@@ -12,11 +12,12 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - Pithagoras 0.3.0 or later.
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
-- A Docker host the portal can reach (its socket), for the portal's shared network (see Security).
+- A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
+  itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
 - About 4 GB of RAM for the Document Server container. The settings page warns before the first start, and shows the
   container's memory use once it runs.
-- Disk for the image (`onlyoffice/documentserver`, several GB), which the portal pulls on the first start, with the
-  progress shown in Settings.
+- Disk for the images (`onlyoffice/documentserver`, several GB, and Node's `node:22.23.4-alpine3.23`, about 50 MB,
+  for the relays below), which the portal pulls on the first start, with the progress shown in Settings.
 
 ## Installing
 
@@ -53,41 +54,71 @@ purpose, in the same page).
 
 ## Security
 
-- **The Document Server sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame
-  and every asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which
-  the portal gates like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and
-  only to one origin, the Document Server this extension started (recorded
-  in `ds.json`). A portal whose Docker is reached through a container-to-container network, where there is no such
-  origin to forward to, is refused with a message that says so.
-- **Two routes are open to the container, on a listener of their own.** The container has no portal session, so the
-  two things it needs are served by a small listener bound to `127.0.0.1` on a port chosen at each start: a document
-  fetch with a signed ticket that expires in 10 minutes (`GET /doc/<ticket>`), and the save callback
-  (`POST /callback`, which must carry a valid HS256 token). Nothing else answers there. The tokens are signed with a
-  secret created once in the extension's data folder (`jwt-secret`, mode 0600).
-- **On a portal on the host's network, the Document Server listens on every interface.** The container joins the
-  portal's shared network (`host` for a portal on the machine itself), so the image's own web server answers on port
-  80 of every address the machine has, without going through the portal's sign-in: the signed tokens protect the
-  requests the portal makes, they are no access control against someone who reaches that port. Firewall the port so
-  that only the machine itself reaches it. Binding it to the loopback is not done by this extension.
+- **A network of its own.** The Document Server is on `pithagoras-office-ds-net`, which Docker for extensions makes
+  internal and with no gateway (gateway mode `isolated`): it reaches neither the machine, its loopback, the local
+  network nor the internet, and nothing outside the machine reaches it. A converter that a hostile `.docx` breaks into
+  finds nothing there but the two relays below. Its plugin manager is off (`PLUGINS_ENABLED=false`): it would try the
+  internet at every start.
+- **Two relays are its only way in and back.** Docker for extensions gives a way onto such a network but none back,
+  and the Document Server has to fetch each document and report each save. So Office runs two small containers of its
+  own on Node's alpine image, unprivileged, with none of the kernel's capabilities, a read-only root and 128 MB, as
+  Docker for extensions runs its forwarder:
+  - `pithagoras-office-ds-relay`, on the network: port 3890 to the Document Server's port 80 (the way in), and port
+    3891 to a socket in the volume `pithagoras-office-ds-relay-sock` (the way back);
+  - `pithagoras-office-ds-portal`, on the portal's own loopback (the machine's network for a portal on it, the portal
+    container's for one in Docker): that socket to the extension's listener on 127.0.0.1.
+
+  The portal reaches the relay as it reaches Blender and Godot: for a portal on the host's network, through the
+  forwarder `pithagoras-office-ds-relay-forward`, which publishes port 3890 on 127.0.0.1; for a portal in a container
+  of its own, by putting that container on the network. Port 80 is never published on the machine.
+- **Two routes are open to the Document Server, on a listener of their own.** The container has no portal session,
+  so the two things it needs are served by a small listener bound to `127.0.0.1`, which the relays lead to and
+  nothing else: a document fetch with a signed ticket that expires in 10 minutes (`GET /doc/<ticket>`), and the save
+  callback (`POST /callback`, which must carry a valid HS256 token). Nothing else answers there. The tokens are signed
+  with a secret created once in the extension's data folder (`jwt-secret`, mode 0600). A save is downloaded from the
+  Document Server itself, from its files (`/cache/files/`) alone, whatever address the callback names.
+- **The editor sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame and every
+  asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which the portal gates
+  like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and only to the
+  Document Server, and tells it the address the browser used, which it builds the editor's own addresses from.
 - **The agent can only write what its revision check allows**, and each document-changing call is recorded in the
   portal's audit log with the chat that made it.
 
 ## Data
 
 Everything is in the extension's own data folder, beside the portal's other data: `settings.json`, `jwt-secret`,
-`ds.json` (the container and its recorded origin), `index.json` and `docs/<id>/<title>.<ext>` (the library),
+`ds.json` (the container and image of the last start), `listener-port` (the listener's port, taken again at the
+next start), `index.json` and `docs/<id>/<title>.<ext>` (the library),
 `.trash/`, `state/<id>.json` (the comments last seen, so that a comment wakes an agent once) and
 `history/<id>/<revision>.zip` (the changes kept for the editor's version history). A scanned document stays where it
-is; only its entry is in the index. The container (`pithagoras-office-ds`) and its volume (`pithagoras-office-ds-data`)
-are Docker's, shown in Settings → Docker under this extension.
+is; only its entry is in the index. The containers (`pithagoras-office-ds` and its relays `-relay` and `-portal`), the
+network (`pithagoras-office-ds-net`) and the volumes (`pithagoras-office-ds-data`, the Document Server's cache of open
+documents, and `pithagoras-office-ds-relay-sock`) are Docker's, shown in Settings → Docker under this extension.
+
+## Settings from the environment
+
+The portal's environment can change each name, for a second portal on the same Docker host or for a test:
+
+| Variable | Default |
+| --- | --- |
+| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relays `<container>-relay` and `<container>-portal`, their volume `<container>-relay-sock`) |
+| `PITHAGORAS_OFFICE_VOLUME` | `<container>-data` |
+| `PITHAGORAS_OFFICE_PORT` | `3890`: the relay's port to the Document Server, and for a portal on the host's network the forwarder's on 127.0.0.1 |
+
+## Removing
+
+Remove the Document Server in Settings → Office first (**Remove**), then uninstall the extension: the portal has no
+uninstall hook, so containers left running keep running. Remove takes the Document Server, both relays, the network
+(and with it the forwarder) and both volumes; the library and every document stay. Docker for extensions cannot
+remove an image, so the images stay on disk: `docker image rm onlyoffice/documentserver:<tag>` deletes the big one.
 
 ## Limits
 
 - Only `.docx` and `.xlsx`. Comments are read and wake an agent in Word documents; spreadsheet comments are not read.
   `.pptx` is not supported.
 - A file above 512 MiB is not indexed.
-- One Document Server for the portal, run by this extension. An existing container of that name is adopted, never made
-  again.
+- One Document Server for the portal, run by this extension. A container of that name that nobody owns (one from
+  before Docker for extensions) is taken over and made again; one of another extension's is refused.
 - Not in this version: copying a document into a chat's folder from the library (the library downloads a copy), and
   expiry for the access a comment grants.
 

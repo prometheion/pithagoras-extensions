@@ -20,7 +20,7 @@ function mem(bytes: number): string {
 export function OfficeSettings() {
   portal.locale.use();
   const state = useOfficeState();
-  const [busy, setBusy] = useState<null | "start" | "stop" | "settings">(null);
+  const [busy, setBusy] = useState<null | "start" | "stop" | "remove" | "settings">(null);
   const [problem, setProblem] = useState<string | null>(null);
   // Null: still saying what the server says. A string: what is in the input now.
   const [tag, setTag] = useState<string | null>(null);
@@ -65,6 +65,17 @@ export function OfficeSettings() {
     await api.stopContainer();
     setTag(null);
   });
+
+  const remove = async () => {
+    const ok = await portal.ui.confirm({
+      title: t("Remove the Document Server?"),
+      message: t("Its container, its two relays and its network are removed, and so is its volume, which holds only its cache of open documents: every save is in the library already. The image stays; Start makes everything again."),
+      confirmLabel: t("Remove"),
+      danger: true,
+      deletes: true,
+    });
+    if (ok) await act("remove", () => api.removeContainer(true));
+  };
 
   return (
     <div className="space-y-4">
@@ -113,6 +124,9 @@ export function OfficeSettings() {
         <button type="button" className={portal.ui.classes.button} disabled={busy !== null || !running} onClick={() => void stop()}>
           {busy === "stop" ? t("Stopping…") : t("Stop container")}
         </button>
+        <button type="button" className={portal.ui.classes.button} disabled={busy !== null} onClick={() => void remove()}>
+          {busy === "remove" ? t("Removing…") : t("Remove")}
+        </button>
       </div>
 
       <portal.ui.Field label={t("Image tag (pinned)")} hint={t("Never pin :latest — a moved image changes the Document Server under you and breaks the co-editing keys. A new tag applies at the next start.")}>
@@ -138,7 +152,7 @@ export function OfficeSettings() {
       {/* Where the things live, and who can reach them: said once, as fact. */}
       <div className="space-y-1">
         <p className="po-exposure">{t("Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.")}</p>
-        <p className="po-exposure">{t("The editor loads through this portal's own proxy, behind its sign-in, so remote viewers have the live editor as well. The endpoints where the Document Server fetches documents and reports saves are bound to 127.0.0.1 only.")}</p>
+        <p className="po-exposure">{t("The editor loads through this portal's own proxy, behind its sign-in, so remote viewers have the live editor as well. The Document Server runs on a network of its own with no way out: it reaches nothing but the two endpoints where it fetches documents and reports saves, through a relay of this extension's.")}</p>
       </div>
     </div>
   );

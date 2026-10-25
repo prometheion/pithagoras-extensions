@@ -14,7 +14,7 @@
  * hash from the CURRENT store.getDoc(docId) meta and refuses on mismatch -- see persistSaved.
  *
  * Persistence (statuses 2/6 + the status-1 forcesave action): fetch body.url with retries (the DS can lag after
- * a save), run store.persistBytes through its mtime gate, store the changesurl archive at
+ * a save) from the Document Server itself (`onDocumentServer`: the envelope names the browser's address), run store.persistBytes through its mtime gate, store the changesurl archive at
  * dataDir/history/<docId>/<newMtimeMs>.zip (mkdir -p; best-effort -- the document write is what matters), fire
  * every onPersisted(docId, buffer) hook (src/ping.ts registers its comment-mention wake through wirePing later),
  * then apply the status's lock rule: 2 unlocks AFTER persist, 6 STAYS locked. Everything happens BEFORE the
@@ -26,11 +26,11 @@
  * {docId, key}) in X-Auth-Token -- harmless if DS's own download path is not gated, correct if it is.
  *
  * Wiring: BOTH a factory AND a bare module-level handler.
- * - createCallbackHandler(getState, getSecret, opts?) returns an isolated handler -- tests build instances with
+ * - createCallbackHandler(getState, getSecret, getOrigin, opts?) returns an isolated handler -- tests build instances with
  *   their own tmp root/secret/retry budget and no global state at all.
- * - configure({ getState, getSecret, root?, retryDelaysMs?, log? }) + export const handleCallback: server.ts
- *   calls configure ONCE at boot with getState = () => container.readDsRecord() (ds.json is the single
- *   source of truth), getSecret = () => the jwt-secret string read once from dataDir()/jwt-secret, and the
+ * - configure({ getState, getSecret, getOrigin, root?, retryDelaysMs?, log? }) + export const handleCallback: server.ts
+ *   calls configure ONCE at boot with getState = () => container.readDsRecord() (set up at all), getSecret = () => the
+ *   jwt-secret string read once from dataDir()/jwt-secret, getOrigin = container.dsOrigin, and the
  *   loopback listener dispatches `POST /callback -> callback.handleCallback(req, res)`. Before configure runs --
  *   or whenever getState/getSecret answer null (container never ensured, no ds.json / no secret yet) -- every
  *   request gets 503 {"error":1} and nothing else happens.
@@ -45,7 +45,7 @@ import * as store from "./store";
 import * as live from "./live";
 
 /** == the DsRecord shape of container.readDsRecord (kept local so this module does not import the Docker half). */
-export type CallbackState = { containerId: string; origin: string; imageTag: string };
+export type CallbackState = { containerId: string; imageTag: string };
 
 export interface CallbackHandlerOptions {
   /** Document-library root; production leaves it undefined (= host.dataDir()), unit tests pass a tmp dir. */
@@ -58,15 +58,22 @@ export interface CallbackHandlerOptions {
   log?: (line: string) => void;
 }
 
-type CallbackConfig = { getState: () => CallbackState | null; getSecret: () => string | null } & CallbackHandlerOptions;
+type CallbackConfig = {
+  getState: () => CallbackState | null;
+  getSecret: () => string | null;
+  /** Where the server half reaches the Document Server (container.dsOrigin): the save and its changes are downloaded
+   * from there, whatever address the envelope names. */
+  getOrigin: () => Promise<string>;
+} & CallbackHandlerOptions;
 
 /** The factory: an isolated handler around these two lookups (+ optional test knobs). */
 export function createCallbackHandler(
   getState: () => CallbackState | null,
   getSecret: () => string | null,
+  getOrigin: () => Promise<string>,
   opts?: CallbackHandlerOptions,
 ): (req: IncomingMessage, res: ServerResponse) => void {
-  return makeHandler({ getState, getSecret, ...opts });
+  return makeHandler({ getState, getSecret, getOrigin, ...opts });
 }
 
 /** Module-level configuration for the BARE handler below; server.ts calls this exactly once at boot. */
@@ -197,7 +204,8 @@ async function fetchWithRetry(url: string, token: string, retryDelaysMs: number[
   for (;;) {
     attempt += 1;
     try {
-      const res = await fetch(url, { headers: { "X-Auth-Token": token } });
+      // A relay or a Document Server that stops answering mid-body must not hold the callback, and with it the save, open.
+      const res = await fetch(url, { headers: { "X-Auth-Token": token }, signal: AbortSignal.timeout(60_000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return Buffer.from(await res.arrayBuffer());
     } catch (err) {
@@ -409,6 +417,26 @@ async function handleDispatch(
 }
 
 /**
+ * Where a file the Document Server names in a callback (`url`, `changesurl`) is downloaded from: always the Document
+ * Server itself (`origin`, through the relay), at the path from `/cache/files/` on and with the query as it came. The
+ * Document Server builds those addresses from where the browser reached it (the /ds proxy's forwarded headers), so
+ * they name the portal's public, sign-in-gated address, which the server half cannot fetch. The query's `md5` signs
+ * the path from `/cache/files/` on, with no host or prefix (nginx `secure_link`), so the address still verifies.
+ * Anything without `/cache/files/` is refused: nothing is ever fetched from an address the envelope chose.
+ */
+export function onDocumentServer(url: string, origin: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`the callback names no address: ${JSON.stringify(url.slice(0, 200))}`);
+  }
+  const at = parsed.pathname.indexOf("/cache/files/");
+  if (at === -1) throw new Error(`the callback names an address outside the document server's files: ${parsed.origin}${parsed.pathname.slice(0, 200)}`);
+  return `${origin}${parsed.pathname.slice(at)}${parsed.search}`;
+}
+
+/**
  * The shared persist path (status 2, status 6 and the status-1 forcesave action). ALWAYS answers `res` itself:
  * success -> 200 {"error":0}; every failure -> 200 {"error":1}. DS decides save outcomes from the JSON error
  * field (DS must be answered {\"error\":0}; anything else makes the editor show an error), which is why the
@@ -456,15 +484,22 @@ async function persistSaved(
     log(`persist for ${docId}: callback carries no url to download`);
     return fail();
   }
+  let from: string;
+  try {
+    from = onDocumentServer(body.url, await cfg.getOrigin());
+  } catch (err) {
+    log(`persist for ${docId}: ${(err as Error).message}`);
+    return fail();
+  }
 
   // JWT for the outbound GET (see the module header): a fresh 60 s HS256 token,
   // purpose-tagged "fetch" so it can never masquerade as an editor-config or a callback in any verifier.
   const fetchToken = signJwt({ docId, key: body.key }, 60_000, secretOrThrow(cfg), "fetch");
   let bytes: Buffer;
   try {
-    bytes = await fetchWithRetry(body.url, fetchToken, cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS);
+    bytes = await fetchWithRetry(from, fetchToken, cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS);
   } catch (err) {
-    log(`persist for ${docId}: could not download ${body.url} after ${(cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS).length + 1} attempts: ${(err as Error).message}`);
+    log(`persist for ${docId}: could not download ${from} after ${(cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS).length + 1} attempts: ${(err as Error).message}`);
     // Leave the lock state untouched -- DS will retry; a status-2 close without a save stays visible.
     return fail();
   }
@@ -489,7 +524,7 @@ async function persistSaved(
   // Best-effort: a lost archive costs the editor's version-history view, never the document.
   if (typeof body.changesurl === "string" && body.changesurl !== "") {
     try {
-      const zip = await fetchWithRetry(body.changesurl, fetchToken, cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS);
+      const zip = await fetchWithRetry(onDocumentServer(body.changesurl, await cfg.getOrigin()), fetchToken, cfg.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS);
       writeAtomic(path.join(rootDir(), "history", docId, `${newMtimeMs}.zip`), zip);
     } catch (err) {
       log(`persist for ${docId}: could not store the changes archive: ${(err as Error).message}`);

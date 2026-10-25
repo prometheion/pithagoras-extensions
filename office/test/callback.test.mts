@@ -17,13 +17,18 @@ import { createHmac, createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { signJwt, verifyJwt } from "../src/jwt";
 import {
-  CallbackState, configure, createCallbackHandler, handleCallback, makeKey, onPersisted, parseKey, revHashOf,
+  CallbackState, configure, createCallbackHandler, handleCallback, makeKey, onDocumentServer, onPersisted, parseKey, revHashOf,
 } from "../src/callback";
 import { createDoc, getDoc } from "../src/store";
 import * as live from "../src/live";
 
 const SECRET = "unit-test-secret-0123456789abcdef";
-const DS_STATE: CallbackState = { containerId: "cid-1", origin: "http://127.0.0.1", imageTag: "onlyoffice/documentserver:10.0" };
+const DS_STATE: CallbackState = { containerId: "cid-1", imageTag: "onlyoffice/documentserver:10.0.0.1" };
+/** Where the browser reached the Document Server (the /ds proxy): the Document Server names its files at this address. */
+const BROWSER = "http://portal.example/api/x/%40pithagoras/office/ds";
+/** Where the server half reaches the Document Server: the last file server started. */
+let lastOrigin = "http://127.0.0.1:9";
+const dsOrigin = async () => lastOrigin;
 
 function tmpRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "office-callback-"));
@@ -81,7 +86,10 @@ const json = (res: FakeRes): Record<string, unknown> => JSON.parse(res.body) as 
 /** A local node:http server standing in for the DS saved-file/changes endpoints. onSaved(n) decides the n-th
  * GET /saved outcome; changes is served verbatim at /changes.zip. Records every X-Auth-Token it was sent. */
 type FileServer = {
+  /** The browser's address of the Document Server, which the envelopes name. */
   base: string;
+  /** Every path and query the server was asked for. */
+  urls: string[];
   savedAttempts: number;
   tokens: string[];
   close(): Promise<void>;
@@ -93,13 +101,14 @@ async function startFileServer(
 ): Promise<FileServer> {
   const server = http.createServer((req, res) => {
     let n = 0;
-    if (req.url === "/saved") {
+    urls.push(req.url ?? "");
+    if (req.url?.startsWith("/cache/files/saved?")) {
       n = ++serverSavedCalls;
       serverTokens.push(typeof req.headers["x-auth-token"] === "string" ? req.headers["x-auth-token"] : "");
       const out = onSaved(n);
       res.writeHead(out.status, { "Content-Type": "application/octet-stream" });
       res.end(out.bytes);
-    } else if (req.url === "/changes.zip") {
+    } else if (req.url?.startsWith("/cache/files/changes.zip?")) {
       if (!changes) return res.writeHead(404).end();
       serverTokens.push(typeof req.headers["x-auth-token"] === "string" ? req.headers["x-auth-token"] : "");
       res.writeHead(200, { "Content-Type": "application/zip" });
@@ -111,10 +120,13 @@ async function startFileServer(
   });
   let serverSavedCalls = 0;
   const serverTokens: string[] = [];
+  const urls: string[] = [];
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const addr = server.address() as { port: number };
+  lastOrigin = `http://127.0.0.1:${addr.port}`;
   return {
-    base: `http://127.0.0.1:${addr.port}`,
+    base: BROWSER,
+    urls,
     get savedAttempts() {
       return serverSavedCalls;
     },
@@ -180,14 +192,14 @@ test("status 2 happy path: persists bytes, bumps index, stores history zip, fire
   const newBytes = Buffer.from("saved-by-ds-content-" + "x".repeat(257));
   const zipBytes = Buffer.from("CHANGES-ARCHIVE-BYTES");
   const server = await startFileServer(() => ({ status: 200, bytes: newBytes }), zipBytes);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
 
   // The envelope is bound to the signed JWT claims; the JSON body is ignored by the handler.
   const envelope = {
     key: makeKey(doc.docId, before.mtimeMs),
     status: 2,
-    url: `${server.base}/saved`,
-    changesurl: `${server.base}/changes.zip`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
+    changesurl: `${server.base}/cache/files/changes.zip?md5=m2&expires=9`,
   };
   const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
 
@@ -225,13 +237,13 @@ test("stale key (revHash of an older mtime): document NOT overwritten, JSON erro
   hookLog.length = 0;
 
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("should-never-land") }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
 
   // key minted from an OLDER mtime than the one currently in the index
   const envelope = {
     key: makeKey(doc.docId, before.mtimeMs - 60_000),
     status: 2,
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
   };
   const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
 
@@ -258,7 +270,7 @@ test("duplicate force-save pass (same url + our revision): treated as done, no s
   const firstBytes = Buffer.from("first-forcesave");
   let n = 0;
   const server = await startFileServer(() => ({ status: 200, bytes: firstBytes }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
   // Pass 1: the status-1 forcesave action (actions[].type === 2) persists now, doc STAYS locked.
   live.setLocked(doc.docId, true);
   const env1 = {
@@ -266,7 +278,7 @@ test("duplicate force-save pass (same url + our revision): treated as done, no s
     status: 1,
     users: [{ id: "u2", name: "Bob" }],
     actions: [{ type: 2, userid: "u2" }],
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
   };
   const r1 = await post(handler, env1, { headers: { "x-auth-token": signJwt(env1, 60_000, SECRET) } });
   assert.deepEqual(json(r1), { error: 0 });
@@ -279,7 +291,7 @@ test("duplicate force-save pass (same url + our revision): treated as done, no s
   const env2 = {
     key: makeKey(doc.docId, before.mtimeMs),
     status: 6,
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
     forcesavetype: 1,
   };
   const r2 = await post(handler, env2, { headers: { "x-auth-token": signJwt(env2, 60_000, SECRET) } });
@@ -299,12 +311,12 @@ test("JWT: garbage token -> 401 {error:1} without touching disk", async () => {
   const doc = await createDoc({ title: "Jwt Doc", type: "word" }, root);
   const original = fs.readFileSync(docFile(root, doc));
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("nope") }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
 
   const res = await post(handler, {
     key: makeKey(doc.docId, getDoc(doc.docId, root)!.mtimeMs),
     status: 2,
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
   }, { headers: { "x-auth-token": "garbage.token.value" } });
 
   await server.close();
@@ -324,7 +336,7 @@ test("JWT: RS256-alg token with a valid HMAC signature is still rejected (alg pi
   const head = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const body = b64url(JSON.stringify({ key: makeKey(doc.docId, getDoc(doc.docId, root)!.mtimeMs), status: 2 }));
   const sig = b64url(createHmac("sha256", SECRET).update(`${head}.${body}`).digest());
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
 
   const res = await post(handler, { status: 2 }, { headers: { "x-auth-token": `${head}.${body}.${sig}` } });
   assert.equal(res.statusCode, 401);
@@ -334,7 +346,7 @@ test("JWT: RS256-alg token with a valid HMAC signature is still rejected (alg pi
 
 test("JWT: expired token -> 401; missing token entirely -> 401", async () => {
   const root = tmpRoot();
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   const key = makeKey("whatever-doc", 1);
 
   const expired = await post(handler, { key, status: 4 }, { headers: { "x-auth-token": signJwt({ sub: "x" }, -1000, SECRET) } });
@@ -348,7 +360,7 @@ test("JWT: expired token -> 401; missing token entirely -> 401", async () => {
 
 test("JWT: embedded body.token is accepted as a defensive fallback (header path stays canonical)", async () => {
   const root = tmpRoot();
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   live.setLocked("fallback-doc", true);
 
   const res = await post(handler, {
@@ -367,14 +379,14 @@ test("envelope binding: valid token without signed key/status cannot drive a hos
   const doc = await createDoc({ title: "Bind Doc", type: "word" }, root);
   const original = fs.readFileSync(docFile(root, doc));
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("attacker-bytes") }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
 
   // A valid token that carries NO envelope (the shape of our own non-callback tokens) plus a hostile JSON
   // body claiming status 2 for a library document: rejected at the binding check, disk untouched.
   const res = await post(handler, {
     key: makeKey(doc.docId, getDoc(doc.docId, root)!.mtimeMs),
     status: 2,
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
   }, { headers: { "x-auth-token": signJwt({ sub: "x" }, 60_000, SECRET) } });
 
   await server.close();
@@ -393,7 +405,7 @@ test("status 1 join then leave mutates live.usersOf; status 4 unlocks without an
   const doc = await createDoc({ title: "Presence Doc", type: "word" }, root);
   const before = getDoc(doc.docId, root)!;
   const original = fs.readFileSync(docFile(root, doc));
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   // JOIN: presence lands in live with id/name and a numeric join time; the doc locks (users.length>0).
   const envJoin = { key: makeKey(doc.docId, before.mtimeMs), status: 1, users: [{ id: "u9", name: "Bob" }] };
   const join = await post(handler, envJoin, { headers: { "x-auth-token": signJwt(envJoin, 60_000, SECRET) } });
@@ -432,13 +444,13 @@ test("statuses 3 and 7: one log line each, zero file changes, zero downloads", a
   const original = fs.readFileSync(docFile(root, doc));
 
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("should-not-be-fetched") }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
-  const env3 = { key: makeKey(doc.docId, before.mtimeMs), status: 3, url: `${server.base}/saved` };
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
+  const env3 = { key: makeKey(doc.docId, before.mtimeMs), status: 3, url: `${server.base}/cache/files/saved?md5=m1&expires=9` };
   const r3 = await post(handler, env3, { headers: { "x-auth-token": signJwt(env3, 60_000, SECRET) } });
   assert.equal(r3.statusCode, 200);
   assert.deepEqual(json(r3), { error: 0 }, "we did not fail internally, so the answer is 0");
 
-  const env7 = { key: makeKey(doc.docId, before.mtimeMs), status: 7, url: `${server.base}/saved`, forcesavetype: 2 };
+  const env7 = { key: makeKey(doc.docId, before.mtimeMs), status: 7, url: `${server.base}/cache/files/saved?md5=m1&expires=9`, forcesavetype: 2 };
   const r7 = await post(handler, env7, { headers: { "x-auth-token": signJwt(env7, 60_000, SECRET) } });
   assert.equal(r7.statusCode, 200);
   assert.deepEqual(json(r7), { error: 0 });
@@ -464,12 +476,12 @@ test("retry: two failed downloads then success -> persisted", async () => {
 
   const saved = Buffer.from("eventually-arrives");
   const server = await startFileServer((n) => (n < 3 ? { status: 500, bytes: Buffer.alloc(0) } : { status: 200, bytes: saved }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, retryDelaysMs: [5, 10], log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: () => {} });
 
   const envelope = {
     key: makeKey(doc.docId, before.mtimeMs),
     status: 2,
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
   };
   const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
 
@@ -488,13 +500,13 @@ test("retry: all attempts fail -> JSON error, doc untouched, lock left as-is", a
   const original = fs.readFileSync(docFile(root, doc));
 
   const server = await startFileServer(() => ({ status: 503, bytes: Buffer.alloc(0) }), null);
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [5, 10], log: (l) => sink.push(l) });
 
   live.setLocked(doc.docId, true);
   const envelope = {
     key: makeKey(doc.docId, before.mtimeMs),
     status: 2,
-    url: `${server.base}/saved`,
+    url: `${server.base}/cache/files/saved?md5=m1&expires=9`,
   };
   const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
 
@@ -515,7 +527,7 @@ test("retry: all attempts fail -> JSON error, doc untouched, lock left as-is", a
 
 test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key -> 400", async () => {
   const root = tmpRoot();
-  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, { root, log: () => {} });
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   const key = makeKey("route-doc", 1);
   // Envelopes are signed into the token claims; each post below signs its own envelope.
   const tokenFor = (env: Record<string, unknown>) => ({ "x-auth-token": signJwt(env, 60_000, SECRET) });
@@ -545,6 +557,53 @@ test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key ->
 });
 
 /* ------------------------------------------------------------------ */
+/* where the save is downloaded from                                   */
+/* ------------------------------------------------------------------ */
+
+test("status 2: the save the Document Server names at the browser's address is downloaded from the Document Server itself, its query intact", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Mapped", type: "word" }, root);
+  const saved = Buffer.from("saved through the relay");
+  const server = await startFileServer(() => ({ status: 200, bytes: saved }), Buffer.from("zip"));
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+  // What the Document Server sends once it was told where the browser is: the portal's public, sign-in-gated address.
+  const envelope = {
+    key: makeKey(doc.docId, doc.mtimeMs),
+    status: 2,
+    url: `${BROWSER}/cache/files/saved?md5=Ab-Cd_1&expires=1792000000&filename=output.docx`,
+    changesurl: `${BROWSER}/cache/files/changes.zip?md5=Ef&expires=1792000000`,
+  };
+  const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
+  await server.close();
+  assert.deepEqual(json(res), { error: 0 });
+  assert.deepEqual(server.urls, ["/cache/files/saved?md5=Ab-Cd_1&expires=1792000000&filename=output.docx", "/cache/files/changes.zip?md5=Ef&expires=1792000000"]);
+  assert.ok(fs.readFileSync(docFile(root, doc)).equals(saved));
+});
+
+test("status 2: an address outside the Document Server's files is refused without a fetch", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Elsewhere", type: "word" }, root);
+  const original = fs.readFileSync(docFile(root, doc));
+  const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("x") }), null);
+  const sink: string[] = [];
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: (l) => sink.push(l) });
+  for (const url of ["http://169.254.169.254/latest/meta-data", `${BROWSER}/info/info.json`, "not a url"]) {
+    const envelope = { key: makeKey(doc.docId, doc.mtimeMs), status: 2, url };
+    const res = await post(handler, envelope, { headers: { "x-auth-token": signJwt(envelope, 60_000, SECRET) } });
+    assert.deepEqual(json(res), { error: 1 });
+  }
+  await server.close();
+  assert.deepEqual(server.urls, [], "nothing was fetched");
+  assert.ok(fs.readFileSync(docFile(root, doc)).equals(original));
+  assert.equal(sink.filter((l) => /outside the document server's files|names no address/.test(l)).length, 3);
+});
+
+test("onDocumentServer: the path from /cache/files/ on and the query, on the Document Server's origin", () => {
+  assert.equal(onDocumentServer("https://a.example/p/ds/cache/files/data/k_1/output.docx/output.docx?md5=x&expires=2", "http://relay:3890"), "http://relay:3890/cache/files/data/k_1/output.docx/output.docx?md5=x&expires=2");
+  assert.throws(() => onDocumentServer("https://a.example/web-apps/x", "http://relay:3890"), /outside/);
+});
+
+/* ------------------------------------------------------------------ */
 /* the bare module-level handler + configure (server wiring)              */
 /* ------------------------------------------------------------------ */
 
@@ -557,14 +616,14 @@ test("bare handleCallback: 503 until configure; after configure it serves reques
   assert.deepEqual(json(notYet), { error: 1 });
 
   // Configured but the DS record is still absent (getState -> null) -> 503 as well.
-  configure({ getState: () => null, getSecret: () => SECRET, root, log: () => {} });
+  configure({ getState: () => null, getSecret: () => SECRET, getOrigin: dsOrigin, root, log: () => {} });
   const noState = await post(handleCallback, { key: makeKey("wire-doc", 1), status: 4 });
   assert.equal(noState.statusCode, 503);
   assert.deepEqual(json(noState), { error: 1 });
 
   // The real wiring shape (what server.ts does at boot).
   live.setLocked("wire-doc", true);
-  configure({ getState: () => DS_STATE, getSecret: () => SECRET, root, log: () => {} });
+  configure({ getState: () => DS_STATE, getSecret: () => SECRET, getOrigin: dsOrigin, root, log: () => {} });
   const wireEnv = { key: makeKey("wire-doc", 1), status: 4 };
   const ok = await post(handleCallback, wireEnv, { headers: { "x-auth-token": signJwt(wireEnv, 60_000, SECRET) } });
   assert.equal(ok.statusCode, 200);

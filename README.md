@@ -43,10 +43,10 @@ extensions: for a portal on the host's network (both of Pithagoras' Compose file
 container that publishes the server's port on 127.0.0.1; for a portal in a container on a network of its own, by
 putting that container on the server's network. Each extension's README says more under Security.
 
-Office is different: it runs OnlyOffice's own Document Server image, which the portal pulls (it is not built here or
-tagged with the package's version), and the container joins the portal's shared network, so that it and the extension
-reach each other on the loopback. That is not a network without a way out, and on a portal on the host's network the
-Document Server listens on every interface of the machine: Office's README says under Security what to firewall.
+Office's Document Server is on a network of its own in the same way. It runs OnlyOffice's own image, which the portal
+pulls (it is not built here or tagged with the package's version), and it also has to reach the portal (to fetch a
+document and report a save), which such a network has no way to: two small relay containers of Office's own are its
+way in and back. Office's README says more under Security.
 
 ## Installing
 

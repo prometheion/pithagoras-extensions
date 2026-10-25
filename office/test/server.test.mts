@@ -14,8 +14,9 @@ import path from "node:path";
 import zlib from "node:zlib";
 import type { AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
-import type { ContainerInfo, Docker, ExecResult, VolumeInfo } from "../../shared/docker-api";
-import officeServer, { dsOrigin, jwtSecret, loopbackPort, settleKept } from "../src/server";
+import { fakeDocker } from "./fake-docker.mts";
+import * as container from "../src/container";
+import officeServer, { forwardedFor, jwtSecret, loopbackPort, settleKept } from "../src/server";
 import * as store from "../src/store";
 import { rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
@@ -106,32 +107,6 @@ type FakeRes = {
   statusCode: number;
 };
 
-function makeDocker(opts: { networkMode?: string } = {}) {
-  const state = { container: undefined as ContainerInfo | undefined, volumes: [] as VolumeInfo[], inspectBody: undefined as Record<string, unknown> | undefined, execResult: { output: "", exitCode: 1, timedOut: false } as ExecResult, networkMode: opts.networkMode ?? "host" };
-  const calls = { ensure: [] as string[], create: [] as Array<[string, Record<string, unknown>]>, start: [] as string[], stop: [] as string[] };
-  const docker = {
-    available: async () => true,
-    sharedNetwork: async () => state.networkMode,
-    images: { present: async () => true, ensure: async (image: string) => { calls.ensure.push(image); } },
-    containers: {
-      list: async () => (state.container ? [state.container] : []),
-      get: async () => state.container,
-      create: async (name: string, spec: Record<string, unknown>) => {
-        calls.create.push([name, spec]);
-        const info: ContainerInfo = { name, id: `cid-${calls.create.length}`, image: String(spec.Image), state: "created", status: "Created", owner: "", labels: {} };
-        state.container = info;
-        return info;
-      },
-      start: async (name: string) => { calls.start.push(name); if (state.container && name === state.container.name) state.container.state = "running"; },
-      stop: async (name: string) => { calls.stop.push(name); if (state.container && name === state.container.name) state.container.state = "exited"; },
-      remove: async () => {}, logs: async () => "", inspect: async () => state.inspectBody,
-      exec: async () => state.execResult, adopt: async () => { throw Object.assign(new Error("nope"), { status: 404 }); },
-    },
-    volumes: { list: async () => [...state.volumes], create: async (n: string) => { state.volumes.push({ name: n, owner: "" }); }, remove: async () => {}, adopt: async () => { throw Object.assign(new Error("nope"), { status: 404 }); } },
-  } as unknown as Docker;
-  return { docker, calls, state };
-}
-
 interface Booted {
   root: string;
   portal: ServerPortal;
@@ -139,16 +114,19 @@ interface Booted {
   logs: string[];
   audits: Array<Record<string, unknown>>;
   allowedDirs: string[];
+  /** The Docker for extensions the half was given (fake-docker.mts). */
+  dock: ReturnType<typeof fakeDocker>;
   cleanup: () => Promise<void>;
 }
 
-async function boot(root?: string, docker?: Docker): Promise<Booted> {
+async function boot(root?: string, dock = fakeDocker()): Promise<Booted> {
+  container.forgetReach();
   const rootDir = root ?? fs.mkdtempSync(path.join(os.tmpdir(), "office-server-"));
   const logs: string[] = [];
   const audits: Array<Record<string, unknown>> = [];
   const allowedDirs: string[] = [];
   const router = new MiniRouter();
-  const ddock = docker ?? makeDocker().docker; // ONE instance per boot: extensions.use() resolves the same fake every time
+  const ddock = dock.docker; // ONE instance per boot: extensions.use() resolves the same fake every time
   const portalObj = {
     extension: "@pithagoras/office",
     dataDir: () => rootDir,
@@ -161,7 +139,7 @@ async function boot(root?: string, docker?: Docker): Promise<Booted> {
     extensions: { use: () => ddock },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
-  return { root: rootDir, portal: portalObj, router, logs, audits, allowedDirs, cleanup };
+  return { root: rootDir, portal: portalObj, router, logs, audits, allowedDirs, dock, cleanup };
 }
 
 async function until(cond: () => boolean, ms = 2000): Promise<void> {
@@ -172,8 +150,12 @@ async function until(cond: () => boolean, ms = 2000): Promise<void> {
   }
 }
 
-function writeDsJson(root: string, origin = "http://127.0.0.1"): void {
-  fs.writeFileSync(path.join(root, "ds.json"), JSON.stringify({ containerId: "cid-test", origin, imageTag: DEFAULT_TAG }));
+/** The Document Server set up (ds.json), and reached at `origin`: where Docker for extensions' reach says it is. */
+function writeDsJson(b: Booted, origin = "http://127.0.0.1:3890"): void {
+  const { hostname, port } = new URL(origin);
+  b.dock.state.reach = { host: hostname, port: Number(port) };
+  container.forgetReach();
+  fs.writeFileSync(path.join(b.root, "ds.json"), JSON.stringify({ containerId: "cid-test", imageTag: DEFAULT_TAG }));
 }
 
 /* ---------------- boot: jwt-secret + cleanup ---------------- */
@@ -216,6 +198,38 @@ test("cleanup closes the loopback listener and clears the timer (nothing keeps n
     refused = true;
   }
   assert.ok(refused, "the listener is closed: connections are refused after cleanup");
+});
+
+test("the loopback listener takes the port of the run before again, so an editor open across a restart still saves; a taken one is replaced", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-port-"));
+  const b1 = await boot(root);
+  const first = loopbackPort();
+  assert.equal(fs.readFileSync(path.join(root, "listener-port"), "utf8").trim(), String(first));
+  await b1.cleanup();
+  const b2 = await boot(root);
+  assert.equal(loopbackPort(), first, "the same port as the run before");
+  await b2.cleanup();
+  // Something else took it meanwhile: another port, kept for the next run.
+  const squatter = http.createServer().listen(first, "127.0.0.1");
+  await new Promise((r) => squatter.once("listening", r));
+  const b3 = await boot(root);
+  assert.notEqual(loopbackPort(), first);
+  assert.equal(fs.readFileSync(path.join(root, "listener-port"), "utf8").trim(), String(loopbackPort()));
+  await b3.cleanup();
+  squatter.close();
+});
+
+test("the loopback listener answers on 127.0.0.1 alone", async () => {
+  const b = await boot();
+  try {
+    const lan = Object.values(os.networkInterfaces()).flat().find((i) => i && i.family === "IPv4" && !i.internal);
+    if (lan) {
+      await assert.rejects(fetch(`http://${lan.address}:${loopbackPort()}/nope`), "not reachable on the machine's own address");
+    }
+    assert.equal((await fetch(`http://127.0.0.1:${loopbackPort()}/nope`)).status, 404);
+  } finally {
+    await b.cleanup();
+  }
 });
 
 /* ---------------- loopback listener ---------------- */
@@ -271,9 +285,9 @@ test("loopback POST /callback while the DS is unconfigured -> 503 {error:1}; unk
 
 /* ---------------- /editor-config ---------------- */
 
-test("editor-config (docx): key round-trips through parseKey, url is a fresh verifiable loopback ticket, the whole config is JWT-signed", async () => {
+test("editor-config (docx): key round-trips through parseKey, url is a fresh verifiable ticket through the relay, the whole config is JWT-signed", async () => {
   const b = await boot();
-  writeDsJson(b.root);
+  writeDsJson(b);
   const doc = await store.createDoc({ title: "Plan", type: "word" }, b.root);
   const secret = jwtSecret(b.root);
 
@@ -293,15 +307,16 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   const parsed = parseKey(String(document.key)) as { docId: string; revHash: string };
   assert.equal(parsed.docId, doc.docId);
   assert.equal(parsed.revHash, revHashOf(doc.mtimeMs));
-  // url: on OUR loopback listener, ticketed, and the ticket verifies with the boot secret
+  // url: the island's relay, which the Document Server reaches and which passes it on to the loopback listener;
+  // ticketed, and the ticket verifies with the boot secret
   const url = String(document.url);
-  assert.ok(url.startsWith(`http://127.0.0.1:${loopbackPort()}/doc/`), `url uses the loopback origin: ${url}`);
+  assert.ok(url.startsWith("http://pithagoras-office-ds-relay:3891/doc/"), `url names the relay: ${url}`);
   const ticket = url.split("/doc/")[1];
   assert.ok(ticket.length > 0 && !ticket.includes("/"));
   assert.equal(verifyTicket(ticket, secret)?.docId, doc.docId, "the minted ticket verifies with the boot secret");
   // editorConfig
   const ec = body.editorConfig as Record<string, unknown>;
-  assert.equal(ec.callbackUrl, `http://127.0.0.1:${loopbackPort()}/callback`);
+  assert.equal(ec.callbackUrl, "http://pithagoras-office-ds-relay:3891/callback");
   assert.equal(ec.mode, "edit");
   assert.deepEqual(ec.user, { id: "portal-user", name: "Portal" });
   // the JWT wrap: payload == the WHOLE plain config (minus token/apiJs), 15-minute life, verifies with the same secret
@@ -324,23 +339,14 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   await b.cleanup();
 });
 
-test("editor-config (xlsx): documentType cell; a container:<id> origin refuses as not supported yet", async () => {
-  const b = await boot();
-  writeDsJson(b.root);
+test("editor-config (xlsx): documentType cell, also for a portal in a container; unconfigured -> 503; unknown doc -> 404", async () => {
+  const b = await boot(undefined, fakeDocker({ sharedNetwork: "container:9f3a1c2d", reach: { host: "pithagoras-office-ds-relay", port: 3890 } }));
+  writeDsJson(b, "http://pithagoras-office-ds-relay:3890");
   const cell = await store.createDoc({ title: "Budget", type: "cell" }, b.root);
   let res = await b.router.dispatch("POST", "/editor-config", { doc: cell.docId });
   assert.equal(res.statusCode, 200);
   assert.equal((res.body as Record<string, unknown>).documentType, "cell");
   live.clearDoc(cell.docId);
-
-  // the deployment shape with no browser-reachable URL in v1: dsOrigin returns the marker AS-IS and /editor-config refuses
-  writeDsJson(b.root, "container:9f3a1c2d");
-  assert.equal(dsOrigin(b.root), "container:9f3a1c2d");
-  res = await b.router.dispatch("POST", "/editor-config", { doc: cell.docId });
-  assert.equal(res.statusCode, 422);
-  const body = res.body as Record<string, unknown>;
-  assert.equal(body.code, "unresolvable_ds_origin");
-  assert.match(String(body.error), /not supported yet/);
 
   // and with no ds.json at all: 503 not-configured; unknown doc: 404
   fs.rmSync(path.join(b.root, "ds.json"));
@@ -349,8 +355,6 @@ test("editor-config (xlsx): documentType cell; a container:<id> origin refuses a
   res = await b.router.dispatch("POST", "/editor-config", { doc: "nope" });
   assert.equal(res.statusCode, 404);
   assert.equal((res.body as Record<string, unknown>).code, "not_found");
-
-  writeDsJson(b.root); // leave a sane record for anyone reusing this root later
   await b.cleanup();
 });
 
@@ -529,8 +533,10 @@ function commentsXmlWith(comments: Array<{ id: string; author: string; text: str
 /* ---------------- /settings + container routes ---------------- */
 
 test("/settings: enable fires ensureContainer exactly once with the settings tag; disable stops + leaves the user-stopped marker", async () => {
-  const m = makeDocker();
-  const b = await boot(undefined, m.docker);
+  const b = await boot();
+  const m = b.dock;
+  const creates = () => m.calls.filter((c) => c === "create pithagoras-office-ds");
+  const starts = () => m.calls.filter((c) => c === "start pithagoras-office-ds");
   assert.equal(store.listDocs(b.root).length, 0);
   // a LEGACY settings file (written before the removed switch existed) must load without crashing -- write it
   // before any POST so every route in this test runs over tolerant loading; saveSettings then rewrites it clean.
@@ -542,25 +548,27 @@ test("/settings: enable fires ensureContainer exactly once with the settings tag
   const body = res.body as Record<string, unknown>;
   assert.equal((body.settings as Record<string, unknown>).enabled, true);
   assert.equal(body.starting, true, "the response says the start is underway");
-  await until(() => m.calls.create.length === 1);
-  const [name, spec] = m.calls.create[0];
-  assert.equal(name, "pithagoras-office-ds");
+  await until(() => fs.existsSync(path.join(b.root, "ds.json")));
+  assert.equal(creates().length, 1);
+  const spec = m.containers.get("pithagoras-office-ds")!.spec;
   assert.equal(spec.Image, DEFAULT_TAG, "the tag comes from settings (default), not a constant");
   assert.ok((spec.Env as string[]).includes(`JWT_SECRET=${jwtSecret(b.root)}`), "the container is env'd with the boot secret");
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(b.root, "ds.json"), "utf8")), { containerId: "cid-1", origin: "http://127.0.0.1", imageTag: DEFAULT_TAG });
-  await until(() => m.calls.start.length === 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(b.root, "ds.json"), "utf8")), { containerId: m.containers.get("pithagoras-office-ds")!.info.id, imageTag: DEFAULT_TAG });
+  // The portal-side relay passes the way back on to this very listener.
+  assert.ok((m.containers.get("pithagoras-office-ds-portal")!.spec.Env as string[]).includes(`TO_PORT=${loopbackPort()}`));
+  assert.equal(starts().length, 1);
 
   // a second enable is an adopt: no second create, no restart
   res = await b.router.dispatch("POST", "/settings", { enabled: true });
   assert.equal((res.body as Record<string, unknown>).starting, undefined, "already enabled -> no start fired");
   await new Promise((r) => setTimeout(r, 100)); // give a stray fire-and-forget a chance to (wrongly) run
-  assert.equal(m.calls.create.length, 1);
-  assert.equal(m.calls.start.length, 1);
+  assert.equal(creates().length, 1);
+  assert.equal(starts().length, 1);
 
   // disable: awaited stop + the intent marker on disk
   res = await b.router.dispatch("POST", "/settings", { enabled: false });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(m.calls.stop, ["pithagoras-office-ds"]);
+  assert.deepEqual(m.calls.filter((c) => c.startsWith("stop")), ["stop pithagoras-office-ds"]);
   assert.ok(fs.existsSync(path.join(b.root, "user-stopped")), "user-stopped marker file written");
   assert.equal((res.body as { settings: Record<string, unknown> }).settings.enabled, false);
   assert.equal((res.body as { container: Record<string, unknown> }).container.state, "stopped");
@@ -586,9 +594,9 @@ test("/settings: enable fires ensureContainer exactly once with the settings tag
   await b.cleanup();
 });
 
-test("/container/status + /container/start + /container/stop drive the same lifecycle", async () => {
-  const m = makeDocker();
-  const b = await boot(undefined, m.docker);
+test("/container/status + /container/start + /container/stop + /container/remove drive the same lifecycle", async () => {
+  const b = await boot();
+  const m = b.dock;
 
   let res = await b.router.dispatch("GET", "/container/status");
   assert.equal(res.statusCode, 200);
@@ -601,12 +609,19 @@ test("/container/status + /container/start + /container/stop drive the same life
 
   res = await b.router.dispatch("POST", "/container/start"); // idempotent adopt
   assert.equal((res.body as Record<string, unknown>).started, false);
-  assert.equal(m.calls.start.length, 1, "never restarted");
+  assert.equal(m.calls.filter((c) => c === "start pithagoras-office-ds").length, 1, "never restarted");
 
   res = await b.router.dispatch("POST", "/container/stop");
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(m.calls.stop, ["pithagoras-office-ds"]);
+  assert.deepEqual(m.calls.filter((c) => c.startsWith("stop")), ["stop pithagoras-office-ds"]);
   assert.ok(fs.existsSync(path.join(b.root, "user-stopped")));
+
+  res = await b.router.dispatch("POST", "/container/remove", { data: true });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual([...m.containers.keys()], [], "the Document Server and both relays are gone");
+  assert.equal(m.networks.size, 0);
+  assert.deepEqual([...m.volumes.keys()], [], "with data: both volumes");
+  assert.ok(b.audits.some((a) => /removed, with its volume/.test(String(a.reason))));
 
   live.resetLive();
   await b.cleanup();
@@ -671,7 +686,7 @@ test("/ds proxy: 200 passes the body, content-type and the RAW query string verb
   const b = await boot();
   const ds = await startFakeDs();
   try {
-    writeDsJson(b.root, `http://127.0.0.1:${ds.port}`);
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
     // the iframe-style query: percent-encoded chars must arrive upstream byte-for-byte (no re-encoding)
     const q = "/ds/web-apps/apps/api/documents/api.js?dockey=a%2Bb~c&lang=en-US&x=1%20two";
     const res = await b.router.dispatch("GET", q);
@@ -693,7 +708,7 @@ test("/ds proxy: an upstream 404 passes through as a 404 with the upstream body"
   const b = await boot();
   const ds = await startFakeDs();
   try {
-    writeDsJson(b.root, `http://127.0.0.1:${ds.port}`);
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
     const res = await b.router.dispatch("GET", "/ds/missing/page.html?dockey=z");
     assert.equal(res.statusCode, 404, "the upstream status passes through");
     assert.match(String(res.data), /nope/, "the upstream body passes through");
@@ -724,7 +739,7 @@ test("/ds proxy: an identity request answered with GZIP bytes + LYING headers st
     });
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(0, "127.0.0.1", () => resolve()); });
     const port = (server.address() as AddressInfo).port;
-    writeDsJson(b.root, `http://127.0.0.1:${port}`);
+    writeDsJson(b, `http://127.0.0.1:${port}`);
     const res = await b.router.dispatch("GET", "/ds/web-apps/apps/api/documents/api.js");
     assert.equal(res.statusCode, 200, "the upstream status passes through");
     assert.equal(seenEncodings.at(-1), "identity", "the proxy asks the DS for an UNENCODED body");
@@ -746,33 +761,88 @@ test("/ds proxy: a dead origin -> 503 {code:'ds_unavailable'} and a log line", a
     await new Promise<void>((resolve, reject) => { dead.once("error", reject); dead.listen(0, "127.0.0.1", () => resolve()); });
     const port = (dead.address() as AddressInfo).port;
     await new Promise<void>((r) => dead.close(() => r()));
-    writeDsJson(b.root, `http://127.0.0.1:${port}`);
+    writeDsJson(b, `http://127.0.0.1:${port}`);
 
     const res = await b.router.dispatch("GET", "/ds/web-apps/apps/api/documents/api.js");
     assert.equal(res.statusCode, 503);
-    assert.deepEqual(res.body, { error: `the document server at http://127.0.0.1:${port} did not answer`, code: "ds_unavailable" });
+    assert.deepEqual(res.body, { error: "the document server did not answer", code: "ds_unavailable" });
     assert.ok(b.logs.some((l) => l.includes("GET /ds/") && l.includes(`http://127.0.0.1:${port}`)), "the failure left a log line");
+    // The way in is asked for again: a forwarder somebody removed comes back.
+    await until(() => b.dock.calls.some((c) => c.startsWith("reach")));
   } finally {
     await b.cleanup();
   }
 });
 
-test("/ds proxy: an unconfigured data dir -> 503 {code:'ds_not_configured'}; a container: origin -> the same 422 /editor-config refusal", async () => {
+test("/ds proxy: an unconfigured data dir -> 503 {code:'ds_not_configured'}", async () => {
   const b = await boot(); // fresh root, no ds.json
   try {
     const none = await b.router.dispatch("GET", "/ds/web-apps/apps/api/documents/api.js");
     assert.equal(none.statusCode, 503);
     assert.equal((none.body as Record<string, unknown>).code, "ds_not_configured");
-
-    writeDsJson(b.root, "container:cid-ab12");
-    const cc = await b.router.dispatch("GET", "/ds/web-apps/apps/api/documents/api.js");
-    assert.equal(cc.statusCode, 422);
-    const body = cc.body as Record<string, unknown>;
-    assert.equal(body.code, "unresolvable_ds_origin");
-    assert.equal(body.origin, "container:cid-ab12", "same refusal family as /editor-config");
   } finally {
     await b.cleanup();
   }
+});
+
+/** A Document Server that answers what it was told about the browser, as the real one builds its addresses from it:
+ * the forwarded headers it got, and a redirect for an unversioned /web-apps/ path, as its nginx does. */
+function startForwardedDs(): Promise<{ server: http.Server; port: number; seen: http.IncomingHttpHeaders[] }> {
+  const seen: http.IncomingHttpHeaders[] = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.headers);
+    const base = `${req.headers["x-forwarded-proto"]}://${req.headers["x-forwarded-host"]}${req.headers["x-forwarded-prefix"]}`;
+    if (req.url === "/web-apps/apps/documenteditor/main/index.html") {
+      res.writeHead(302, { Location: `${base}/10.0.0-169/web-apps/apps/documenteditor/main/index.html` });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ editorBin: `${base}/cache/files/data/k1/Editor.bin/Editor.bin?md5=x&expires=1` }));
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, port: (server.address() as AddressInfo).port, seen })));
+}
+
+test("/ds proxy: the Document Server is told where the browser is, so the addresses it hands out (Editor.bin) are the browser's", async () => {
+  const b = await boot();
+  const ds = await startForwardedDs();
+  try {
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
+    // A browser on another machine, at the portal's address.
+    let res = await b.router.dispatch("GET", "/ds/10.0.0-169/doc/k1/c/?EIO=4", undefined, { host: "portal.example:8080" });
+    assert.equal(ds.seen[0]["x-forwarded-host"], "portal.example:8080");
+    assert.equal(ds.seen[0]["x-forwarded-proto"], "http");
+    assert.equal(ds.seen[0]["x-forwarded-prefix"], "/api/x/%40pithagoras/office/ds");
+    assert.equal(JSON.parse(String(res.data)).editorBin, "http://portal.example:8080/api/x/%40pithagoras/office/ds/cache/files/data/k1/Editor.bin/Editor.bin?md5=x&expires=1");
+    // Behind a reverse proxy that terminates TLS: its own forwarded host and scheme, the first of each.
+    res = await b.router.dispatch("GET", "/ds/10.0.0-169/doc/k1/c/?EIO=4", undefined, { host: "127.0.0.1:8080", "x-forwarded-host": "office.example, inner", "x-forwarded-proto": "https" });
+    assert.equal(JSON.parse(String(res.data)).editorBin.startsWith("https://office.example/api/x/%40pithagoras/office/ds/cache/files/"), true);
+  } finally {
+    ds.server.close();
+    await b.cleanup();
+  }
+});
+
+test("/ds proxy: a redirect of the Document Server reaches the browser as one, never followed to the portal's public address", async () => {
+  const b = await boot();
+  const ds = await startForwardedDs();
+  try {
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
+    const res = await b.router.dispatch("GET", "/ds/web-apps/apps/documenteditor/main/index.html", undefined, { host: "portal.example" });
+    assert.equal(res.statusCode, 302);
+    assert.equal(res.headers.location, "http://portal.example/api/x/%40pithagoras/office/ds/10.0.0-169/web-apps/apps/documenteditor/main/index.html");
+    assert.equal(ds.seen.length, 1, "the proxy did not follow it");
+  } finally {
+    ds.server.close();
+    await b.cleanup();
+  }
+});
+
+test("forwardedFor: the request's Host and scheme, or a reverse proxy's forwarded ones, and the prefix", () => {
+  const prefix = "/api/x/%40pithagoras/office/ds";
+  assert.deepEqual(forwardedFor({ headers: { host: "a.example" } }, prefix), { "x-forwarded-host": "a.example", "x-forwarded-proto": "http", "x-forwarded-prefix": prefix });
+  assert.deepEqual(forwardedFor({ headers: { host: "a.example" }, socket: { encrypted: true } }, prefix)["x-forwarded-proto"], "https");
+  assert.deepEqual(forwardedFor({ headers: { host: "inner", "x-forwarded-host": ["outer.example", "x"], "x-forwarded-proto": "https, http" } }, prefix), { "x-forwarded-host": "outer.example", "x-forwarded-proto": "https", "x-forwarded-prefix": prefix });
 });
 
 /** A fake engine.io polling endpoint: answers the handshake GET and records every POST body it received.
@@ -807,7 +877,7 @@ test("/ds proxy: a POST forwards method + raw body verbatim to the DS (the socke
   const ds = await startFakeEngineIo();
   const b = await boot();
   try {
-    writeDsJson(b.root, `http://127.0.0.1:${ds.port}`);
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
     const res = await b.router.dispatch("POST", "/ds/c/?EIO=4&transport=polling&sid=Zkx0F6Y_6ZptlT-cAAKS", "40", { "content-type": "text/plain;charset=UTF-8" });
     assert.equal(res.statusCode, 200, "the upstream answer passes back through the proxy");
     assert.deepEqual(ds.posts, ["40"], "the raw engine.io packet arrived at the DS byte-for-byte with its query string");
@@ -824,7 +894,7 @@ test("/ds proxy: an engine.io handshake loses its websocket upgrade offer (this 
   const ds = await startFakeEngineIo();
   const b = await boot();
   try {
-    writeDsJson(b.root, `http://127.0.0.1:${ds.port}`);
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
     const res = await b.router.dispatch("GET", "/ds/c/?EIO=4&transport=polling");
     assert.equal(res.statusCode, 200);
     const raw = String(res.data as Buffer | string);
@@ -846,7 +916,7 @@ test("/ds proxy: an idle long-poll HELD past the old 15s cutoff still comes back
   const ds = await startFakeEngineIo(16_500); // held open just past the old 15_000ms cutoff
   const b = await boot();
   try {
-    writeDsJson(b.root, `http://127.0.0.1:${ds.port}`);
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
     const t0 = Date.now();
     const res = await b.router.dispatch("GET", "/ds/c/?EIO=4&transport=polling");
     assert.equal(res.statusCode, 200, "the held poll answers instead of a ds_unavailable abort");

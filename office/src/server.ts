@@ -3,35 +3,30 @@
  * `server` field). It sets up, in order:
  *
  *   1. setPortal(portal) + the shared HS256 secret file dataDir()/jwt-secret (0600; created ONCE with
- *      crypto.randomBytes(32).toString("hex"), reused on every later boot -- one secret for callback JWTs,
- *      document tickets AND editor-config signing).
+ *      crypto.randomBytes(32).toString("hex"), reused on every later boot), which the Document Server is given: editor
+ *      configs are signed and callbacks verified with it.
  *   2. registerTools({record}), wirePing({root, record}) -- both audit sinks land in portal().audit AND a log line.
- *   3. The co-editor model: there is NO co-editing switch and NO hook to wire -- office_edit
- *      proceeds under the strict mtime/revision gate no matter who has the editor open, and a stale edit is
- *      refused loudly as a conflict (fail loud, re-read + retry). Nothing here installs any refusal machinery.
- *   4. callback.configure(...) once, with getState = () => container.readDsRecord(root) and the boot secret;
+ *   3. callback.configure(...) once, with the Document Server's origin (container.dsOrigin) and the boot secret;
  *      live.setMetaResolver(docId -> store.getDoc(docId, root)?.mtimeMs ?? null).
- *   5. The UI routes on portal.router (mounted by the portal at /api/x/@pithagoras/office, session-gated there); every error is JSON {error, message?, code?}.
- *   6. The cookie-free LOOPBACK listener (the DS container holds no session cookie): http bound to 127.0.0.1 port 0 that serves ONLY
- *      GET /doc/<ticket> (a fresh document fetch for the editor: verifyTicket -> bytes, no-store) and POST /callback
- *      (the DS callback, callback.handleCallback). Everything else is a 404 JSON. This origin -- not dsOrigin() --
- *      is what document.url and editorConfig.callbackUrl point at in the minted config (a container cannot fetch a
- *      browser-only origin; "container:<id>" origins have no URL at all).
- *   7. Boot: settleKept() (.trash >7d sweep + index-vs-disk prune) FIRST, then the workspace scan
+ *   4. The UI routes on portal.router (mounted by the portal at /api/x/@pithagoras/office, session-gated there); every
+ *      error is JSON {error, message?, code?}.
+ *   5. The cookie-free LOOPBACK listener (the Document Server holds no session cookie): http bound to 127.0.0.1 that
+ *      serves ONLY GET /doc/<ticket> (the document for the editor) and POST /callback (the save callback). The
+ *      Document Server reaches it through Office's relays (container.ts): document.url and callbackUrl name the
+ *      island's relay, which passes them on to this listener. Its port is kept in dataDir()/listener-port and taken
+ *      again at the next start where it is free, so an editor left open across a restart of the half still saves.
+ *   6. Boot: settleKept() (.trash >7d sweep + index-vs-disk settle) FIRST, then the workspace scan
  *      (store.scanWorkspace over portal().folders.list(): every .docx/.xlsx of the agent homes and projects
- *      indexed IN PLACE -- manual import is gone, the scanned file IS the document; POST /documents/rescan
- *      re-runs it on demand) + container.lookAfter() (adopt an existing DS),
- *      then a 30_000 ms unref'd interval that re-runs settleKept+lookAfter. The returned cleanup closes the listener and clears it.
- *   8. jszip (the blank document templates) is bundled into server.js by build.mjs, so the package needs nothing
+ *      indexed IN PLACE; POST /documents/rescan re-runs it on demand) + container.lookAfter(), then a 30_000 ms
+ *      unref'd interval that re-runs settleKept+lookAfter. The returned cleanup closes the listener and clears it.
+ *   7. jszip (the blank document templates) is bundled into server.js by build.mjs, so the package needs nothing
  *      installed beside it.
  *
- * dsOrigin(): ONE function -- the origin read straight out of ds.json (host-networked DS at http://127.0.0.1). The BROWSER now reaches it through the portal's GET /ds/ reverse
- * proxy (api.js, the editor iframe and every asset -- same-origin, behind the session gate like every route here):
- * apiJs is that root-relative prefix, and api.js' getBasePath() turns it into the editor's base URL. What stays an
- * ABSOLUTE LOOPBACK URL in the signed config is document.url and editorConfig.callbackUrl: those are fetched by the
- * DS server-side (host netns -> loopback works), never by a browser -- leave them exactly as-is. When the recorded
- * origin is a "container:<id>" marker there is NO usable URL yet: it is returned as-is and /editor-config AND /ds
- * refuse with a clear JSON error saying a portal in a container is not supported yet.
+ * The browser reaches the Document Server only through the portal's GET+POST /ds/ reverse proxy (api.js, the editor
+ * frame, every asset and the socket.io channel), behind the session gate like every route here. The Document Server
+ * builds every address it hands the browser (the converted document, images, downloads) from the X-Forwarded-Host,
+ * -Proto and -Prefix of the editor's own requests, so the proxy sends them: without them it named its own address,
+ * http://127.0.0.1/cache/files/..., which no browser can load, and every open ended in "Download failed".
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -235,15 +230,11 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
 
   const record = container.readDsRecord(dd);
   if (!record) return { res: { status: 503, body: { error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" } } };
-  // network-mode option (a): a "container:<id>" origin is a marker with no browser-reachable URL in v1 -- fail clearly.
-  if (record.origin.startsWith("container:")) {
-    return { res: { status: 422, body: { error: `the document server runs under ${record.origin}: a portal that itself runs in a container is not supported yet, because the browser cannot reach the editor there`, code: "unresolvable_ds_origin", origin: record.origin } } };
-  }
 
   const { token: ticket } = mintTicket(doc.docId, TICKET_TTL_MS, secret);
-  // document.url is the ticketed GET on OUR loopback listener (the container's fetch must reach a URL it
-  // can actually dial -- never a browser-only origin); callbackUrl sits right next door.
-  const base = `http://127.0.0.1:${loopPort}`;
+  // document.url is the ticketed GET on the loopback listener and callbackUrl sits right next door, both through the
+  // island's relay: the one address the Document Server reaches, which passes them on to the listener (container.ts).
+  const base = `http://${container.NAMES.relay}:${container.BACK_PORT}`;
   const config: Record<string, unknown> = {
     documentType: doc.ext === "docx" ? "word" : "cell",
     type: "embedded",
@@ -278,7 +269,7 @@ function registerRoutes(dd: string, secret: string): void {
     const s = loadSettings(dd);
     let c: Awaited<ReturnType<typeof container.status>>;
     try {
-      c = await container.status(undefined, dd);
+      c = await container.status();
     } catch (e) {
       c = { state: "stopped", pull: null } as typeof c; // status() should not throw -- never kill the poller
       logLine(`container.status failed: ${(e as Error).message}`);
@@ -450,7 +441,7 @@ function registerRoutes(dd: string, secret: string): void {
       }
     }
 
-    const c = await container.status(undefined, dd);
+    const c = await container.status();
     res.json({ settings, container: c, ...(starting ? { starting: true } : {}) });
   });
 
@@ -459,7 +450,7 @@ function registerRoutes(dd: string, secret: string): void {
    * progress surfaces here via polling). */
   r.get("/container/status", async (_req, res) => {
     try {
-      res.json(await container.status(undefined, dd));
+      res.json(await container.status());
     } catch (e) {
       codedResponse(res, e);
     }
@@ -471,7 +462,7 @@ function registerRoutes(dd: string, secret: string): void {
     try {
       const r2 = await container.ensureContainer(undefined, undefined, dd);
       recordAudit({ subject: container.DS_NAME, reason: r2.started ? "document server started" : "document server already running" });
-      res.json({ ...r2, container: await container.status(undefined, dd) });
+      res.json({ ...r2, container: await container.status() });
     } catch (e) {
       codedResponse(res, e);
     }
@@ -482,7 +473,20 @@ function registerRoutes(dd: string, secret: string): void {
     try {
       await container.stopContainer(undefined, dd);
       recordAudit({ subject: container.DS_NAME, reason: "document server stopped" });
-      res.json({ container: await container.status(undefined, dd) });
+      res.json({ container: await container.status() });
+    } catch (e) {
+      codedResponse(res, e);
+    }
+  });
+
+  /** POST /container/remove {data?} -> the relays, the Document Server, its network and the relays' volume removed
+   * (container.removeContainers), with `data` also the Document Server's own volume; recorded as stopped. */
+  r.post("/container/remove", json, async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      await container.removeContainers(body.data === true, undefined, dd);
+      recordAudit({ subject: container.DS_NAME, reason: body.data === true ? "document server removed, with its volume" : "document server removed" });
+      res.json({ container: await container.status() });
     } catch (e) {
       codedResponse(res, e);
     }
@@ -494,38 +498,39 @@ function registerRoutes(dd: string, secret: string): void {
    * "40" connect packet, user state, ...) arrive as POSTs to the same path while its next-poll GETs stay open until
    * the server has something to send. A GET-only proxy answered every POST with the portal's 404 and the channel never
    * opened: the editor white-loads forever even though DS is healthy (reproduced by wire replay).
-   * The portal mounts us at /api/x/<extension> BEHIND THE SESSION GATE, so only
-   * signed-in browsers may reach this -- and it forwards to ONE origin only: the recorded DS origin from ds.json,
-   * never anywhere else. The upstream path is recomputed from the RAW request URL with its query string included
-   * (express params may be decoded; an iframe's ?dockey=... must pass verbatim). The upstream ask carries
-   * accept-encoding: identity and neither content-encoding nor content-length is copied on the way out:
-   * Node's undici fetch AUTO-DECODES gzip bodies but keeps the upstream's compressed content-encoding and COMPRESSED
-   * content-length in the response headers, so copying them made Node emit Content-Length for 13.7KB while sending
-   * 67KB of decoded bytes -- browsers read a truncated api.js (invalid JS) and the keep-alive stream reset. Asking
-   * identity means the body arrives plain with a truthful length anyway; buffering it and letting Node compute
-   * Content-Length from the ACTUAL bytes makes header and payload exactly consistent.
+   * The portal mounts us at /api/x/<extension> BEHIND THE SESSION GATE, so only signed-in browsers may reach this --
+   * and it forwards to ONE origin only: the Document Server through Office's relay (container.dsOrigin). The upstream
+   * path is recomputed from the RAW request URL with its query string included (express params may be decoded; an
+   * iframe's ?dockey=... must pass verbatim).
+   * Where the browser is: the Document Server makes every absolute address it hands the browser from the
+   * X-Forwarded-Proto, -Host and -Prefix of the editor's requests (the converted document Editor.bin, images,
+   * downloads, print), and its nginx answers unversioned /web-apps/... and / with a redirect built the same way.
+   * Without them it said http://127.0.0.1/cache/files/... (its own Host), which a browser cannot load: "Download
+   * failed" on every open. So they are sent, from what the browser asked (behind a reverse proxy, its own forwarded
+   * headers), and a redirect is passed on to the browser, never followed here: its target is the portal's public,
+   * sign-in-gated address.
+   * The upstream ask carries accept-encoding: identity and neither content-encoding nor content-length is copied on
+   * the way out: Node's undici fetch AUTO-DECODES gzip bodies but keeps the upstream's compressed content-encoding and
+   * COMPRESSED content-length in the response headers, so copying them made Node emit Content-Length for 13.7KB while
+   * sending 67KB of decoded bytes. Buffering the body and letting Node compute Content-Length from the ACTUAL bytes
+   * makes header and payload exactly consistent.
    * Two transport rules beyond that: polling GETs are HELD open by docserver until it has data (an engine.io ping
    * lands at least every 25s), so the abort window must cover a full ping cycle or the proxy kills healthy long-
-   * polls -- undici's abort also closes the upstream socket, which DS logs as a 499 at exactly the cutoff. And the
-   * handshake JSON advertises upgrades:["websocket"]: this proxy is fetch-based and cannot relay WebSocket frames,
-   * so "websocket" is stripped from every outbound handshake, pinning the client to polling for good (engine.io's
-   * fallback on a failed upgrade works, but a deterministic single transport has no double-connection churn).
-   * Refusals mirror /editor-config: 503 ds_not_configured (no ds.json), 422 unresolvable_ds_origin (a
-   * "container:<id>" marker has no URL yet), 503 ds_unavailable (the origin did not answer). Nothing below
-   * this route mutates portal state: POSTs only ever forward to the DS. */
+   * polls. And the handshake JSON advertises upgrades:["websocket"]: this proxy is fetch-based and cannot relay
+   * WebSocket frames, so "websocket" is stripped from every outbound handshake, pinning the client to polling.
+   * Refusals: 503 ds_not_configured (never started: no ds.json), 503 ds_unavailable (it did not answer; the way in is
+   * asked for again, which puts right a forwarder that went). Nothing below this route mutates portal state: POSTs
+   * only ever forward to the DS. */
+  const prefix = `/api/x/${portal().extension.split("/").map(encodeURIComponent).join("/")}/ds`;
   const proxyDs = async (req: any, res: any): Promise<void> => {
     const raw = typeof req.url === "string" ? req.url : "";
     const i = raw.indexOf("/ds/");
     if (i === -1) return res.status(404).json({ error: "bad proxy path", code: "not_found" });
     const rest = raw.slice(i + 4); // everything after /ds/, query string included, untouched
-    const origin = dsOrigin(dd);
-    if (origin === "") {
+    if (!container.readDsRecord(dd)) {
       return res.status(503).json({ error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" });
     }
-    if (origin.startsWith("container:")) {
-      return res.status(422).json({ error: `the document server runs under ${origin}: a portal that itself runs in a container is not supported yet, because the browser cannot reach the editor there`, code: "unresolvable_ds_origin", origin });
-    }
-    const fwdHeaders: Record<string, string> = { "accept-encoding": "identity" };
+    const fwdHeaders: Record<string, string> = { "accept-encoding": "identity", ...forwardedFor(req, prefix) };
     let body: Buffer | undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
       // engine.io POSTs its client packets as raw text/plain; buffer them verbatim. Nothing upstream of this
@@ -541,25 +546,29 @@ function registerRoutes(dd: string, secret: string): void {
       const ct = req.headers?.["content-type"];
       if (typeof ct === "string") fwdHeaders["content-type"] = ct;
     }
+    let origin = "";
     let upstream: Response;
     try {
+      origin = await container.dsOrigin();
       upstream = await fetch(`${origin}/${rest}`, {
         method: req.method,
         headers: fwdHeaders,
         body: body && body.length > 0 ? new Uint8Array(body) : undefined,
-        redirect: "follow",
+        redirect: "manual",
         // An idle poll must survive a full engine.io ping cycle (pingInterval 25s) or more; 15s cut healthy
         // long-polls in half and made every doc channel look like it was dying.
         signal: AbortSignal.timeout(90_000),
       });
     } catch (e) {
-      logLine(`${req.method} /ds/${rest.split("?")[0]} -> ${origin} failed: ${(e as Error).message}`);
-      return res.status(503).json({ error: `the document server at ${origin} did not answer`, code: "ds_unavailable" });
+      logLine(`${req.method} /ds/${rest.split("?")[0]} -> ${origin || "(no way in)"} failed: ${(e as Error).message}`);
+      // A forwarder that went, or a portal container made again: the next request finds the way in again.
+      container.reachAgain().catch(() => {});
+      return res.status(503).json({ error: "the document server did not answer", code: "ds_unavailable" });
     }
     // content-encoding / content-length are DELIBERATELY not copied: undici has already decoded any gzip body,
     // so the upstream length now describes compressed bytes we never send. The buffer below IS the payload;
     // Node computes a truthful Content-Length from it.
-    for (const k of ["content-type", "cache-control", "content-disposition", "access-control-allow-origin"]) {
+    for (const k of ["content-type", "cache-control", "content-disposition", "access-control-allow-origin", "location"]) {
       const v = upstream.headers.get(k);
       if (v !== null) res.setHeader(k, v);
     }
@@ -583,7 +592,7 @@ function registerRoutes(dd: string, secret: string): void {
       res.status(upstream.status).end(buf.length === 0 ? undefined : buf);
     } catch (e) {
       logLine(`${req.method} /ds/${rest.split("?")[0]}: the body from ${origin} could not be read: ${(e as Error).message}`);
-      if (!res.headersSent) res.status(503).json({ error: `the document server at ${origin} did not answer`, code: "ds_unavailable" });
+      if (!res.headersSent) res.status(503).json({ error: "the document server did not answer", code: "ds_unavailable" });
       else res.destroy();
     }
   };
@@ -592,13 +601,59 @@ function registerRoutes(dd: string, secret: string): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* the loopback listener's port                                        */
+/* ------------------------------------------------------------------ */
+
+const LISTENER_PORT_FILE = "listener-port";
+
+/** Listens on 127.0.0.1: on the port of the run before (dataDir()/listener-port) where it is free, so the portal-side
+ * relay is still right and an editor open across a restart of the half still reaches its callback; else on a port the
+ * system picks, which is kept for the next run. */
+async function listenLoopback(server: http.Server, dd: string): Promise<number> {
+  const at = (port: number) =>
+    new Promise<void>((resolve, reject) => {
+      const failed = (e: Error) => reject(e);
+      server.once("error", failed);
+      server.listen(port, "127.0.0.1", () => {
+        server.off("error", failed);
+        resolve();
+      });
+    });
+  const file = path.join(dd, LISTENER_PORT_FILE);
+  const before = Number(fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "");
+  let listening = false;
+  if (Number.isInteger(before) && before > 0 && before < 65536) {
+    try {
+      await at(before);
+      listening = true;
+    } catch {
+      // taken by something else since: a new one below
+    }
+  }
+  if (!listening) await at(0);
+  const port = (server.address() as AddressInfo).port;
+  if (port !== before) fs.writeFileSync(file, `${port}\n`);
+  return port;
+}
+
+/* ------------------------------------------------------------------ */
 /* boot + cleanup                                                      */
 /* ------------------------------------------------------------------ */
 
-/** dsOrigin(): the browser-facing origin of the DS read from ds.json (option (a)). "" when unconfigured; a
- * "container:<id>" marker is returned AS-IS -- it is the clear signal that /editor-config must refuse with the "not supported yet" note. */
-export function dsOrigin(root?: string): string {
-  return container.readDsRecord(root ?? dataDir())?.origin ?? "";
+/** The first of a header's values: a header given twice, or a list a chain of proxies made ("a, b"). */
+function first(value: unknown): string | undefined {
+  const one = Array.isArray(value) ? value[0] : value;
+  return typeof one === "string" ? one.split(",")[0]?.trim() || undefined : undefined;
+}
+
+/** What tells the Document Server where the browser is (see the /ds proxy): the host and scheme the browser used --
+ * a reverse proxy's own forwarded headers where one is in front, else the request's Host and whether it came over
+ * TLS -- and the prefix the proxy serves it under. */
+export function forwardedFor(req: { headers?: Record<string, unknown>; socket?: { encrypted?: boolean } }, prefix: string): Record<string, string> {
+  const h = req.headers ?? {};
+  const host = first(h["x-forwarded-host"]) ?? first(h.host);
+  const proto = first(h["x-forwarded-proto"]) ?? (req.socket?.encrypted ? "https" : "http");
+  return { ...(host ? { "x-forwarded-host": host } : {}), "x-forwarded-proto": proto, "x-forwarded-prefix": prefix };
 }
 
 export default async function officeServer(portalObj: ServerPortal): Promise<() => Promise<void>> {
@@ -611,18 +666,15 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   // the strict mtime/revision gate with human editor sessions open or not (co-editor model; fail loud, re-read + retry).
   registerTools({ root: dd, record: recordAudit });
   wirePing({ root: dd, record: recordAudit });
-  callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, root: dd });
+  callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd });
   live.setMetaResolver((docId) => store.getDoc(docId, dd)?.mtimeMs ?? null);
 
   registerRoutes(dd, secret);
 
-  // the cookie-free loopback listener: 127.0.0.1, port 0 -> a private ephemeral port per boot
+  // the cookie-free loopback listener, on 127.0.0.1 alone
   const server = http.createServer(makeLoopbackHandler(dd, secret));
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-  loopPort = (server.address() as AddressInfo).port;
+  loopPort = await listenLoopback(server, dd);
+  container.setBackPort(loopPort);
 
   // boot settle: reclaim trash + reconcile index vs disk, then adopt an existing DS if settings say it should run
   try {
@@ -657,6 +709,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     stopped = true;
     clearInterval(timer);
     loopPort = 0;
+    container.setBackPort(0);
     // close() alone would wait on keep-alive connections held open by clients (undici fetch among them);
     // dropping the idle ones is what lets a portal stop -- and a test's cleanup -- actually finish
     server.closeAllConnections();

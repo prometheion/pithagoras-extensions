@@ -43,6 +43,7 @@ import { signJwt } from "../src/jwt";
 import { makeKey } from "../src/callback";
 import { parseDocx, rewriteZip } from "../src/ooxml";
 import { registerTools, __resetToolsForTests } from "../src/tools";
+import * as container from "../src/container";
 
 const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url));
 /** The committed sample docx doubles as the "what the DS saved" payload in test 2: it differs from the
@@ -76,6 +77,8 @@ function IT(name: string, fn: () => Promise<void>): void {
 
 interface Booted {
   root: string;
+  /** Where Docker for extensions says the Document Server is reached (the stand-in's address, once it listens). */
+  reach: { host: string; port: number };
   logs: string[];
   audits: Array<Record<string, unknown>>;
   cleanup: () => Promise<void>;
@@ -88,8 +91,12 @@ async function boot(): Promise<Booted> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-it-"));
   const logs: string[] = [];
   const audits: Array<Record<string, unknown>> = [];
-  const fakeDocker = { available: async () => false } as Record<string, unknown>;
+  // Docker answers only where the Document Server is reached: lookAfter finds Office off and makes nothing.
+  const reach = { host: "127.0.0.1", port: 9 };
+  const fakeDocker = { available: async () => true, networks: { reach: async () => reach, get: async () => undefined } } as Record<string, unknown>;
+  container.forgetReach();
   const portalObj = {
+    extension: "@pithagoras/office",
     dataDir: () => root,
     log: (l: unknown) => logs.push(String(l)),
     audit: { record: (e: Record<string, unknown>) => audits.push(e) },
@@ -100,7 +107,7 @@ async function boot(): Promise<Booted> {
     extensions: { use: () => fakeDocker },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
-  return { root, logs, audits, cleanup };
+  return { root, reach, logs, audits, cleanup };
 }
 
 function closeServer(server: http.Server): Promise<void> {
@@ -164,7 +171,7 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
   try {
     // The listener's POST /callback was configured at boot to read this tmp root's ds.json + jwt-secret on
     // every request -- so writing the record here is what turns the endpoint from 503 into live.
-    fs.writeFileSync(path.join(b.root, "ds.json"), JSON.stringify({ containerId: "it-cid", origin: "http://127.0.0.1", imageTag: "onlyoffice/documentserver:10.0" }));
+    fs.writeFileSync(path.join(b.root, "ds.json"), JSON.stringify({ containerId: "it-cid", imageTag: "onlyoffice/documentserver:10.0.0.1" }));
     const doc = await store.createDoc({ title: "Round Trip", type: "word" }, b.root);
 
     // A stand-in for the DS download endpoint (body.url / changesurl): a second ephemeral loopback server
@@ -173,13 +180,13 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
     const changesArchive = Buffer.concat([Buffer.from("PK\x03\x04"), randomBytes(1024)]);
     let hits: string[] = [];
     const dsStandin = http.createServer((req, res) => {
-      if (req.method === "GET" && req.url === "/saved") {
+      if (req.method === "GET" && req.url?.startsWith("/cache/files/saved?")) {
         hits.push("saved");
         res.writeHead(200, { "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
         res.end(SAVED_DOCX);
         return;
       }
-      if (req.method === "GET" && req.url === "/changes.zip") {
+      if (req.method === "GET" && req.url?.startsWith("/cache/files/changes.zip?")) {
         hits.push("changes.zip");
         res.writeHead(200, { "Content-Type": "application/zip" });
         res.end(changesArchive);
@@ -190,6 +197,8 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
     });
     await new Promise<void>((resolve, reject) => { dsStandin.once("error", reject); dsStandin.listen(0, "127.0.0.1", () => resolve()); });
     const dsPort = (dsStandin.address() as AddressInfo).port;
+    b.reach.port = dsPort;
+    container.forgetReach();
 
     // The state a status-1 join would have left: one human present, the lock flag set.
     live.setUser(doc.docId, { id: "u-sam", name: "Sam" }, true);
@@ -201,8 +210,9 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
     const envelope = {
       key: makeKey(before.docId, before.mtimeMs), // the only key shape this package mints
       status: 2, // ready for saving: terminal close
-      url: `http://127.0.0.1:${dsPort}/saved`,
-      changesurl: `http://127.0.0.1:${dsPort}/changes.zip`,
+      // At the browser's address of the Document Server, as it names them: fetched from the Document Server itself.
+      url: "http://portal.example/api/x/%40pithagoras/office/ds/cache/files/saved?md5=a&expires=9",
+      changesurl: "http://portal.example/api/x/%40pithagoras/office/ds/cache/files/changes.zip?md5=b&expires=9",
     };
     const token = signJwt(envelope, 60_000, secret);
 

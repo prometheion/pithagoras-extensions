@@ -8,8 +8,13 @@ extends EditorPlugin
 ## {"id": ..., "ok": false, "error": "..."}. Scene edits go through the editor's undo/redo, so they show in History
 ## and can be undone like any other edit. Without GODOT_BRIDGE_SECRET in the environment (any editor outside
 ## godot-server) the plugin does nothing.
+##
+## Each game the editor runs gets the bridge's game side as its main loop (game.gd, on the run's command line: see
+## _run_scene), which answers over the editor's own debugger channel (GameLink): godot-server's game_input and
+## game_state go through here to the game, and run_playtest's visible runs start here.
 
 const MAX_LINE := 64 * 1024 * 1024
+const GAME_SCRIPT := "res://addons/godot_mcp_bridge/game.gd"
 
 var _server: TCPServer
 var _conns: Array[Dictionary] = []
@@ -17,6 +22,44 @@ var _secret := ""
 var _err := ""   # set by the value converters when a value cannot be converted
 var _ready := false   # true once the editor's first filesystem scan is done (ping reports it)
 var _halt := {}   # while the game is stopped in the editor's debugger: {"reason": ..., "stack": [...]}
+var _link: GameLink   # the game side's messages, on the debugger channel
+var _next_run := {}   # what the next run adds to the game's command line and environment (a playtest)
+var _calls := 0
+
+
+## The editor's end of the channel to the game side (game.gd) of each game it runs: the debugger's own connection to
+## the game, with the messages "mcp:...". The game says "mcp:ready" once its side is up, and answers each "mcp:call"
+## with an "mcp:reply" of the same id.
+class GameLink:
+	extends EditorDebuggerPlugin
+	var ready := {}     # session id -> what the game said when its side came up
+	var replies := {}   # call id -> the game's answer
+
+	func _has_capture(capture: String) -> bool:
+		return capture == "mcp"
+
+	func _capture(message: String, data: Array, session_id: int) -> bool:
+		if message == "mcp:ready":
+			ready[session_id] = data[0] if not data.is_empty() else {}
+			return true
+		if message == "mcp:reply" and data.size() >= 2:
+			replies[str(data[0])] = data[1]
+			return true
+		return false
+
+	func _setup_session(session_id: int) -> void:
+		var session := get_session(session_id)
+		session.started.connect(func(): ready.erase(session_id))
+		session.stopped.connect(func(): ready.erase(session_id))
+
+	## The session of the running game whose side is up (the latest), or -1.
+	func game_session() -> int:
+		var best := -1
+		for id in ready:
+			var session := get_session(id)
+			if session and session.is_active():
+				best = maxi(best, id)
+		return best
 
 
 func _enter_tree() -> void:
@@ -29,6 +72,8 @@ func _enter_tree() -> void:
 	_server = TCPServer.new()
 	var err := _server.listen(port, "127.0.0.1")
 	print("GODOT_MCP_BRIDGE listening on 127.0.0.1:%d (%s)" % [port, error_string(err)])
+	_link = GameLink.new()
+	add_debugger_plugin(_link)
 	# The virtual display has no vsync: without a cap, continuous redraws (and a game run from the editor) spin.
 	Engine.max_fps = 60
 	_setup_editor.call_deferred()
@@ -38,7 +83,26 @@ func _exit_tree() -> void:
 	if _server:
 		_server.stop()
 		_server = null
+	if _link:
+		remove_debugger_plugin(_link)
+		_link = null
 	_conns.clear()
+
+
+## Every run the editor starts (run_project, run_scene, the viewer's Run, the editor's own Play buttons) runs with the
+## game side as its main loop: `-s` names a SceneTree script, and the game's scene, autoloads and settings load as they
+## always do. Nothing is written to the project. A playtest run (_next_run) also gets its fixed frame rate and, in the
+## environment, the folder of its spec; the game inherits the editor's environment as it starts, within this call.
+func _run_scene(_scene: String, args: PackedStringArray) -> PackedStringArray:
+	if _server == null:
+		return args
+	args.append_array(["-s", GAME_SCRIPT])
+	if not _next_run.is_empty():
+		args.append_array(_next_run["args"])
+		OS.set_environment("GODOT_MCP_PLAYTEST", _next_run["dir"])
+		OS.unset_environment.call_deferred("GODOT_MCP_PLAYTEST")
+		_next_run = {}
+	return args
 
 
 func _setup_editor() -> void:
@@ -167,6 +231,8 @@ func _call(cmd: String, a: Dictionary):
 			return await _reload(a)
 		"run":
 			return await _run_game(a)
+		"game":
+			return await _game(a)
 		"stop":
 			return await _stop_game()
 		"debugger":
@@ -207,6 +273,7 @@ func _ping() -> Dictionary:
 		"open_scenes": Array(EditorInterface.get_open_scenes()),
 		"playing": EditorInterface.is_playing_scene(),
 		"halted_in_debugger": _debugger_state()["halted"],
+		"game_bridge": _link != null and _link.game_session() >= 0,
 		"window_size": [size.x, size.y],
 		"ready": _ready,
 	}
@@ -602,23 +669,34 @@ func _run_game(a: Dictionary):
 	_watch_debuggers()
 	_halt = {}
 	var scene := str(a.get("scene", ""))
+	var play: Callable
 	match str(a.get("mode", "main")):
 		"main":
-			var main := str(ProjectSettings.get_setting("application/run/main_scene", ""))
-			if main.is_empty():
+			scene = str(ProjectSettings.get_setting("application/run/main_scene", ""))
+			if scene.is_empty():
 				return {"error": "the project has no main scene; use new_scene with set_main, or run_scene"}
-			scene = main
-			EditorInterface.play_main_scene()
+			play = EditorInterface.play_main_scene
 		"current":
 			var root := EditorInterface.get_edited_scene_root()
 			if root == null:
 				return {"error": "no scene is open"}
 			scene = root.scene_file_path
-			EditorInterface.play_current_scene()
+			play = EditorInterface.play_current_scene
 		"custom":
 			if not ResourceLoader.exists(scene):
 				return {"error": "no such scene: " + scene}
-			EditorInterface.play_custom_scene(scene)
+			play = EditorInterface.play_custom_scene.bind(scene)
+		_:
+			return {"error": "mode must be main, current or custom"}
+	if a.has("playtest"):
+		# A playtest at a fixed frame rate (capped to it, so it plays at its speed), whose script errors fail its test
+		# instead of stopping the game in the debugger.
+		var fps := str(int(a.get("fps", 60)))
+		_next_run = {"dir": str(a["playtest"]), "args": ["--fixed-fps", fps, "--max-fps", fps, "--ignore-error-breaks"]}
+	play.call()
+	if not _next_run.is_empty():   # the editor did not start the run, so _run_scene never took it
+		_next_run = {}
+		return {"error": "the editor did not start the game; get_output shows why"}
 	for i in 50:
 		await get_tree().create_timer(0.1).timeout
 		if EditorInterface.is_playing_scene():
@@ -635,6 +713,42 @@ func _stop_game():
 			break
 		await get_tree().create_timer(0.1).timeout
 	return {"stopped": was, "playing": EditorInterface.is_playing_scene()}
+
+
+## A call to the game side of the running game: input to send (op "input") or state to read (op "state").
+func _game(a: Dictionary):
+	var t0 := Time.get_ticks_msec()
+	var limit := float(a.get("timeout", 10)) * 1000.0
+	var id := _link.game_session()
+	while id < 0 and EditorInterface.is_playing_scene() and Time.get_ticks_msec() - t0 < 5000:
+		await get_tree().process_frame   # a game that has just started: its side says it is up within a moment
+		id = _link.game_session()
+	if id < 0:
+		if not EditorInterface.is_playing_scene():
+			return {"error": "no game is running; start one with run_project (or run_scene)"}
+		return {"error": "the running game has no game bridge, so it takes no input and its state cannot be read (a "
+			+ "project that sets application/config/disable_project_settings_override does not load it); "
+			+ "screenshot(target=game) and get_output still work"}
+	var session := _link.get_session(id)
+	_calls += 1
+	var call_id := "%d" % _calls
+	session.send_message("mcp:call", [call_id, str(a.get("op", "")), a.get("args", {}) if a.get("args") is Dictionary else {}])
+	while not _link.replies.has(call_id):
+		if session.is_breaked():
+			var st := _debugger_state()
+			return {"error": "the game is stopped in the editor's debugger%s; fix the error, then stop and run it again"
+				% ((": " + str(st.get("reason", "")).trim_suffix(".")) if st["halted"] else "")}
+		if not session.is_active():
+			return {"error": "the game ended before it answered"}
+		if Time.get_ticks_msec() - t0 > limit:
+			return {"error": "the game did not answer within %d s (is it paused with time_scale 0, or busy?)" % int(limit / 1000)}
+		await get_tree().process_frame
+	var r = _link.replies[call_id]
+	_link.replies.erase(call_id)
+	if r is Dictionary and r.has("png"):
+		r["png_base64"] = Marshalls.raw_to_base64(r["png"])
+		r.erase("png")
+	return r
 
 
 func _screenshot(a: Dictionary):

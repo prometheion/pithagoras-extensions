@@ -1,7 +1,7 @@
 # Godot for Pithagoras
 
 `@pithagoras/godot` runs the real Godot 4.7.2 editor in a container on your portal's Docker, rendered on an NVIDIA GPU,
-and brings it into Pithagoras in two ways: the agent in every chat gets the editor's 27 tools, and you get the editor's
+and brings it into Pithagoras in two ways: the agent in every chat gets the editor's 30 tools, and you get the editor's
 live screen in a panel beside the chat, where you can watch the agent work and take the mouse and keyboard at any
 time. Every edit the agent makes happens in that editor, through its undo history.
 
@@ -33,7 +33,7 @@ In Settings → Extensions → Discover → **Install by name**:
 
 ## The first start
 
-Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/prometheion/pithagoras-godot:0.1.0`,
+Settings → **Godot** → **Install**. The extension downloads its image (`ghcr.io/prometheion/pithagoras-godot:0.2.0`,
 about 0.6 GB unpacked), makes a volume for the projects and a network of its own (`pithagoras-godot-net`), makes the
 container on it and starts it, and opens the portal's way to it (below, under Security). The page shows the download,
 then the server starting, then the editor's own state ("Editor ready: starter"). The first start makes a 3D project
@@ -75,23 +75,83 @@ The server's MCP tools are the extension's own tools in every chat, named `godot
 `godot_list_files`, `godot_read_file`, `godot_write_file`, `godot_delete_file`, `godot_get_scene_tree`,
 `godot_open_scene`, `godot_new_scene`, `godot_add_node`, `godot_set_property`, `godot_delete_node`,
 `godot_attach_script`, `godot_save_scene`, `godot_reload`, `godot_run_project`, `godot_run_scene`, `godot_stop`,
-`godot_get_output`, `godot_check_scripts`, `godot_screenshot`, `godot_record`, `godot_export` and
-`godot_execute_gdscript`. Their descriptions, their schemas and the server's MCP instructions (said to the agent
+`godot_get_output`, `godot_game_input`, `godot_game_state`, `godot_run_playtest`, `godot_check_scripts`,
+`godot_screenshot`, `godot_record`, `godot_export` and `godot_execute_gdscript`. Their descriptions, their schemas and the server's MCP instructions (said to the agent
 once) are the ones this version of the extension was released with, in `server/tools.json`, which the release's smoke
 test holds the image to: never what the running server says of itself, since the agent's code runs in that container.
 A tool the server lists that the file does not name is not relayed, and one it names that the server does not list
 (an older image) is not offered.
 
 They are on in every chat by default. Settings → Tools lists them under **@pithagoras/godot**, where the group or a
-single tool can be switched off, or made lazy (offered through the `tools` tool instead of in every request: the 27
-cost about 3k tokens a request), for the whole portal, an agent, a project or a mode. They leave every chat when the
+single tool can be switched off, or made lazy (offered through the `tools` tool instead of in every request: the 30
+cost about 4k tokens a request), for the whole portal, an agent, a project or a mode. They leave every chat when the
 extension is switched off or removed, and while the server is not installed.
 
-`godot_screenshot` and `godot_record` return a picture, which reaches the model as a picture (a model that sees
-pictures, `input: ["text", "image"]`). The chat's card of the call shows its text; the picture is what the panel
-shows.
+`godot_screenshot` and `godot_record` return a picture, as do `godot_game_state` with `image` and a visible
+`godot_run_playtest` (its checkpoints), which reaches the model as a picture (a model that sees pictures,
+`input: ["text", "image"]`). The chat's card of the call shows its text; the picture is what the panel shows.
 
 Don't add an MCP server named `godot` beside this extension: its tools would have the same names.
+
+## Playing and testing the game
+
+Three of the tools reach into the game the agent builds, where `godot_execute_gdscript`, which runs in the editor,
+cannot:
+
+- `godot_game_input` plays the game the editor runs: it taps, presses or releases an action of the project's Input
+  Map (`move_right`, `jump`, `ui_accept`) or a key, or clicks or moves the mouse at a point in the game's viewport. A
+  tap holds for some physics frames (or seconds), lets go, and answers with the frames: `{"action": "jump"}` gives
+  `{"sent": "tap jump", "pressed_frame": 812, "released_frame": 813, "frames_held": 1}`.
+- `godot_game_state` reads the running game: its live node tree (each node's path, type and a few telling values such
+  as `position`, `velocity` and `text`) and Godot expressions evaluated with the current scene as their base, such as
+  `get_node("Player").position` or `get_tree().get_nodes_in_group("enemies").size()`, each value as JSON (`[x, y]`
+  for a Vector2) and each failed expression in `errors`, optionally after some physics frames, and with `image`, the
+  frame those values are from.
+- `godot_run_playtest` runs the tests the agent writes in the project's `res://tests/`: files named `test_*.gd` that
+  extend `PlayTest`, each `test_*` function a test run on the scene loaded afresh. Headless (the default), the
+  project runs with no window at a fixed frame rate, so a run repeats exactly, and takes a fraction of a second for
+  a short test; visible, it runs from the editor in its window, at the same rate and capped to it, so you watch it at
+  normal speed, and its checkpoints come back as pictures. The answer says which tests passed, each failed check with
+  its line and message, the game's errors and what it printed. Without a path, every `test_*.gd` in `res://tests/`
+  runs.
+
+```gdscript
+extends PlayTest
+
+func test_jump() -> void:
+    var player := node("Player")
+    await wait_frames(10)
+    var y: float = player.position.y
+    await press("jump")
+    await wait_frames(15)
+    check(player.position.y < y - 40, "the player rises after jump")
+    checkpoint("in the air")
+```
+
+| PlayTest | |
+|---|---|
+| `await press(action, frames = 1)`, `await hold(action)`, `await release(action)` | an input action: a tap, held down, let go |
+| `await key(name, frames = 1)` | a key: `Space`, `Enter`, `Left`, `A`, ... |
+| `await click(Vector2, button = "left")`, `await move_mouse(Vector2)` | the mouse, in the game's viewport |
+| `await wait_frames(n)`, `await wait_seconds(s)` | let the game run (physics frames; seconds are whole frames) |
+| `await wait_until(callable, max_frames = 600)` | wait for a condition; giving up fails the test |
+| `node(path)`, `scene`, `frame` | a node of the scene (a path that names none fails the test), its root, the frames since the test began |
+| `check(condition, message)`, `check_eq(got, want, message)`, `fail(message)` | a failed check fails the test at its line and the test goes on |
+| `checkpoint(name)` | a picture of the game as it is (in a visible run) |
+
+A script error in a test fails it at its line; one in the game while a test runs fails it too, with the game's file
+and line. Frames are physics frames throughout: input is applied at the end of a physics frame, after the game's own
+physics, as a real device's input arrives between two frames, and the game sees it from the next frame on.
+
+**How it gets into the game.** The editor plugin adds `-s res://addons/godot_mcp_bridge/game.gd` to the command line
+of each game the editor runs (`EditorPlugin._run_scene`, which every run from the editor goes through: the tools, the
+panel's Run and the editor's own Play buttons). That script is the game's SceneTree, its main loop, and adds no node
+to it: the game's main scene, autoloads and settings load as they always do. It talks to the editor over the debugger
+connection the editor already has with each game it runs (`EngineDebugger` in the game, an `EditorDebuggerPlugin` in
+the editor). A headless playtest is the project run by the server with `--headless --fixed-fps 60 -s` and the same
+script. Nothing is written to the project, and no export has it: nothing gives an exported game that command line,
+and the export presets the server writes leave the addon's scripts out (Godot still packs its `plugin.cfg`, an inert
+text file).
 
 ## Security
 
@@ -134,10 +194,13 @@ Don't add an MCP server named `godot` beside this extension: its tools would hav
   without the portal's cookie and the page's own credentials, adds the token, lets only the portal frame the answers
   (`frame-ancestors 'self'`), adds `nosniff`, and passes no cookie the container sets.
 - **The tools run code, and say only what the package says.** `godot_execute_gdscript` runs GDScript in the editor;
-  written scripts load at once and `@tool` scripts run in the editor; every game is a program. Every Godot tool's
-  result is outside content to the guard, and once a conversation has read a result the guard flags as a likely
-  prompt injection, it holds `godot_write_file`, `godot_attach_script`, `godot_run_project`, `godot_run_scene`,
-  `godot_record` and `godot_execute_gdscript` as uploads: it asks you first, or refuses where nobody can answer. What
+  written scripts load at once and `@tool` scripts run in the editor; every game is a program, which
+  `godot_game_input` drives, `godot_game_state`'s expressions run code in (they can call any method) and
+  `godot_run_playtest` runs the agent's tests in. Every Godot tool's result is outside content to the guard, and once
+  a conversation has read a result the guard flags as a likely prompt injection, it holds `godot_write_file`,
+  `godot_attach_script`, `godot_run_project`, `godot_run_scene`, `godot_game_input`, `godot_game_state`,
+  `godot_run_playtest`, `godot_record` and `godot_execute_gdscript` as uploads: it asks you first, or refuses where
+  nobody can answer. What
   the model is told of the tools, and the instructions in every chat's prompt, are the package's (`server/tools.json`),
   never what the running server says of itself.
 - **Who can use it.** Everyone signed in to the portal can use the panel, and drive the editor from it.
@@ -178,7 +241,7 @@ card or a port.
 **Remove** on the Settings page first, then uninstall the extension: the container is restarted by Docker unless
 stopped (`unless-stopped`), and outlives the extension, which has no say once it is uninstalled. Remove asks whether to
 delete the projects too, and also removes the network and the forwarder. The image stays on disk, as other containers
-may use it: `docker image rm ghcr.io/prometheion/pithagoras-godot:0.1.0` deletes it.
+may use it: `docker image rm ghcr.io/prometheion/pithagoras-godot:0.2.0` deletes it.
 
 ## Limits
 
@@ -187,6 +250,11 @@ may use it: `docker image rm ghcr.io/prometheion/pithagoras-godot:0.1.0` deletes
 - A modal dialog in the editor blocks the agent's calls until someone answers it in the panel; `godot_restart_editor`
   clears it.
 - No window manager: a game opens as a window over the editor, not in the editor's Game tab.
+- A project that sets `application/config/disable_project_settings_override` ignores the `-s` the editor adds: its
+  games run without the bridge's game side, and `godot_game_input`, `godot_game_state` and visible playtests say so.
+  A project with a main loop of its own (`application/run/main_loop_type`) runs from the editor with the bridge's
+  SceneTree in its place.
+- A headless playtest draws nothing: its checkpoints give the frame, and pictures come with a visible run.
 - The stream is encoded on the CPU (x264): NVENC wants the first GPU's device node, which a container that sees only
   another card does not have.
 - For a portal on the host's network, port 3880 on 127.0.0.1 is the forwarder's: a port in use shows as the server

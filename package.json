@@ -3,11 +3,11 @@
   "private": true,
   "description": "A wild collection of extensions for the Pithagoras Agent, each a package of its own",
   "license": "Apache-2.0",
-  "workspaces": ["blender", "godot", "inline-ui"],
+  "workspaces": ["blender", "godot", "inline-ui", "office"],
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",
-    "test:portal": "npm run test:portal --workspaces"
+    "test:portal": "npm run test:portal --workspaces --if-present"
   },
   "devDependencies": {
     "@pithagoras/extension-api": "^0.2.0",

@@ -297,7 +297,7 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
 
   // the plain fields a DocsAPI.DocEditor gets
   assert.equal(body.documentType, "word");
-  assert.equal(body.type, "embedded");
+  assert.equal(body.type, "desktop", "the editor, not the embed viewer");
   assert.equal(body.title, "Plan");
   const document = body.document as Record<string, unknown>;
   assert.equal(document.fileType, "docx");

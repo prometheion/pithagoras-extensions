@@ -237,7 +237,8 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
   const base = `http://${container.NAMES.relay}:${container.BACK_PORT}`;
   const config: Record<string, unknown> = {
     documentType: doc.ext === "docx" ? "word" : "cell",
-    type: "embedded",
+    // The full editor: "embedded" is OnlyOffice's read-only viewer for a page, with no toolbar and no editing.
+    type: "desktop",
     title: doc.title,
     document: {
       fileType: doc.ext,

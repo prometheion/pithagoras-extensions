@@ -63,7 +63,14 @@ const TRASH_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sweepTrash removes .trash entri
 // importFile caps: the sync copy must not commit an unbounded file into the library (and any xlsx/docx in it
 // is parsed later against ooxml.ts' 256 MiB / 1 GiB zip envelope). Above MAX_BASELINE_BYTES the docx comment
 // baseline is skipped (ping.ts "unparseable source" fallback) instead of reading a huge file inline.
-const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
+// The same cap holds for every later read of a file whole (readDoc, the tools' read as the agent): an indexed file
+// that grew since is refused, not read into the portal's memory.
+export const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
+
+/** The refusal of a file above MAX_IMPORT_BYTES, before a byte of it is read. */
+export function tooLarge(file: string, size: number): Error {
+  return Object.assign(new Error(`${file} is ${size} bytes: files above ${MAX_IMPORT_BYTES / (1024 * 1024)} MiB are not read`), { code: "too_large" });
+}
 const MAX_BASELINE_BYTES = 32 * 1024 * 1024;
 
 /* ------------------------------------------------------------------ */
@@ -449,7 +456,9 @@ export function renameDoc(docId: string, newTitle: string, root = dataDir()): Do
  * `document.json`, its index entry with where it was (`path`, for a scanned one): what is needed to put it back by
  * hand. Then the index entry goes. A scanned doc's real file moves out of its folder; where the trash is on another
  * file system than that folder (a portal in a container with the workspace bound in), it is copied and the original
- * removed. A link put in the file's place is removed as the link. A scanned file already gone is NOT an error: only
+ * removed. A link put in the file's place is removed as the link. Where the file's folder leads elsewhere since it was
+ * indexed (a link took the folder's place), or a folder took the file's name, nothing on disk is touched: the path
+ * leads into another folder now, whose file is not this document's. A scanned file already gone is NOT an error: only
  * the index entry drops. sweepTrash (server boot / settleKept) removes entries older than 7 days, whole. Throws
  * {code:"not_found"} for an unknown id.
  */
@@ -476,11 +485,11 @@ export function deleteDoc(docId: string, root = dataDir()): void {
     try {
       plainFile(doc, doc.path);
     } catch (err) {
-      if ((err as { code?: string }).code !== "invalid") plain = false; // gone
-      else {
-        fs.rmSync(doc.path, { force: true }); // a link in its place: removed as the link, never followed
-        plain = false;
-      }
+      plain = false; // gone, or not a plain file at its own name in its own folder any more
+      // A link in its place, in the folder as it was indexed: removed as the link, never followed. Through a folder
+      // that leads elsewhere now, the same path names another folder's file: left alone.
+      const dir = path.dirname(doc.path);
+      if ((err as { code?: string }).code === "invalid" && canonical(dir) === dir && fs.lstatSync(doc.path, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(doc.path, { force: true });
     }
     if (plain) moveIn(doc.path, `${doc.title}.${doc.ext}`);
   } else {
@@ -873,6 +882,8 @@ export function readDoc(doc: DocMeta, root = dataDir()): Buffer {
   plainFile(doc, file);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
+    const { size } = fs.fstatSync(fd);
+    if (size > MAX_IMPORT_BYTES) throw tooLarge(file, size);
     return fs.readFileSync(fd);
   } finally {
     fs.closeSync(fd);

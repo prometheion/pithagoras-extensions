@@ -25,7 +25,7 @@ export const de: Record<string, string | Plural> = {
   "Editing an office document": "Ein Office-Dokument bearbeiten",
   "Export a fresh copy": "Eine frische Kopie exportieren",
   "Image tag (pinned)": "Image-Tag (festgelegt)",
-  "Its container, its two relays and its network are removed, and so is its volume, which holds only its cache of open documents: every save is in the library already. The image stays; Start makes everything again.": "Sein Container, seine beiden Relays und sein Netzwerk werden entfernt, ebenso sein Volume, das nur den Zwischenspeicher offener Dokumente enthält: Jede Speicherung ist schon in der Bibliothek. Das Image bleibt; „Container starten“ legt alles wieder an.",
+  "Its container, its relay and its network are removed, and so are its volumes: its cache of open documents, with any save it could not hand over yet, its logs and its own data. Every save that reached the library stays there. The image stays; Start makes everything again.": "Sein Container, sein Relay und sein Netzwerk werden entfernt, ebenso seine Volumes: der Zwischenspeicher offener Dokumente samt Speicherungen, die er noch nicht übergeben konnte, seine Logs und seine eigenen Daten. Jede Speicherung, die in der Bibliothek angekommen ist, bleibt dort. Das Image bleibt; „Container starten“ legt alles wieder an.",
   "Its file is gone; it stays listed for a week, in case it comes back.": "Seine Datei ist weg; es bleibt eine Woche gelistet, falls sie zurückkommt.",
   "Kind": "Art",
   "Listed the office documents": "Die Office-Dokumente aufgelistet",

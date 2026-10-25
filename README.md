@@ -45,8 +45,9 @@ putting that container on the server's network. Each extension's README says mor
 
 Office's Document Server is on a network of its own in the same way. It runs OnlyOffice's own image, which the portal
 pulls (it is not built here or tagged with the package's version), and it also has to reach the portal (to fetch a
-document and report a save), which such a network has no way to: two small relay containers of Office's own are its
-way in and back. Office's README says more under Security.
+document and report a save), which such a network has no way to: a small relay container of Office's own on that
+network is its way in, and its way back runs over the way in, held open from the portal's side. Office's README says
+more under Security.
 
 ## Installing
 

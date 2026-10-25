@@ -19,9 +19,20 @@ export const DEFAULT_SETTINGS: OfficeSettings = { enabled: false, imageTag: "onl
 
 const FILE = "settings.json";
 
-function field<K extends keyof OfficeSettings>(raw: Record<string, unknown>, key: K): OfficeSettings[K] {
+/** Image tags that were the default once, which a version before stored for everyone who switched Office on (it
+ * wrote down every field): read as not set, so the default of this version applies. */
+const PAST_DEFAULT_TAGS = new Set(["onlyoffice/documentserver:10.0"]);
+
+/** A field as the file holds it, where it is one of the right type that was set; undefined otherwise. */
+function setField(raw: Record<string, unknown>, key: keyof OfficeSettings): unknown {
   const value = raw[key];
-  return value !== undefined && typeof value === typeof DEFAULT_SETTINGS[key] ? (value as OfficeSettings[K]) : DEFAULT_SETTINGS[key];
+  if (value === undefined || typeof value !== typeof DEFAULT_SETTINGS[key]) return undefined;
+  if (key === "imageTag" && PAST_DEFAULT_TAGS.has(value as string)) return undefined;
+  return value;
+}
+
+function field<K extends keyof OfficeSettings>(raw: Record<string, unknown>, key: K): OfficeSettings[K] {
+  return (setField(raw, key) as OfficeSettings[K] | undefined) ?? DEFAULT_SETTINGS[key];
 }
 
 /** Read root/settings.json and merge it over DEFAULTS field by field; unknown fields are ignored -- LEGACY files
@@ -40,16 +51,29 @@ export function loadSettings(root = dataDir()): OfficeSettings {
   return { enabled: field(obj, "enabled"), imageTag: field(obj, "imageTag") };
 }
 
-/** Load, apply a patch of any subset of fields (ignoring absent/undefined ones), persist the whole object atomically
- * (tmp file in the same directory + rename) and return the stored result. */
+/** Apply a patch of any subset of fields (ignoring absent/undefined and unknown ones) over what the file holds, persist
+ * that atomically (tmp file in the same directory + rename) and return the settings as they load now. Only fields the
+ * person set are stored: a default (the image tag) they never chose is not written down, so a later version's
+ * default reaches them. */
 export function saveSettings(patch: Partial<OfficeSettings>, root = dataDir()): OfficeSettings {
-  const merged: OfficeSettings = { ...loadSettings(root) };
+  const stored: Record<string, unknown> = {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(root, FILE), "utf8"));
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof OfficeSettings)[]) {
+        const value = setField(raw, key);
+        if (value !== undefined) stored[key] = value;
+      }
+    }
+  } catch {
+    // missing or unreadable: nothing set yet
+  }
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined || !(key in DEFAULT_SETTINGS)) continue; // unknown keys are ignored
-    (merged as Record<string, unknown>)[key] = value;
+    stored[key] = value;
   }
-  writeAtomic(path.join(root, FILE), Buffer.from(JSON.stringify(merged, null, 2) + "\n", "utf8"));
-  return { ...merged };
+  writeAtomic(path.join(root, FILE), Buffer.from(JSON.stringify(stored, null, 2) + "\n", "utf8"));
+  return loadSettings(root);
 }
 
 function writeAtomic(dest: string, bytes: Buffer): void {

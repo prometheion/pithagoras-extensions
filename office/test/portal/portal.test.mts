@@ -34,7 +34,7 @@ process.env.PORTAL_CONTAINER_NAME = "portal-test";
 process.env.PORTAL_PASSWORD = "";
 process.env.PORTAL_ALLOW_NO_PASSWORD = "1";
 // The portal's container, on the host's network as both of Pithagoras' Compose files run it: the way in is a
-// forwarder, and the portal-side relay shares the portal container's namespace.
+// forwarder, and the way back runs over it.
 daemon.containers.push({ Id: "portal-one", Name: "portal-test", Image: "pithagoras-portal:latest", State: "running", Labels: {}, Tty: false, out: "", err: "", HostConfig: { NetworkMode: "host" } });
 daemon.images.add(IMAGE);
 daemon.images.add("node:22.23.4-alpine3.23");
@@ -114,7 +114,7 @@ test("the half waits for Docker, which it requires", async () => {
   assert.equal(host.isServing("@pithagoras/office"), true);
 });
 
-test("switched on, the Document Server, its relays, its network and the way in are made through Docker's own API", async () => {
+test("switched on, the Document Server, its relay, its network and the way in are made through Docker's own API, and nothing shares the portal's network", async () => {
   for (let i = 0; i < 300 && !made("pithagoras-office-ds-relay-forward"); i++) await delay(20);
   const dsSpec = made("pithagoras-office-ds").made;
   assert.equal(dsSpec.Image, IMAGE);
@@ -122,7 +122,12 @@ test("switched on, the Document Server, its relays, its network and the way in a
   assert.equal(dsSpec.HostConfig.PortBindings, undefined, "nothing of the Document Server's is published");
   assert.equal(made("pithagoras-office-ds").Labels["pithagoras.extension"], "@pithagoras/office", "Docker's API marks it as the extension's");
   assert.equal(made("pithagoras-office-ds-relay").made.HostConfig.NetworkMode, "pithagoras-office-ds-net");
-  assert.equal(made("pithagoras-office-ds-portal").made.HostConfig.NetworkMode, "container:portal-one", "the portal-side relay shares the portal container's namespace");
+  assert.equal(made("pithagoras-office-ds-portal"), undefined, "no relay of Office's is on the portal's own network");
+  const key = readFileSync(path.join(data, "relay-secret"), "utf8").trim();
+  assert.ok(made("pithagoras-office-ds-relay").made.Env.includes(`TUNNEL_KEY=${key}`), "the relay knows the key the way back's tunnels open with");
+  assert.ok(!dsSpec.Env.some((e: string) => e.includes(key)), "the Document Server does not");
+  const binds = dsSpec.HostConfig.Binds as string[];
+  assert.deepEqual(binds.map((b) => b.split(":")[1]).sort(), ["/usr/share/fonts/truetype/custom", "/var/lib/onlyoffice", "/var/log/onlyoffice", "/var/www/onlyoffice/Data"]);
   const island = daemon.networks.find((n: { Name: string }) => n.Name === "pithagoras-office-ds-net")!;
   assert.equal(island.Internal, true);
   assert.equal(island.Options!["com.docker.network.bridge.gateway_mode_ipv4"], "isolated");
@@ -155,6 +160,11 @@ test("the tools are in a project's chats, read the project's own document throug
   const createdDoc = await tool("office_create").execute("c3", { title: "Minutes", type: "word" });
   const doc = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === createdDoc.details.id);
   assert.equal(doc.owner, project, "owned by the project's folder");
+  // office_edit asks the portal whether the project's agent may change the file's folder (files.identity with
+  // likeParent), then writes it in place.
+  const edited = await tool("office_edit").execute("c4", { id: plan.id, ops: [{ quote: "New document", replacement: "Planned by the agent" }], baseRevision: plan.mtimeMs });
+  assert.equal(edited.details.action, "edit", edited.content[0].text);
+  assert.match((await tool("office_read").execute("c5", { id: plan.id })).content[0].text, /Planned by the agent/);
 });
 
 test("a change asked from another page than the portal's own is refused", async () => {

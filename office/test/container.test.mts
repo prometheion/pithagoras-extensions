@@ -1,7 +1,8 @@
 /**
- * Unit tests for src/container.ts: the Document Server and its two relays over the fake Docker for extensions of
- * fake-docker.mts, with real tmp dirs for settings/jwt-secret/ds.json/user-stopped, and the relays' own programs run
- * with this Node against servers of the test's own. Nothing here reaches the Docker socket or portal().
+ * Unit tests for src/container.ts: the Document Server and its relay over the fake Docker for extensions of
+ * fake-docker.mts, with real tmp dirs for settings/jwt-secret/relay-secret/ds.json/user-stopped, and the relay's own
+ * program run with this Node, with the way back of back.ts, against servers of the test's own. Nothing here reaches the
+ * Docker socket or portal().
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,9 +18,9 @@ import { stamped } from "../../shared/service";
 import {
   BACK_PORT,
   DS_NAME,
+  DS_PATHS,
   DS_VOLUME,
   NAMES,
-  PORTAL_SCRIPT,
   RELAY_IMAGE,
   RELAY_SCRIPT,
   dsOrigin,
@@ -29,35 +30,38 @@ import {
   forgetReach,
   lookAfter,
   officeNames,
-  portalSideSpec,
+  reachAgain,
+  reachedNow,
   readDsRecord,
   removeContainers,
-  setBackPort,
   settled,
   status,
   stopContainer,
   userStopped,
+  whenReached,
 } from "../src/container";
+import { hello, holdWayBack } from "../src/back";
 import { fakeDocker } from "./fake-docker.mts";
 
 const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 const TAG92 = "onlyoffice/documentserver:9.2.1.1";
 const NET = "pithagoras-office-ds-net";
 const RELAY = "pithagoras-office-ds-relay";
-const PORTAL_SIDE = "pithagoras-office-ds-portal";
-const SOCK = "pithagoras-office-ds-relay-sock";
+const KEY = "k".repeat(64);
+/** The Document Server's volumes, in the order of DS_PATHS. */
+const VOLUMES = [DS_VOLUME, "pithagoras-office-ds-cache", "pithagoras-office-ds-logs", "pithagoras-office-ds-fonts"];
 
 function tmpRoot(settings: Record<string, unknown> = {}, secret: string | null = "s3cret\n"): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-container-"));
   fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: false, imageTag: DEFAULT_TAG, ...settings }));
   if (secret !== null) fs.writeFileSync(path.join(root, "jwt-secret"), secret);
+  fs.writeFileSync(path.join(root, "relay-secret"), `${KEY}\n`);
   return root;
 }
 
 function fresh(options?: Parameters<typeof fakeDocker>[0]) {
   forgetReach();
   forgetProbe();
-  setBackPort(41234);
   return fakeDocker(options);
 }
 
@@ -65,34 +69,43 @@ const made = (m: ReturnType<typeof fakeDocker>, name: string) => m.containers.ge
 
 /* ---------------- the names ---------------- */
 
-test("the names: the Document Server, its volume, network and relays, each from the environment where it says so", () => {
+test("the names: the Document Server, its volumes, network and relay, each from the environment where it says so", () => {
   assert.equal(DS_NAME, "pithagoras-office-ds");
   assert.equal(DS_VOLUME, "pithagoras-office-ds-data");
-  assert.deepEqual([NAMES.network, NAMES.relay, NAMES.portalSide, NAMES.sock, NAMES.port], [NET, RELAY, PORTAL_SIDE, SOCK, 3890]);
-  const other = officeNames({ PITHAGORAS_OFFICE_CONTAINER: "office-test", PITHAGORAS_OFFICE_PORT: "4890" });
-  assert.deepEqual([other.container, other.volume, other.network, other.relay, other.portalSide, other.sock, other.port], ["office-test", "office-test-data", "office-test-net", "office-test-relay", "office-test-portal", "office-test-relay-sock", 4890]);
+  assert.deepEqual([NAMES.network, NAMES.relay, NAMES.port], [NET, RELAY, 3890]);
+  assert.deepEqual(Object.values(NAMES.volumes), VOLUMES);
+  const other = officeNames({ PITHAGORAS_OFFICE_CONTAINER: "office-test", PITHAGORAS_OFFICE_PORT: "4890", PITHAGORAS_OFFICE_VOLUME: "kept" });
+  assert.deepEqual([other.container, other.volume, other.network, other.relay, other.port], ["office-test", "kept", "office-test-net", "office-test-relay", 4890]);
+  assert.deepEqual(Object.values(other.volumes), ["kept", "office-test-cache", "office-test-logs", "office-test-fonts"]);
+});
+
+test("the Document Server has a named volume at every path its image declares one, so Docker makes no anonymous volume", () => {
+  // `docker image inspect onlyoffice/documentserver:10.0.0.1 --format '{{json .Config.Volumes}}'`
+  const declared = ["/usr/share/fonts/truetype/custom", "/var/lib/onlyoffice", "/var/log/onlyoffice", "/var/www/onlyoffice/Data"];
+  assert.deepEqual(Object.keys(DS_PATHS).sort(), declared);
+  const binds = (dsSpec(DEFAULT_TAG, [], NET).HostConfig as { Binds: string[] }).Binds;
+  assert.deepEqual(binds.map((b) => b.slice(b.indexOf(":") + 1)).sort(), declared);
+  assert.ok(binds.includes("pithagoras-office-ds-cache:/var/lib/onlyoffice"), "the cache, with the forgotten saves, outlives a re-create");
+  assert.equal(new Set(binds.map((b) => b.split(":")[0])).size, declared.length, "a volume of its own for each");
 });
 
 /* ---------------- ensure: the fresh path ---------------- */
 
-test("ensure (fresh): both images, both volumes, the island, the Document Server on it, the relays, the way in, ds.json", async () => {
+test("ensure (fresh): both images, the volumes, the island, the Document Server on it, the relay, the way in, ds.json", async () => {
   const root = tmpRoot({ enabled: true, imageTag: TAG92 });
   const m = fresh();
   const seen: string[] = [];
   const res = await ensureContainer(m.docker, (s) => seen.push(s.line), root);
   assert.deepEqual(res, { started: true });
-  assert.deepEqual(m.calls.filter((c) => !c.startsWith("sharedNetwork")), [
+  assert.deepEqual(m.calls, [
     `pull ${TAG92}`,
     `pull ${RELAY_IMAGE}`,
-    `volume ${DS_VOLUME}`,
-    `volume ${SOCK}`,
+    ...VOLUMES.map((v) => `volume ${v}`),
     `network ${NET}`,
     `create ${DS_NAME}`,
     `start ${DS_NAME}`,
     `create ${RELAY}`,
     `start ${RELAY}`,
-    `create ${PORTAL_SIDE}`,
-    `start ${PORTAL_SIDE}`,
     `reach ${NET} ${RELAY} 3890`,
   ]);
   assert.deepEqual(seen, [`downloading ${TAG92}`, "done", `downloading ${RELAY_IMAGE}`, "done"]);
@@ -104,33 +117,27 @@ test("ensure (fresh): both images, both volumes, the island, the Document Server
   assert.equal(ds.HostConfig.NetworkMode, NET);
   assert.equal(ds.HostConfig.PortBindings, undefined);
   assert.equal(ds.ExposedPorts, undefined);
-  assert.deepEqual(ds.HostConfig.Binds, [`${DS_VOLUME}:/var/www/onlyoffice/Data`]);
+  assert.deepEqual(ds.HostConfig.Binds, Object.keys(DS_PATHS).map((at, i) => `${VOLUMES[i]}:${at}`));
   assert.deepEqual(ds.HostConfig.RestartPolicy, { Name: "unless-stopped" });
   assert.deepEqual(ds.Env, ["JWT_ENABLED=true", "JWT_SECRET=s3cret", "JWT_HEADER=X-Auth-Token", "JWT_IN_BODY=false", "PLUGINS_ENABLED=false"]);
   assert.ok(!ds.Env.some((e: string) => e.startsWith("ALLOW_PRIVATE_IP_ADDRESS")));
   assert.match(ds.Labels["pithagoras.extension-spec"], /^[0-9a-f]{16}$/);
 
-  // The island's relay: the way in to the Document Server's port 80, the way back to the socket, hardened as the
-  // forwarder of Docker for extensions is.
+  // The island's relay: the way in to the Document Server's port 80, the way back to the portal's tunnels with the
+  // key they open with, hardened as the forwarder of Docker for extensions is.
   const relay = made(m, RELAY);
   assert.equal(relay.Image, RELAY_IMAGE);
   assert.equal(relay.User, "1000:1000");
   assert.deepEqual(relay.Cmd, ["node", "-e", RELAY_SCRIPT]);
-  assert.deepEqual(relay.Env, ["IN_PORT=3890", `DS_HOST=${DS_NAME}`, "DS_PORT=80", `BACK_PORT=${BACK_PORT}`, "BACK_SOCKET=/home/node/portal.sock"]);
-  for (const spec of [relay, made(m, PORTAL_SIDE)]) {
-    assert.deepEqual(spec.HostConfig.Binds, [`${SOCK}:/home/node`]);
-    assert.deepEqual(spec.HostConfig.CapDrop, ["ALL"]);
-    assert.deepEqual(spec.HostConfig.SecurityOpt, ["no-new-privileges"]);
-    assert.equal(spec.HostConfig.ReadonlyRootfs, true);
-    assert.equal(spec.HostConfig.Memory, 128 * 1024 ** 2);
-    assert.equal(spec.HostConfig.PidsLimit, 64);
-  }
+  assert.deepEqual(relay.Env, ["IN_PORT=3890", `DS_HOST=${DS_NAME}`, "DS_PORT=80", `BACK_PORT=${BACK_PORT}`, `TUNNEL_KEY=${KEY}`]);
+  assert.equal(relay.HostConfig.Binds, undefined);
+  assert.deepEqual(relay.HostConfig.CapDrop, ["ALL"]);
+  assert.deepEqual(relay.HostConfig.SecurityOpt, ["no-new-privileges"]);
+  assert.equal(relay.HostConfig.ReadonlyRootfs, true);
+  assert.equal(relay.HostConfig.Memory, 128 * 1024 ** 2);
+  assert.equal(relay.HostConfig.PidsLimit, 64);
   assert.equal(relay.HostConfig.NetworkMode, NET);
-  // The portal-side relay: on the portal's own loopback, to the listener's port.
-  const side = made(m, PORTAL_SIDE);
-  assert.equal(side.HostConfig.NetworkMode, "host");
-  assert.deepEqual(side.Env, ["BACK_SOCKET=/home/node/portal.sock", "TO_PORT=41234"]);
-  assert.deepEqual(side.Cmd, ["node", "-e", PORTAL_SCRIPT]);
+  assert.ok(!ds.Env.some((e: string) => e.includes(KEY)), "the Document Server is not given the relay's key");
 
   assert.deepEqual(readDsRecord(root), { containerId: m.containers.get(DS_NAME)!.info.id, imageTag: TAG92 });
   assert.equal(await dsOrigin(m.docker), "http://127.0.0.1:3890");
@@ -140,13 +147,15 @@ test("ensure (fresh): both images, both volumes, the island, the Document Server
   assert.deepEqual(s.pull, { active: false, line: "done" });
 });
 
-test("ensure (portal in a container): the portal-side relay shares the portal container's namespace, and the way in is by name", async () => {
-  const root = tmpRoot();
-  const m = fresh({ sharedNetwork: "container:abc123", reach: { host: RELAY, port: 3890 } });
-  await ensureContainer(m.docker, undefined, root);
-  assert.equal(made(m, PORTAL_SIDE).HostConfig.NetworkMode, "container:abc123");
-  assert.equal(made(m, DS_NAME).HostConfig.NetworkMode, NET);
-  assert.equal(await dsOrigin(m.docker), `http://${RELAY}:3890`);
+test("ensure (portal on the machine or in a container): nothing of Office's shares the portal's network; every container is on the island", async () => {
+  for (const [shared, reach] of [["host", { host: "127.0.0.1", port: 3890 }], ["container:abc123", { host: RELAY, port: 3890 }]] as const) {
+    const m = fresh({ sharedNetwork: shared, reach });
+    await ensureContainer(m.docker, undefined, tmpRoot());
+    assert.ok(!m.calls.includes("sharedNetwork"), "the portal's own network is never asked for");
+    assert.deepEqual([...m.containers.keys()].sort(), [DS_NAME, RELAY]);
+    for (const c of m.containers.values()) assert.equal((c.spec.HostConfig as { NetworkMode: string }).NetworkMode, NET);
+    assert.equal(await dsOrigin(m.docker), `http://${reach.host}:3890`);
+  }
 });
 
 test("ensure (everything running and current): nothing made or started again, {started:false}", async () => {
@@ -177,18 +186,17 @@ test("ensure (a network made again since): a container on the old one is made ag
   await ensureContainer(m.docker, undefined, root);
   assert.ok(m.calls.includes(`create ${DS_NAME}`));
   assert.ok(m.calls.includes(`create ${RELAY}`));
-  assert.ok(!m.calls.includes(`create ${PORTAL_SIDE}`), "the portal-side relay is not on the island");
 });
 
-test("ensure (the listener on another port after a restart): only the portal-side relay is made again", async () => {
+test("ensure (another relay key): only the relay is made again, the Document Server keeps running", async () => {
   const root = tmpRoot();
   const m = fresh();
   await ensureContainer(m.docker, undefined, root);
-  setBackPort(45678);
+  fs.writeFileSync(path.join(root, "relay-secret"), "x".repeat(64));
   m.calls.length = 0;
   assert.deepEqual(await ensureContainer(m.docker, undefined, root), { started: false });
-  assert.deepEqual(m.calls.filter((c) => c.startsWith("create")), [`create ${PORTAL_SIDE}`]);
-  assert.ok(made(m, PORTAL_SIDE).Env.includes("TO_PORT=45678"));
+  assert.deepEqual(m.calls.filter((c) => c.startsWith("create")), [`create ${RELAY}`]);
+  assert.ok(made(m, RELAY).Env.includes(`TUNNEL_KEY=${"x".repeat(64)}`));
 });
 
 test("ensure (another image tag): a running Document Server is left as it runs, a stopped one is made with the new tag", async () => {
@@ -219,10 +227,11 @@ test("ensure (a container nobody owns by that name): taken over and made again; 
   await assert.rejects(ensureContainer(other.docker, undefined, tmpRoot()), (e: Error & { code?: string }) => e.code === "foreign" && /@someone\/else/.test(e.message));
 });
 
-test("ensure (before the listener runs): refused, nothing made", async () => {
+test("ensure (no relay key yet): the plain fs error, nothing made", async () => {
   const m = fresh();
-  setBackPort(0);
-  await assert.rejects(ensureContainer(m.docker, undefined, tmpRoot()), (e: Error & { code?: string }) => e.code === "not_ready");
+  const root = tmpRoot();
+  fs.rmSync(path.join(root, "relay-secret"));
+  await assert.rejects(ensureContainer(m.docker, undefined, root), (e: NodeJS.ErrnoException) => e.code === "ENOENT");
   assert.ok(!m.calls.some((c) => c.startsWith("create")));
 });
 
@@ -240,7 +249,7 @@ test("stop: the Document Server stopped and the intent recorded; lookAfter stays
   await ensureContainer(m.docker, undefined, root);
   await stopContainer(m.docker, root);
   assert.equal(m.containers.get(DS_NAME)!.info.state, "exited");
-  assert.equal(m.containers.get(RELAY)!.info.state, "running", "the relays hold nothing and keep running");
+  assert.equal(m.containers.get(RELAY)!.info.state, "running", "the relay holds nothing and keeps running");
   assert.ok(userStopped(root));
   m.calls.length = 0;
   await lookAfter(m.docker, root);
@@ -250,22 +259,23 @@ test("stop: the Document Server stopped and the intent recorded; lookAfter stays
   assert.equal(m.containers.get(DS_NAME)!.info.state, "running");
 });
 
-test("remove: the relays, the Document Server, the network and the socket volume; the data volume only when asked", async () => {
+test("remove: the relay, the Document Server and the network; the Document Server's volumes, every one, only when asked", async () => {
   const root = tmpRoot({ enabled: true });
   const m = fresh();
   await ensureContainer(m.docker, undefined, root);
   m.calls.length = 0;
   await removeContainers(false, m.docker, root);
-  assert.deepEqual(m.calls, [`remove ${PORTAL_SIDE}`, `remove ${RELAY}`, `remove ${DS_NAME}`, `remove network ${NET}`, `remove volume ${SOCK}`]);
+  assert.deepEqual(m.calls, [`remove ${RELAY}`, `remove ${DS_NAME}`, `remove network ${NET}`]);
   assert.equal(readDsRecord(root), null);
   assert.ok(userStopped(root), "lookAfter does not make it all again");
   await ensureContainer(m.docker, undefined, root);
   m.calls.length = 0;
   await removeContainers(true, m.docker, root);
-  assert.ok(m.calls.includes(`remove volume ${DS_VOLUME}`));
+  assert.deepEqual(m.calls.filter((c) => c.startsWith("remove volume")), VOLUMES.map((v) => `remove volume ${v}`));
+  assert.equal(m.volumes.size, 0);
 });
 
-test("lookAfter: off -> nothing; on -> all made; all running -> nothing made; a relay gone -> made again", async () => {
+test("lookAfter: off -> nothing; on -> all made; all running -> nothing made; the relay gone -> made again", async () => {
   const root = tmpRoot({ enabled: false });
   const m = fresh();
   await lookAfter(m.docker, root);
@@ -276,9 +286,9 @@ test("lookAfter: off -> nothing; on -> all made; all running -> nothing made; a 
   m.calls.length = 0;
   await lookAfter(m.docker, root);
   assert.ok(!m.calls.some((c) => c.startsWith("create")));
-  m.containers.delete(PORTAL_SIDE);
+  m.containers.delete(RELAY);
   await lookAfter(m.docker, root);
-  assert.ok(m.calls.includes(`create ${PORTAL_SIDE}`));
+  assert.ok(m.calls.includes(`create ${RELAY}`));
 });
 
 test("lookAfter: all running but the Document Server does not answer through the way in: the way in is asked for again", async () => {
@@ -366,7 +376,7 @@ test("a new Document Server that still makes its fonts is starting, and refused 
   assert.equal(await settled(stopped.docker), true);
 });
 
-/* ---------------- the relays' programs ---------------- */
+/* ---------------- the relay's program and the way back ---------------- */
 
 async function freePort(): Promise<number> {
   const s = net.createServer().listen(0, "127.0.0.1");
@@ -395,11 +405,10 @@ async function connectable(at: net.NetConnectOpts): Promise<void> {
   throw new Error(`nothing listens at ${JSON.stringify(at)}`);
 }
 
-test("the relays' programs: the way in reaches the Document Server, and the way back reaches the listener through the socket", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "office-relay-"));
-  const sock = path.join(dir, "portal.sock");
-  // The Document Server and the extension's listener, as far as the relays are concerned.
-  const ds = http.createServer((req, res) => res.end(`ds ${req.url}`)).listen(0, "127.0.0.1");
+/** The relay's program, run with this Node, before a Document Server and a listener of the test's own, and the way
+ * back of back.ts holding its tunnels to it. */
+async function relayWorld(options: { pool?: number } = {}) {
+  const ds = http.createServer((req, res) => res.end(`ds ${req.method} ${req.url}`)).listen(0, "127.0.0.1");
   const listener = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c) => chunks.push(c));
@@ -407,29 +416,114 @@ test("the relays' programs: the way in reaches the Document Server, and the way 
   }).listen(0, "127.0.0.1");
   await Promise.all([once(ds, "listening"), once(listener, "listening")]);
   const [inPort, backPort] = [await freePort(), await freePort()];
-  fs.writeFileSync(sock, "left by the one before");
-  const relay = run(RELAY_SCRIPT, { IN_PORT: String(inPort), DS_HOST: "127.0.0.1", DS_PORT: String((ds.address() as AddressInfo).port), BACK_PORT: String(backPort), BACK_SOCKET: sock });
-  const side = run(PORTAL_SCRIPT, { BACK_SOCKET: sock, TO_PORT: String((listener.address() as AddressInfo).port) });
+  const env = { IN_PORT: String(inPort), DS_HOST: "127.0.0.1", DS_PORT: String((ds.address() as AddressInfo).port), BACK_PORT: String(backPort), TUNNEL_KEY: KEY };
+  let relay = run(RELAY_SCRIPT, env);
+  await connectable({ port: inPort, host: "127.0.0.1" });
+  await connectable({ port: backPort, host: "127.0.0.1" });
+  const reach = Promise.resolve({ host: "127.0.0.1", port: inPort });
+  const way = holdWayBack({ at: () => reach, key: KEY, to: () => (listener.address() as AddressInfo).port, pool: options.pool });
+  const until = async (check: () => boolean, what: string) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(check(), what);
+  };
+  return {
+    inPort,
+    backPort,
+    way,
+    until,
+    async restartRelay() {
+      relay.kill("SIGTERM");
+      await once(relay, "exit");
+      relay = run(RELAY_SCRIPT, env);
+      await connectable({ port: inPort, host: "127.0.0.1" });
+    },
+    close() {
+      way.stop();
+      relay.kill("SIGTERM");
+      for (const s of [ds, listener]) {
+        s.closeAllConnections();
+        s.close();
+      }
+    },
+  };
+}
+
+/** A raw connection's whole answer, once the other side closes it (or after `ms`). */
+function answerOf(port: number, send: Buffer | string, ms = 2000): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    const s = net.connect({ port, host: "127.0.0.1" }, () => s.write(send));
+    s.on("data", (c) => chunks.push(c));
+    const done = () => resolve(Buffer.concat(chunks).toString());
+    s.on("close", done);
+    s.on("error", () => {});
+    setTimeout(() => {
+      s.destroy();
+      done();
+    }, ms).unref();
+  });
+}
+
+test("the relay: the way in reaches the Document Server, and the way back reaches the listener through a tunnel the portal holds", async () => {
+  const w = await relayWorld();
   try {
-    await connectable({ port: inPort, host: "127.0.0.1" });
-    await connectable({ path: sock });
-    assert.equal(await (await fetch(`http://127.0.0.1:${inPort}/healthcheck`)).text(), "ds /healthcheck");
-    const back = await fetch(`http://127.0.0.1:${backPort}/callback`, { method: "POST", body: '{"status":2}' });
+    assert.equal(await (await fetch(`http://127.0.0.1:${w.inPort}/healthcheck`)).text(), "ds GET /healthcheck");
+    await w.until(() => w.way.waiting() === 4, "the portal's tunnels wait at the relay");
+    const back = await fetch(`http://127.0.0.1:${w.backPort}/callback`, { method: "POST", body: '{"status":2}' });
     assert.equal(await back.text(), 'listener POST /callback {"status":2}');
+    // More requests at once than tunnels wait: each waits for the next, which the portal opens as one is taken.
+    const many = await Promise.all(Array.from({ length: 10 }, (_, i) => fetch(`http://127.0.0.1:${w.backPort}/doc/${i}`).then((r) => r.text())));
+    assert.deepEqual(many, Array.from({ length: 10 }, (_, i) => `listener GET /doc/${i} `));
+    await w.until(() => w.way.waiting() === 4, "and the pool is full again");
   } finally {
-    relay.kill("SIGTERM");
-    side.kill("SIGTERM");
-    ds.closeAllConnections();
-    listener.closeAllConnections();
-    ds.close();
-    listener.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    w.close();
   }
 });
 
-test("the portal-side relay's spec changes with the portal's container and the listener's port, so either makes it again", () => {
-  const key = "pithagoras.extension-spec";
-  const label = (mode: string, port: number) => (stamped(portalSideSpec(mode, port)).Labels as Record<string, string>)[key];
-  assert.notEqual(label("host", 1000), label("container:new", 1000));
-  assert.notEqual(label("host", 1000), label("host", 1001));
+test("the relay: a connection that opens with a NUL but not the key is closed, and is never handed the Document Server's requests", async () => {
+  const w = await relayWorld({ pool: 1 });
+  try {
+    await w.until(() => w.way.waiting() === 1, "the portal's tunnel waits");
+    assert.equal(await answerOf(w.inPort, hello("w".repeat(64))), "", "a wrong key is closed with nothing said");
+    assert.equal(await answerOf(w.inPort, Buffer.concat([hello(KEY), Buffer.from("GET / HTTP/1.1\r\n\r\n")])), "", "nor may a tunnel send anything of its own");
+    // A taker with the wrong key waits for nothing: the request goes to the portal's own tunnel.
+    const thief = net.connect({ port: w.inPort, host: "127.0.0.1" }, () => thief.write(hello("w".repeat(64))));
+    thief.on("error", () => {});
+    const got: Buffer[] = [];
+    thief.on("data", (c) => got.push(c));
+    const back = await fetch(`http://127.0.0.1:${w.backPort}/callback`, { method: "POST", body: "x" });
+    assert.equal(await back.text(), "listener POST /callback x");
+    assert.equal(Buffer.concat(got).length, 0);
+    thief.destroy();
+  } finally {
+    w.close();
+  }
+});
+
+test("the way back comes back by itself after the relay restarted, as after any restart on either side", async () => {
+  const w = await relayWorld({ pool: 2 });
+  try {
+    await w.until(() => w.way.waiting() === 2, "the portal's tunnels wait");
+    await w.restartRelay();
+    await w.until(() => w.way.waiting() === 2, "the tunnels are opened again to the new relay");
+    const back = await fetch(`http://127.0.0.1:${w.backPort}/callback`, { method: "POST", body: "after" });
+    assert.equal(await back.text(), "listener POST /callback after");
+  } finally {
+    w.close();
+  }
+});
+
+test("the way back goes only where the way in was given, and opens its tunnels at once when it is given anew", async () => {
+  const m = fresh({ reach: { host: "127.0.0.1", port: 9 } });
+  assert.equal(reachedNow(), undefined, "nothing before the first ask: the way back waits, and asks Docker for nothing");
+  let nudged = 0;
+  whenReached(() => nudged++);
+  try {
+    await reachAgain(m.docker);
+    assert.equal(nudged, 1);
+    assert.deepEqual(await reachedNow(), { host: "127.0.0.1", port: 9 });
+  } finally {
+    whenReached(undefined);
+  }
+  assert.equal(m.calls.filter((c) => c.startsWith("reach")).length, 1);
 });

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
+import https from "node:https";
+import os from "node:os";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,6 +21,7 @@ import { signJwt } from "../../src/jwt.ts";
  * portal is "on the machine" (host network), so the way in is Docker for extensions' forwarder on 127.0.0.1. A
  * Chromium opens a document in the editor as the Office page does, types into it and closes it, and the text must be
  * in the file: what "Download failed", the refused key, the refused callback token and the embed viewer each broke.
+ * Then once more through a reverse proxy that ends TLS and sends no forwarded headers, as a plain nginx in front does.
  *
  * Opt-in: it needs Docker Engine 28 or later, the image (about 3 GB, `onlyoffice/documentserver:10.0.0.1` unless
  * OFFICE_E2E_IMAGE names another), Chromium for Playwright, and a few minutes. Its containers, network and volumes go
@@ -98,10 +101,11 @@ window.__events = [];
     await new Promise((resolve) => server.close(resolve));
     if (keep) return;
     // What Docker for extensions made for the way in goes with the network; anything a failed run left, by name.
-    for (const name of [`${PREFIX}-portal`, `${PREFIX}-relay`, `${PREFIX}-relay-forward`, PREFIX]) execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+    for (const name of [`${PREFIX}-relay`, `${PREFIX}-relay-forward`, PREFIX]) execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+    for (const end of ["data", "cache", "logs", "fonts"]) execFileSync("docker", ["volume", "rm", "-f", `${PREFIX}-${end}`], { stdio: "ignore" });
   });
 
-  test("the Document Server, its relays and its network come up through Docker for extensions, and it answers through the way in", { timeout: 600_000 }, async () => {
+  test("the Document Server, its relay and its network come up through Docker for extensions, and it answers through the way in", { timeout: 600_000 }, async () => {
     await host.syncServerHalves([half(path.join(PITHAGORAS, "extensions/docker"), "src/server.ts"), half(PACKAGE, "src/server.ts")]);
     assert.equal(host.serverFailure("@pithagoras/office"), undefined);
     let answer = "";
@@ -121,21 +125,28 @@ window.__events = [];
     const inspect = (name: string) => JSON.parse(execFileSync("docker", ["inspect", name], { encoding: "utf8" }))[0];
     assert.equal(inspect(PREFIX).HostConfig.NetworkMode, `${PREFIX}-net`);
     assert.deepEqual(inspect(PREFIX).HostConfig.PortBindings ?? {}, {}, "nothing of the Document Server's is published");
-    assert.equal(inspect(`${PREFIX}-portal`).HostConfig.NetworkMode, "host");
+    assert.equal(inspect(`${PREFIX}-relay`).HostConfig.NetworkMode, `${PREFIX}-net`, "the way back runs over the way in: nothing of Office's is on the portal's network");
     const net = JSON.parse(execFileSync("docker", ["network", "inspect", `${PREFIX}-net`], { encoding: "utf8" }))[0];
     assert.equal(net.Internal, true);
+    // Every folder the image keeps apart is a named volume of Office's: none is anonymous, which a re-create drops.
+    const declared = Object.keys(JSON.parse(execFileSync("docker", ["image", "inspect", IMAGE, "--format", "{{json .Config.Volumes}}"], { encoding: "utf8" }))).sort();
+    const mounts = inspect(PREFIX).Mounts as { Type: string; Name: string; Destination: string }[];
+    assert.deepEqual(mounts.map((m) => m.Destination).sort(), declared);
+    for (const m of mounts) assert.ok(m.Type === "volume" && m.Name.startsWith(`${PREFIX}-`), `${m.Destination} is in ${m.Name}`);
   });
 
-  test("a document opens in the editor, takes what is typed, and the save lands in the file", { timeout: 600_000 }, async () => {
-    const made = await json(`${at}/documents`, { method: "POST", body: JSON.stringify({ title: "End to end", type: "word" }) });
+  /** A document made, opened in the editor from `pageOrigin` as the Office page does, typed into and closed: the text
+   * must be in the file. */
+  async function openTypeSave(pageOrigin: string, title: string, typed: string): Promise<void> {
+    const made = await json(`${at}/documents`, { method: "POST", body: JSON.stringify({ title, type: "word" }) });
     assert.equal(made.status, 201);
     const doc = made.body as { docId: string };
     const browser = await chromium.launch();
     try {
-      const page = await browser.newPage();
+      const page = await (await browser.newContext({ ignoreHTTPSErrors: true })).newPage();
       const failed: string[] = [];
       page.on("requestfailed", (r) => failed.push(`${r.url()} ${r.failure()?.errorText}`));
-      await page.goto(`${origin}/editor.html?doc=${encodeURIComponent(doc.docId)}`);
+      await page.goto(`${pageOrigin}/editor.html?doc=${encodeURIComponent(doc.docId)}`);
       let events: unknown[][] = [];
       for (let i = 0; i < 120 && !events.some((e) => e[0] !== "warning"); i++) {
         await delay(1000);
@@ -164,21 +175,51 @@ window.__events = [];
       assert.equal(await info(), 0, "the Document Server says the session is open");
 
       await frame.locator("#editor_sdk").click({ position: { x: 300, y: 150 } });
-      await page.keyboard.type("Typed end to end", { delay: 30 });
+      await page.keyboard.type(typed, { delay: 30 });
       await delay(3000);
       await page.evaluate(() => (window as unknown as { __editor: { destroyEditor(): void } }).__editor.destroyEditor());
       const file = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === doc.docId);
       const onDisk = path.join(data, "docs", doc.docId, `${file.title}.docx`);
       let text = "";
-      for (let i = 0; i < 90 && !text.includes("Typed end to end"); i++) {
+      for (let i = 0; i < 90 && !text.includes(typed); i++) {
         await delay(1000);
         text = parseDocx(readFileSync(onDisk)).text;
       }
-      assert.match(text, /Typed end to end/, "the Document Server's save was taken and written to the file");
+      assert.ok(text.includes(typed), "the Document Server's save was taken and written to the file");
       assert.deepEqual((await json(`${at}/state`)).body.locks[doc.docId], [], "nobody is in it once it closed");
       assert.equal(await info(), 1, "and that none is open once it closed");
     } finally {
       await browser.close();
+    }
+  }
+
+  test("a document opens in the editor, takes what is typed, and the save lands in the file", { timeout: 600_000 }, async () => {
+    await openTypeSave(origin, "End to end", "Typed end to end");
+  });
+
+  test("behind a reverse proxy that ends TLS and says nothing of it, the editor opens and saves as well", { timeout: 600_000 }, async () => {
+    // A self-signed certificate for localhost, and a front that passes each request on as it came (Host kept), with no
+    // X-Forwarded-* header: the portal behind it sees plain HTTP. The Document Server must still name https:// in what
+    // it hands the page, or the browser refuses it as mixed content.
+    const certs = mkdtempSync(path.join(os.tmpdir(), "office-e2e-tls-"));
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", path.join(certs, "key.pem"), "-out", path.join(certs, "cert.pem"), "-days", "1", "-subj", "/CN=localhost"], { stdio: "ignore" });
+    const upstream = new URL(origin);
+    const front = https.createServer({ key: readFileSync(path.join(certs, "key.pem")), cert: readFileSync(path.join(certs, "cert.pem")) }, (req, res) => {
+      const on = http.request({ host: upstream.hostname, port: upstream.port, method: req.method, path: req.url, headers: req.headers }, (answer) => {
+        res.writeHead(answer.statusCode ?? 502, answer.headers);
+        answer.pipe(res);
+      });
+      on.on("error", () => res.destroy());
+      req.pipe(on);
+    });
+    front.listen(0, "127.0.0.1");
+    await once(front, "listening");
+    try {
+      await openTypeSave(`https://localhost:${(front.address() as AddressInfo).port}`, "Behind TLS", "Typed behind a proxy");
+    } finally {
+      front.closeAllConnections();
+      await new Promise((resolve) => front.close(resolve));
+      rmSync(certs, { recursive: true, force: true });
     }
   });
 }

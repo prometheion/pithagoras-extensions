@@ -12,9 +12,9 @@
  *      error is JSON {error, message?, code?}.
  *   5. The cookie-free LOOPBACK listener (the Document Server holds no session cookie): http bound to 127.0.0.1 that
  *      serves ONLY GET /doc/<ticket> (the document for the editor) and POST /callback (the save callback). The
- *      Document Server reaches it through Office's relays (container.ts): document.url and callbackUrl name the
- *      island's relay, which passes them on to this listener. Its port is kept in dataDir()/listener-port and taken
- *      again at the next start where it is free, so an editor left open across a restart of the half still saves.
+ *      Document Server reaches it through Office's relay (container.ts): document.url and callbackUrl name the
+ *      island's relay, which hands each request to a tunnel the half holds open to it (back.ts), and the half passes
+ *      it on to this listener.
  *   6. Boot: settleKept() (.trash >7d sweep + index-vs-disk settle) FIRST, then the workspace scan
  *      (store.scanWorkspace over portal().folders.list(): every .docx/.xlsx of the agent homes and projects
  *      indexed IN PLACE; POST /documents/rescan re-runs it on demand) + container.lookAfter(), then a 30_000 ms
@@ -44,6 +44,7 @@ import * as store from "./store";
 import * as live from "./live";
 import * as callback from "./callback";
 import { wirePing } from "./ping";
+import { holdWayBack } from "./back";
 import { registerTools } from "./tools";
 import { floatingTag } from "./office-ui";
 import { writesFromHere } from "../../shared/proxy";
@@ -161,7 +162,7 @@ const CODE_STATUS: Record<string, number> = {
   revision_mismatch: 409,
   index_corrupt: 500,
   no_docker: 503,
-  too_large: 413, // store.importFile's 512 MiB import cap
+  too_large: 413, // store's 512 MiB cap: on import, and on every read of a file whole
 };
 
 /** Map the coded errors store/container throw onto consistent JSON {error, code?}. */
@@ -224,8 +225,9 @@ function makeLoopbackHandler(dd: string, tickets: string): (req: http.IncomingMe
       let bytes: Buffer;
       try {
         bytes = store.readDoc(doc, dd);
-      } catch {
-        jsonRaw(res, 404, { error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
+      } catch (e) {
+        if ((e as { code?: string }).code === "too_large") jsonRaw(res, 413, { error: (e as Error).message, code: "too_large" });
+        else jsonRaw(res, 404, { error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
         return;
       }
       res.writeHead(200, { "Content-Type": mediaType(doc.ext), "Cache-Control": "no-store" });
@@ -387,7 +389,8 @@ function registerRoutes(dd: string, secret: string): void {
     let bytes: Buffer;
     try {
       bytes = store.readDoc(doc, dd);
-    } catch {
+    } catch (e) {
+      if ((e as { code?: string }).code === "too_large") return codedResponse(res, e);
       return res.status(404).json({ error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
     }
     res.setHeader("Content-Type", mediaType(doc.ext));
@@ -422,6 +425,8 @@ function registerRoutes(dd: string, secret: string): void {
       const written = store.exportDoc(id, tmp, dd);
       bytes = fs.readFileSync(written);
       recordAudit({ subject: doc.title, reason: `exported (download of a fresh copy)` });
+    } catch (e) {
+      return codedResponse(res, e); // too large, or a link in its place
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
@@ -476,6 +481,9 @@ function registerRoutes(dd: string, secret: string): void {
       const tag = typeof body.imageTag === "string" ? body.imageTag.trim() : "";
       if (tag === "") return res.status(400).json({ error: "{ imageTag } must be a non-empty string like onlyoffice/documentserver:10.0.0.1", code: "invalid_image_tag" });
       if (floatingTag(tag)) return res.status(400).json({ error: "never pin :latest or a tag-less image -- it moves under you and breaks co-editing keys", code: "invalid_image_tag" });
+      // Docker for extensions takes an image by its tag and splits the reference at its last colon: a digest
+      // (`@sha256:…`) would be split inside the digest, and its download fail.
+      if (tag.includes("@")) return res.status(400).json({ error: "name the image by its tag, like onlyoffice/documentserver:10.0.0.1 -- not by a digest", code: "invalid_image_tag" });
       patch.imageTag = tag;
     }
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "no known setting in the body -- send { enabled?, imageTag? }" });
@@ -535,13 +543,13 @@ function registerRoutes(dd: string, secret: string): void {
     }
   });
 
-  /** POST /container/remove {data?} -> the relays, the Document Server, its network and the relays' volume removed
-   * (container.removeContainers), with `data` also the Document Server's own volume; recorded as stopped. */
+  /** POST /container/remove {data?} -> the relay, the Document Server and its network removed
+   * (container.removeContainers), with `data` also the Document Server's volumes; recorded as stopped. */
   r.post("/container/remove", json, async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     try {
       await container.removeContainers(body.data === true, undefined, dd);
-      recordAudit({ subject: container.DS_NAME, reason: body.data === true ? "document server removed, with its volume" : "document server removed" });
+      recordAudit({ subject: container.DS_NAME, reason: body.data === true ? "document server removed, with its volumes" : "document server removed" });
       res.json({ container: await container.status() });
     } catch (e) {
       codedResponse(res, e);
@@ -686,42 +694,6 @@ async function sessionOpen(dd: string, secret: string, doc: store.DocMeta): Prom
 }
 
 /* ------------------------------------------------------------------ */
-/* the loopback listener's port                                        */
-/* ------------------------------------------------------------------ */
-
-const LISTENER_PORT_FILE = "listener-port";
-
-/** Listens on 127.0.0.1: on the port of the run before (dataDir()/listener-port) where it is free, so the portal-side
- * relay is still right and an editor open across a restart of the half still reaches its callback; else on a port the
- * system picks, which is kept for the next run. */
-async function listenLoopback(server: http.Server, dd: string): Promise<number> {
-  const at = (port: number) =>
-    new Promise<void>((resolve, reject) => {
-      const failed = (e: Error) => reject(e);
-      server.once("error", failed);
-      server.listen(port, "127.0.0.1", () => {
-        server.off("error", failed);
-        resolve();
-      });
-    });
-  const file = path.join(dd, LISTENER_PORT_FILE);
-  const before = Number(fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "");
-  let listening = false;
-  if (Number.isInteger(before) && before > 0 && before < 65536) {
-    try {
-      await at(before);
-      listening = true;
-    } catch {
-      // taken by something else since: a new one below
-    }
-  }
-  if (!listening) await at(0);
-  const port = (server.address() as AddressInfo).port;
-  if (port !== before) fs.writeFileSync(file, `${port}\n`);
-  return port;
-}
-
-/* ------------------------------------------------------------------ */
 /* boot + cleanup                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -755,13 +727,34 @@ function first(value: unknown): string | undefined {
   return typeof one === "string" ? one.split(",")[0]?.trim() || undefined : undefined;
 }
 
-/** What tells the Document Server where the browser is (see the /ds proxy): the host and scheme the browser used --
- * a reverse proxy's own forwarded headers where one is in front, else the request's Host and whether it came over
- * TLS -- and the prefix the proxy serves it under. */
+/** The page's own origin, as the browser says it: from `Origin`, else from `Referer`, and only for a request the
+ * browser itself says comes from the same origin (`Sec-Fetch-Site: same-origin`, which no page can set or change).
+ * Nothing where it does not say so: another site's page that links here names its own origin there. */
+function browserOrigin(h: Record<string, unknown>): { proto: string; host: string } | undefined {
+  if (first(h["sec-fetch-site"]) !== "same-origin") return undefined;
+  for (const value of [first(h.origin), first(h.referer)]) {
+    if (!value || value === "null") continue;
+    try {
+      const url = new URL(value);
+      if (url.protocol === "https:" || url.protocol === "http:") return { proto: url.protocol.slice(0, -1), host: url.host };
+    } catch {
+      // not an address: the next, or the headers below
+    }
+  }
+  return undefined;
+}
+
+/** What tells the Document Server where the browser is (see the /ds proxy): the host and scheme the browser used, and
+ * the prefix the proxy serves it under. The browser's own word first (browserOrigin): a reverse proxy in front that
+ * ends TLS and says nothing of it, or that sends its upstream's name as Host, would otherwise have the Document Server
+ * name http:// or that upstream in what it hands an https:// page, which the browser refuses (a blank editor frame, or
+ * "Download failed"). Else a reverse proxy's own forwarded headers, else the request's Host and whether it came over
+ * TLS. */
 export function forwardedFor(req: { headers?: Record<string, unknown>; socket?: { encrypted?: boolean } }, prefix: string): Record<string, string> {
   const h = req.headers ?? {};
-  const host = first(h["x-forwarded-host"]) ?? first(h.host);
-  const proto = first(h["x-forwarded-proto"]) ?? (req.socket?.encrypted ? "https" : "http");
+  const browser = browserOrigin(h);
+  const host = browser?.host ?? first(h["x-forwarded-host"]) ?? first(h.host);
+  const proto = browser?.proto ?? first(h["x-forwarded-proto"]) ?? (req.socket?.encrypted ? "https" : "http");
   return { ...(host ? { "x-forwarded-host": host } : {}), "x-forwarded-proto": proto, "x-forwarded-prefix": prefix };
 }
 
@@ -770,6 +763,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   const dd = portal().dataDir();
   const secret = ensureSecret(dd, "jwt-secret"); // the Document Server's HS256 secret: editor configs and callbacks
   const tickets = ensureSecret(dd, "ticket-secret"); // the document tickets', which the Document Server never sees
+  const relayKey = ensureSecret(dd, "relay-secret"); // the key the way back's tunnels open with at the relay
 
   // the seams, as their module headers describe them (audit lands in portal().audit AND a log line).
   // NOTE: there is NO co-editing switch and no flush-before-write hook to install here -- office_edit runs under
@@ -794,10 +788,18 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
 
   registerRoutes(dd, secret);
 
-  // the cookie-free loopback listener, on 127.0.0.1 alone
+  // the cookie-free loopback listener, on 127.0.0.1 alone, and the way back to it (back.ts)
   const server = http.createServer(makeLoopbackHandler(dd, tickets));
-  loopPort = await listenLoopback(server, dd);
-  container.setBackPort(loopPort);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  loopPort = (server.address() as AddressInfo).port;
+  const wayBack = holdWayBack({ at: container.reachedNow, key: relayKey, to: () => loopPort });
+  container.whenReached(() => wayBack.nudge());
 
   // boot settle: reclaim trash + reconcile index vs disk, then adopt an existing DS if settings say it should run
   try {
@@ -845,7 +847,8 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     stopped = true;
     clearInterval(timer);
     loopPort = 0;
-    container.setBackPort(0);
+    container.whenReached(undefined);
+    wayBack.stop();
     // close() alone would wait on keep-alive connections held open by clients (undici fetch among them);
     // dropping the idle ones is what lets a portal stop -- and a test's cleanup -- actually finish
     server.closeAllConnections();

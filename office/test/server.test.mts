@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { fakeDocker } from "./fake-docker.mts";
 import * as container from "../src/container";
@@ -210,23 +210,40 @@ test("cleanup closes the loopback listener and clears the timer (nothing keeps n
   assert.ok(refused, "the listener is closed: connections are refused after cleanup");
 });
 
-test("the loopback listener takes the port of the run before again, so an editor open across a restart still saves; a taken one is replaced", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-port-"));
-  const b1 = await boot(root);
-  const first = loopbackPort();
-  assert.equal(fs.readFileSync(path.join(root, "listener-port"), "utf8").trim(), String(first));
-  await b1.cleanup();
-  const b2 = await boot(root);
-  assert.equal(loopbackPort(), first, "the same port as the run before");
-  await b2.cleanup();
-  // Something else took it meanwhile: another port, kept for the next run.
-  const squatter = http.createServer().listen(first, "127.0.0.1");
-  await new Promise((r) => squatter.once("listening", r));
-  const b3 = await boot(root);
-  assert.notEqual(loopbackPort(), first);
-  assert.equal(fs.readFileSync(path.join(root, "listener-port"), "utf8").trim(), String(loopbackPort()));
-  await b3.cleanup();
-  squatter.close();
+test("the way back: once the way in is given, the half holds tunnels open to the relay with its relay-secret, and a request through one reaches the listener; cleanup closes them", async () => {
+  // The relay, as far as the half is concerned: it keeps each connection that opens with the key.
+  const tunnels: net.Socket[] = [];
+  const hellos: string[] = [];
+  const relay = net.createServer((s) => {
+    s.once("data", (c) => {
+      hellos.push(c.toString());
+      tunnels.push(s);
+    });
+    s.on("error", () => {});
+  }).listen(0, "127.0.0.1");
+  await new Promise((r) => relay.once("listening", r));
+  const b = await boot();
+  try {
+    assert.equal(tunnels.length, 0, "no tunnel before the way in was given: the half asks Docker for nothing by itself");
+    b.dock.state.reach = { host: "127.0.0.1", port: (relay.address() as AddressInfo).port };
+    await container.reachAgain(b.dock.docker);
+    await until(() => tunnels.length === 4);
+    const key = fs.readFileSync(path.join(b.root, "relay-secret"), "utf8").trim();
+    assert.match(key, /^[0-9a-f]{64}$/);
+    assert.deepEqual(hellos, Array(4).fill(`\0${key}\n`));
+    // The Document Server's request, as the relay hands it on: answered by the loopback listener.
+    const t = tunnels[0];
+    const chunks: Buffer[] = [];
+    t.on("data", (c) => chunks.push(c));
+    t.write("GET /doc/not-a-ticket HTTP/1.1\r\nHost: pithagoras-office-ds-relay:3891\r\nConnection: close\r\n\r\n");
+    await new Promise((r) => t.once("close", r));
+    assert.match(Buffer.concat(chunks).toString(), /^HTTP\/1\.1 401 [\s\S]*bad_ticket/);
+    await until(() => tunnels.length === 5, 3000); // the one taken is replaced at once
+  } finally {
+    await b.cleanup();
+  }
+  await until(() => tunnels.every((t) => t.destroyed || t.readableEnded));
+  relay.close();
 });
 
 test("the loopback listener answers on 127.0.0.1 alone", async () => {
@@ -694,8 +711,8 @@ test("/settings: enable fires ensureContainer exactly once with the settings tag
   assert.equal(spec.Image, DEFAULT_TAG, "the tag comes from settings (default), not a constant");
   assert.ok((spec.Env as string[]).includes(`JWT_SECRET=${jwtSecret(b.root)}`), "the container is env'd with the boot secret");
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(b.root, "ds.json"), "utf8")), { containerId: m.containers.get("pithagoras-office-ds")!.info.id, imageTag: DEFAULT_TAG });
-  // The portal-side relay passes the way back on to this very listener.
-  assert.ok((m.containers.get("pithagoras-office-ds-portal")!.spec.Env as string[]).includes(`TO_PORT=${loopbackPort()}`));
+  // The relay opens the way back to tunnels that carry this half's key.
+  assert.ok((m.containers.get("pithagoras-office-ds-relay")!.spec.Env as string[]).includes(`TUNNEL_KEY=${fs.readFileSync(path.join(b.root, "relay-secret"), "utf8").trim()}`));
   assert.equal(starts().length, 1);
 
   // a second enable is an adopt: no second create, no restart
@@ -721,6 +738,10 @@ test("/settings: enable fires ensureContainer exactly once with the settings tag
   res = await b.router.dispatch("POST", "/settings", { imageTag: "onlyoffice/documentserver" });
   assert.equal(res.statusCode, 400);
   assert.equal((res.body as Record<string, unknown>).code, "invalid_image_tag");
+  // and an image by its digest, which Docker for extensions would split inside the digest
+  res = await b.router.dispatch("POST", "/settings", { imageTag: "onlyoffice/documentserver@sha256:0123456789abcdef" });
+  assert.equal(res.statusCode, 400);
+  assert.match(String((res.body as Record<string, unknown>).error), /digest/);
 
   // there is no co-editing switch in this payload any more (the agent is a co-editor under the revision gate,
   // full stop): a body carrying only the LEGACY key hits the existing no-known-setting path and changes nothing
@@ -762,7 +783,7 @@ test("/container/status + /container/start + /container/stop + /container/remove
 
   res = await b.router.dispatch("POST", "/container/remove", { data: true });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual([...m.containers.keys()], [], "the Document Server and both relays are gone");
+  assert.deepEqual([...m.containers.keys()], [], "the Document Server and its relay are gone");
   assert.equal(m.networks.size, 0);
   assert.deepEqual([...m.volumes.keys()], [], "with data: both volumes");
   assert.ok(b.audits.some((a) => /removed, with its volume/.test(String(a.reason))));
@@ -1025,6 +1046,24 @@ test("forwardedFor: the request's Host and scheme, or a reverse proxy's forwarde
   assert.deepEqual(forwardedFor({ headers: { host: "a.example" } }, prefix), { "x-forwarded-host": "a.example", "x-forwarded-proto": "http", "x-forwarded-prefix": prefix });
   assert.deepEqual(forwardedFor({ headers: { host: "a.example" }, socket: { encrypted: true } }, prefix)["x-forwarded-proto"], "https");
   assert.deepEqual(forwardedFor({ headers: { host: "inner", "x-forwarded-host": ["outer.example", "x"], "x-forwarded-proto": "https, http" } }, prefix), { "x-forwarded-host": "outer.example", "x-forwarded-proto": "https", "x-forwarded-prefix": prefix });
+});
+
+test("forwardedFor: behind a reverse proxy that ends TLS and sends no forwarded headers (and its upstream's name as Host), the browser's own origin says where it is", () => {
+  const prefix = "/api/x/%40pithagoras/office/ds";
+  const behind = { host: "127.0.0.1:3000", "sec-fetch-site": "same-origin" };
+  // The editor frame's polls and Editor.bin: a same-origin GET carries Referer, not Origin.
+  assert.deepEqual(forwardedFor({ headers: { ...behind, referer: "https://portal.example/api/x/%40pithagoras/office/ds/web-apps/apps/documenteditor/main/index.html?x=1" } }, prefix), { "x-forwarded-host": "portal.example", "x-forwarded-proto": "https", "x-forwarded-prefix": prefix });
+  // A POST of the socket.io channel carries Origin, which comes first.
+  assert.deepEqual(forwardedFor({ headers: { ...behind, origin: "https://portal.example:8443", referer: "https://elsewhere.example/" } }, prefix)["x-forwarded-host"], "portal.example:8443");
+  // Over the forwarded headers too: what the browser used is what it must be handed.
+  assert.deepEqual(forwardedFor({ headers: { ...behind, "x-forwarded-proto": "http", referer: "https://portal.example/" } }, prefix)["x-forwarded-proto"], "https");
+  // Not where the browser does not say the request is its own page's: another site's page that links here names
+  // itself in Referer, and an old browser says nothing.
+  assert.deepEqual(forwardedFor({ headers: { host: "portal.example", "sec-fetch-site": "cross-site", referer: "https://evil.example/" } }, prefix)["x-forwarded-host"], "portal.example");
+  assert.deepEqual(forwardedFor({ headers: { host: "portal.example", referer: "https://evil.example/" } }, prefix)["x-forwarded-host"], "portal.example");
+  // An opaque origin, or no address at all, falls back as well.
+  assert.deepEqual(forwardedFor({ headers: { host: "portal.example", "sec-fetch-site": "same-origin", origin: "null" } }, prefix), { "x-forwarded-host": "portal.example", "x-forwarded-proto": "http", "x-forwarded-prefix": prefix });
+  assert.deepEqual(forwardedFor({ headers: { host: "portal.example", "sec-fetch-site": "same-origin", referer: "not a url" } }, prefix)["x-forwarded-host"], "portal.example");
 });
 
 /** A fake engine.io polling endpoint: answers the handshake GET and records every POST body it received.

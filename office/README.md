@@ -17,7 +17,12 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - About 4 GB of RAM for the Document Server container. The settings page warns before the first start, and shows the
   container's memory use once it runs.
 - Disk for the images (`onlyoffice/documentserver`, several GB, and Node's `node:22.23.4-alpine3.23`, about 50 MB,
-  for the relays below), which the portal pulls on the first start, with the progress shown in Settings.
+  for the relay below), which the portal pulls on the first start, with the progress shown in Settings.
+- Behind a reverse proxy (one that ends TLS, say), a browser that says which page a request comes from, as every
+  current one does (`Sec-Fetch-Site`), or a proxy that passes `X-Forwarded-Host` and `X-Forwarded-Proto` (or keeps
+  `Host`): the Document Server names the addresses it hands the editor (the opened document among them) by the
+  address the browser used, and an `http://` address on an `https://` page is refused by the browser, which shows as
+  "Download failed".
 
 ## Installing
 
@@ -69,22 +74,23 @@ as an editor opened before would lose what is typed in it.
 - **A network of its own.** The Document Server is on `pithagoras-office-ds-net`, which Docker for extensions makes
   internal and with no gateway (gateway mode `isolated`): it reaches neither the machine, its loopback, the local
   network nor the internet, and nothing outside the machine reaches it. A converter that a hostile `.docx` breaks into
-  finds nothing there but the two relays below. Its plugin manager is off (`PLUGINS_ENABLED=false`): it would try the
+  finds nothing there but the relay below. Its plugin manager is off (`PLUGINS_ENABLED=false`): it would try the
   internet at every start.
-- **Two relays are its only way in and back.** Docker for extensions gives a way onto such a network but none back,
-  and the Document Server has to fetch each document and report each save. So Office runs two small containers of its
-  own on Node's alpine image, unprivileged, with none of the kernel's capabilities, a read-only root and 128 MB, as
-  Docker for extensions runs its forwarder:
-  - `pithagoras-office-ds-relay`, on the network: port 3890 to the Document Server's port 80 (the way in), and port
-    3891 to a socket in the volume `pithagoras-office-ds-relay-sock` (the way back);
-  - `pithagoras-office-ds-portal`, on the portal's own loopback (the machine's network for a portal on it, the portal
-    container's for one in Docker): that socket to the extension's listener on 127.0.0.1.
-
-  The portal reaches the relay as it reaches Blender and Godot: for a portal on the host's network, through the
-  forwarder `pithagoras-office-ds-relay-forward`, which publishes port 3890 on 127.0.0.1; for a portal in a container
-  of its own, by putting that container on the network. Port 80 is never published on the machine.
+- **One relay is its only way in and back.** Docker for extensions gives a way onto such a network but none back,
+  and the Document Server has to fetch each document and report each save. So Office runs one small container of its
+  own on that network, `pithagoras-office-ds-relay`, on Node's alpine image, unprivileged, with none of the kernel's
+  capabilities, a read-only root and 128 MB, as Docker for extensions runs its forwarder. Its port 3890 leads to the
+  Document Server's port 80 (the way in). The way back runs over the way in, opened from the portal's side: the
+  extension keeps a few connections to that port open, each opened with a key of the extension's (`relay-secret`),
+  which the Document Server is not given; the relay hands each connection the Document Server makes to its port 3891
+  to one of them, and the extension passes it on to its listener on 127.0.0.1. Nothing of Office's shares the portal's
+  network or is on any network but its own. The portal reaches the relay as it reaches Blender and Godot: for a
+  portal on the host's network, through the forwarder `pithagoras-office-ds-relay-forward`, which publishes port 3890
+  on 127.0.0.1; for a portal in a container of its own, by putting that container on the network. Port 80 is never
+  published on the machine. A restart of the portal, or of its container, breaks nothing: the portal opens its
+  connections to the relay anew.
 - **Two routes are open to the Document Server, on a listener of their own.** The container has no portal session,
-  so the two things it needs are served by a small listener bound to `127.0.0.1`, which the relays lead to and
+  so the two things it needs are served by a small listener bound to `127.0.0.1`, which the way back leads to and
   nothing else: a document fetch with a signed ticket for one document at one revision that expires in 10 minutes
   (`GET /doc/<ticket>`), and the save callback (`POST /callback`, which must carry a valid HS256 token). Nothing else
   answers there. The editor configs and callbacks are signed with a secret created once in the extension's data folder
@@ -112,14 +118,16 @@ as an editor opened before would lose what is typed in it.
 
 ## Data
 
-Everything is in the extension's own data folder, beside the portal's other data: `settings.json`, `jwt-secret`,
-`ticket-secret`,
-`ds.json` (the container and image of the last start), `listener-port` (the listener's port, taken again at the
-next start), `index.json` and `docs/<id>/<title>.<ext>` (the library),
-`.trash/`, and `state/<id>.json` (the comments last seen, so that a comment wakes an agent once). A scanned document
-stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds` and its relays `-relay` and `-portal`), the
-network (`pithagoras-office-ds-net`) and the volumes (`pithagoras-office-ds-data`, the Document Server's cache of open
-documents, and `pithagoras-office-ds-relay-sock`) are Docker's, shown in Settings → Docker under this extension.
+Everything is in the extension's own data folder, beside the portal's other data: `settings.json` (what you set; a
+default you never changed is not written down, so a later version's default applies), `jwt-secret`, `ticket-secret`,
+`relay-secret`, `ds.json` (the container and image of the last start), `index.json` and `docs/<id>/<title>.<ext>`
+(the library), `.trash/`, and `state/<id>.json` (the comments last seen, so that a comment wakes an agent once). A
+scanned document stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds` and its
+relay `-relay`), the network (`pithagoras-office-ds-net`) and the Document Server's volumes are Docker's, shown in
+Settings → Docker under this extension. The volumes are one for each folder its image keeps apart:
+`pithagoras-office-ds-cache` (`/var/lib/onlyoffice`: the cache of open documents, with the saves it could not hand
+over yet, which the portal takes back once it reaches it again), `-data` (`/var/www/onlyoffice/Data`, its own keys),
+`-logs` and `-fonts`. They outlive the container being made again, after an update say.
 
 ## Settings from the environment
 
@@ -127,15 +135,15 @@ The portal's environment can change each name, for a second portal on the same D
 
 | Variable | Default |
 | --- | --- |
-| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relays `<container>-relay` and `<container>-portal`, their volume `<container>-relay-sock`) |
+| `PITHAGORAS_OFFICE_CONTAINER` | `pithagoras-office-ds` (the network is `<container>-net`, the relay `<container>-relay`, the volumes `<container>-cache`, `-logs` and `-fonts`) |
 | `PITHAGORAS_OFFICE_VOLUME` | `<container>-data` |
 | `PITHAGORAS_OFFICE_PORT` | `3890`: the relay's port to the Document Server, and for a portal on the host's network the forwarder's on 127.0.0.1 |
 
 ## Removing
 
 Remove the Document Server in Settings → Office first (**Remove**), then uninstall the extension: the portal has no
-uninstall hook, so containers left running keep running. Remove takes the Document Server, both relays, the network
-(and with it the forwarder) and both volumes; the library and every document stay. Docker for extensions cannot
+uninstall hook, so containers left running keep running. Remove takes the Document Server, its relay, the network
+(and with it the forwarder) and the Document Server's volumes; the library and every document stay. Docker for extensions cannot
 remove an image, so the images stay on disk: `docker image rm onlyoffice/documentserver:<tag>` deletes the big one.
 
 ## Limits

@@ -12,7 +12,7 @@ import path from "node:path";
 import JSZip from "jszip";
 import {
   listDocs, getDoc, docsForHome, createDoc, renameDoc, deleteDoc, sweepTrash,
-  importFile, exportDoc, persistBytes, templateDocx, templateXlsx, slugify,
+  importFile, exportDoc, persistBytes, readDoc, templateDocx, templateXlsx, slugify,
   scanWorkspace, pruneMissingDocs, addGrant, migrateOwners,
 } from "../src/store";
 import { parseDocx, parseXlsx } from "../src/ooxml";
@@ -209,6 +209,47 @@ test("persistBytes: a link put in the file's place, or in its folder's, is refus
   assert.throws(() => persistBytes({ ...doc2, mtimeMs: fs.statSync(path.join(real, "report.docx")).mtimeMs }, Buffer.from("x"), root2), (e: Error & { code?: string }) => e.code === "invalid");
   assert.equal(fs.readFileSync(path.join(real, "report.docx"), "utf8"), "theirs");
   for (const d of [ws, elsewhere, ws2, ws3]) fs.rmSync(d, { recursive: true, force: true });
+});
+
+test("deleteDoc: a scanned document whose folder an agent swapped for a link to another folder deletes nothing there", async () => {
+  // Agent A's docs/report.docx is indexed; A replaces docs/ with a link to agent B's private/, which holds a
+  // report.docx of B's; the person deletes "report" in the library.
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-swap-")));
+  const [a, b] = [path.join(base, "a"), path.join(base, "b")];
+  fs.mkdirSync(path.join(a, "docs"), { recursive: true });
+  fs.mkdirSync(path.join(b, "private"), { recursive: true });
+  fs.writeFileSync(path.join(a, "docs", "report.docx"), "A's");
+  fs.writeFileSync(path.join(b, "private", "report.docx"), "B's");
+  const root = tmpRoot();
+  scanWorkspace([a], root);
+  const doc = listDocs(root)[0];
+  fs.renameSync(path.join(a, "docs"), path.join(a, "docs.old"));
+  fs.symlinkSync(path.join(b, "private"), path.join(a, "docs"));
+  deleteDoc(doc.docId, root);
+  assert.equal(fs.readFileSync(path.join(b, "private", "report.docx"), "utf8"), "B's", "B's file is still there");
+  assert.equal(fs.readFileSync(path.join(a, "docs.old", "report.docx"), "utf8"), "A's");
+  assert.equal(listDocs(root).length, 0, "the entry goes");
+  const [entry] = fs.readdirSync(path.join(root, ".trash"));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, ".trash", entry, "document.json"), "utf8")).path, doc.path, "and the trash says where it was");
+
+  // A link in the file's own place, in its own folder, is still removed as the link: what it leads to stays.
+  fs.rmSync(path.join(a, "docs"));
+  fs.renameSync(path.join(a, "docs.old"), path.join(a, "docs"));
+  scanWorkspace([a], root);
+  const again = listDocs(root)[0];
+  fs.rmSync(path.join(a, "docs", "report.docx"));
+  fs.symlinkSync(path.join(b, "private", "report.docx"), path.join(a, "docs", "report.docx"));
+  deleteDoc(again.docId, root);
+  assert.equal(fs.lstatSync(path.join(a, "docs", "report.docx"), { throwIfNoEntry: false }), undefined, "the link is gone");
+  assert.equal(fs.readFileSync(path.join(b, "private", "report.docx"), "utf8"), "B's");
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+test("readDoc: a file that grew past the library's cap since it was indexed is refused before it is read", async () => {
+  const { root, ws, file, doc } = await scannedOne();
+  fs.truncateSync(file, 513 * 1024 * 1024); // sparse: nothing is written to the disk
+  assert.throws(() => readDoc({ ...doc, mtimeMs: fs.statSync(file).mtimeMs }, root), (e: Error & { code?: string }) => e.code === "too_large");
+  fs.rmSync(ws, { recursive: true, force: true });
 });
 
 test("renameDoc: a scanned file is never renamed over another file of that name", async () => {

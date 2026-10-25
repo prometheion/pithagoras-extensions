@@ -35,7 +35,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
-import { canonical, createDoc, docPath, docsForHome, persistBytes, refresh, refreshAll, type DocMeta } from "./store";
+import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, persistBytes, readDoc, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
 import { parseDocx, parseXlsx, editDocx, readPart, rewriteZip, type EditOp } from "./ooxml";
 import { inSession, usersOf, isLocked } from "./live";
 import { drainWakeQueue } from "./ping";
@@ -84,9 +84,14 @@ export type ToolsDeps = {
   chatFolder?: (chatId: string) => string;
   /** The folders the agents work in. Default: () => portal().folders.list(). */
   folders?: () => ToolsFolderInfo[];
-  /** A scanned document's bytes, read for `chatId`'s agent as it could read them itself (`file` is the document's own
-   * path). Default: portal().files.open with likeParent, the chat, and no link followed. */
-  readFile?: (file: string, chatId: string) => Buffer;
+  /** A scanned document's file, opened for `chatId`'s agent as it could open it itself (`file` is the document's own
+   * path): its descriptor, which the caller closes, and its size. Default: portal().files.open with likeParent, the
+   * chat, and no link followed. */
+  openFile?: (file: string, chatId: string) => { fd: number; size: number };
+  /** Throws where `chatId`'s agent could not change the scanned document `file` itself: its folder is not one the agent
+   * may write in, as the kernel would tell it. Default: portal().files.identity of the folder with likeParent and the
+   * chat, which asks for that. */
+  mayWrite?: (file: string, chatId: string) => void;
   /** Store/state root override. Default: lazy portal().dataDir(). */
   root?: string;
   /** Whether the Document Server has an editing session open on the document at its current revision. Default:
@@ -120,11 +125,13 @@ function folders(): ToolsFolderInfo[] {
   return (cfg.folders ?? (() => portal().folders.list()))();
 }
 /** A file read through the portal as the agent of `chatId` reads: refused where that agent could not read it, and
- * never through a link. Whole, from the descriptor the portal opened (no size cap: a .docx is often over 1 MB). */
+ * never through a link. Whole, from the descriptor the portal opened (not files.readBytes, whose cap is 1 MB: a .docx
+ * is often more), up to the library's own cap (store.MAX_IMPORT_BYTES): a file that grew past it since it was indexed
+ * is refused before a byte is read. */
 function readAsAgent(file: string, chatId: string): Buffer {
-  if (cfg.readFile) return cfg.readFile(file, chatId);
-  const opened = portal().files.open(path.dirname(file), path.basename(file), { likeParent: true, chats: [chatId], direct: true });
+  const opened = (cfg.openFile ?? ((f: string, c: string) => portal().files.open(path.dirname(f), path.basename(f), { likeParent: true, chats: [c], direct: true })))(file, chatId);
   try {
+    if (opened.size > MAX_IMPORT_BYTES) throw tooLarge(file, opened.size);
     const out = Buffer.alloc(opened.size);
     let read = 0;
     while (read < out.length) {
@@ -135,6 +142,15 @@ function readAsAgent(file: string, chatId: string): Buffer {
     return out.subarray(0, read);
   } finally {
     fs.closeSync(opened.fd);
+  }
+}
+/** Refuses (`error:not_found`, as for a file it cannot read) where the agent of `chatId` could not change the scanned
+ * document `file` itself: the portal writes it with its own rights, which may be root's. */
+function assertMayWrite(file: string, chatId: string, title: string): void {
+  try {
+    (cfg.mayWrite ?? ((f: string, c: string) => void portal().files.identity(path.dirname(f), ".", { likeParent: true, chats: [c] })))(file, chatId);
+  } catch (e) {
+    throw new Refusal("not_found", `"${title}" is not a file your agent may change (${e instanceof Error ? e.message : String(e)})`);
   }
 }
 function logLine(line: string): void {
@@ -213,10 +229,10 @@ const MAX_READ_CHARS = 200_000;
  * library doc's from the extension's own folder, which no agent can write; a not_found refusal where it is gone. */
 function readBytes(doc: DocMeta, chatId: string): Buffer {
   try {
-    return doc.path ? readAsAgent(doc.path, chatId) : fs.readFileSync(docPath(doc, rootDir()));
+    return doc.path ? readAsAgent(doc.path, chatId) : readDoc(doc, rootDir());
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { code?: string };
-    if (err.code === "ENOENT" || err.code === "missing") throw new Refusal("not_found", `the file of "${doc.title}" is missing from disk`);
+    if (err.code === "ENOENT" || err.code === "missing" || err.code === "not_found") throw new Refusal("not_found", `the file of "${doc.title}" is missing from disk`);
     if (err.code === "invalid") throw new Refusal("not_found", `"${doc.title}" is not a file your agent can read (${err.message})`);
     throw e;
   }
@@ -420,6 +436,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         throw new Refusal("corrupt", `"${doc.title}" could not be opened as a zip archive: ${e instanceof Error ? e.message : String(e)}`);
       }
 
+      // Written with the portal's rights: only where the agent could have written it itself.
+      if (doc.path) assertMayWrite(doc.path, chatId, doc.title);
       const editedXml = editDocx(documentXml, ops as EditOp[]); // throws {code:"quote_not_found"|"quote_ambiguous"} -- surfaced unchanged by failed()
       const out = rewriteZip(buf, { "word/document.xml": editedXml }); // {code:"invalid_zip"} -> corrupt
       let saved: { mtimeMs: number };

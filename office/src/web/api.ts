@@ -86,7 +86,7 @@ export const api = {
   /** Awaits the whole first pull to completion -- the page shows its progress from /state meanwhile. */
   startContainer: () => call<{ started: boolean; container: OfficeContainer }>("/container/start", { method: "POST" }),
   stopContainer: () => call<{ container: OfficeContainer }>("/container/stop", { method: "POST" }),
-  /** The Document Server, its relays and its network removed; with `data` also its volume. */
+  /** The Document Server, its relay and its network removed; with `data` also its volumes. */
   removeContainer: (data: boolean) => call<{ container: OfficeContainer }>("/container/remove", { method: "POST", body: JSON.stringify({ data }) }),
   /** The library bytes as an attachment -- plain addresses, the session rides along on the cookie. */
   downloadUrl: (id: string) => portal.api.url(`/documents/${encodeURIComponent(id)}`),

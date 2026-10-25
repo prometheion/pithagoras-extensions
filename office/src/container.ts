@@ -1,25 +1,33 @@
 /**
- * @pithagoras/office container lifecycle: the OnlyOffice Document Server behind every edit, and the two small relay
- * containers that are its only way to the portal and back. All three are made through Docker for extensions
+ * @pithagoras/office container lifecycle: the OnlyOffice Document Server behind every edit, and the small relay
+ * container that is its only way to the portal and back. Both are made through Docker for extensions
  * (pithagoras-docker 1.3.0), carry this extension's name, and are Office's alone.
  *
  * The Document Server is on a network of its own (`names.network`, made by `networks.create`): internal, isolated,
  * no IPv6, so a converter fed an untrusted .docx reaches neither the machine, its loopback, the local network nor the
- * internet, and nothing outside the machine reaches the Document Server. Docker for extensions gives a way onto such a
- * network (`networks.reach`) but none back from it, and the Document Server must fetch `document.url` and post its
- * save callback to the portal. So Office runs two relays of its own, both on Node's alpine image (the one the
- * forwarder of Docker for extensions runs, so usually there already) and hardened as that forwarder is:
+ * internet, and nothing outside the machine reaches the Document Server. Office uses nothing of Docker for extensions
+ * but that network and the way onto it (`networks.reach`), as Blender and Godot do: no container of Office's shares
+ * the portal's network namespace (`sharedNetwork`). The Document Server must still fetch `document.url` and post its
+ * save callback to the portal, which such a network has no way to. So the way back runs over the way in, opened from
+ * the portal's side:
  *
- *   browser -> portal /ds proxy -> reach(network, relay, port) -> relay :port -> document server :80   (the way in)
- *   document server -> relay :3891 -> unix socket in a volume -> portal-side relay -> 127.0.0.1:<listener>  (the way back)
+ *   browser -> portal /ds proxy -> reach(network, relay, port) -> relay :port -> document server :80      (the way in)
+ *   portal (back.ts) -> reach(network, relay, port) -> relay :port, held open with the relay's key        (a tunnel)
+ *   document server -> relay :3891 -> the next tunnel -> back.ts -> 127.0.0.1:<listener>                 (the way back)
  *
- * - `<container>-relay` is on the island. It passes `port` (3890 by default; Blender is 3870 and Godot 3880) on to the
- *   Document Server's port 80, and BACK_PORT on to a unix socket in a volume it shares with the other relay. The
- *   Document Server is never reached on its own port 80 from the machine: `reach` publishes its port on the machine's
- *   127.0.0.1 for a portal in the host's namespace, where port 80 is usually a reverse proxy's.
- * - `<container>-portal` shares the portal's own network namespace (`docker.sharedNetwork()`: `host`, or
- *   `container:<portal id>`), listens on that socket and passes each connection on to the extension's loopback
- *   listener on 127.0.0.1, which still checks its ticket and the callback's JWT.
+ * `<container>-relay` is on the island, on Node's alpine image (the one Docker for extensions' forwarder runs, so
+ * usually there already) and hardened as that forwarder is. On `port` (3890 by default; Blender is 3870 and Godot
+ * 3880) it passes each connection on to the Document Server's port 80, except one that opens with its key (a NUL byte,
+ * the key, a newline: no HTTP request starts with a NUL), which it keeps as a tunnel. On BACK_PORT it hands each
+ * connection of the Document Server's to the next tunnel, and the portal passes it on to the extension's loopback
+ * listener, which still checks its ticket and the callback's JWT. The key is in the extension's data folder
+ * (`relay-secret`), and the Document Server is not given it: whatever reaches the relay's port (the forwarder
+ * publishes it on the machine's 127.0.0.1) cannot take the Document Server's requests without it. The Document Server
+ * is never reached on its own port 80 from the machine: `reach` publishes the relay's port on the machine's 127.0.0.1
+ * for a portal in the host's namespace, where port 80 is usually a reverse proxy's.
+ *
+ * A restart of the portal, or of its container, takes nothing of this with it: the new run reaches the relay again and
+ * opens its tunnels anew, and Docker for extensions puts a portal container that was made again on the network.
  *
  * Each container is made from a spec whose hash is its label (`stamped`, as Blender's and Godot's are), and one whose
  * label is not what would be made now, or that is not on the network as it is now (by the network's id), is made
@@ -40,17 +48,31 @@ import type { ContainerInfo, ContainerSpec, Docker, NetworkInfo, PullState, Reac
 /** The names Office's containers go by, each one the portal's environment can change (`PITHAGORAS_OFFICE_*`): a test
  * never meets the containers of a portal in use. */
 export interface OfficeNames extends Names {
-  /** The relay on the island: the way in, and the island's end of the way back. */
+  /** The relay on the island: the way in, and the way back. */
   relay: string;
-  /** The relay on the portal's loopback: the portal's end of the way back. */
-  portalSide: string;
-  /** The volume the two relays share their socket in. */
-  sock: string;
+  /** The Document Server's volumes, by the path in its container each is bound at (see DS_PATHS). */
+  volumes: Record<string, string>;
 }
+
+/**
+ * Every path the Document Server's image declares as a VOLUME (`docker image inspect onlyoffice/documentserver:10.0.0.1`:
+ * Config.Volumes), each given a named volume of Office's own, by the end of its name. One left out would be an
+ * anonymous volume, which Docker makes anew for each container and keeps, nobody's, after it: dropped at every
+ * re-create, and left on the machine. `/var/lib/onlyoffice` matters most: it holds the cache of open documents,
+ * the saves the Document Server kept as forgotten among them (callback.ts takes those back).
+ */
+export const DS_PATHS: Record<string, string> = {
+  "/var/www/onlyoffice/Data": "data",
+  "/var/lib/onlyoffice": "cache",
+  "/var/log/onlyoffice": "logs",
+  "/usr/share/fonts/truetype/custom": "fonts",
+};
 
 export function officeNames(env: NodeJS.ProcessEnv = process.env): OfficeNames {
   const base = namesFrom(env, "office", { container: "pithagoras-office-ds", port: 3890, image: "" });
-  return { ...base, relay: `${base.container}-relay`, portalSide: `${base.container}-portal`, sock: `${base.container}-relay-sock` };
+  // The data volume keeps its own setting (PITHAGORAS_OFFICE_VOLUME), as it had one before the others were named.
+  const volumes = Object.fromEntries(Object.entries(DS_PATHS).map(([at, end]) => [at, end === "data" ? base.volume : `${base.container}-${end}`]));
+  return { ...base, relay: `${base.container}-relay`, volumes };
 }
 
 export const NAMES = officeNames();
@@ -58,43 +80,87 @@ export const NAMES = officeNames();
 export const DS_NAME = NAMES.container;
 /** The named volume bound at /var/www/onlyoffice/Data (DS's internal storage). */
 export const DS_VOLUME = NAMES.volume;
-const DS_DATA_PATH = "/var/www/onlyoffice/Data";
 
-/** The relays' image: the one Docker for extensions pins for its forwarder (forward.ts), pinned by its tag. */
+/** The relay's image: the one Docker for extensions pins for its forwarder (forward.ts), pinned by its tag. */
 export const RELAY_IMAGE = "node:22.23.4-alpine3.23";
 /** The relay's port for the way back. It never leaves the island, so it needs no setting. */
 export const BACK_PORT = 3891;
-/** Where the relays' shared volume is mounted: the image's own `node` home, whose owner (1000) Docker copies into a new
- * volume at its first mount, so both relays run as that user and may make and use the socket. */
-const SOCK_DIR = "/home/node";
-const BACK_SOCKET = `${SOCK_DIR}/portal.sock`;
 
-/** One connection passed on: a side that ends its writing is passed on as such, a side that closes or fails closes the
- * other, no delay on small writes. The program of Docker for extensions' forwarder, for a socket as well. */
-const PASS = `const net = require("node:net");
-const pass = (from, to) => {
-  const on = net.connect({ ...to, allowHalfOpen: true });
-  for (const s of [from, on]) s.setNoDelay(true);
-  const close = () => { from.destroy(); on.destroy(); };
-  for (const s of [from, on]) { s.on("error", close); s.on("close", close); }
-  from.pipe(on).pipe(from);
+/**
+ * The relay's program (see the module header). Two connections joined: a side that ends its writing is passed on as
+ * such, a side that closes or fails closes the other, no delay on small writes, as Docker for extensions' forwarder
+ * joins them. On IN_PORT, a connection whose first byte is not NUL goes to the Document Server (looked up by name for
+ * each, so one that came back at another address is reached); one that opens with the key (TUNNEL_KEY between a NUL
+ * and a newline, compared in constant time) waits as a tunnel, and anything else that starts with a NUL is closed. A
+ * tunnel that ends or sends anything while it waits is closed. On BACK_PORT, each connection waits (at most 30 s) for
+ * a tunnel and is joined to it. At most 16 tunnels and 64 connections wait at once.
+ */
+export const RELAY_SCRIPT = `const net = require("node:net");
+const { timingSafeEqual } = require("node:crypto");
+const join = (a, b) => {
+  for (const s of [a, b]) s.setNoDelay(true);
+  const close = () => { a.destroy(); b.destroy(); };
+  for (const s of [a, b]) { s.on("error", close); s.on("close", close); }
+  a.pipe(b).pipe(a);
 };
-const listen = (at, to) => net.createServer({ allowHalfOpen: true }, (from) => pass(from, to)).listen(at);
+const HELLO = Buffer.from("\\0" + process.env.TUNNEL_KEY + "\\n");
+const tunnels = [];
+const waiting = [];
+const drop = (list, s) => { const i = list.indexOf(s); if (i >= 0) list.splice(i, 1); };
+const pair = () => {
+  for (;;) {
+    while (tunnels.length && tunnels[0].destroyed) tunnels.shift();
+    while (waiting.length && waiting[0].destroyed) waiting.shift();
+    if (!tunnels.length || !waiting.length) return;
+    const tunnel = tunnels.shift();
+    const from = waiting.shift();
+    clearTimeout(from.wait);
+    tunnel.off("data", tunnel.kill);
+    tunnel.off("end", tunnel.kill);
+    join(from, tunnel);
+  }
+};
+net.createServer({ allowHalfOpen: true }, (from) => {
+  let seen = Buffer.alloc(0);
+  from.on("error", () => from.destroy());
+  from.setTimeout(10000, () => from.destroy());
+  const first = (chunk) => {
+    seen = Buffer.concat([seen, chunk]);
+    if (seen[0] !== 0) {
+      from.off("data", first);
+      from.pause();
+      from.setTimeout(0);
+      from.unshift(seen);
+      join(from, net.connect({ host: process.env.DS_HOST, port: Number(process.env.DS_PORT), allowHalfOpen: true }));
+      return;
+    }
+    if (seen.length < HELLO.length) return;
+    from.off("data", first);
+    from.setTimeout(0);
+    if (seen.length !== HELLO.length || !timingSafeEqual(seen, HELLO) || tunnels.length >= 16) return from.destroy();
+    from.setKeepAlive(true, 30000);
+    from.kill = () => from.destroy();
+    from.on("data", from.kill);
+    from.on("end", from.kill);
+    from.on("close", () => drop(tunnels, from));
+    tunnels.push(from);
+    pair();
+  };
+  from.on("data", first);
+}).listen(Number(process.env.IN_PORT), "0.0.0.0");
+net.createServer({ allowHalfOpen: true }, (from) => {
+  from.pause();
+  from.on("error", () => from.destroy());
+  if (waiting.length >= 64) return from.destroy();
+  from.wait = setTimeout(() => from.destroy(), 30000);
+  from.on("close", () => { clearTimeout(from.wait); drop(waiting, from); });
+  waiting.push(from);
+  pair();
+}).listen(Number(process.env.BACK_PORT), "0.0.0.0");
 process.on("SIGTERM", () => process.exit(0));
 `;
 
-/** The island's relay: IN_PORT to the Document Server (looked up by name for each connection, so one that came back at
- * another address is reached), BACK_PORT to the socket the portal-side relay listens on. */
-export const RELAY_SCRIPT = `${PASS}listen({ port: Number(process.env.IN_PORT), host: "0.0.0.0" }, { host: process.env.DS_HOST, port: Number(process.env.DS_PORT) });
-listen({ port: Number(process.env.BACK_PORT), host: "0.0.0.0" }, { path: process.env.BACK_SOCKET });
-`;
-
-/** The portal-side relay: the socket to the extension's loopback listener. A socket left by the one before is removed. */
-export const PORTAL_SCRIPT = `${PASS}require("node:fs").rmSync(process.env.BACK_SOCKET, { force: true });
-listen({ path: process.env.BACK_SOCKET }, { host: "127.0.0.1", port: Number(process.env.TO_PORT) });
-`;
-
-/** What Docker for extensions' forwarder is held to (forward.ts), for both relays. */
+/** What Docker for extensions' forwarder is held to (forward.ts), for the relay. */
 const HARDENED = {
   CapDrop: ["ALL"],
   SecurityOpt: ["no-new-privileges"],
@@ -119,13 +185,6 @@ type Inspected = {
 
 /** The last pull progress, in memory only, so status() can report it without re-pulling */
 let pullState: PullState | null = null;
-
-/** The port of the extension's loopback listener, which the portal-side relay passes the way back on to. Set by the
- * server half once it listens (0 before). */
-let backTo = 0;
-export function setBackPort(port: number): void {
-  backTo = port;
-}
 
 function log(line: string): void {
   try {
@@ -160,31 +219,26 @@ function dsEnv(root: string): string[] {
   return ["JWT_ENABLED=true", `JWT_SECRET=${secret}`, "JWT_HEADER=X-Auth-Token", "JWT_IN_BODY=false", "PLUGINS_ENABLED=false"];
 }
 
-/** The Document Server, on the island by its name, with no published port. */
+/** The Document Server, on the island by its name, with no published port, and a named volume at each path its image
+ * declares one (DS_PATHS). */
 export function dsSpec(image: string, env: string[], island: string, names: OfficeNames = NAMES): ContainerSpec {
-  return { Image: image, Env: env, HostConfig: { NetworkMode: island, Binds: [`${names.volume}:${DS_DATA_PATH}`] } };
+  return { Image: image, Env: env, HostConfig: { NetworkMode: island, Binds: Object.entries(names.volumes).map(([at, volume]) => `${volume}:${at}`) } };
 }
 
-export function relaySpec(island: string, names: OfficeNames = NAMES): ContainerSpec {
+/** The relay, on the island, with the key a tunnel opens with (the extension's `relay-secret`). */
+export function relaySpec(island: string, key: string, names: OfficeNames = NAMES): ContainerSpec {
   return {
     Image: RELAY_IMAGE,
     User: "1000:1000",
     Cmd: ["node", "-e", RELAY_SCRIPT],
-    Env: [`IN_PORT=${names.port}`, `DS_HOST=${names.container}`, "DS_PORT=80", `BACK_PORT=${BACK_PORT}`, `BACK_SOCKET=${BACK_SOCKET}`],
-    HostConfig: { NetworkMode: island, Binds: [`${names.sock}:${SOCK_DIR}`], ...HARDENED },
+    Env: [`IN_PORT=${names.port}`, `DS_HOST=${names.container}`, "DS_PORT=80", `BACK_PORT=${BACK_PORT}`, `TUNNEL_KEY=${key}`],
+    HostConfig: { NetworkMode: island, ...HARDENED },
   };
 }
 
-/** The portal-side relay, on the portal's own loopback: `host`, or `container:<portal id>`. Made again when either the
- * portal's container or the listener's port is another. */
-export function portalSideSpec(networkMode: string, toPort: number, names: OfficeNames = NAMES): ContainerSpec {
-  return {
-    Image: RELAY_IMAGE,
-    User: "1000:1000",
-    Cmd: ["node", "-e", PORTAL_SCRIPT],
-    Env: [`BACK_SOCKET=${BACK_SOCKET}`, `TO_PORT=${toPort}`],
-    HostConfig: { NetworkMode: networkMode, Binds: [`${names.sock}:${SOCK_DIR}`], ...HARDENED },
-  };
+/** The key the portal's tunnels open with (server.ts makes the file at boot, as it makes jwt-secret). */
+export function relayKey(root: string): string {
+  return fs.readFileSync(path.join(root, "relay-secret"), "utf8").trim();
 }
 
 function writeAtomic(dest: string, bytes: Buffer): void {
@@ -234,17 +288,36 @@ let reached: Promise<Reach> | undefined;
  * that was made again. */
 export function reachAgain(docker?: Docker): Promise<Reach> {
   const asked = reachable(docker).then((d) => d.networks.reach(NAMES.network, NAMES.relay, NAMES.port));
-  reached = asked.catch((e) => {
-    reached = undefined;
-    throw e;
-  });
-  return reached;
+  const now: Promise<Reach> = asked.then(
+    (at) => {
+      onReached?.();
+      return at;
+    },
+    (e) => {
+      if (reached === now) reached = undefined;
+      throw e;
+    },
+  );
+  reached = now;
+  return now;
 }
 
 /** The origin the server half reaches the Document Server at, through the relay: `http://<host>:<port>`. */
 export async function dsOrigin(docker?: Docker): Promise<string> {
   const { host, port } = await (reached ?? reachAgain(docker));
   return `http://${host}:${port}`;
+}
+
+/** The way in as last asked for, without asking: for the way back (back.ts), which must not make the forwarder or
+ * the network's connection again by itself, after the person removed them. Nothing before the first ask. */
+export function reachedNow(): Promise<Reach> | undefined {
+  return reached;
+}
+
+/** What is told each time the way in was asked for and given: the way back opens its tunnels at once then. */
+let onReached: (() => void) | undefined;
+export function whenReached(hook: (() => void) | undefined): void {
+  onReached = hook;
 }
 
 /** Forgets the way in, for a removal (the network goes, and the forwarder with it) and for tests. */
@@ -293,16 +366,15 @@ async function claim(d: Docker, name: string): Promise<Inspected | undefined> {
 const labelOf = (spec: ContainerSpec) => (spec.Labels as Record<string, string>)[SPEC_LABEL];
 const running = (detail: Inspected | undefined) => detail?.State?.Running === true && !detail.State.Restarting;
 
-/** Made as it would be now, and, for one on the island, on the network as it is now (by its id). */
-function current(detail: Inspected, spec: ContainerSpec, island?: NetworkInfo): boolean {
+/** Made as it would be now, and on the network as it is now (by its id). */
+function current(detail: Inspected, spec: ContainerSpec, island: NetworkInfo): boolean {
   if (detail.Config?.Labels?.[SPEC_LABEL] !== labelOf(spec)) return false;
-  return !island || detail.NetworkSettings?.Networks?.[island.name]?.NetworkID === island.id;
+  return detail.NetworkSettings?.Networks?.[island.name]?.NetworkID === island.id;
 }
 
 /** What each container would be made with now, in the order they start. The Document Server's is made with the
  * image a running one has where only that differs (see the module header). */
-async function wanted(d: Docker, r: string, island: NetworkInfo, tag: string): Promise<{ name: string; spec: ContainerSpec; island?: NetworkInfo }[]> {
-  if (!backTo) throw Object.assign(new Error("the office listener is not running yet"), { code: "not_ready" });
+async function wanted(d: Docker, r: string, island: NetworkInfo, tag: string): Promise<{ name: string; spec: ContainerSpec; island: NetworkInfo }[]> {
   const env = dsEnv(r);
   let ds = stamped(dsSpec(tag, env, island.name));
   const now = (await d.containers.inspect(NAMES.container).catch(() => undefined)) as Inspected | undefined;
@@ -313,8 +385,7 @@ async function wanted(d: Docker, r: string, island: NetworkInfo, tag: string): P
   }
   return [
     { name: NAMES.container, spec: ds, island },
-    { name: NAMES.relay, spec: stamped(relaySpec(island.name)), island },
-    { name: NAMES.portalSide, spec: stamped(portalSideSpec(await d.sharedNetwork(), backTo)) },
+    { name: NAMES.relay, spec: stamped(relaySpec(island.name, relayKey(r))), island },
   ];
 }
 
@@ -351,8 +422,7 @@ async function ensureContainerOnce(docker?: Docker, onPull?: (state: PullState) 
       onPull?.(state);
     });
   }
-  await ensureVolume(d, NAMES.volume);
-  await ensureVolume(d, NAMES.sock);
+  for (const volume of Object.values(NAMES.volumes)) await ensureVolume(d, volume);
   const island = await d.networks.create(NAMES.network);
 
   let started = false;
@@ -378,7 +448,7 @@ async function ensureContainerOnce(docker?: Docker, onPull?: (state: PullState) 
 }
 
 /** Stops the Document Server and records the user-stopped intent (the marker BEFORE the stop, so a lookAfter in flight
- * cannot race the person back into a revive). The relays keep running: they hold nothing, and the Document Server's
+ * cannot race the person back into a revive). The relay keeps running: it holds nothing, and the Document Server's
  * next start finds its way in and back as it was. */
 export async function stopContainer(docker?: Docker, root?: string): Promise<void> {
   const d = await reachable(docker);
@@ -390,25 +460,24 @@ export async function stopContainer(docker?: Docker, root?: string): Promise<voi
 }
 
 /**
- * Removes what Office made in Docker: the portal-side relay, the island's relay and the Document Server, then the
- * network (which takes the forwarder or the portal's connection with it) and the relays' socket volume; with
- * `removeData` also the Document Server's own volume (its cache of open documents: every save is in the library
- * already). The images stay: Docker for extensions cannot remove one. Recorded as stopped, so lookAfter does not
- * make it all again; a Start does.
+ * Removes what Office made in Docker: the relay and the Document Server, then the network (which takes the forwarder
+ * or the portal's connection with it); with `removeData` also the Document Server's volumes (its cache of open
+ * documents with the saves it could not hand over yet, its logs, its own data). Without, they stay for the next Start,
+ * which takes back such a save. The images stay: Docker for extensions cannot remove one. Recorded as stopped, so
+ * lookAfter does not make it all again; a Start does.
  */
 export async function removeContainers(removeData: boolean, docker?: Docker, root?: string): Promise<void> {
   const d = await reachable(docker);
   const r = resolvedRoot(root);
   fs.mkdirSync(r, { recursive: true });
   writeAtomic(path.join(r, USER_STOPPED_FILE), Buffer.from("user removed the document server\n"));
-  for (const name of [NAMES.portalSide, NAMES.relay, NAMES.container]) {
+  for (const name of [NAMES.relay, NAMES.container]) {
     const found = await d.containers.get(name);
     if (found && found.owner === ownName()) await d.containers.remove(name);
   }
   await d.networks.remove(NAMES.network);
   forgetReach();
-  await d.volumes.remove(NAMES.sock);
-  if (removeData) await d.volumes.remove(NAMES.volume);
+  if (removeData) for (const volume of Object.values(NAMES.volumes)) await d.volumes.remove(volume);
   fs.rmSync(path.join(r, "ds.json"), { force: true });
 }
 
@@ -540,8 +609,8 @@ async function answers(docker: Docker): Promise<boolean> {
 /**
  * Fire-and-forget, at boot and every 30 s: with Office on and not stopped by the person, what is not running or not as
  * it would be made now is put right (ensureContainer), and where all runs but the Document Server does not answer, the
- * way in is asked for again (a forwarder somebody removed, a portal container made again). Every failure lands as
- * one log line.
+ * way in is asked for again (a forwarder somebody removed, a portal container made again), and with it the way back,
+ * which runs over it. Every failure lands as one log line.
  */
 export function lookAfter(docker?: Docker, root?: string): Promise<void> {
   return (async () => {

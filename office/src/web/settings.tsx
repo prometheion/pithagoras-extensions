@@ -69,7 +69,7 @@ export function OfficeSettings() {
   const remove = async () => {
     const ok = await portal.ui.confirm({
       title: t("Remove the Document Server?"),
-      message: t("Its container, its two relays and its network are removed, and so is its volume, which holds only its cache of open documents: every save is in the library already. The image stays; Start makes everything again."),
+      message: t("Its container, its relay and its network are removed, and so are its volumes: its cache of open documents, with any save it could not hand over yet, its logs and its own data. Every save that reached the library stays there. The image stays; Start makes everything again."),
       confirmLabel: t("Remove"),
       danger: true,
       deletes: true,

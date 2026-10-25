@@ -73,3 +73,29 @@ test("saveSettings: overwrites a corrupt file with clean defaults", () => {
   assert.equal(s.imageTag, "x/y:1.2");
   assert.equal(s.enabled, DEFAULT_SETTINGS.enabled);
 });
+
+test("saveSettings: only what the person set is stored, so a later version's default image reaches an install that switched Office on", () => {
+  const root = tmpRoot();
+  saveSettings({ enabled: true }, root);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")), { enabled: true }, "the default tag is not written down");
+  const before = DEFAULT_SETTINGS.imageTag;
+  try {
+    DEFAULT_SETTINGS.imageTag = "onlyoffice/documentserver:10.0.1.1"; // as a later version would have it
+    assert.equal(loadSettings(root).imageTag, "onlyoffice/documentserver:10.0.1.1");
+    saveSettings({ enabled: false }, root);
+    assert.equal(loadSettings(root).imageTag, "onlyoffice/documentserver:10.0.1.1", "and saving again does not pin it either");
+  } finally {
+    DEFAULT_SETTINGS.imageTag = before;
+  }
+  // A tag the person chose stays theirs.
+  saveSettings({ imageTag: "onlyoffice/documentserver:9.2.1.1" }, root);
+  assert.equal(loadSettings(root).imageTag, "onlyoffice/documentserver:9.2.1.1");
+});
+
+test("loadSettings: the default an earlier version wrote down for everyone (:10.0) counts as not set, and is not written again", () => {
+  const root = tmpRoot();
+  fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0" }));
+  assert.deepEqual(loadSettings(root), { enabled: true, imageTag: DEFAULT_SETTINGS.imageTag });
+  saveSettings({ enabled: true }, root);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")), { enabled: true });
+});

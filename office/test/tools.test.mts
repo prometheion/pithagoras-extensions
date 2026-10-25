@@ -257,10 +257,11 @@ test("scanned documents: the ones in the agent's own folder are read and edited 
     extend: (f) => f(pi, { id: "chat-a" }),
     chatFolder: () => mine,
     folders: () => [{ path: mine, name: "Atlas", kind: "agent" }, { path: theirs, name: "Bolt", kind: "agent" }],
-    readFile: (file, chatId) => {
+    openFile: (file, chatId) => {
       reads.push([file, chatId]);
-      return fs.readFileSync(file);
+      return { fd: fs.openSync(file, "r"), size: fs.statSync(file).size };
     },
+    mayWrite: () => {},
     root,
     record: () => {},
     log: () => {},
@@ -293,7 +294,7 @@ test("scanned documents: a file the portal refuses to read for the agent (the sa
     extend: (f) => f(pi, { id: "chat-a" }),
     chatFolder: () => ws,
     folders: () => [{ path: ws, name: "Atlas", kind: "agent" }],
-    readFile: () => {
+    openFile: () => {
       throw Object.assign(new Error("That folder is not one its agent may use"), { code: "invalid" });
     },
     root,
@@ -304,6 +305,64 @@ test("scanned documents: a file the portal refuses to read for the agent (the sa
   const msg = await refused(pi.registered.find((t) => t.name === "office_read")!.execute("c", { id: doc.docId }), "closed");
   assert.match(msg, /^error:not_found .*not a file your agent can read/);
   fs.rmSync(ws, { recursive: true, force: true });
+});
+
+/** A scanned document in a folder of its own, with the tools registered for the agent that works there, through the
+ * seams given. */
+async function scanned(seams: Parameters<typeof registerTools>[0]) {
+  __resetToolsForTests();
+  resetLive();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-tools-"));
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-")));
+  const file = path.join(ws, "shared.docx");
+  fs.writeFileSync(file, await (await import("../src/store")).templateDocx());
+  (await import("../src/store")).scanWorkspace([ws], root);
+  const pi = makePi();
+  registerTools({ extend: (f) => f(pi, { id: "chat-a" }), chatFolder: () => ws, folders: () => [{ path: ws, name: "Atlas", kind: "agent" }], root, record: () => {}, log: () => {}, ...seams });
+  const doc = (await import("../src/store")).listDocs(root)[0]!;
+  return { ws, file, doc, find: (name: string) => pi.registered.find((t) => t.name === name)! };
+}
+
+test("office_edit: a scanned document the agent may read but not change (its folder is closed to writing for it) is not written", async () => {
+  const asked: [string, string][] = [];
+  const s = await scanned({
+    openFile: (file) => ({ fd: fs.openSync(file, "r"), size: fs.statSync(file).size }),
+    mayWrite: (file, chatId) => {
+      asked.push([file, chatId]);
+      throw Object.assign(new Error("That folder is not one its agent may use"), { code: "invalid" });
+    },
+  });
+  const before = fs.readFileSync(s.file);
+  const msg = await refused(s.find("office_edit").execute("c", { id: s.doc.docId, ops: [{ quote: "New document", replacement: "Changed anyway" }], baseRevision: s.doc.mtimeMs }), "read-only");
+  assert.match(msg, /^error:not_found .*not a file your agent may change/);
+  assert.deepEqual(asked, [[s.file, "chat-a"]], "asked for that chat's agent, of the document's own file");
+  assert.deepEqual(fs.readFileSync(s.file), before, "nothing written");
+  fs.rmSync(s.ws, { recursive: true, force: true });
+});
+
+test("office_read/office_edit: a scanned file that grew past the library's cap since it was indexed is refused before a byte of it is read", async () => {
+  let read = false;
+  const s = await scanned({
+    // What the portal opened says it is 600 MiB now; reading from the descriptor would show it.
+    openFile: () => ({ fd: -1, size: 600 * 1024 * 1024 }),
+    mayWrite: () => {},
+  });
+  const realRead = fs.readSync;
+  (fs as { readSync: unknown }).readSync = (...args: unknown[]) => {
+    read = true;
+    return (realRead as (...a: unknown[]) => number)(...args);
+  };
+  const realClose = fs.closeSync;
+  (fs as { closeSync: unknown }).closeSync = (fd: number) => (fd === -1 ? undefined : realClose(fd));
+  try {
+    assert.match(await refused(s.find("office_read").execute("c", { id: s.doc.docId }), "too large"), /^error:too_large /);
+    assert.match(await refused(s.find("office_edit").execute("c", { id: s.doc.docId, ops: [{ quote: "New document", replacement: "x" }], baseRevision: s.doc.mtimeMs }), "too large"), /^error:too_large /);
+  } finally {
+    (fs as { readSync: unknown }).readSync = realRead;
+    (fs as { closeSync: unknown }).closeSync = realClose;
+  }
+  assert.equal(read, false, "nothing was read");
+  fs.rmSync(s.ws, { recursive: true, force: true });
 });
 
 test("a document written outside the extension: office_read shows its new revision, and office_edit with it goes through", async () => {

@@ -18,13 +18,17 @@ test("parseDocQuery: no doc, an empty one, or other parameters mean the list vie
   assert.equal(parseDocQuery("?x=1"), null);
 });
 
-test("floatingTag: the server's :latest/:stable/@latest refusal, mirrored in the input", () => {
+test("floatingTag: :latest, :stable, @latest and no tag at all are refused, by the server and in the input", () => {
   assert.equal(floatingTag("onlyoffice/documentserver:latest"), true);
   assert.equal(floatingTag("onlyoffice/documentserver:LATEST"), true);
   assert.equal(floatingTag("onlyoffice/documentserver:stable"), true);
   assert.equal(floatingTag("registry.example/onlyoffice@latest"), true);
-  assert.equal(floatingTag("onlyoffice/documentserver:10.0"), false);
-  assert.equal(floatingTag("onlyoffice/documentserver"), false);
+  assert.equal(floatingTag("onlyoffice/documentserver:10.0.0.1"), false);
+  assert.equal(floatingTag("onlyoffice/documentserver@sha256:ca17889f"), false);
+  // No tag is :latest to Docker; a registry's port is no tag.
+  assert.equal(floatingTag("onlyoffice/documentserver"), true);
+  assert.equal(floatingTag("registry.example:5000/onlyoffice/documentserver"), true);
+  assert.equal(floatingTag("registry.example:5000/onlyoffice/documentserver:10.0.0.1"), false);
 });
 
 test("editorsIn: every doc has a locks entry (empty when nobody is in it); missing maps say none", () => {

@@ -47,9 +47,9 @@ export function OfficeSettings() {
   const saveTag = () =>
     act("settings", async () => {
       const next = (tag ?? state.imageTag).trim();
-      if (next === "") throw new Error(t("{ imageTag } must be a non-empty string like onlyoffice/documentserver:10.0"));
+      if (next === "") throw new Error(t("{ imageTag } must be a non-empty string like onlyoffice/documentserver:10.0.0.1"));
       // The same refusal the server makes, made here first: never a floating tag (it breaks the co-editing keys).
-      if (floatingTag(next)) throw new Error(t("Never pin :latest — a moved image changes the Document Server under you and breaks the co-editing keys."));
+      if (floatingTag(next)) throw new Error(t("Pin a full tag, never :latest or none — a moved image changes the Document Server under you and breaks the co-editing keys."));
       await api.saveSettings({ imageTag: next });
     });
 
@@ -129,7 +129,7 @@ export function OfficeSettings() {
         </button>
       </div>
 
-      <portal.ui.Field label={t("Image tag (pinned)")} hint={t("Never pin :latest — a moved image changes the Document Server under you and breaks the co-editing keys. A new tag applies at the next start.")}>
+      <portal.ui.Field label={t("Image tag (pinned)")} hint={t("Pin a full tag, never :latest or none — a moved image changes the Document Server under you and breaks the co-editing keys. A new tag applies at the next start.")}>
         <div className="flex flex-wrap items-center gap-2">
           <input
             className={`${portal.ui.classes.input} mt-1 font-mono text-xs`}

@@ -646,6 +646,10 @@ test("/settings: enable fires ensureContainer exactly once with the settings tag
   res = await b.router.dispatch("POST", "/settings", { imageTag: "onlyoffice/documentserver:latest" });
   assert.equal(res.statusCode, 400);
   assert.equal((res.body as Record<string, unknown>).code, "invalid_image_tag");
+  // and so is a tag-less one, which Docker reads as :latest
+  res = await b.router.dispatch("POST", "/settings", { imageTag: "onlyoffice/documentserver" });
+  assert.equal(res.statusCode, 400);
+  assert.equal((res.body as Record<string, unknown>).code, "invalid_image_tag");
 
   // there is no co-editing switch in this payload any more (the agent is a co-editor under the revision gate,
   // full stop): a body carrying only the LEGACY key hits the existing no-known-setting path and changes nothing

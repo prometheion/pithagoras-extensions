@@ -15,12 +15,14 @@ export function parseDocQuery(search: string): string | null {
 }
 
 /**
- * What POST /settings refuses on its side (400 invalid_image_tag), refused here in the input before it is sent:
- * a floating image tag moves under you and breaks the co-editing keys, so the pinning warning is enforced, not
- * only said. The same words of the server's rule, mirrored client-side.
+ * A reference whose image moves under you, which breaks the co-editing keys: `:latest` or `:stable`, `@latest`, and
+ * one with no tag at all, which Docker reads as `:latest`. A colon before the last "/" is a registry's port, not a tag.
+ * One rule for both halves: POST /settings refuses such a tag (400 invalid_image_tag), and the Settings page refuses it
+ * in the input before it is sent.
  */
 export function floatingTag(tag: string): boolean {
-  return /:(latest|stable)$/i.test(tag) || tag.endsWith("@latest");
+  const name = tag.trim().slice(tag.trim().lastIndexOf("/") + 1);
+  return /:(latest|stable)$/i.test(tag) || /@latest$/i.test(tag) || !/[:@]/.test(name);
 }
 
 /** How many are in a document right now, out of the polled locks map: every doc has an entry, empty when nobody. */

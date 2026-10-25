@@ -45,6 +45,7 @@ import * as live from "./live";
 import * as callback from "./callback";
 import { wirePing } from "./ping";
 import { registerTools } from "./tools";
+import { floatingTag } from "./office-ui";
 
 /* ------------------------------------------------------------------ */
 /* constants                                                           */
@@ -461,8 +462,8 @@ function registerRoutes(dd: string, secret: string): void {
     }
     if ("imageTag" in body) {
       const tag = typeof body.imageTag === "string" ? body.imageTag.trim() : "";
-      if (tag === "") return res.status(400).json({ error: "{ imageTag } must be a non-empty string like onlyoffice/documentserver:10.0", code: "invalid_image_tag" });
-      if (/:(latest|stable)$/i.test(tag) || tag.endsWith("@latest")) return res.status(400).json({ error: "never pin :latest -- it moves under you and breaks co-editing keys", code: "invalid_image_tag" });
+      if (tag === "") return res.status(400).json({ error: "{ imageTag } must be a non-empty string like onlyoffice/documentserver:10.0.0.1", code: "invalid_image_tag" });
+      if (floatingTag(tag)) return res.status(400).json({ error: "never pin :latest or a tag-less image -- it moves under you and breaks co-editing keys", code: "invalid_image_tag" });
       patch.imageTag = tag;
     }
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "no known setting in the body -- send { enabled?, imageTag? }" });

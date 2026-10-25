@@ -8,7 +8,7 @@
  * JWT_IN_BODY=false (src/container.ts dsEnv); an embedded body.token is accepted ONLY as a defensive fallback for DS
  * builds that ignore those vars.
  *
- * document.key format: "office|" + docId + "|" + base64url-no-pad(sha256(String(expectedMtimeMs))).
+ * document.key format: keyIdOf(docId) + "." + base64url-no-pad(sha256(String(expectedMtimeMs))) (makeKey).
  * The hash pins the revision the config was minted against, so a stale session's save-back can never clobber a
  * newer revision (the file's mtime is the revision the tools compare against). The persist path re-derives the
  * hash from the CURRENT store.getDoc(docId) meta and refuses on mismatch -- see persistSaved.
@@ -103,23 +103,30 @@ export function revHashOf(mtimeMs: number): string {
   return createHash("sha256").update(String(mtimeMs)).digest("base64url");
 }
 
-/** The only key shape this package mints (server.ts editor-config) and the only one parseKey accepts. */
-export function makeKey(docId: string, expectedMtimeMs: number): string {
-  return `office|${docId}|${revHashOf(expectedMtimeMs)}`;
+/** The document's part of every key: the first 16 bytes of sha256(docId), base64url (22 characters). A docId is up to
+ * 200 characters and the Document Server takes a key of at most 128, so the key names the document by this, and the
+ * callback finds the document whose docId gives it (`docIdOf`). */
+export function keyIdOf(docId: string): string {
+  return createHash("sha256").update(docId).digest("base64url").slice(0, 22);
 }
 
-/**
- * Parse "office|" + docId + "|" + base64url-no-pad(sha256(...)). Null when the prefix is missing, the docId part
- * is empty, or the hash part is not 43 base64url characters (exactly one unpadded sha256 digest). The docId is
- * taken greedily between the first and LAST pipe, so a future docId containing "|" still parses.
- */
-export function parseKey(key: string): { docId: string; revHash: string } | null {
+/** The only key shape this package mints (server.ts editor-config) and the only one parseKey accepts:
+ * `<keyIdOf(docId)>.<revHashOf(mtimeMs)>`, 66 characters of the only ones the Document Server allows in a key
+ * (`0-9 a-z A-Z - . _ =`: a key with any other is refused when the editor connects, error -23). */
+export function makeKey(docId: string, expectedMtimeMs: number): string {
+  return `${keyIdOf(docId)}.${revHashOf(expectedMtimeMs)}`;
+}
+
+/** The two parts of a key this package minted, or null for anything else. */
+export function parseKey(key: string): { keyId: string; revHash: string } | null {
   if (typeof key !== "string") return null;
-  const m = /^office\|(.+)\|[A-Za-z0-9_-]{43}$/.exec(key);
-  if (!m) return null;
-  const docId = m[1];
-  if (docId === "") return null;
-  return { docId, revHash: key.slice(7 + docId.length + 1) };
+  const m = /^([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/.exec(key);
+  return m ? { keyId: m[1], revHash: m[2] } : null;
+}
+
+/** The document a key names, among those in the library now; null for none (deleted since it was opened). */
+export function docIdOf(keyId: string, root: string): string | null {
+  return store.listDocs(root).find((d) => keyIdOf(d.docId) === keyId)?.docId ?? null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -347,6 +354,13 @@ async function handleDispatch(
     respond(res, 400, 1);
     return;
   }
+  const docId = docIdOf(parsed.keyId, cfg.root ?? dataDir());
+  if (docId === null) {
+    // Deleted since it was opened: a save has nowhere to go (the editor says so), anything else has nothing to change.
+    log(`callback status ${status} for a document no longer in the library (key ${String(body.key)})`);
+    respond(res, 200, status === 2 || status === 6 ? 1 : 0);
+    return;
+  }
 
   switch (status) {
     case 1: {
@@ -357,20 +371,20 @@ async function handleDispatch(
           if (u && typeof u === "object" && typeof (u as Record<string, unknown>).id === "string") {
             const id = (u as { id: string }).id;
             const name = (u as { name?: unknown }).name;
-            live.setUser(parsed.docId, { id, name: typeof name === "string" ? name : undefined }, true);
+            live.setUser(docId, { id, name: typeof name === "string" ? name : undefined }, true);
             snapshotIds.add(id);
           }
         }
       }
-      for (const tracked of live.usersOf(parsed.docId)) if (!snapshotIds.has(tracked.id)) live.setUser(parsed.docId, { id: tracked.id }, false);
-      live.setLocked(parsed.docId, live.usersOf(parsed.docId).length > 0);
+      for (const tracked of live.usersOf(docId)) if (!snapshotIds.has(tracked.id)) live.setUser(docId, { id: tracked.id }, false);
+      live.setLocked(docId, live.usersOf(docId).length > 0);
 
       // Forcesave-click (actions[].type === 2) while the session continues -> persist NOW from body.url and STAY
       // locked (status-6 rules; the canonical result may still arrive as a status-6 callback -- lastPersist
       // absorbs that duplicate). The envelope's forcesavetype field belongs to statuses 6/7 only.
       const actions = Array.isArray(body.actions) ? body.actions : [];
       if (actions.some((a) => a && typeof a === "object" && (a as { type?: unknown }).type === 2) && typeof body.url === "string") {
-        await persistSaved(log, cfg, parsed.docId, parsed.revHash, body, false, res); // stays locked
+        await persistSaved(log, cfg, docId, parsed.revHash, body, false, res); // stays locked
         return;
       }
       respond(res, 200, 0);
@@ -380,14 +394,14 @@ async function handleDispatch(
     case 3: {
       // Document saving error AT DS: log only, no disk write. We did not fail internally -> answer 0 so DS does not
       // loop.
-      log(`status-3: document server reported a save error for ${parsed.docId}`);
+      log(`status-3: document server reported a save error for ${docId}`);
       respond(res, 200, 0);
       return;
     }
 
     case 7: {
       // Force-saving error AT DS: same treatment as status 3 (one line each, no disk).
-      log(`status-7: document server reported a force-save error for ${parsed.docId} (forcesavetype=${JSON.stringify(body.forcesavetype ?? null)})`);
+      log(`status-7: document server reported a force-save error for ${docId} (forcesavetype=${JSON.stringify(body.forcesavetype ?? null)})`);
       respond(res, 200, 0);
       return;
     }
@@ -395,7 +409,7 @@ async function handleDispatch(
     case 4: {
       // Closed with no changes: terminal close -- nobody is connected anymore, so clear BOTH the flag and any
       // tracked presence (no disk write of any kind).
-      live.clearDoc(parsed.docId);
+      live.clearDoc(docId);
       respond(res, 200, 0);
       return;
     }
@@ -404,12 +418,12 @@ async function handleDispatch(
     case 6: {
       // Ready-for-saving / force-saved: persist (fetch url w/ retries -> persistBytes gate -> history zip ->
       // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked.
-      await persistSaved(log, cfg, parsed.docId, parsed.revHash, body, status === 2, res);
+      await persistSaved(log, cfg, docId, parsed.revHash, body, status === 2, res);
       return;
     }
 
     default: {
-      log(`unknown callback status ${status} for ${parsed.docId}`);
+      log(`unknown callback status ${status} for ${docId}`);
       respond(res, 400, 1);
       return;
     }

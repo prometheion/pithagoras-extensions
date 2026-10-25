@@ -22,7 +22,7 @@ import { rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
 import { verifyJwt } from "../src/jwt";
-import { makeKey, parseKey, revHashOf } from "../src/callback";
+import { docIdOf, makeKey, parseKey, revHashOf } from "../src/callback";
 
 const DEFAULT_TAG = "onlyoffice/documentserver:10.0";
 
@@ -304,9 +304,11 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   assert.equal(document.title, "Plan.docx");
   // key: exactly makeKey(docId, current mtime) and parseable back
   assert.equal(document.key, makeKey(doc.docId, doc.mtimeMs));
-  const parsed = parseKey(String(document.key)) as { docId: string; revHash: string };
-  assert.equal(parsed.docId, doc.docId);
+  const parsed = parseKey(String(document.key)) as { keyId: string; revHash: string };
+  assert.equal(docIdOf(parsed.keyId, b.root), doc.docId);
   assert.equal(parsed.revHash, revHashOf(doc.mtimeMs));
+  // only what the Document Server takes in a key, and no more than it takes
+  assert.match(String(document.key), /^[0-9a-zA-Z_.=-]{1,128}$/);
   // url: the island's relay, which the Document Server reaches and which passes it on to the loopback listener;
   // ticketed, and the ticket verifies with the boot secret
   const url = String(document.url);

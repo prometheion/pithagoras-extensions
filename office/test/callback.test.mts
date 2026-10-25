@@ -17,7 +17,7 @@ import { createHmac, createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { signJwt, verifyJwt } from "../src/jwt";
 import {
-  CallbackState, configure, createCallbackHandler, handleCallback, makeKey, onDocumentServer, onPersisted, parseKey, revHashOf,
+  CallbackState, configure, createCallbackHandler, docIdOf, handleCallback, keyIdOf, makeKey, onDocumentServer, onPersisted, parseKey, revHashOf,
 } from "../src/callback";
 import { createDoc, getDoc } from "../src/store";
 import * as live from "../src/live";
@@ -146,30 +146,39 @@ async function startFileServer(
 /* parseKey                                                            */
 /* ------------------------------------------------------------------ */
 
-test("parseKey: valid round-trip (sha256 of '12345', base64url no pad)", () => {
+test("makeKey/parseKey: the document's id hash and the revision hash, round-trip", () => {
   const sha = createHash("sha256").update("12345").digest("base64url");
   assert.equal(sha.length, 43); // one unpadded sha256 digest in base64url
   assert.equal(revHashOf(12345), sha);
-  assert.equal(makeKey("my-doc", 12345), `office|my-doc|${sha}`);
-  const parsed = parseKey(`office|my-doc|${sha}`);
-  assert.deepEqual(parsed, { docId: "my-doc", revHash: sha });
+  const keyId = createHash("sha256").update("my-doc").digest("base64url").slice(0, 22);
+  assert.equal(keyIdOf("my-doc"), keyId);
+  assert.equal(makeKey("my-doc", 12345), `${keyId}.${sha}`);
+  assert.deepEqual(parseKey(`${keyId}.${sha}`), { keyId, revHash: sha });
 });
 
-test("parseKey: a docId containing a pipe still parses (greedy first/last split)", () => {
-  const key = makeKey("a|b", 42);
-  assert.deepEqual(parseKey(key), { docId: "a|b", revHash: revHashOf(42) });
+test("makeKey: every key is one the Document Server takes (its alphabet, at most 128), for the longest title too", async () => {
+  const root = tmpRoot();
+  const title = "Ä long title with spaces, punctuation | pipes & ümlauts ".repeat(4).slice(0, 200);
+  const doc = await createDoc({ title, type: "word" }, root);
+  assert.ok(doc.docId.length > 128, "a docId alone can be longer than a key may be");
+  for (const key of [makeKey(doc.docId, doc.mtimeMs), makeKey("a", 0), makeKey("x|y", 1.5)]) {
+    assert.match(key, /^[0-9a-zA-Z_.=-]{1,128}$/, key);
+  }
+  const parsed = parseKey(makeKey(doc.docId, doc.mtimeMs))!;
+  assert.equal(docIdOf(parsed.keyId, root), doc.docId);
+  assert.equal(docIdOf(keyIdOf("not-in-the-library"), root), null);
 });
 
-test("parseKey: null on missing parts, empty docId and malformed hash part", () => {
+test("parseKey: null for anything this package did not mint", () => {
   const sha = revHashOf(1);
+  const keyId = keyIdOf("doc");
   assert.equal(parseKey(""), null);
-  assert.equal(parseKey(`my-doc|${sha}`), null); // no "office|" prefix
-  assert.equal(parseKey("office|my-doc"), null); // missing hash part
-  assert.equal(parseKey(`office|my-doc|`), null); // empty hash part
-  assert.equal(parseKey(`office||${sha}`), null); // empty docId
-  assert.equal(parseKey(`office|doc|x`.padEnd(7 + 4 + 50, "z")), null); // wrong length / alphabet
-  assert.equal(parseKey("office|doc|" + sha.slice(0, 42)), null); // 42 chars -- not a sha256 digest
-  assert.equal(parseKey("office|doc|" + "=".repeat(43)), null); // "=" is not base64url
+  assert.equal(parseKey(`office|doc|${sha}`), null); // the old shape, which the Document Server refuses
+  assert.equal(parseKey(keyId), null); // missing hash part
+  assert.equal(parseKey(`${keyId}.`), null); // empty hash part
+  assert.equal(parseKey(`.${sha}`), null); // empty id part
+  assert.equal(parseKey(`${keyId}.${sha.slice(0, 42)}`), null); // 42 chars -- not a sha256 digest
+  assert.equal(parseKey(`${keyId}.${"=".repeat(43)}`), null); // "=" is not base64url
 });
 
 /* ------------------------------------------------------------------ */
@@ -361,17 +370,18 @@ test("JWT: expired token -> 401; missing token entirely -> 401", async () => {
 test("JWT: embedded body.token is accepted as a defensive fallback (header path stays canonical)", async () => {
   const root = tmpRoot();
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
-  live.setLocked("fallback-doc", true);
+  const doc = await createDoc({ title: "Fallback", type: "word" }, root);
+  live.setLocked(doc.docId, true);
 
   const res = await post(handler, {
-    key: makeKey("fallback-doc", 1),
+    key: makeKey(doc.docId, 1),
     status: 4,
     // The fallback token itself must carry the signed envelope (the body is never trusted).
-    token: signJwt({ key: makeKey("fallback-doc", 1), status: 4 }, 60_000, SECRET), // no x-auth-token header
+    token: signJwt({ key: makeKey(doc.docId, 1), status: 4 }, 60_000, SECRET), // no x-auth-token header
   });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(json(res), { error: 0 });
-  assert.equal(live.pollState("fallback-doc", 0).locked, false, "status-4 unlock applied through the fallback");
+  assert.equal(live.pollState(doc.docId, 0).locked, false, "status-4 unlock applied through the fallback");
 });
 
 test("envelope binding: valid token without signed key/status cannot drive a hostile body", async () => {
@@ -528,7 +538,7 @@ test("retry: all attempts fail -> JSON error, doc untouched, lock left as-is", a
 test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key -> 400", async () => {
   const root = tmpRoot();
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
-  const key = makeKey("route-doc", 1);
+  const key = makeKey((await createDoc({ title: "Route", type: "word" }, root)).docId, 1);
   // Envelopes are signed into the token claims; each post below signs its own envelope.
   const tokenFor = (env: Record<string, unknown>) => ({ "x-auth-token": signJwt(env, 60_000, SECRET) });
 
@@ -554,6 +564,11 @@ test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key ->
   const noKey = await post(handler, { key, status: 2 }, { headers: tokenFor({ status: 2 }) });
   assert.equal(noKey.statusCode, 400);
   assert.deepEqual(json(noKey), { error: 1 });
+
+  // A key of a document deleted since it was opened: a save is refused, a close needs nothing.
+  const gone = makeKey("deleted-since", 1);
+  assert.deepEqual(json(await post(handler, { key: gone, status: 2 }, { headers: tokenFor({ key: gone, status: 2, url: "http://x/cache/files/a" }) })), { error: 1 });
+  assert.deepEqual(json(await post(handler, { key: gone, status: 4 }, { headers: tokenFor({ key: gone, status: 4 }) })), { error: 0 });
 });
 
 /* ------------------------------------------------------------------ */
@@ -609,26 +624,27 @@ test("onDocumentServer: the path from /cache/files/ on and the query, on the Doc
 
 test("bare handleCallback: 503 until configure; after configure it serves requests", async () => {
   const root = tmpRoot();
+  const wire = (await createDoc({ title: "Wire", type: "word" }, root)).docId;
 
   // Not configured yet (no test before this one called configure).
-  const notYet = await post(handleCallback, { key: makeKey("wire-doc", 1), status: 4 });
+  const notYet = await post(handleCallback, { key: makeKey(wire, 1), status: 4 });
   assert.equal(notYet.statusCode, 503);
   assert.deepEqual(json(notYet), { error: 1 });
 
   // Configured but the DS record is still absent (getState -> null) -> 503 as well.
   configure({ getState: () => null, getSecret: () => SECRET, getOrigin: dsOrigin, root, log: () => {} });
-  const noState = await post(handleCallback, { key: makeKey("wire-doc", 1), status: 4 });
+  const noState = await post(handleCallback, { key: makeKey(wire, 1), status: 4 });
   assert.equal(noState.statusCode, 503);
   assert.deepEqual(json(noState), { error: 1 });
 
   // The real wiring shape (what server.ts does at boot).
-  live.setLocked("wire-doc", true);
+  live.setLocked(wire, true);
   configure({ getState: () => DS_STATE, getSecret: () => SECRET, getOrigin: dsOrigin, root, log: () => {} });
-  const wireEnv = { key: makeKey("wire-doc", 1), status: 4 };
+  const wireEnv = { key: makeKey(wire, 1), status: 4 };
   const ok = await post(handleCallback, wireEnv, { headers: { "x-auth-token": signJwt(wireEnv, 60_000, SECRET) } });
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(json(ok), { error: 0 });
-  assert.equal(live.pollState("wire-doc", 0).locked, false);
+  assert.equal(live.pollState(wire, 0).locked, false);
 });
 
 /* ------------------------------------------------------------------ */

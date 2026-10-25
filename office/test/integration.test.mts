@@ -35,7 +35,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
-import officeServer, { jwtSecret, loopbackPort } from "../src/server";
+import officeServer, { jwtSecret, loopbackPort, ticketSecret, ticketSubject } from "../src/server";
 import * as store from "../src/store";
 import * as live from "../src/live";
 import { mintTicket } from "../src/tickets";
@@ -137,8 +137,8 @@ IT("ticketed GET on the real loopback listener serves a >1 MB document byte-for-
     const fresh = store.getDoc(doc.docId, b.root)!;
     assert.ok(fresh.sizeBytes > 1024 * 1024, `the index sizeBytes is ${fresh.sizeBytes} (>1 MB)`);
 
-    const secret = jwtSecret(b.root);
-    const { token } = mintTicket(fresh.docId, 600_000, secret);
+    const secret = ticketSecret(b.root);
+    const { token } = mintTicket(ticketSubject(fresh.docId, fresh.mtimeMs), 600_000, secret);
     // node's fetch carries no cookie jar: this request -- like the DS's own GET -- crosses without a session cookie.
     const r = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${token}`);
     assert.equal(r.status, 200);
@@ -151,7 +151,7 @@ IT("ticketed GET on the real loopback listener serves a >1 MB document byte-for-
     // and it is a real Word document end to end, not just bytes:
     assert.ok(parseDocx(served).text.startsWith("Heavy document"), "the heavy doc still parses as docx");
 
-    const { token: dead } = mintTicket(fresh.docId, -1_000, secret); // negative ttl -> already expired at mint time
+    const { token: dead } = mintTicket(ticketSubject(fresh.docId, fresh.mtimeMs), -1_000, secret); // negative ttl -> already expired at mint time
     const r2 = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${dead}`);
     assert.equal(r2.status, 401);
     assert.deepEqual(await r2.json(), { error: "invalid or expired document ticket", code: "bad_ticket" });
@@ -255,6 +255,7 @@ IT("office_edit with a seat the Document Server never confirmed: proceeds under 
   __resetToolsForTests(); // this file's process starts clean; be explicit
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-it-tools-"));
   const home = "chat-aegis-home";
+  const folder = "/workspaces/aegis"; // what owns: the agent's folder
 
   // Register through the REAL tools seams: an agent folder whose home chat owns what it edits.
   type ToolDef = { name: string; execute: (callId: unknown, params: Record<string, unknown>) => Promise<unknown> };
@@ -270,7 +271,7 @@ IT("office_edit with a seat the Document Server never confirmed: proceeds under 
   assert.ok(tools2.office_edit, "office_edit registered into the agent home (ownership scope is real here)");
 
   /* Scenario A -- a minted seat the Document Server never confirmed (the editor did not load) does not block. */
-  const docA = await store.createDoc({ title: "Order Doc", type: "word", owner: home }, root); // template says "New document"
+  const docA = await store.createDoc({ title: "Order Doc", type: "word", owner: folder }, root); // template says "New document"
   live.setUser(docA.docId, { id: "u-sam", name: "Sam" }, true); // a fake human with the editor open
   const fileA = path.join(root, "docs", docA.docId, "Order Doc.docx");
   // Pin the file mtime to an exact value AND mirror it in the index so the ZERO-tolerance gate is deterministic
@@ -286,7 +287,7 @@ IT("office_edit with a seat the Document Server never confirmed: proceeds under 
   /* Scenario B -- an EXTERNAL co-editor save (persistBytes, the same path the DS callback persist takes)
    * moves the revision after the agent read it: office_edit must refuse error:revision_mismatch CONFLICT
    * and leave the human's bytes on disk. */
-  const docB = await store.createDoc({ title: "Bump Doc", type: "word", owner: home }, root);
+  const docB = await store.createDoc({ title: "Bump Doc", type: "word", owner: folder }, root);
   live.setUser(docB.docId, { id: "u-sam", name: "Sam" }, true);
   const fileB = path.join(root, "docs", docB.docId, "Bump Doc.docx");
   // Same pin as Scenario A: the agent reads at exactly this revision (index mirrors the stat readback)...

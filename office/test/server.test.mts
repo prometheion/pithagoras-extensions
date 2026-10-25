@@ -16,7 +16,7 @@ import type { AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { fakeDocker } from "./fake-docker.mts";
 import * as container from "../src/container";
-import officeServer, { dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept } from "../src/server";
+import officeServer, { dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept, ticketSecret, ticketSubject } from "../src/server";
 import * as store from "../src/store";
 import { commentKeys, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
@@ -238,8 +238,8 @@ test("the loopback listener answers on 127.0.0.1 alone", async () => {
 test("loopback GET /doc/<ticket> returns the exact bytes + content-type + no-store; bad/expired tickets -> 401", async () => {
   const b = await boot();
   const doc = await store.createDoc({ title: "Loop", type: "word" }, b.root);
-  const secret = jwtSecret(b.root);
-  const { token } = mintTicket(doc.docId, 600_000, secret);
+  const secret = ticketSecret(b.root);
+  const { token } = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), 600_000, secret);
 
   const r = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${token}`);
   assert.equal(r.status, 200);
@@ -250,7 +250,7 @@ test("loopback GET /doc/<ticket> returns the exact bytes + content-type + no-sto
 
   // xlsx gets the spreadsheet media type
   const cell = await store.createDoc({ title: "Cells", type: "cell" }, b.root);
-  const { token: t2 } = mintTicket(cell.docId, 600_000, secret);
+  const { token: t2 } = mintTicket(ticketSubject(cell.docId, cell.mtimeMs), 600_000, secret);
   const r2 = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${t2}`);
   assert.equal(r2.headers.get("content-type"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 
@@ -258,12 +258,36 @@ test("loopback GET /doc/<ticket> returns the exact bytes + content-type + no-sto
   const r3 = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/garbage.ticket.here`);
   assert.equal(r3.status, 401);
   assert.deepEqual(await r3.json(), { error: "invalid or expired document ticket", code: "bad_ticket" });
-  const { token: expired } = mintTicket(doc.docId, -1_000, secret);
+  const { token: expired } = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), -1_000, secret);
   assert.equal(verifyTicket(expired, secret), null, "sanity: the negative-ttl ticket does not verify");
   const r4 = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${expired}`);
   assert.equal(r4.status, 401);
 
   live.clearDoc(doc.docId); live.clearDoc(cell.docId);
+  await b.cleanup();
+});
+
+test("loopback GET /doc/<ticket>: the Document Server's own secret makes no ticket, one for an older revision reads nothing, and a link in the file's place is not followed", async () => {
+  const b = await boot();
+  const doc = await store.createDoc({ title: "Ticketed", type: "word" }, b.root);
+  assert.notEqual(ticketSecret(b.root), jwtSecret(b.root), "two secrets: the Document Server holds only one of them");
+  const forged = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), 600_000, jwtSecret(b.root)).token;
+  assert.equal((await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${forged}`)).status, 401);
+  const before = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), 600_000, ticketSecret(b.root)).token;
+  const file = path.join(b.root, "docs", doc.docId, "Ticketed.docx");
+  fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000)); // something wrote it since
+  assert.equal((await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${before}`)).status, 409);
+  // A link in the file's place, to a file the portal can read and an agent cannot.
+  const secretFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "office-secret-file-")), "secret.docx");
+  fs.writeFileSync(secretFile, "not for the editor");
+  fs.rmSync(file);
+  fs.symlinkSync(secretFile, file);
+  const now = store.refresh(doc.docId, b.root)!;
+  const linked = mintTicket(ticketSubject(doc.docId, now.mtimeMs), 600_000, ticketSecret(b.root)).token;
+  const res = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${linked}`);
+  assert.equal(res.status, 404);
+  assert.doesNotMatch(await res.text(), /not for the editor/);
+  live.clearDoc(doc.docId);
   await b.cleanup();
 });
 
@@ -316,7 +340,7 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   assert.ok(url.startsWith("http://pithagoras-office-ds-relay:3891/doc/"), `url names the relay: ${url}`);
   const ticket = url.split("/doc/")[1];
   assert.ok(ticket.length > 0 && !ticket.includes("/"));
-  assert.equal(verifyTicket(ticket, secret)?.docId, doc.docId, "the minted ticket verifies with the boot secret");
+  assert.equal(verifyTicket(ticket, ticketSecret(b.root))?.docId, ticketSubject(doc.docId, doc.mtimeMs), "the minted ticket names the document at its revision, with the ticket secret");
   // editorConfig
   const ec = body.editorConfig as Record<string, unknown>;
   assert.equal(ec.callbackUrl, "http://pithagoras-office-ds-relay:3891/callback");

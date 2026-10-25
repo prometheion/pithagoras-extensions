@@ -99,11 +99,11 @@ function recordAudit(entry: { subject: string; reason?: string; chatId?: string 
 /* the shared secret                                                   */
 /* ------------------------------------------------------------------ */
 
-/** Create dataDir()/jwt-secret ONCE -- mode 0600, explicit chmod (umask-proof), hex of crypto.randomBytes(32) -- and
+/** Create dataDir()/<name> ONCE -- mode 0600, explicit chmod (umask-proof), hex of crypto.randomBytes(32) -- and
  * return its trimmed content. Existing files are reused byte-for-byte (second boot and every one after). */
-function ensureJwtSecret(dd: string): string {
+function ensureSecret(dd: string, name: string): string {
   fs.mkdirSync(dd, { recursive: true });
-  const file = path.join(dd, "jwt-secret");
+  const file = path.join(dd, name);
   let raw = "";
   try {
     raw = fs.readFileSync(file, "utf8");
@@ -115,9 +115,23 @@ function ensureJwtSecret(dd: string): string {
   return fs.readFileSync(file, "utf8").trim();
 }
 
-/** Read the boot secret from `root` (the portal dataDir by default). Boot creates the file; this only reads. */
+/** Read the boot secret from `root` (the portal dataDir by default): the one the Document Server is given (editor
+ * configs, callbacks). Boot creates the file; this only reads. */
 export function jwtSecret(root?: string): string {
   return fs.readFileSync(path.join(root ?? dataDir(), "jwt-secret"), "utf8").trim();
+}
+
+/** The secret document tickets are signed with, which the Document Server is never given: a converter that a hostile
+ * file breaks into finds the JWT secret in its environment, and with it alone can forge no ticket to read a
+ * document it was not opened on. */
+export function ticketSecret(root?: string): string {
+  return fs.readFileSync(path.join(root ?? dataDir(), "ticket-secret"), "utf8").trim();
+}
+
+/** What a ticket names: a document at one revision. The ticket is refused once the document moved on, so one made
+ * for an editor cannot read what an agent or a script wrote later. */
+export function ticketSubject(docId: string, mtimeMs: number): string {
+  return `${docId}@${mtimeMs}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -176,7 +190,7 @@ function jsonRaw(res: http.ServerResponse, status: number, body: unknown): void 
 /* the loopback listener                                    */
 /* ------------------------------------------------------------------ */
 
-function makeLoopbackHandler(dd: string, secret: string): (req: http.IncomingMessage, res: http.ServerResponse) => void {
+function makeLoopbackHandler(dd: string, tickets: string): (req: http.IncomingMessage, res: http.ServerResponse) => void {
   return (req, res) => {
     let pathname: string;
     try {
@@ -189,19 +203,25 @@ function makeLoopbackHandler(dd: string, secret: string): (req: http.IncomingMes
       // Tickets are base64url tokens: no percent-decoding -- decodeURIComponent would throw URIError on a
       // malformed escape, and an uncaught throw in the http listener kills the server. verifyTicket enforces the alphabet anyway.
       const ticket = pathname.slice("/doc/".length);
-      const verified = verifyTicket(ticket, secret);
+      const verified = verifyTicket(ticket, tickets);
       if (!verified) {
         jsonRaw(res, 401, { error: "invalid or expired document ticket", code: "bad_ticket" });
         return;
       }
-      const doc = store.getDoc(verified.docId, dd);
+      const at = verified.docId.lastIndexOf("@");
+      const docId = verified.docId.slice(0, at);
+      const doc = at > 0 ? store.refresh(docId, dd) : null;
       if (!doc) {
-        jsonRaw(res, 404, { error: `no such document ${verified.docId}`, code: "not_found" });
+        jsonRaw(res, 404, { error: `no such document ${docId}`, code: "not_found" });
+        return;
+      }
+      if (ticketSubject(doc.docId, doc.mtimeMs) !== verified.docId) {
+        jsonRaw(res, 409, { error: `${doc.docId} changed since this ticket was made; open it again`, code: "revision_mismatch" });
         return;
       }
       let bytes: Buffer;
       try {
-        bytes = fs.readFileSync(fileFor(dd, doc));
+        bytes = store.readDoc(doc, dd);
       } catch {
         jsonRaw(res, 404, { error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
         return;
@@ -235,7 +255,7 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
   const record = container.readDsRecord(dd);
   if (!record) return { res: { status: 503, body: { error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" } } };
 
-  const { token: ticket } = mintTicket(doc.docId, TICKET_TTL_MS, secret);
+  const { token: ticket } = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), TICKET_TTL_MS, ticketSecret(dd));
   // document.url is the ticketed GET on the loopback listener and callbackUrl sits right next door, both through the
   // island's relay: the one address the Document Server reaches, which passes them on to the listener (container.ts).
   const base = `http://${container.NAMES.relay}:${container.BACK_PORT}`;
@@ -360,7 +380,7 @@ function registerRoutes(dd: string, secret: string): void {
     if (!doc) return res.status(404).json({ error: `no document with id ${String(req.params?.id ?? "")}`, code: "not_found" });
     let bytes: Buffer;
     try {
-      bytes = fs.readFileSync(fileFor(dd, doc));
+      bytes = store.readDoc(doc, dd);
     } catch {
       return res.status(404).json({ error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
     }
@@ -735,7 +755,8 @@ export function forwardedFor(req: { headers?: Record<string, unknown>; socket?: 
 export default async function officeServer(portalObj: ServerPortal): Promise<() => Promise<void>> {
   setPortal(portalObj);
   const dd = portal().dataDir();
-  const secret = ensureJwtSecret(dd); // the one HS256 secret: callbacks, tickets and configs all sign with it
+  const secret = ensureSecret(dd, "jwt-secret"); // the Document Server's HS256 secret: editor configs and callbacks
+  const tickets = ensureSecret(dd, "ticket-secret"); // the document tickets', which the Document Server never sees
 
   // the seams, as their module headers describe them (audit lands in portal().audit AND a log line).
   // NOTE: there is NO co-editing switch and no flush-before-write hook to install here -- office_edit runs under
@@ -761,7 +782,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   registerRoutes(dd, secret);
 
   // the cookie-free loopback listener, on 127.0.0.1 alone
-  const server = http.createServer(makeLoopbackHandler(dd, secret));
+  const server = http.createServer(makeLoopbackHandler(dd, tickets));
   loopPort = await listenLoopback(server, dd);
   container.setBackPort(loopPort);
 

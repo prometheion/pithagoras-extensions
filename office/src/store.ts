@@ -816,7 +816,7 @@ export function exportDoc(docId: string, destAbsDir: string, root = dataDir()): 
   if (!doc) throw notFound(`no document with id ${docId}`);
   fs.mkdirSync(destAbsDir, { recursive: true });
   const dest = path.join(destAbsDir, `${doc.title}.${doc.ext}`);
-  fs.copyFileSync(docPath(doc, rootDir), dest);
+  fs.writeFileSync(dest, readDoc(doc, rootDir)); // never through a link put in the file's place
   return path.resolve(dest);
 }
 
@@ -837,6 +837,19 @@ function plainFile(doc: DocMeta, file: string): fs.Stats {
     throw Object.assign(new Error(`the folder of ${file} leads elsewhere now (a link took its place)`), { code: "invalid" });
   }
   return st;
+}
+
+/** A document's bytes, from its own file and never through a link (plainFile, then opened without following one), so
+ * that an agent that put a link in its file's place cannot have the portal hand out what the link leads to. */
+export function readDoc(doc: DocMeta, root = dataDir()): Buffer {
+  const file = docPath(doc, root);
+  plainFile(doc, file);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    return fs.readFileSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**

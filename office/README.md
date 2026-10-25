@@ -81,10 +81,13 @@ same page).
   of its own, by putting that container on the network. Port 80 is never published on the machine.
 - **Two routes are open to the Document Server, on a listener of their own.** The container has no portal session,
   so the two things it needs are served by a small listener bound to `127.0.0.1`, which the relays lead to and
-  nothing else: a document fetch with a signed ticket that expires in 10 minutes (`GET /doc/<ticket>`), and the save
-  callback (`POST /callback`, which must carry a valid HS256 token). Nothing else answers there. The tokens are signed
-  with a secret created once in the extension's data folder (`jwt-secret`, mode 0600). A save is downloaded from the
-  Document Server itself, from its files (`/cache/files/`) alone, whatever address the callback names.
+  nothing else: a document fetch with a signed ticket for one document at one revision that expires in 10 minutes
+  (`GET /doc/<ticket>`), and the save callback (`POST /callback`, which must carry a valid HS256 token). Nothing else
+  answers there. The editor configs and callbacks are signed with a secret created once in the extension's data folder
+  (`jwt-secret`, mode 0600), which the Document Server is given; the tickets with another (`ticket-secret`), which it
+  is not, so a converter that a hostile file breaks into cannot forge one. A save is downloaded from the Document
+  Server itself, from its files (`/cache/files/`) alone, whatever address the callback names. A document's file is
+  read and written at its own name only: a link put in its place is refused, never followed.
 - **The editor sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame and every
   asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which the portal gates
   like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and only to the
@@ -99,6 +102,7 @@ same page).
 ## Data
 
 Everything is in the extension's own data folder, beside the portal's other data: `settings.json`, `jwt-secret`,
+`ticket-secret`,
 `ds.json` (the container and image of the last start), `listener-port` (the listener's port, taken again at the
 next start), `index.json` and `docs/<id>/<title>.<ext>` (the library),
 `.trash/`, `state/<id>.json` (the comments last seen, so that a comment wakes an agent once) and

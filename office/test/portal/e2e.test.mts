@@ -77,8 +77,25 @@ window.__events = [];
   await new Promise((ok, no) => { const s = document.createElement("script"); s.src = cfg.apiJs; s.onload = ok; s.onerror = () => no(new Error("api.js")); document.head.appendChild(s); });
   const c = { ...cfg, width: "100%", height: "700px" };
   delete c.apiJs;
-  c.events = { onDocumentReady: () => __events.push(["ready"]), onError: (e) => __events.push(["error", e.data]), onWarning: (e) => __events.push(["warning", e.data]) };
+  // As the Office page: every second it asks how its key stands, and loads the agent's revision with the editor's own
+  // refreshFile when it is told to follow (and when the editor asks for it).
+  window.__key = c.document.key;
+  const reload = async () => {
+    const r2 = await fetch("/api/x/%40pithagoras/office/editor-config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ doc: ${JSON.stringify(req.query.doc)} }) });
+    const next = await r2.json();
+    delete next.apiJs;
+    __events.push(["refresh", next.document.key]);
+    window.__editor.refreshFile(next);
+    window.__key = next.document.key;
+  };
+  c.events = { onDocumentReady: () => __events.push(["ready"]), onError: (e) => __events.push(["error", e.data]), onWarning: (e) => __events.push(["warning", e.data]), onRequestRefreshFile: () => { __events.push(["asked to refresh"]); void reload(); } };
   window.__editor = new DocsAPI.DocEditor("ph", c);
+  setInterval(async () => {
+    const r3 = await fetch("/api/x/%40pithagoras/office/editor-state?doc=" + encodeURIComponent(${JSON.stringify(req.query.doc)}) + "&key=" + encodeURIComponent(window.__key));
+    const standing = (await r3.json()).standing;
+    if (standing !== "current") __events.push(["standing", standing]);
+    if (standing === "follow") await reload();
+  }, 1000);
 })().catch((e) => __events.push(["exception", String(e)]));
 </script></body></html>`),
   );
@@ -195,6 +212,77 @@ window.__events = [];
 
   test("a document opens in the editor, takes what is typed, and the save lands in the file", { timeout: 600_000 }, async () => {
     await openTypeSave(origin, "End to end", "Typed end to end");
+  });
+
+  test("an agent's edit of a document open in the editor: the editor saves what is typed first, the edit lands on top of it, and the editor loads it in place", { timeout: 600_000 }, async () => {
+    const project = path.join(process.env.WORKSPACE_ROOT!, "acme");
+    mkdirSync(project, { recursive: true });
+    const chatId = `office-e2e-${Math.random().toString(36).slice(2)}`;
+    db.createSession({ id: chatId, title: chatId, workspace: project, executor: "host", kind: "task" });
+    const tools: Record<string, { execute: (id: string, params: unknown) => Promise<{ content: { text: string }[]; details: Record<string, unknown> }> }> = {};
+    for (const { factory } of host.hostExtensions(chatId)) factory({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on() {}, registerCommand() {}, events: { on: () => () => {} } });
+    const made = await tools.office_create.execute("c1", { title: "Agent and person", type: "word" });
+    const docId = String(made.details.id);
+    const onDisk = async () => {
+      const file = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === docId);
+      return parseDocx(readFileSync(path.join(data, "docs", docId, `${file.title}.docx`))).text;
+    };
+    const browser = await chromium.launch();
+    try {
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${origin}/editor.html?doc=${encodeURIComponent(docId)}`);
+      const events = () => page.evaluate(() => (window as unknown as { __events: unknown[][] }).__events);
+      for (let i = 0; i < 120 && !(await events()).some((e) => e[0] === "ready"); i++) await delay(1000);
+      assert.ok((await events()).some((e) => e[0] === "ready"), JSON.stringify(await events()));
+      const frame = page.frames().find((f) => /documenteditor\/main\//.test(f.url()))!;
+      for (let i = 0; i < 30 && !(await json(`${at}/state`)).body.locks[docId].length; i++) await delay(1000);
+      const firstKey = await page.evaluate(() => (window as unknown as { __key: string }).__key);
+
+      // The person types; nothing of it is on disk yet.
+      await frame.locator("#editor_sdk").click({ position: { x: 300, y: 150 } });
+      await page.keyboard.press("Control+End");
+      await page.keyboard.type(" Typed by the person", { delay: 30 });
+      await delay(3000);
+      assert.ok(!(await onDisk()).includes("Typed by the person"));
+
+      // The agent edits what the person typed, on the revision it read before.
+      const read = await tools.office_read.execute("r1", { id: docId });
+      const started = Date.now();
+      const edited = await tools.office_edit.execute("e1", { id: docId, ops: [{ quote: "Typed by the person", replacement: "Typed by the person, edited by the agent" }], baseRevision: read.details.mtimeMs });
+      console.log(`office_edit on the open document took ${Date.now() - started} ms: ${edited.content[0].text}`);
+      assert.equal(edited.details.action, "edit", edited.content[0].text);
+      assert.match(await onDisk(), /Typed by the person, edited by the agent/, "the edit is on top of what the person typed");
+
+      // The editor loads the new revision in place, under a new key.
+      let key = firstKey;
+      for (let i = 0; i < 30 && key === firstKey; i++) {
+        await delay(1000);
+        key = await page.evaluate(() => (window as unknown as { __key: string }).__key);
+      }
+      assert.notEqual(key, firstKey, `the editor followed to the agent's revision (${JSON.stringify(await events())})`);
+      for (let i = 0; i < 30 && (await json(`${at}/state`)).body.locks[docId].length !== 1; i++) await delay(1000);
+      await delay(8000); // the old session closes a few seconds after the editor left it
+      assert.ok(!(await events()).some((e) => e[0] === "error"), JSON.stringify(await events()));
+
+      // Typing goes on in the loaded revision, and its save lands on top of the agent's edit: the editor had it.
+      await frame.locator("#editor_sdk").click({ position: { x: 300, y: 150 } });
+      await page.keyboard.press("Control+End");
+      await page.keyboard.type(" And more after the reload", { delay: 30 });
+      await delay(3000);
+      await page.evaluate(() => (window as unknown as { __editor: { destroyEditor(): void } }).__editor.destroyEditor());
+      let text = "";
+      for (let i = 0; i < 90 && !text.includes("And more after the reload"); i++) {
+        await delay(1000);
+        text = await onDisk();
+      }
+      assert.match(text, /Typed by the person, edited by the agent/);
+      assert.match(text, /And more after the reload/);
+      const titles = (await json(`${at}/state`)).body.docs.map((d: { title: string }) => d.title);
+      assert.deepEqual(titles.filter((t: string) => t.startsWith("Agent and person")), ["Agent and person"], "no conflict copy: the old session's close held nothing new");
+      console.log(`editor events: ${JSON.stringify(await events())}`);
+    } finally {
+      await browser.close();
+    }
   });
 
   test("behind a reverse proxy that ends TLS and says nothing of it, the editor opens and saves as well", { timeout: 600_000 }, async () => {

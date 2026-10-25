@@ -54,17 +54,24 @@ as an editor opened before would lose what is typed in it.
   exist. What an agent makes or is granted belongs to its folder, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
   and a link is not followed.
-- **The agent and the editor take turns**: while a document is open in the editor, `office_edit` refuses
-  (`error:open_in_editor`) and the agent tries again once it is closed: the Document Server saves what is typed only
-  as the last editor closes, under the revision it opened, and an edit landing first would make that save stale.
+- **The agent edits what you are typing, live**: when the agent edits a document that is open in the editor
+  (`office_edit`), the portal first has the Document Server save what is typed there (its command service's
+  forcesave), waits for that save, and makes the agent's edit on top of it; the open editor then loads the new
+  revision in place, in the same frame (the editor's own refresh, under a new document key), and says that it loaded
+  the agent's edit. Nothing typed is written over: where the editor does not save within 30 seconds, the edit is
+  refused (`error:editor_not_saved`), nothing is written, and the agent tries again. What is typed in the second or
+  so between that save and the reload is kept beside the document as "<title> (conflict <date time>)", as it lacks
+  the agent's edit. Edits of one document run one at a time.
   Every write goes through a revision check: a document's revision is its file's modification time, `office_read`
   shows it, and `office_edit` takes it as `baseRevision` and replaces quoted text only if the file is still at that
-  revision; if it moved on, nothing is written and the tool answers `error:revision_mismatch`. A change made outside
-  the extension (a script, a git pull) is a new revision at once. A save from the editor that would overwrite a newer
-  revision (the file changed on disk while it was open) is not lost and does not overwrite it: it is kept beside the
-  document as "<title> (conflict <date time>)", and the audit log says so. A save the Document Server could not hand
-  over while the portal was away (it keeps such a save as "forgotten") is taken back once the portal runs again. An open editor says within about 5
-  seconds when the file changed on disk; reloading it opens the new revision.
+  revision (or at the one the open editor's save just wrote on top of it); if it moved on, nothing is written and the
+  tool answers `error:revision_mismatch`. `office_read` reads the saved file: what is typed in an open editor since
+  its last save is not in it. A change made outside the extension (a script, a git pull) is a new revision at once. A
+  save from the editor that would overwrite a newer revision (the file changed on disk while it was open) is not lost
+  and does not overwrite it: it is kept beside the document as "<title> (conflict <date time>)", and the audit log
+  says so. A save the Document Server could not hand over while the portal was away (it keeps such a save as
+  "forgotten") is taken back once the portal runs again. An open editor says within a second or two when the file
+  changed on disk; its button loads the new revision in place.
 - **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document, or
   in whose folder it is), or `@<name>` or `@project:<name>` for an agent or project by name, and save, a chat of that
   agent is woken, told which document mentions it, and gets access to that document; it reads the comment itself.
@@ -101,7 +108,10 @@ as an editor opened before would lose what is typed in it.
 - **The editor sits behind the portal's sign-in.** The browser reaches the editor (`api.js`, the editor frame and every
   asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which the portal gates
   like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and only to the
-  Document Server, and tells it the address the browser used, which it builds the editor's own addresses from.
+  Document Server, and tells it the address the browser used, which it builds the editor's own addresses from. The
+  Document Server's own endpoints are not passed on: its statistics, its cluster switches, its conversion services,
+  and its command service, which the portal alone calls (to save an open editor before the agent edits), over its own
+  way in.
   The editor therefore runs on the portal's own origin, where a script has the signed-in person's session: a
   document's macros and the editor's plugins are switched off in the signed editor config, which the page cannot
   change, as OnlyOffice holds macros apart only by a guard inside the page. A Document Server on an origin of its own
@@ -155,6 +165,10 @@ remove an image, so the images stay on disk: `docker image rm onlyoffice/documen
   before Docker for extensions) is taken over and made again; one of another extension's is refused.
 - Not in this version: copying a document into a chat's folder from the library (the library downloads a copy), and
   expiry for the access a comment grants.
+- What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. A session that
+  saved for an agent's edit before the portal restarted has its later save kept as a conflict copy, not written.
+- The editor's reload for an agent's edit reopens the document in the same frame; where the cursor and the view go
+  then is the editor's choice.
 
 ## Licences
 

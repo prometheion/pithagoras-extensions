@@ -437,7 +437,7 @@ test("status 1 join then leave mutates live.usersOf; status 4 unlocks without an
   const original = fs.readFileSync(docFile(root, doc));
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   // JOIN: presence lands in live with id/name and a numeric join time; the doc locks (users.length>0).
-  const envJoin = { key: makeKey(doc.docId, before.mtimeMs), status: 1, users: [{ id: "u9", name: "Bob" }] };
+  const envJoin = { key: makeKey(doc.docId, before.mtimeMs), status: 1, users: [{ id: "u9", name: "Bob" }], actions: [{ type: 1, userid: "u9" }] };
   const join = await post(handler, envJoin, { headers: dsHeaders(envJoin) });
   assert.deepEqual(json(join), { error: 0 });
   const joined = live.usersOf(doc.docId);
@@ -464,6 +464,35 @@ test("status 1 join then leave mutates live.usersOf; status 4 unlocks without an
   const after = getDoc(doc.docId, root)!;
   assert.equal(after.mtimeMs, before.mtimeMs);
   assert.equal(after.sizeBytes, before.sizeBytes);
+});
+
+test("status 1 as the Document Server sends it: users by id strings keep the minted seat, its name, past the TTL; a leave and a close end it", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Seat", type: "word" }, root);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
+  live.resetLive();
+  live.setPresenceTtl(40);
+  // The seat the editor config was minted with.
+  live.setUser(doc.docId, { id: "portal-user", name: "Portal" }, true);
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  const connected = { key, status: 1, users: ["portal-user"], actions: [{ type: 1, userid: "portal-user" }] };
+  assert.deepEqual(json(await post(handler, connected, { headers: dsHeaders(connected) })), { error: 0 });
+  assert.deepEqual(live.usersOf(doc.docId).map((u) => [u.id, u.name]), [["portal-user", "Portal"]]);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(live.usersOf(doc.docId).length, 1, "no heartbeat comes: the confirmed seat outlives the TTL while the editor is open");
+  assert.equal(live.pollState(doc.docId, 0).locked, true);
+  // A second person joins, and leaves again.
+  const two = { key, status: 1, users: ["portal-user", "guest"], actions: [{ type: 1, userid: "guest" }] };
+  await post(handler, two, { headers: dsHeaders(two) });
+  assert.equal(live.usersOf(doc.docId).length, 2);
+  const left = { key, status: 1, users: ["portal-user"], actions: [{ type: 0, userid: "guest" }] };
+  await post(handler, left, { headers: dsHeaders(left) });
+  assert.deepEqual(live.usersOf(doc.docId).map((u) => u.id), ["portal-user"]);
+  // The last one closes: status 4.
+  const closed = { key, status: 4 };
+  await post(handler, closed, { headers: dsHeaders(closed) });
+  assert.deepEqual(live.usersOf(doc.docId), []);
+  live.resetLive();
 });
 
 test("statuses 3 and 7: one log line each, zero file changes, zero downloads", async () => {

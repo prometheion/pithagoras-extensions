@@ -26,11 +26,11 @@
  * On top of that, tracked PRESENCE carries a TTL (DEFAULT_PRESENCE_TTL_MS = 15 min, setPresenceTtl to change):
  * presence is minted at editor-config time for a single shared seat and only cleared on terminal closes, so
  * an abandoned open (api.js never loads, tab closed before DS connects) would otherwise hold the doc locked for
- * DS and badge "still editing" -- forever. Stale entries are dropped lazily on read (usersOf/pollState); a live
- * session is immune because every status-1 heartbeat re-calls setUser and pushes expiresAt forward. This adds
- * expiry only -- it does NOT change lock/badge semantics: a non-expired open session still locks the doc for
- * DS (the status rules above) and is reported to polling clients by pollState. Agent edits are gated purely on
- * the revision, never on who is present -- an open editor neither allows nor blocks office_edit (co-editor model).
+ * DS and badge "still editing" -- forever. Stale entries are dropped lazily on read (usersOf/pollState). Once the
+ * Document Server confirms a user (its status-1 callback names them), that presence no longer expires: it sends
+ * status 1 only as somebody connects or leaves, never as a heartbeat. This adds expiry only -- it does NOT change
+ * lock/badge semantics: a non-expired open session still locks the doc for DS (the status rules above) and is
+ * reported to polling clients by pollState.
  */
 
 export type LiveUser = { id: string; name?: string; at: number };
@@ -39,12 +39,14 @@ export type LiveUser = { id: string; name?: string; at: number };
  * The TTL closes the stuck-lock problem: presence is minted at editor-config time (a single shared seat,
  * EDITOR_USER id "portal-user") and only cleared unconditionally on a terminal DS close -- so a failed or
  * abandoned open (api.js never loads, tab closed before DS connects) left the doc locked FOREVER. With a TTL
- * such a stuck entry auto-expires; a LIVE session keeps itself fresh because every status-1 heartbeat re-calls
- * setUser and pushes expiresAt forward.
+ * such a stuck entry auto-expires; one the Document Server confirmed stays until it leaves.
  * 15 minutes matches CONFIG_TTL_MS (server.ts): an editor config outlives a single page-load, and the badge is
  * already best-effort (the /state poller refreshes it every 5 s from this same map). */
 const DEFAULT_PRESENCE_TTL_MS = 15 * 60_000;
-type PresenceRecord = LiveUser & { expiresAt: number };
+/** `confirmed`: the Document Server said the user is connected (a status-1 callback). Such presence does not expire:
+ * the Document Server sends a status 1 only as somebody connects or leaves, never as a heartbeat, so a person editing
+ * for longer than the TTL would otherwise drop out while the editor is open. It ends at a leave, or at a status 2 or 4. */
+type PresenceRecord = LiveUser & { expiresAt: number; confirmed?: boolean };
 
 let presenceTtlMs = DEFAULT_PRESENCE_TTL_MS;
 
@@ -61,7 +63,7 @@ export function getPresenceTtl(): number {
 }
 
 function isStale(u: PresenceRecord, now: number): boolean {
-  return u.expiresAt <= now; // inclusive: exactly-at-expiry counts as gone (clocks only ever move forward here)
+  return !u.confirmed && u.expiresAt <= now; // inclusive: exactly-at-expiry counts as gone (clocks only ever move forward here)
 }
 
 /** docId -> userId -> PresenceRecord. Maps (not arrays) so a re-join of the same user never duplicates. */
@@ -95,14 +97,15 @@ export function usersOf(docId: string): LiveUser[] {
  * user so the badge shows when they first opened it) or a leave (joined=false -- removes the id; a no-op if
  * absent). Used by status-1 action handling AND by server.ts when it mints an editor config. An empty user id
  * is ignored rather than stored under "". */
-export function setUser(docId: string, user: { id: string; name?: string }, joined: boolean): void {
+export function setUser(docId: string, user: { id: string; name?: string }, joined: boolean, options: { confirmed?: boolean } = {}): void {
   if (!user || typeof user.id !== "string" || user.id === "") return;
   const users = userMap(docId);
   if (joined) {
     const existing = users.get(user.id);
     // `at` keeps the FIRST join (the badge shows when they opened it); expiresAt moves forward on EVERY
-    // join/heartbeat, so a live session never trips its own TTL while a dead one does.
-    users.set(user.id, { id: user.id, name: user.name ?? existing?.name, at: existing?.at ?? Date.now(), expiresAt: Date.now() + presenceTtlMs });
+    // join, so a minted seat that the Document Server confirms in time stays, while an abandoned one goes.
+    const confirmed = options.confirmed || existing?.confirmed;
+    users.set(user.id, { id: user.id, name: user.name ?? existing?.name, at: existing?.at ?? Date.now(), expiresAt: Date.now() + presenceTtlMs, ...(confirmed ? { confirmed } : {}) });
   } else {
     users.delete(user.id);
   }

@@ -374,16 +374,17 @@ async function handleDispatch(
 
   switch (status) {
     case 1: {
-      // Being edited: set presence from body.users (locked while users.length > 0) and apply the lock rule.
+      // Being edited: presence is who body.users says is connected now (locked while anybody is). The Document Server
+      // names them by the ids of the configs they opened with, as strings ("portal-user"): the name is the one the
+      // editor config was minted with. An object with an id is taken too.
       const snapshotIds = new Set<string>();
       if (Array.isArray(body.users)) {
         for (const u of body.users) {
-          if (u && typeof u === "object" && typeof (u as Record<string, unknown>).id === "string") {
-            const id = (u as { id: string }).id;
-            const name = (u as { name?: unknown }).name;
-            live.setUser(docId, { id, name: typeof name === "string" ? name : undefined }, true);
-            snapshotIds.add(id);
-          }
+          const id = typeof u === "string" ? u : u && typeof u === "object" && typeof (u as Record<string, unknown>).id === "string" ? (u as { id: string }).id : "";
+          if (!id) continue;
+          const name = u && typeof u === "object" ? (u as { name?: unknown }).name : undefined;
+          live.setUser(docId, { id, name: typeof name === "string" ? name : undefined }, true, { confirmed: true });
+          snapshotIds.add(id);
         }
       }
       for (const tracked of live.usersOf(docId)) if (!snapshotIds.has(tracked.id)) live.setUser(docId, { id: tracked.id }, false);

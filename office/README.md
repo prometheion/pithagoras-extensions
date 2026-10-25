@@ -139,9 +139,11 @@ by its digest: a tag that came to name another build is refused, not run.
   and its command service, which the portal alone calls (to save the session after an agent's edit), over its own
   way in.
   The editor therefore runs on the portal's own origin, where a script has the signed-in person's session: a
-  document's macros and the editor's plugins are switched off in the signed editor config, which the page cannot
-  change, as OnlyOffice holds macros apart only by a guard inside the page. A Document Server on an origin of its own
-  would be the full answer; it is not done here.
+  document's macros and the editor's plugins are switched off in the editor config the portal hands the page, as
+  OnlyOffice holds macros apart only by a guard inside the page, and a document cannot switch them on. The Document
+  Server 10.0 does not hold the page to the signed config (a page that changes it before it opens the editor gets
+  plugins, as measured), but a script that could change it has the person's session already. A Document Server on an
+  origin of its own would be the full answer; it is not done here.
 - **Changes only from the portal's pages.** Every request of the extension's that changes something (a document
   created, renamed or deleted, the Document Server started, stopped or removed, the settings) is refused unless it
   comes from the portal's own pages: the portal's cookie is SameSite=Lax, which a page on another port or another

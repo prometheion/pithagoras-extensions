@@ -294,7 +294,8 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
       user: { id: EDITOR_USER.id, name: EDITOR_USER.name },
       // The editor runs on the portal's own origin (the /ds proxy), where a script has the person's session for the
       // whole portal API. A document's macros and the editor's plugins would run there, held only by OnlyOffice's
-      // in-page guard around eval, so neither runs: signed into the config, which the page cannot change.
+      // in-page guard around eval, so neither runs, and a document cannot switch them on. (The Document Server does not
+      // hold the page to the signed config: a script that changes it there has the person's session already.)
       customization: { macros: false, plugins: false },
     },
   };

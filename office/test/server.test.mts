@@ -32,17 +32,15 @@ const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 
 class MiniRouter {
   routes: Array<{ method: string; pattern: string | RegExp; handler: (req: unknown, res: FakeRes) => Promise<void> | void }> = [];
-  private reg(method: string) {
-    return (pattern: string | RegExp, ...rest: unknown[]) => {
-      const handler = rest[rest.length - 1] as (req: unknown, res: FakeRes) => Promise<void> | void;
-      this.routes.push({ method, pattern, handler });
-    };
+  private reg(method: string, pattern: string | RegExp, rest: unknown[]) {
+    const handler = rest[rest.length - 1] as (req: unknown, res: FakeRes) => Promise<void> | void;
+    this.routes.push({ method, pattern, handler });
   }
   /** Express-shaped registration: (pattern, ...middlewares, handler). */
-  get(...args: unknown[]) { this.reg("GET")(...args); }
-  post(...args: unknown[]) { this.reg("POST")(...args); }
-  put(...args: unknown[]) { this.reg("PUT")(...args); }
-  delete(...args: unknown[]) { this.reg("DELETE")(...args); }
+  get(pattern: string | RegExp, ...rest: unknown[]) { this.reg("GET", pattern, rest); }
+  post(pattern: string | RegExp, ...rest: unknown[]) { this.reg("POST", pattern, rest); }
+  put(pattern: string | RegExp, ...rest: unknown[]) { this.reg("PUT", pattern, rest); }
+  delete(pattern: string | RegExp, ...rest: unknown[]) { this.reg("DELETE", pattern, rest); }
 
   /** Express-shaped fake request: the plain fields PLUS the stream surface -- an async iterator over the body
    * (real IncomingMessages are async-iterable, and the /ds proxy's POST forwarding reads `for await (req)`). */
@@ -54,7 +52,7 @@ class MiniRouter {
     return o;
   }
 
-  async dispatch(method: string, urlPath: string, body: unknown, headers: Record<string, string> = {}): Promise<FakeRes> {
+  async dispatch(method: string, urlPath: string, body?: unknown, headers: Record<string, string> = {}): Promise<FakeRes> {
     const us = urlPath.split("?")[0].split("/").filter(Boolean);
     for (const route of this.routes) {
       if (route.method !== method) continue;
@@ -742,7 +740,7 @@ const API_JS_BYTES = Buffer.from("// stand-in for the real api.js: getBasePath()
 function startFakeDs(): Promise<{ server: http.Server; port: number; urls: string[] }> {
   const urls: string[] = [];
   const server = http.createServer((req, res) => {
-    urls.push(req.url);
+    urls.push(req.url ?? "");
     if (req.method === "GET" && req.url?.startsWith("/web-apps/")) {
       res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache" });
       res.end(API_JS_BYTES);
@@ -823,7 +821,7 @@ test("/ds proxy: an identity request answered with GZIP bytes + LYING headers st
     assert.ok(!Object.keys(res.headers).includes("content-length"), "no upstream-declared content-length is forwarded -- Node sizes the real buffer");
     assert.equal(Buffer.from(res.data as Buffer).compare(ORIGINAL), 0, "the FULL original payload arrives intact (undici decoded it; no truncation at the lying length)");
   } finally {
-    if (server) { server.closeAllConnections(); await new Promise<void>((r) => server.close(() => r())); }
+    if (server) { const s = server; s.closeAllConnections(); await new Promise<void>((r) => s.close(() => r())); }
     await b.cleanup();
   }
 });

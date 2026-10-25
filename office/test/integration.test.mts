@@ -60,7 +60,7 @@ function gateReason(): string | undefined {
     return 'docker-gated integration test: set OFFICE_IT_DOCKER=1 to run it (the operator starts the DS container first; host.docker() is unusable outside a running portal process)';
   }
   const probe = spawnSync("docker", ["info"], { encoding: "utf8", timeout: 20_000 });
-  if (probe.error) return `docker-gated: the docker CLI is unreachable (${(probe.error as Error).code ?? (probe.error as Error).message})`;
+  if (probe.error) return `docker-gated: the docker CLI is unreachable (${(probe.error as NodeJS.ErrnoException).code ?? (probe.error as Error).message})`;
   if (probe.status !== 0) return `docker-gated: "docker info" exited ${probe.status}`;
   return undefined; // a working docker host exists -- proceed
 }
@@ -265,7 +265,6 @@ IT("office_edit with a seat the Document Server never confirmed: proceeds under 
     extend: (factory) => factory({ registerTool: (def: ToolDef) => { tools2[def.name] = def; } }, { id: home }),
     chatFolder: () => "/workspaces/aegis",
     folders: () => [{ path: "/workspaces/aegis", name: "aegis", kind: "agent" }],
-    inFolder: () => [{ id: home }],
     record: () => {}, log: () => {},
   });
   assert.ok(tools2.office_edit, "office_edit registered into the agent home (ownership scope is real here)");

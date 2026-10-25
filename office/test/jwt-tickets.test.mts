@@ -28,7 +28,8 @@ test("jwt: sign/verify round-trip keeps the payload and adds iat/exp", () => {
   assert.equal(typeof payload.exp, "number");
   // seconds precision: exp is within [now+60, now+61]
   const nowSec = Math.floor(Date.now() / 1000);
-  assert.ok(payload.exp! >= nowSec + 60 && payload.exp! <= nowSec + 62, `exp ${payload.exp} not ~now+60`);
+  const exp = Number(payload.exp);
+  assert.ok(exp >= nowSec + 60 && exp <= nowSec + 62, `exp ${exp} not ~now+60`);
 });
 
 test("jwt: ttlMs undefined -> no iat/exp claims, still verifies", () => {

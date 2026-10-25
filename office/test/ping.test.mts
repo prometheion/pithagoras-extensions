@@ -63,7 +63,7 @@ function setup(): { root: string; seen: Seen } {
 }
 
 async function makeDoc(root: string, title: string, opts?: { type?: "word" | "cell"; owner?: string | null }) {
-  const input = { title, type: opts?.type ?? ("word" as const) };
+  const input: { title: string; type: "word" | "cell"; owner?: string | null } = { title, type: opts?.type ?? "word" };
   if (opts && "owner" in opts) input.owner = opts.owner;
   return await createDoc(input, root);
 }

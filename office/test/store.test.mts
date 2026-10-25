@@ -74,7 +74,7 @@ test("createDoc: word and cell write parseable templates into docs/<docId>/", as
 test("createDoc: duplicate (same title + type) throws code 'exists'; same title different type is fine", async () => {
   const root = tmpRoot();
   await createDoc({ title: "Report", type: "word" }, root);
-  await assert.rejects(async () => createDoc({ title: "Report", type: "word" }, root), (err: Error) => err.code === "exists");
+  await assert.rejects(async () => createDoc({ title: "Report", type: "word" }, root), (err: NodeJS.ErrnoException) => err.code === "exists");
   // a spreadsheet with the same title is a different document, not a duplicate
   const cell = await createDoc({ title: "Report", type: "cell" }, root);
   assert.equal(cell.ext, "xlsx");
@@ -227,7 +227,7 @@ test("renameDoc: a scanned file is never renamed over another file of that name"
 
 test("renameDoc: renames the file on disk, keeps bytes and mtimeMs, bumps updatedAt", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Old Title" }, root);
+  const doc = await createDoc({ title: "Old Title", type: "word" }, root);
   const oldBytes = fs.readFileSync(docFile(root, doc));
   const before = getDoc(doc.docId, root);
   assert.ok(before);
@@ -242,12 +242,12 @@ test("renameDoc: renames the file on disk, keeps bytes and mtimeMs, bumps update
   assert.ok(renamed.updatedAt >= before!.updatedAt);
   // renaming onto another doc's title -> exists
   await createDoc({ title: "Taken", type: "word" }, root);
-  assert.throws(() => renameDoc(doc.docId, "Taken", root), (err: Error) => err.code === "exists");
+  assert.throws(() => renameDoc(doc.docId, "Taken", root), (err: NodeJS.ErrnoException) => err.code === "exists");
 });
 
 test("renameDoc on unknown id -> not_found", () => {
   const root = tmpRoot();
-  assert.throws(() => renameDoc("ghost-123456", "X", root), (err: Error) => err.code === "not_found");
+  assert.throws(() => renameDoc("ghost-123456", "X", root), (err: NodeJS.ErrnoException) => err.code === "not_found");
 });
 
 test("deleteDoc: moves docs/<docId> into .trash, prunes the index; unknown id -> not_found", async () => {
@@ -260,7 +260,7 @@ test("deleteDoc: moves docs/<docId> into .trash, prunes the index; unknown id ->
   assert.match(trash[0], new RegExp(`^\\d+-${doc.docId}$`));
   assert.ok(fs.existsSync(path.join(root, ".trash", trash[0], "docs", "Doomed.docx"))); // content kept for the TTL
   assert.equal(getDoc(doc.docId, root), null);
-  assert.throws(() => deleteDoc(doc.docId, root), (err: Error) => err.code === "not_found");
+  assert.throws(() => deleteDoc(doc.docId, root), (err: NodeJS.ErrnoException) => err.code === "not_found");
 });
 
 test("deleteDoc: the trash entry says where the file was, and takes what was kept for the document with it", async () => {
@@ -367,8 +367,8 @@ test("importFile: .txt -> unsupported_format; missing file -> not_found; upperca
   const srcRoot = tmpRoot();
   const txt = path.join(srcRoot, "notes.txt");
   fs.writeFileSync(txt, "hi");
-  await assert.rejects(async () => importFile(txt, {}, root), (err: Error) => err.code === "unsupported_format");
-  await assert.rejects(async () => importFile(path.join(srcRoot, "ghost.docx"), {}, root), (err: Error) => err.code === "not_found");
+  await assert.rejects(async () => importFile(txt, {}, root), (err: NodeJS.ErrnoException) => err.code === "unsupported_format");
+  await assert.rejects(async () => importFile(path.join(srcRoot, "ghost.docx"), {}, root), (err: NodeJS.ErrnoException) => err.code === "not_found");
 
   const upper = path.join(srcRoot, "UPPER.DOCX");
   fs.writeFileSync(upper, await templateDocx());
@@ -387,7 +387,7 @@ test("importFile: a file above 512 MiB is rejected with too_large before anythin
   } finally {
     fs.closeSync(fd);
   }
-  await assert.rejects(async () => importFile(big, {}, root), (err: Error) => err.code === "too_large" && /512 MiB/.test(err.message));
+  await assert.rejects(async () => importFile(big, {}, root), (err: NodeJS.ErrnoException) => err.code === "too_large" && /512 MiB/.test(err.message));
   assert.equal(listDocs(root).length, 0, "nothing landed in the library");
 });
 
@@ -422,14 +422,14 @@ test("exportDoc: writes <title>.<ext> into a created dest dir and returns the ab
   assert.equal(written, path.join(destDir, "Export me.docx"));
   assert.ok(path.isAbsolute(written));
   assert.deepEqual(parseDocx(fs.readFileSync(written)), parseDocx(fs.readFileSync(docFile(root, doc))));
-  assert.throws(() => exportDoc("ghost-123456", destDir, root), (err: Error) => err.code === "not_found");
+  assert.throws(() => exportDoc("ghost-123456", destDir, root), (err: NodeJS.ErrnoException) => err.code === "not_found");
 });
 
 /* ---------------- persist gate ---------------- */
 
 test("persistBytes: success writes the bytes, updates the index mtime/size and returns the new mtimeMs", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Live" }, root);
+  const doc = await createDoc({ title: "Live", type: "word" }, root);
   const oldMeta = getDoc(doc.docId, root);
   assert.ok(oldMeta);
   const saved = Buffer.from("saved-by-DS-" + "x".repeat(100));
@@ -446,7 +446,7 @@ test("persistBytes: success writes the bytes, updates the index mtime/size and r
 
 test("persistBytes: a stale meta (external write moved the mtime) throws revision_mismatch with currentMtimeMs", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Contended" }, root);
+  const doc = await createDoc({ title: "Contended", type: "word" }, root);
   const staleMeta = getDoc(doc.docId, root);
   assert.ok(staleMeta);
 
@@ -460,7 +460,7 @@ test("persistBytes: a stale meta (external write moved the mtime) throws revisio
 
   await assert.rejects(
     (async () => persistBytes(staleMeta, Buffer.from("my stale save"), root))(),
-    (err: Error) => {
+    (err: NodeJS.ErrnoException) => {
       assert.equal(err.code, "revision_mismatch");
       assert.equal((err as NodeJS.ErrnoException & { currentMtimeMs?: number }).currentMtimeMs, currentMtimeMs);
       return true;
@@ -472,20 +472,20 @@ test("persistBytes: a stale meta (external write moved the mtime) throws revisio
 
 test("persistBytes: an FRESH meta after the external write persists again (the gate clears)", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Retry" }, root);
+  const doc = await createDoc({ title: "Retry", type: "word" }, root);
   const file = docFile(root, doc);
   fs.writeFileSync(file, Buffer.from("newer content"));
   const freshMeta = getDoc(doc.docId, root) ?? undefined; // re-read: still the OLD index mtime -> would mismatch
   assert.ok(freshMeta);
   // but persistBytes with the stale index meta must fail...
-  await assert.rejects((async () => persistBytes(freshMeta, Buffer.from("z"), root))(), (err: Error) => err.code === "revision_mismatch");
+  await assert.rejects((async () => persistBytes(freshMeta, Buffer.from("z"), root))(), (err: NodeJS.ErrnoException) => err.code === "revision_mismatch");
 });
 
 /* ---------------- end-to-end-ish ---------------- */
 
 test("a full round-trip: create -> edit bytes through the gate -> export is parseable", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Round Trip" }, root);
+  const doc = await createDoc({ title: "Round Trip", type: "word" }, root);
   let meta = getDoc(doc.docId, root)!;
   for (let i = 0; i < 3; i++) {
     const bytes = Buffer.from(`revision ${i} of the round trip document`);

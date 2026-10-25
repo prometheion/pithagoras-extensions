@@ -141,6 +141,7 @@ const CODE_STATUS: Record<string, number> = {
   exists: 409,
   unsupported_format: 415,
   invalid_title: 400,
+  invalid: 409, // store: a document's file is a link now, or its folder leads elsewhere
   revision_mismatch: 409,
   index_corrupt: 500,
   no_docker: 503,

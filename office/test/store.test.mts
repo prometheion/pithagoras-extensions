@@ -4,7 +4,7 @@
  * files by parsing them with src/ooxml.ts (parseDocx/parseXlsx). Every root is an mkdtemp dir in os.tmpdir() --
  * the real data dir and portal() are never touched.
  */
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -150,6 +150,77 @@ test("migrateOwners: owners and grants that named a chat name that chat's folder
   assert.deepEqual(getDoc(doc.docId, root)!.grants, [{ folder: "/homes/b", commentId: "c1", at: 1 }]);
   assert.equal(getDoc(gone.docId, root)!.owner, "chat-gone", "seen by no agent, rather than by every one");
   assert.equal(migrateOwners((id) => folders[id], root), 0, "once is enough");
+});
+
+/* ---------------- writing an agent's file ---------------- */
+
+async function scannedOne(name = "report.docx") {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-own-")));
+  const file = path.join(ws, name);
+  fs.writeFileSync(file, await templateDocx());
+  fs.chmodSync(file, 0o640);
+  scanWorkspace([ws], root);
+  return { root, ws, file, doc: listDocs(root)[0]! };
+}
+
+test("persistBytes: a save keeps the file's owner, group and mode, as the agent had them", async () => {
+  const { root, ws, file, doc } = await scannedOne();
+  const before = fs.statSync(file);
+  const old = process.umask(0o022); // a fresh file would be 0644
+  // The portal runs as root with the sandbox on: the owner is given back, which a test as another user can only watch.
+  const given: number[][] = [];
+  const chown = mock.method(fs, "fchownSync", (_fd: number, uid: number, gid: number) => void given.push([uid, gid]));
+  try {
+    persistBytes(doc, Buffer.from("saved"), root);
+  } finally {
+    process.umask(old);
+    chown.mock.restore();
+  }
+  assert.deepEqual(given, [[before.uid, before.gid]]);
+  const after = fs.statSync(file);
+  assert.equal(after.mode & 0o777, 0o640);
+  assert.equal(after.uid, before.uid);
+  assert.equal(after.gid, before.gid);
+  assert.notEqual(after.ino, before.ino, "put in place by a rename, never written half");
+  assert.deepEqual(fs.readdirSync(ws), ["report.docx"], "no temporary file left behind");
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("persistBytes: a link put in the file's place, or in its folder's, is refused and nothing it leads to is written", async () => {
+  const { root, ws, file, doc } = await scannedOne();
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "office-elsewhere-"));
+  const secret = path.join(elsewhere, "secret.docx");
+  fs.writeFileSync(secret, "not yours");
+  fs.rmSync(file);
+  fs.symlinkSync(secret, file);
+  assert.throws(() => persistBytes({ ...doc, mtimeMs: fs.statSync(secret).mtimeMs }, Buffer.from("x"), root), (e: Error & { code?: string }) => e.code === "invalid");
+  assert.equal(fs.readFileSync(secret, "utf8"), "not yours");
+  assert.ok(fs.lstatSync(file).isSymbolicLink(), "the link itself is left as it is");
+
+  // The folder swapped for a link to another one holding a file of that name.
+  const ws2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-own2-")));
+  const real = path.join(ws2, "real");
+  fs.mkdirSync(real);
+  fs.writeFileSync(path.join(real, "report.docx"), "theirs");
+  const { root: root2, ws: ws3, doc: doc2 } = await scannedOne();
+  fs.rmSync(ws3, { recursive: true, force: true });
+  fs.symlinkSync(real, ws3);
+  assert.throws(() => persistBytes({ ...doc2, mtimeMs: fs.statSync(path.join(real, "report.docx")).mtimeMs }, Buffer.from("x"), root2), (e: Error & { code?: string }) => e.code === "invalid");
+  assert.equal(fs.readFileSync(path.join(real, "report.docx"), "utf8"), "theirs");
+  for (const d of [ws, elsewhere, ws2, ws3]) fs.rmSync(d, { recursive: true, force: true });
+});
+
+test("renameDoc: a scanned file is never renamed over another file of that name", async () => {
+  const { root, ws, file, doc } = await scannedOne();
+  fs.writeFileSync(path.join(ws, "notes.docx"), "an unindexed file of the agent's");
+  assert.throws(() => renameDoc(doc.docId, "notes", root), (e: Error & { code?: string }) => e.code === "exists");
+  assert.equal(fs.readFileSync(path.join(ws, "notes.docx"), "utf8"), "an unindexed file of the agent's");
+  assert.ok(fs.existsSync(file));
+  const renamed = renameDoc(doc.docId, "final", root);
+  assert.equal(renamed.path, path.join(ws, "final.docx"));
+  assert.deepEqual(fs.readdirSync(ws).sort(), ["final.docx", "notes.docx"]);
+  fs.rmSync(ws, { recursive: true, force: true });
 });
 
 /* ---------------- rename / delete / trash ---------------- */

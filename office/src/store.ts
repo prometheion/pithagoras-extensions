@@ -358,6 +358,24 @@ export async function createDoc(input: { title: string; type: "word" | "cell"; o
   return { ...doc };
 }
 
+/** `from` renamed to `to`, never over something there: the new name made as a second name of the file (a hard link,
+ * which the system refuses for a name that is taken) before the old one goes. Where hard links are not possible, a
+ * rename after a look. */
+function renameNoClobber(from: string, to: string, title: string): void {
+  const taken = () => Object.assign(new Error(`a file named "${path.basename(to)}" is already there`), { code: "exists", title });
+  try {
+    fs.linkSync(from, to);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") throw taken();
+    if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EXDEV") throw e;
+    if (fs.existsSync(to)) throw taken();
+    fs.renameSync(from, to);
+    return;
+  }
+  fs.unlinkSync(from);
+}
+
 /** Retitle a document and rename its file on disk (docs/<docId>/<newTitle>.<ext>). The docId is stable across the
  * whole lifetime of the doc (tickets, history paths, state files key off it), and rename preserves the content's
  * mtimeMs -- that IS the revision tools gate on, so a retitle is never a new revision. updatedAt bumps. A title
@@ -375,7 +393,8 @@ export function renameDoc(docId: string, newTitle: string, root = dataDir()): Do
   // for a scanned doc it renames the real workspace file next to where it already is (same parent, new name).
   const from = docPath(doc, rootDir);
   const to = path.join(path.dirname(from), `${newTitle}.${doc.ext}`);
-  fs.renameSync(from, to);
+  plainFile(doc, from);
+  renameNoClobber(from, to, newTitle);
   if (doc.path) doc.path = to;
   doc.title = newTitle;
   doc.updatedAt = Date.now();
@@ -745,6 +764,54 @@ export function exportDoc(docId: string, destAbsDir: string, root = dataDir()): 
   return path.resolve(dest);
 }
 
+/**
+ * The document's file as it may be written: a plain file at its own name (a link put in its place is refused, and so is
+ * a scanned file whose folder was swapped for a link since it was indexed, which would lead the write into another
+ * folder), with what lstat says of it.
+ */
+function plainFile(doc: DocMeta, file: string): fs.Stats {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    throw notFound(`no file for ${doc.docId}`);
+  }
+  if (!st.isFile()) throw Object.assign(new Error(`${file} is not a plain file any more (a link or a folder took its name)`), { code: "invalid" });
+  if (doc.path && canonical(path.dirname(file)) !== path.dirname(file)) {
+    throw Object.assign(new Error(`the folder of ${file} leads elsewhere now (a link took its place)`), { code: "invalid" });
+  }
+  return st;
+}
+
+/**
+ * `bytes` put in place of `file` as a save does: written beside it under a name nobody else uses, with the file's own
+ * owner, group and mode (an agent's file stays the agent's: the portal may run as root, and a file it made fresh would
+ * be root's, which the agent could then no longer write), synced, and renamed over it. Where the owner cannot be given
+ * (the portal is not root), the file is the portal's, as only root may give a file away. The portal's own
+ * `files.write` does the same but takes at most 1 MB, and a .docx is often more.
+ */
+function replaceKeeping(file: string, bytes: Buffer, was: fs.Stats): void {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomInt(1e9)}.tmp`);
+  const mode = was.mode & 0o7777;
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
+  try {
+    fs.writeFileSync(fd, bytes);
+    try {
+      fs.fchownSync(fd, was.uid, was.gid);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EPERM") throw e;
+    }
+    fs.fchmodSync(fd, mode); // the umask had its say at the open
+    fs.fsyncSync(fd);
+  } catch (e) {
+    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
+  fs.closeSync(fd);
+  fs.renameSync(tmp, file);
+}
+
 /** Persist saved document bytes (the callback's status-2/6 path) under the REVISION GATE -- the whole point of
  * mtime-as-revision: stat the library file FIRST and if its mtimeMs differs from doc.mtimeMs (tolerance none;
  * the caller passes the meta it last saw), refuse with Error{code:"revision_mismatch", currentMtimeMs} so a stale
@@ -755,18 +822,11 @@ export function exportDoc(docId: string, destAbsDir: string, root = dataDir()): 
 export function persistBytes(doc: DocMeta, bytes: Buffer, root = dataDir()): { mtimeMs: number } {
   const rootDir = root ?? dataDir();
   const file = docPath(doc, rootDir);
-  let st: fs.Stats;
-  try {
-    st = fs.statSync(file);
-  } catch {
-    throw notFound(`no library file for ${doc.docId}`);
-  }
+  const st = plainFile(doc, file);
   if (st.mtimeMs !== doc.mtimeMs) {
     throw Object.assign(new Error("revision_mismatch: the document changed since this session opened it"), { code: "revision_mismatch", currentMtimeMs: st.mtimeMs });
   }
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, bytes);
-  fs.renameSync(tmp, file);
+  replaceKeeping(file, bytes, st);
   const after = fs.statSync(file);
   const index = readIndex(rootDir);
   const entry = index.docs.find((d) => d.docId === doc.docId);

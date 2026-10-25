@@ -9,7 +9,7 @@ a separate npm package. You install the ones you want into your portal; nothing 
 - [Blender](blender/README.md) (`@pithagoras/blender`): a headless Blender 5.2 in a container on the portal's Docker
   host, its tools in every chat, and its live viewport in a panel beside the chat.
 - [Godot](godot/README.md) (`@pithagoras/godot`): the real Godot 4.7 editor on the GPU, run in a container through
-  Docker for extensions, its 27 tools in every chat and its live screen in a panel beside the chat.
+  Docker for extensions, its 30 tools in every chat and its live screen in a panel beside the chat.
 - [Inline UI](inline-ui/README.md) (`@pithagoras/inline-ui`): the agent shows you an interactive card of its
   own HTML in the chat, sandboxed and with no network, and what you do in it comes back to the agent as events. It
   needs no container and no Docker.

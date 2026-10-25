@@ -36,6 +36,9 @@ export const LABELS: Record<string, string> = {
   run_scene: msg("Running a scene"),
   stop: msg("Stopping the game"),
   get_output: msg("Reading the editor output"),
+  game_input: msg("Playing the game"),
+  game_state: msg("Reading the game's state"),
+  run_playtest: msg("Running a playtest"),
   check_scripts: msg("Checking scripts"),
   screenshot: msg("Taking a screenshot in Godot"),
   record: msg("Recording the game"),
@@ -46,7 +49,9 @@ export const LABELS: Record<string, string> = {
 /**
  * The guard rules every call of each tool is the shape of, decided for each (`[]`: none; the relay holds a tool this
  * table does not name to `upload`). The ones that run code, or write code the editor runs, are uploads: a GDScript file
- * loads as soon as it is written, a `@tool` script runs in the editor, and a game is a program. Once the conversation
+ * loads as soon as it is written, a `@tool` script runs in the editor, and a game is a program. So are the ones that
+ * drive the running game or run code in it: game_input plays it as run_project starts it, game_state evaluates
+ * expressions in it (any method can be called), and run_playtest runs the agent's tests in it. Once the conversation
  * has read a result the guard flags as a likely prompt injection, the guard asks the person before each of their
  * calls, or refuses where nobody can answer, since that code can change the projects and what it prints comes back to
  * the chat, though its network has no way out (see the README on what it reaches). The others read the project or the
@@ -75,6 +80,9 @@ export const ACTS: Record<string, "upload"[]> = {
   run_scene: ["upload"],
   stop: [],
   get_output: [],
+  game_input: ["upload"],
+  game_state: ["upload"],
+  run_playtest: ["upload"],
   check_scripts: [],
   screenshot: [],
   record: ["upload"],

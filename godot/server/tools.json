@@ -1,5 +1,5 @@
 {
-  "instructions": "Tools for a real Godot 4 editor running on a GPU in a container. The person may be watching it live in the Godot panel beside the chat, and one editor is shared by every chat and the person, so check list_projects before you replace what is open. Every editor edit you make (add_node, set_property, attach_script, write_file, ...) happens in that editor and goes through its undo history. Typical loop: list_projects / new_project / open_project -> open_scene or new_scene -> add_node / set_property / attach_script -> save_scene -> check_scripts -> run_project -> screenshot(target=game) and get_output -> stop -> record or export. File paths are res:// paths inside the open project; nothing outside it can be read or written. Property values are JSON: [x, y] for Vector2, \"#rrggbb\" for Color, \"res://...\" to load a resource, {\"type\": \"RectangleShape2D\", \"size\": [32, 32]} for a new resource, {\"$expr\": \"...\"} for any Godot expression. execute_gdscript runs arbitrary GDScript in the editor for anything the other tools do not cover. If the editor stops answering, restart_editor restarts it.",
+  "instructions": "Tools for a real Godot 4 editor running on a GPU in a container. The person may be watching it live in the Godot panel beside the chat, and one editor is shared by every chat and the person, so check list_projects before you replace what is open. Every editor edit you make (add_node, set_property, attach_script, write_file, ...) happens in that editor and goes through its undo history. Typical loop: list_projects / new_project / open_project -> open_scene or new_scene -> add_node / set_property / attach_script -> save_scene -> check_scripts -> run_project -> play it with game_input, look with game_state, screenshot(target=game) and get_output -> fix -> write a test in res://tests/ and run_playtest -> stop -> record or export. File paths are res:// paths inside the open project; nothing outside it can be read or written. Property values are JSON: [x, y] for Vector2, \"#rrggbb\" for Color, \"res://...\" to load a resource, {\"type\": \"RectangleShape2D\", \"size\": [32, 32]} for a new resource, {\"$expr\": \"...\"} for any Godot expression. execute_gdscript runs arbitrary GDScript in the editor for anything the other tools do not cover; it does not reach the running game, which game_state reads. If the editor stops answering, restart_editor restarts it.",
   "tools": [
     {
       "name": "ping",
@@ -429,6 +429,145 @@
           "errors_only": {
             "type": "boolean",
             "default": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "game_input",
+      "description": "Play the game the editor is running (start it with run_project): tap, press or release an input action of the project (move_right, jump, ui_accept; preferred) or a key, or click or move the mouse at a point in the game's viewport. A tap holds for frames (physics frames) or seconds, then lets go, and returns once done; press holds until a release. Returns what was sent and the frames it was pressed and released on.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "An input action of the project (preferred)"
+          },
+          "key": {
+            "type": "string",
+            "description": "A key instead: Space, Enter, Escape, Left, A, F1, ..."
+          },
+          "mouse": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "A point [x, y] in the game's viewport instead"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tap",
+              "press",
+              "release",
+              "move"
+            ],
+            "default": "tap",
+            "description": "move is for the mouse"
+          },
+          "frames": {
+            "type": "integer",
+            "default": 1,
+            "description": "How long a tap holds, in physics frames"
+          },
+          "seconds": {
+            "type": "number",
+            "description": "Instead of frames"
+          },
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "default": "left"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "game_state",
+      "description": "Read the game the editor is running: its live scene tree (each node's path, type and key values such as position, velocity, text) and/or Godot expressions evaluated on the current scene, such as get_node(\"Player\").position or get_tree().get_nodes_in_group(\"enemies\").size(), optionally after wait_frames physics frames. Values are JSON ([x, y] for a Vector2); an expression that fails is in errors. image adds the frame the values are from. Expressions run in the game and can call any method.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "expressions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Godot expressions on the current scene"
+          },
+          "tree": {
+            "type": "boolean",
+            "description": "The node tree (default: when no expressions are given)"
+          },
+          "root": {
+            "type": "string",
+            "description": "The tree from this node: a path from the current scene, or /root for everything, autoloads included"
+          },
+          "max_depth": {
+            "type": "integer",
+            "default": 6
+          },
+          "wait_frames": {
+            "type": "integer",
+            "default": 0
+          },
+          "image": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_width": {
+            "type": "integer",
+            "description": "Scale the image down to this width"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "run_playtest",
+      "description": "Run playtests: GDScript files res://tests/test_*.gd that extend PlayTest (write them with write_file). Each func test_*() is a test, run on the main scene loaded afresh, with these helpers: await press(action, frames=1), await hold(action), await release(action), await key(name, frames=1), await click(Vector2), await move_mouse(Vector2), await wait_frames(n), await wait_seconds(s), await wait_until(func(): return condition, max_frames=600), node(path), scene, frame, check(condition, message), check_eq(got, want, message), fail(message), checkpoint(name). headless (default) runs at a fixed frame rate, so a run repeats exactly; visible runs in the editor's window at the same rate and returns the checkpoints' pictures. Returns pass or fail, each failed check with its line, and the game's errors and output. The tests run in the game: arbitrary code.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "default": "res://tests",
+            "description": "A test file, or a folder whose test_*.gd files all run"
+          },
+          "test": {
+            "type": "string",
+            "description": "Only this test function"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "headless",
+              "visible"
+            ],
+            "default": "headless"
+          },
+          "scene": {
+            "type": "string",
+            "description": "The scene to test instead of the main scene. A res:// path inside the open project (a path relative to the project root also works)."
+          },
+          "fps": {
+            "type": "integer",
+            "default": 60,
+            "description": "The fixed frame rate"
+          },
+          "timeout": {
+            "type": "integer",
+            "default": 120,
+            "description": "Seconds before the run is stopped (at most 280)"
           }
         },
         "required": [],

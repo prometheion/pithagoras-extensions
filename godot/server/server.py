@@ -18,8 +18,10 @@ on the portal's origin (whose secure context Selkies' WebCodecs need): this proc
 runs the agent's code, so nothing it answers is ever run as a page of the portal's.
 
 It starts and restarts the X display (Xvfb), the stream (Selkies) and the editor, and runs the command-line jobs
-(script checks, exports, Movie Maker recordings) itself. Editor operations go to the godot_mcp_bridge editor plugin
-over a loopback JSON-lines socket; the plugin is copied into and enabled in every project the server opens.
+(script checks, exports, Movie Maker recordings, headless playtests) itself. Editor operations go to the
+godot_mcp_bridge editor plugin over a loopback JSON-lines socket; the plugin is copied into and enabled in every project
+the server opens. Its game side (addon/godot_mcp_bridge/game.gd) is the main loop of every game the editor runs and of
+every playtest: it takes input and answers questions about the game over the editor's debugger channel.
 
 Environment:
     GODOT_SERVER_TOKEN       required; the server refuses to start without it (the Bearer token of every route)
@@ -86,6 +88,7 @@ TMP = os.path.join(DATA, "tmp")
 STATE_FILE = os.path.join(DATA, ".state.json")
 RUNTIME_DIR = "/tmp/runtime"
 ADDON_CFG = "res://addons/godot_mcp_bridge/plugin.cfg"
+GAME_SCRIPT = "res://addons/godot_mcp_bridge/game.gd"   # the bridge's game side, a SceneTree script run with -s
 RENDERERS = ("forward_plus", "mobile", "gl_compatibility")
 FEATURE = {"forward_plus": "Forward Plus", "mobile": "Mobile", "gl_compatibility": "GL Compatibility"}
 MAX_BODY = 64 * 1024 * 1024
@@ -162,6 +165,35 @@ def error_lines(lines):
             out.append(line)
         else:
             keep = False
+    return out
+
+
+def errors_only(lines):
+    """Godot's error lines with their indented "at:" / backtrace lines, without its warnings and theirs."""
+    out, keep = [], False
+    for line in lines:
+        if ERR_START.match(line):
+            keep = "WARNING" not in line.split(":", 1)[0]
+            if keep:
+                out.append(line)
+        elif keep and line[:1] in (" ", "\t"):
+            out.append(line)
+        else:
+            keep = False
+    return out
+
+
+def printed(lines):
+    """What a game printed itself: the lines that are not Godot's errors or warnings (or lines of theirs), nor its
+    banner."""
+    out, inside = [], False
+    for line in lines:
+        if ERR_START.match(line):
+            inside = True
+        elif not (inside and line[:1] in (" ", "\t")):
+            inside = False
+            if line.strip() and not line.startswith("Godot Engine v"):
+                out.append(line)
     return out
 
 
@@ -920,8 +952,9 @@ def unpack_project(zip_path, name_hint):
 
 # ---- command-line jobs -------------------------------------------------------------------------------------------
 
-def run_job(argv, timeout, env=None, cwd=None):
-    """Run a Godot (or ffmpeg) command line to the end; returns (exit code, output lines)."""
+def run_job(argv, timeout, env=None, cwd=None, allow_timeout=False):
+    """Run a Godot (or ffmpeg) command line to the end; returns (exit code, output lines). One that runs out of time
+    is killed: an error, or with allow_timeout an exit code of None and its output."""
     p = subprocess.Popen(argv, env=env or base_env(), cwd=cwd or TMP, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, preexec_fn=no_core)
     try:
@@ -929,6 +962,8 @@ def run_job(argv, timeout, env=None, cwd=None):
     except subprocess.TimeoutExpired:
         kill_group(p, 5)
         out, _ = p.communicate()
+        if allow_timeout:
+            return None, [ANSI.sub("", l) for l in out.decode("utf-8", "replace").splitlines()]
         raise ToolError(f"{os.path.basename(argv[0])} did not finish within {timeout} s; output ended with: "
                         + " | ".join(ANSI.sub("", out.decode("utf-8", "replace")).splitlines()[-8:]))
     lines = [ANSI.sub("", l) for l in out.decode("utf-8", "replace").splitlines()]
@@ -1451,6 +1486,210 @@ def t_execute_gdscript(a, ctx):
     return res
 
 
+# ---- playing and testing the game ---------------------------------------------------------------------------------
+
+TESTS = "res://tests"
+MAX_CHECKPOINT_IMAGES = 6
+
+
+def no_game():
+    """Why game_input and game_state have no game to talk to, in one sentence, with what works."""
+    if playing():
+        return ("A game window is open, but the editor did not start it, so it takes no input and its state cannot be "
+                "read; screenshot(target=game) and get_output still work, and run_project starts one that does.")
+    return "No game is running; start one with run_project (or run_scene)."
+
+
+def game_call(op, args, timeout):
+    """A call to the game side (game.gd) of the game the editor runs, through the plugin and the editor's debugger
+    channel; what the game printed as errors meanwhile comes back as game_errors."""
+    if not bridge("ping", timeout=10).get("playing"):
+        raise ToolError(no_game())
+    mark = EDITOR_OUT.mark()
+    res = bridge("game", {"op": op, "args": args, "timeout": timeout}, timeout=timeout + 15)
+    errs = errors_only(output_since(mark, 0.05))
+    if errs:
+        res["game_errors"] = errs[:20]
+    return res
+
+
+def t_game_input(a, ctx):
+    if sum(k in a for k in ("action", "key", "mouse")) != 1:
+        raise ToolError("give one of action (preferred), key or mouse")
+    held = float(a["seconds"]) if "seconds" in a else int(a.get("frames", 1)) / 30
+    return game_call("input", dict(a), timeout=15 + int(held))
+
+
+def t_game_state(a, ctx):
+    args = dict(a)
+    if isinstance(args.get("expressions"), str):
+        args["expressions"] = [args["expressions"]]
+    res = game_call("state", args, timeout=15 + int(a.get("wait_frames", 0)) // 30)
+    png = res.pop("png_base64", None)
+    if png:
+        res["_image"] = (png, "image/png")
+    return res
+
+
+def playtest_files(path):
+    """The test files a run_playtest call names: one file, or every test_*.gd under a folder (res://tests unless
+    another is given)."""
+    res, full = resolve_res(path or TESTS)
+    if not os.path.exists(full):
+        raise ToolError(f"there is no {res}; write a test first (a script that extends PlayTest, such as "
+                        "res://tests/test_jump.gd) with write_file")
+    if os.path.isfile(full):
+        if not res.endswith(".gd"):
+            raise ToolError(f"{res} is not a GDScript file")
+        return [res]
+    base = os.path.realpath(current_dir())
+    files = []
+    for root, dirs, names in os.walk(full):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        files += ["res://" + os.path.relpath(os.path.join(root, f), base).replace(os.sep, "/")
+                  for f in sorted(names) if f.startswith("test_") and f.endswith(".gd")]
+    if not files:
+        raise ToolError(f"no test_*.gd files in {res}; write one (a script that extends PlayTest) with write_file")
+    return files
+
+
+def read_results(out):
+    """What a playtest run has written to results.jsonl so far, one event per line."""
+    try:
+        with open(os.path.join(out, "results.jsonl"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            pass   # the line the game was writing when it was stopped
+    return events
+
+
+def finished(events):
+    return any(e.get("event") == "done" for e in events)
+
+
+def playtest_headless(path, out, fps, timeout):
+    """The tests in a game of their own, with no window, at a fixed frame rate: (output lines, how it ended)."""
+    env = base_env()
+    env["GODOT_MCP_PLAYTEST"] = out
+    code, lines = run_job([GODOT, "--headless", "--path", path, "--fixed-fps", str(fps), "-s", GAME_SCRIPT], timeout,
+                          env=env, allow_timeout=True)
+    if finished(read_results(out)):
+        return lines, "done"
+    return lines, (f"timed out after {timeout} s" if code is None else
+                   f"the game exited (code {code}) before the tests finished")
+
+
+def playtest_visible(out, scene, fps, timeout):
+    """The tests in the game the editor runs, in its window over the editor, at a fixed frame rate (see the plugin's
+    _run_game): (output lines, how it ended)."""
+    mark = EDITOR_OUT.mark()
+    run = {"mode": "custom", "scene": scene} if scene else {"mode": "main"}
+    bridge("run", dict(run, playtest=out, fps=fps), timeout=30)
+    t0, ended = time.time(), None
+    while ended is None:
+        time.sleep(0.25)
+        if finished(read_results(out)):
+            ended = "done"
+        elif halt := debugger_halt():
+            ended = "halted in the editor's debugger: " + halt
+        elif not (bridge_quiet("ping", timeout=5) or {}).get("playing"):
+            time.sleep(0.3)   # the last lines it wrote before it quit
+            ended = "done" if finished(read_results(out)) else "the game quit before the tests finished"
+        elif time.time() - t0 > timeout:
+            ended = f"timed out after {timeout} s"
+    if (bridge_quiet("ping", timeout=5) or {}).get("playing"):
+        bridge_quiet("stop", timeout=15)
+    return output_since(mark, 0.2), ended
+
+
+def playtest_report(events, out, lines, mode, fps, ended):
+    """run_playtest's answer: each test passed or failed with its failures (line and message), the checkpoints (with
+    their pictures, as the second item), and the errors and output the game printed."""
+    tests, order, checkpoints, images = {}, [], [], []
+
+    def name(e):
+        return f"{os.path.basename(e.get('file', ''))}:{e.get('test', '')}"
+
+    for e in events:
+        kind = e.get("event")
+        if kind == "start":
+            tests[name(e)] = {"test": name(e), "passed": None}
+            order.append(name(e))
+        elif kind == "check" and name(e) in tests:
+            tests[name(e)].setdefault("failures", []).append({"line": e.get("line", 0), "message": e.get("message", "")})
+        elif kind == "end" and name(e) in tests:
+            tests[name(e)].update(passed=bool(e.get("passed")), frames=e.get("frames"))
+        elif kind == "error":   # a file that cannot run, or a scene that cannot load
+            key = os.path.basename(e.get("file", "")) or "scene"
+            tests[key] = {"test": key, "passed": False, "failures": [{"line": e.get("line", 0), "message": e.get("message", "")}]}
+            order.append(key)
+        elif kind == "checkpoint":
+            cp = {"test": name(e), "name": e.get("name"), "frame": e.get("frame")}
+            picture = os.path.join(out, os.path.basename(e["image"])) if e.get("image") else None
+            if picture and os.path.isfile(picture) and len(images) < MAX_CHECKPOINT_IMAGES:
+                with open(picture, "rb") as f:
+                    images.append((base64.b64encode(f.read()).decode(), "image/png"))
+                cp["image"] = len(images)
+            checkpoints.append(cp)
+    results = [tests[k] for k in order]
+    for t in results:
+        if t["passed"] is None:   # started, never ended
+            t["passed"] = False
+            t.setdefault("failures", []).append({"line": 0, "message": "did not finish: " + ended})
+    ok = sum(1 for t in results if t["passed"])
+    errors, said = errors_only(lines), printed(lines)
+    res = {"passed": ended == "done" and bool(results) and ok == len(results), "mode": mode, "fps": fps,
+           "summary": f"{ok} of {len(results)} passed" + ("" if ended == "done" else f"; {ended}"), "tests": results}
+    if checkpoints:
+        res["checkpoints"] = checkpoints
+        if mode == "headless":
+            res["note"] = "checkpoint pictures come with mode visible"
+    if errors:
+        res["errors"] = errors[:20]
+    if said:
+        res["output"] = said[-30:]
+    return res, images
+
+
+def t_run_playtest(a, ctx):
+    name, path = CURRENT["name"], current_dir()
+    files = playtest_files(a.get("path"))
+    mode = a.get("mode", "headless")
+    if mode not in ("headless", "visible"):
+        raise ToolError("mode must be headless or visible")
+    fps = int(a.get("fps", 60))
+    if not 1 <= fps <= 240:
+        raise ToolError("fps must be between 1 and 240")
+    timeout = int(a.get("timeout", 120))
+    if not 1 <= timeout <= 280:   # the portal's request to the server ends after 300 s
+        raise ToolError("timeout is between 1 and 280 seconds")
+    scene = resolve_res(a["scene"], must_exist=True)[0] if a.get("scene") else ""
+    os.makedirs(TMP, exist_ok=True)
+    out = tempfile.mkdtemp(prefix="playtest-", dir=TMP)
+    try:
+        write_text(os.path.join(out, "spec.json"), json.dumps({"files": files, "test": a.get("test", ""), "scene": scene}))
+        bridge_quiet("save_all")
+        if mode == "headless":
+            with JOB_LOCK, busy(f"playtesting {name}"):
+                lines, ended = playtest_headless(path, out, fps, timeout)
+        else:
+            with busy(f"playtesting {name} in the editor"):
+                lines, ended = playtest_visible(out, scene, fps, timeout)
+        res, images = playtest_report(read_results(out), out, lines, mode, fps, ended)
+    finally:
+        shutil.rmtree(out, ignore_errors=True)
+    if images:
+        res["_images"] = images
+    log(f"playtest {name} ({mode}): {res['summary']}")
+    return res
+
+
 TOOLS = [
     ("ping", t_ping, "Versions (Godot, server), the GPU the container renders on, the open project and its renderer, "
      "and the editor's own report (graphics adapter, rendering method, open scenes, whether a game is running).",
@@ -1543,6 +1782,51 @@ TOOLS = [
      "playing is false and halted gives the error and its file:line.",
      _obj({"since": {"type": "integer"}, "limit": {"type": "integer", "default": 200},
            "errors_only": {"type": "boolean", "default": False}})),
+    ("game_input", t_game_input, "Play the game the editor is running (start it with run_project): tap, press or "
+     "release an input action of the project (move_right, jump, ui_accept; preferred) or a key, or click or move the "
+     "mouse at a point in the game's viewport. A tap holds for frames (physics frames) or seconds, then lets go, and "
+     "returns once done; press holds until a release. Returns what was sent and the frames it was pressed and released "
+     "on.",
+     _obj({"action": {"type": "string", "description": "An input action of the project (preferred)"},
+           "key": {"type": "string", "description": "A key instead: Space, Enter, Escape, Left, A, F1, ..."},
+           "mouse": {"type": "array", "items": {"type": "number"},
+                     "description": "A point [x, y] in the game's viewport instead"},
+           "type": {"type": "string", "enum": ["tap", "press", "release", "move"], "default": "tap",
+                    "description": "move is for the mouse"},
+           "frames": {"type": "integer", "default": 1, "description": "How long a tap holds, in physics frames"},
+           "seconds": {"type": "number", "description": "Instead of frames"},
+           "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"}})),
+    ("game_state", t_game_state, "Read the game the editor is running: its live scene tree (each node's path, type "
+     "and key values such as position, velocity, text) and/or Godot expressions evaluated on the current scene, such as "
+     "get_node(\"Player\").position or get_tree().get_nodes_in_group(\"enemies\").size(), optionally after wait_frames "
+     "physics frames. Values are JSON ([x, y] for a Vector2); an expression that fails is in errors. image adds the "
+     "frame the values are from. Expressions run in the game and can call any method.",
+     _obj({"expressions": {"type": "array", "items": {"type": "string"},
+                           "description": "Godot expressions on the current scene"},
+           "tree": {"type": "boolean", "description": "The node tree (default: when no expressions are given)"},
+           "root": {"type": "string", "description": "The tree from this node: a path from the current scene, or "
+                                                    "/root for everything, autoloads included"},
+           "max_depth": {"type": "integer", "default": 6},
+           "wait_frames": {"type": "integer", "default": 0},
+           "image": {"type": "boolean", "default": False},
+           "max_width": {"type": "integer", "description": "Scale the image down to this width"}})),
+    ("run_playtest", t_run_playtest, "Run playtests: GDScript files res://tests/test_*.gd that extend PlayTest (write "
+     "them with write_file). Each func test_*() is a test, run on the main scene loaded afresh, with these helpers: "
+     "await press(action, frames=1), await hold(action), await release(action), await key(name, frames=1), await "
+     "click(Vector2), await move_mouse(Vector2), await wait_frames(n), await wait_seconds(s), await "
+     "wait_until(func(): return condition, max_frames=600), node(path), scene, frame, check(condition, message), "
+     "check_eq(got, want, message), fail(message), checkpoint(name). headless (default) runs at a fixed frame rate, so "
+     "a run repeats exactly; visible runs in the editor's window at the same rate and returns the checkpoints' "
+     "pictures. Returns pass or fail, each failed check with its line, and the game's errors and output. The tests run "
+     "in the game: arbitrary code.",
+     _obj({"path": {"type": "string", "default": TESTS,
+                    "description": "A test file, or a folder whose test_*.gd files all run"},
+           "test": {"type": "string", "description": "Only this test function"},
+           "mode": {"type": "string", "enum": ["headless", "visible"], "default": "headless"},
+           "scene": {"type": "string", "description": "The scene to test instead of the main scene. " + RES},
+           "fps": {"type": "integer", "default": 60, "description": "The fixed frame rate"},
+           "timeout": {"type": "integer", "default": 120,
+                       "description": "Seconds before the run is stopped (at most 280)"}})),
     ("check_scripts", t_check_scripts, "Parse and type-check GDScript files (all of the project's, outside addons/, "
      "or the given paths) with Godot's --check-only, and return each failing file's errors with line numbers.",
      _obj({"paths": {"type": "array", "items": {"type": "string"}}})),
@@ -1583,11 +1867,13 @@ MCP_INSTRUCTIONS = (
     "replace what is open. Every editor edit you make (add_node, set_property, attach_script, write_file, ...) happens "
     "in that editor and goes through its undo history. Typical loop: list_projects / new_project / open_project -> "
     "open_scene or new_scene -> add_node / set_property / attach_script -> save_scene -> check_scripts -> run_project -> "
-    "screenshot(target=game) and get_output -> stop -> record or export. File paths are res:// paths inside the "
+    "play it with game_input, look with game_state, screenshot(target=game) and get_output -> fix -> write a test in "
+    "res://tests/ and run_playtest -> stop -> record or export. File paths are res:// paths inside the "
     "open project; nothing outside it can be read or written. Property values are JSON: [x, y] for Vector2, "
     "\"#rrggbb\" for Color, \"res://...\" to load a resource, {\"type\": \"RectangleShape2D\", \"size\": [32, 32]} "
     "for a new resource, {\"$expr\": \"...\"} for any Godot expression. execute_gdscript runs arbitrary GDScript in "
-    "the editor for anything the other tools do not cover. If the editor stops answering, restart_editor restarts it.")
+    "the editor for anything the other tools do not cover; it does not reach the running game, which game_state reads. "
+    "If the editor stops answering, restart_editor restarts it.")
 
 
 def summarize(args):
@@ -1621,14 +1907,15 @@ def mcp_call(name, args, ctx):
         "tool" if ok else "tool-error")
     if not ok:
         return {"content": [{"type": "text", "text": result}], "isError": True}
-    image = result.pop("_image", None) if isinstance(result, dict) else None
+    images = []
+    if isinstance(result, dict):
+        images = result.pop("_images", None) or ([result.pop("_image")] if "_image" in result else [])
     if isinstance(result, dict) and name in EDITOR_TOOLS:
         errs = [l for l in error_lines(output_since(mark, 0.02)) if not l.startswith("WARNING")]
         if errs:
             result["editor_errors"] = errs[:20]
     content = [{"type": "text", "text": json.dumps(result, indent=1)}]
-    if image:
-        content.append({"type": "image", "data": image[0], "mimeType": image[1]})
+    content += [{"type": "image", "data": data, "mimeType": mime} for data, mime in images]
     return {"content": content, "isError": False}
 
 

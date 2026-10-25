@@ -46,7 +46,7 @@ test("the package's tools are Godot's, with the prefix, their schemas, the instr
     assert.deepEqual(tool.guard, ACTS[source.name].length ? { outside: true, acts: ["upload"] } : { outside: true }, tool.name);
   }
   assert.deepEqual(Object.keys(ACTS).sort(), TOOLS.map((t) => t.name).sort(), "every tool's rule is decided");
-  assert.deepEqual(Object.keys(ACTS).filter((name) => ACTS[name].length).sort(), ["attach_script", "execute_gdscript", "record", "run_project", "run_scene", "write_file"]);
+  assert.deepEqual(Object.keys(ACTS).filter((name) => ACTS[name].length).sort(), ["attach_script", "execute_gdscript", "game_input", "game_state", "record", "run_playtest", "run_project", "run_scene", "write_file"]);
   assert.ok(LISTED.instructions.startsWith("Tools for a real Godot 4 editor running on a GPU in a container"));
 });
 
@@ -115,4 +115,14 @@ test("Godot's instructions name its tools as the chat offers them, so the model 
   assert.match(told, /godot_execute_gdscript runs arbitrary GDScript/);
   assert.match(told, /godot_screenshot\(target=game\)/);
   assert.match(told, /In this chat each of these tools is named with godot_ in front: \w+ is godot_\w+\.$/);
+});
+
+test("the loop the instructions give plays, reads and tests the game, by the chat's names, and the playtest helpers stay as written", () => {
+  const names = TOOLS.map((t) => t.name);
+  const told = guidelineOf(LISTED.instructions, names, "godot");
+  assert.match(told, /godot_run_project -> play it with godot_game_input, look with godot_game_state, godot_screenshot\(target=game\) and godot_get_output -> fix -> write a test in res:\/\/tests\/ and godot_run_playtest -> stop -> record or export\./);
+  assert.match(told, /it does not reach the running game, which godot_game_state reads/);
+  const playtest = inChatNames(TOOLS.find((t) => t.name === "run_playtest")!.description, names, "godot");
+  assert.match(playtest, /await press\(action, frames=1\), await hold\(action\), .* check\(condition, message\), check_eq\(got, want, message\), fail\(message\), checkpoint\(name\)\./);
+  assert.match(inChatNames(TOOLS.find((t) => t.name === "game_input")!.description, names, "godot"), /^Play the game the editor is running \(start it with godot_run_project\)/);
 });

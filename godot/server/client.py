@@ -7,6 +7,9 @@
     python3 client.py call screenshot '{"target": "game"}' --save game.png
     python3 client.py e2e [--name coin-chase] [--out DIR]      build a small 2D game through MCP alone and check
                                                                every tool on the way
+    python3 client.py gametest [--name platformer] [--out DIR] build a small platformer, play it (game_input,
+                                                               game_state) and run passing and failing playtests,
+                                                               headless and visible
 
 The server comes from GODOT_SERVER_URL (default http://127.0.0.1:3880) and the token from GODOT_SERVER_TOKEN, or
 --url / --token. The server is on a network of its own, which only the Pithagoras portal reaches, so run this where
@@ -116,6 +119,108 @@ func _ready() -> void:
 '''
 
 
+PLATFORMER_PLAYER_GD = '''extends CharacterBody2D
+## Runs with move_left / move_right and jumps with jump, on the floor only.
+
+const SPEED := 300.0
+const JUMP_VELOCITY := -450.0
+
+var gravity: float = ProjectSettings.get_setting("physics/2d/default_gravity")
+var jumps := 0
+var last_jump_frame := -1
+
+
+func _physics_process(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y += gravity * delta
+	if Input.is_action_just_pressed("jump") and is_on_floor():
+		velocity.y = JUMP_VELOCITY
+		jumps += 1
+		last_jump_frame = Engine.get_physics_frames()
+	velocity.x = Input.get_axis("move_left", "move_right") * SPEED
+	move_and_slide()
+'''
+
+PLATFORMER_MAIN_GD = '''extends Node2D
+## A coin for a point, and a bonus button worth ten.
+
+var score := 0
+
+@onready var label: Label = $ScoreLabel
+
+
+func _ready() -> void:
+	$Coin.body_entered.connect(_on_coin)
+	$Bonus.pressed.connect(_add.bind(10))
+
+
+func _on_coin(body: Node) -> void:
+	if body.name == "Player":
+		_add(1)
+		$Coin.queue_free()
+
+
+func _add(points: int) -> void:
+	score += points
+	label.text = "Score: %d" % score
+'''
+
+PLATFORMER_INPUT_GD = '''for a in [["move_left", KEY_LEFT], ["move_right", KEY_RIGHT], ["jump", KEY_SPACE]]:
+	var ev := InputEventKey.new()
+	ev.physical_keycode = a[1]
+	ProjectSettings.set_setting("input/" + a[0], {"deadzone": 0.2, "events": [ev]})
+ProjectSettings.save()
+return InputMap.has_action("jump") or ProjectSettings.has_setting("input/jump")'''
+
+TEST_PLATFORMER_GD = '''extends PlayTest
+
+
+func test_walks_right() -> void:
+	var player := node("Player")
+	await wait_frames(20)
+	var x: float = player.position.x
+	await press("move_right", 60)
+	print("walked from ", x, " to ", player.position.x, " by frame ", frame)
+	check(player.position.x > x + 250, "the player walks right (from %s to %s)" % [x, player.position.x])
+
+
+func test_jumps_once() -> void:
+	var player := node("Player")
+	await wait_frames(20)
+	var y: float = player.position.y
+	await press("jump")
+	await wait_frames(12)
+	checkpoint("in the air")
+	check(player.position.y < y - 40, "the player rises (from %s to %s)" % [y, player.position.y])
+	await press("jump")
+	await wait_until(func(): return player.is_on_floor(), 120)
+	check_eq(player.jumps, 1, "no jump in the air")
+
+
+func test_coin_scores() -> void:
+	await hold("move_right")
+	var scored := await wait_until(func(): return node("ScoreLabel").text == "Score: 1", 120)
+	await release("move_right")
+	checkpoint("coin taken")
+	check(scored, "touching the coin scores a point")
+'''
+
+TEST_FAILING_GD = '''extends PlayTest
+
+
+func test_wrong_score() -> void:
+	await wait_frames(5)
+	check_eq(node("ScoreLabel").text, "Score: 99", "the score at the start")
+
+
+func test_script_error() -> void:
+	await wait_frames(3)
+	var player := node("Player")
+	player.fly_away()
+	check(false, "never reached")
+'''
+
+
 class E2E:
     def __init__(self, mcp, out):
         self.mcp, self.out, self.results = mcp, out, []
@@ -130,7 +235,7 @@ class E2E:
         ms = int((time.time() - t0) * 1000)
         problem = None
         if expect_error:
-            problem = None if not ok else "expected an error"
+            problem = "expected an error" if ok else (check(res) if check else None)
         elif not ok:
             problem = str(res)[:400]
         elif check:
@@ -277,15 +382,147 @@ class E2E:
         return name, failed
 
 
+def gametest(e, name):
+    """The game-testing tools against a running server: a small platformer built through MCP, played with game_input
+    and read with game_state, then playtests that pass and fail, headless and visible."""
+    S = e.step
+    S("ping")
+    projects = S("list_projects")
+    existing = {p["name"] for p in projects.get("projects", [])} if isinstance(projects, dict) else set()
+    base, i = name, 2
+    while name in existing:
+        name, i = f"{base}-{i}", i + 1
+    S("new_project", {"name": name, "template": "2d"}, check=lambda r: None if r["opened"]["project"] == name else "did not open")
+    S("execute_gdscript", {"code": PLATFORMER_INPUT_GD})
+    S("restart_editor", check=lambda r: None if r["project"] == name else f"{r}")   # the editor's InputMap from the saved settings
+    S("open_scene", {"path": "res://main.tscn"})
+    S("add_node", {"type": "CharacterBody2D", "name": "Player", "properties": {"position": [200, 480]}})
+    S("add_node", {"type": "CollisionShape2D", "name": "Shape", "parent": "Player",
+                   "properties": {"shape": {"type": "RectangleShape2D", "size": [40, 56]}}})
+    S("add_node", {"type": "Sprite2D", "name": "Sprite", "parent": "Player",
+                   "properties": {"texture": "res://icon.svg", "scale": [0.35, 0.45]}})
+    S("attach_script", {"node": "Player", "path": "res://player.gd", "source": PLATFORMER_PLAYER_GD},
+      check=lambda r: None if r["compiles"] else f"{r}")
+    S("add_node", {"type": "StaticBody2D", "name": "Platform", "properties": {"position": [576, 560]}})
+    S("add_node", {"type": "CollisionShape2D", "name": "Shape", "parent": "Platform",
+                   "properties": {"shape": {"type": "RectangleShape2D", "size": [1100, 40]}}})
+    S("add_node", {"type": "ColorRect", "name": "Look", "parent": "Platform",
+                   "properties": {"position": [-550, -20], "size": [1100, 40], "color": "#4a7a3a"}})
+    S("add_node", {"type": "Area2D", "name": "Coin", "properties": {"position": [460, 500]}})
+    S("add_node", {"type": "CollisionShape2D", "name": "Shape", "parent": "Coin",
+                   "properties": {"shape": {"type": "CircleShape2D", "radius": 18}}})
+    S("add_node", {"type": "Sprite2D", "name": "Sprite", "parent": "Coin",
+                   "properties": {"texture": "res://icon.svg", "scale": [0.25, 0.25], "modulate": "#ffd700"}})
+    S("add_node", {"type": "Label", "name": "ScoreLabel", "properties": {"text": "Score: 0", "position": [24, 16],
+                                                                         "theme_override_font_sizes/font_size": 32}})
+    S("add_node", {"type": "Button", "name": "Bonus", "properties": {"text": "Bonus", "position": [960, 20],
+                                                                     "size": [140, 48]}})
+    S("attach_script", {"node": ".", "path": "res://main.gd", "source": PLATFORMER_MAIN_GD},
+      check=lambda r: None if r["compiles"] else f"{r}")
+    S("save_scene")
+    S("check_scripts", check=lambda r: None if r["failed"] == 0 else f"{r}")
+
+    # Nothing running: said in one sentence.
+    S("game_state", expect_error=True,
+      check=lambda t: None if t == "No game is running; start one with run_project (or run_scene)." else t)
+    S("run_project", check=lambda r: None if r["playing"] and not r["errors"] else f"{r}")
+    S("game_state", check=lambda r: None if {"Player", "Platform", "Coin", "ScoreLabel", "Bonus"}
+      <= {n["path"] for n in r["nodes"]} else f"{r}")
+    pos = "get_node(\"Player\").position"
+    floor = S("game_state", {"expressions": [pos, "get_node(\"Player\").is_on_floor()", "get_node(\"ScoreLabel\").text"],
+                             "wait_frames": 30},
+              check=lambda r: None if r["values"]["get_node(\"Player\").is_on_floor()"] else f"{r}")
+    x0 = floor["values"][pos][0] if isinstance(floor, dict) else 0
+    S("game_input", {"action": "move_right", "frames": 60},
+      check=lambda r: None if r["frames_held"] == 60 and r["released_frame"] - r["pressed_frame"] == 60 else f"{r}")
+    S("game_state", {"expressions": [pos, "get_node(\"ScoreLabel\").text"]},
+      check=lambda r: None if r["values"][pos][0] > x0 + 250 and r["values"]["get_node(\"ScoreLabel\").text"] == "Score: 1"
+      else f"{r}")
+    tap = S("game_input", {"action": "jump"}, check=lambda r: None if r["frames_held"] == 1 else f"{r}")
+    pressed = tap.get("pressed_frame") if isinstance(tap, dict) else None
+    S("game_state", {"expressions": ["get_node(\"Player\").last_jump_frame", "get_node(\"Player\").jumps",
+                                     "get_node(\"Player\").velocity"], "wait_frames": 5},
+      check=lambda r: None if r["values"]["get_node(\"Player\").last_jump_frame"] == pressed
+      and r["values"]["get_node(\"Player\").jumps"] == 1 else f"jump not seen on frame {pressed}: {r}")
+    S("game_input", {"key": "Left", "frames": 20}, check=lambda r: None if r["frames_held"] == 20 else f"{r}")
+    S("game_input", {"action": "move_left", "type": "press"}, check=lambda r: None if "pressed_frame" in r else f"{r}")
+    S("game_input", {"action": "move_left", "type": "release"}, check=lambda r: None if "released_frame" in r else f"{r}")
+    S("game_input", {"mouse": [1030, 44]}, check=lambda r: None if r["frames_held"] == 1 else f"{r}")
+    S("game_state", {"expressions": ["score", "get_node(\"ScoreLabel\").text", "get_node(\"Nope\").position", "1 +"],
+                     "image": True, "max_width": 960}, save="game-state.png",
+      check=lambda r: None if r["values"]["score"] == 11 and set(r.get("errors", {})) == {"get_node(\"Nope\").position", "1 +"}
+      else f"{r}")
+    S("game_input", {"action": "fly"}, expect_error=True)
+    S("game_input", {"key": "Spce"}, expect_error=True)
+    S("screenshot", {"target": "game"}, save="game-window.png")
+    S("stop", check=lambda r: None if not r["playing"] else "still playing")
+    S("game_input", {"action": "jump"}, expect_error=True)
+
+    # A game the editor did not start, and one that does not load the game side: each said, with what works.
+    other = S("execute_gdscript", {"code": 'return OS.create_process(OS.get_executable_path(), ["--path", '
+                                           'ProjectSettings.globalize_path("res://"), "--position", "120,120"])'})
+    time.sleep(3)
+    S("game_state", expect_error=True,
+      check=lambda t: None if "the editor did not start it" in t and "screenshot(target=game)" in t else t)
+    S("execute_gdscript", {"code": f'return OS.kill({other.get("return", 0) if isinstance(other, dict) else 0})'})
+    S("execute_gdscript", {"code": 'ProjectSettings.set_setting("application/config/disable_project_settings_override", true)\n'
+                                   'return ProjectSettings.save()'})
+    S("run_project", check=lambda r: None if r["playing"] else f"{r}")
+    S("game_input", {"action": "jump"}, expect_error=True, check=lambda t: None if "no game bridge" in t else t)
+    S("stop")
+    S("execute_gdscript", {"code": 'ProjectSettings.set_setting("application/config/disable_project_settings_override", false)\n'
+                                   'return ProjectSettings.save()'})
+
+    # Playtests: one file that passes, one that fails (a wrong value and a script error), headless and visible.
+    S("write_file", {"path": "res://tests/test_platformer.gd", "content": TEST_PLATFORMER_GD})
+    S("write_file", {"path": "res://tests/test_failing.gd", "content": TEST_FAILING_GD})
+    S("check_scripts", {"paths": ["res://tests/test_platformer.gd", "res://tests/test_failing.gd"]},
+      check=lambda r: None if r["failed"] == 0 else f"{r}")
+    runs = []
+
+    def passing(r):
+        runs.append(r)
+        return None if r["passed"] and r["summary"] == "3 of 3 passed" else f"{r}"
+
+    def failing(r):
+        fails = {t["test"]: t.get("failures", []) for t in r["tests"]}
+        wrong = fails.get("test_failing.gd:test_wrong_score", [{}])[0]
+        error = fails.get("test_failing.gd:test_script_error", [{}])[0]
+        return None if not r["passed"] and wrong.get("line") == 6 and "Score: 99" in wrong.get("message", "") \
+            and error.get("line") == 12 and "fly_away" in error.get("message", "") else f"{r}"
+
+    S("run_playtest", {"path": "res://tests/test_platformer.gd"}, check=passing)
+    S("run_playtest", {"path": "res://tests/test_platformer.gd"}, check=passing)
+    S("run_playtest", {"path": "res://tests/test_failing.gd"}, check=failing)
+    S("run_playtest", {"path": "res://tests/test_platformer.gd", "mode": "visible"}, check=passing, save="checkpoint.png")
+    S("run_playtest", {"path": "res://tests/test_failing.gd", "mode": "visible"}, check=failing)
+    S("run_playtest", check=lambda r: None if not r["passed"] and r["summary"] == "3 of 5 passed" else f"{r}")
+    S("run_playtest", {"path": "res://tests/test_platformer.gd", "test": "test_jumps_once"},
+      check=lambda r: None if r["passed"] and [t["test"] for t in r["tests"]] == ["test_platformer.gd:test_jumps_once"] else f"{r}")
+    if len(runs) == 3:   # two headless runs and a visible one: the same frames and the same positions
+        same = [([(t["test"], t.get("frames")) for t in r["tests"]], [l for l in r.get("output", []) if "walked" in l])
+                for r in runs]
+        ok = same[0] == same[1] == same[2]
+        e.results.append({"tool": "repeatable", "ok": ok, "ms": 0, "problem": None if ok else f"{same}", "saved": None})
+        print(f"{time.strftime('%H:%M:%S')} {'ok' if ok else 'FAIL':4} repeatable           {same}")
+    S("export", {"platform": "web"}, check=lambda r: None if "index.pck" in r["files"] else f"{r}")
+    failed = [r for r in e.results if not r["ok"]]
+    print(f"{time.strftime('%H:%M:%S')} DONE project={name} steps={len(e.results)} passed={len(e.results) - len(failed)} "
+          f"failed={len(failed)}")
+    with open(os.path.join(e.out, "gametest-results.json"), "w") as f:
+        json.dump({"project": name, "results": e.results}, f, indent=1)
+    return name, failed
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["tools", "call", "e2e"])
+    ap.add_argument("command", choices=["tools", "call", "e2e", "gametest"])
     ap.add_argument("tool", nargs="?")
     ap.add_argument("args", nargs="?", default="{}")
     ap.add_argument("--url", default=os.environ.get("GODOT_SERVER_URL", "http://127.0.0.1:3880"))
     ap.add_argument("--token", default=os.environ.get("GODOT_SERVER_TOKEN", ""))
     ap.add_argument("--save", help="call: write the first returned image here")
-    ap.add_argument("--name", default="coin-chase", help="e2e: project name (a suffix is added if it exists)")
+    ap.add_argument("--name", help="e2e / gametest: project name (a suffix is added if it exists)")
     ap.add_argument("--out", default="e2e-out", help="e2e: folder for screenshots and results")
     ap.add_argument("--no-switch", action="store_true", help="e2e: skip the open_project round trip")
     a = ap.parse_args()
@@ -305,7 +542,10 @@ def main():
     info = mcp.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                   "clientInfo": {"name": "godot-server-e2e", "version": "1"}})
     print(f"{time.strftime('%H:%M:%S')} connected to {info['serverInfo']['name']} {info['serverInfo']['version']} at {mcp.url}")
-    _, failed = E2E(mcp, a.out).run(a.name, switch=not a.no_switch)
+    if a.command == "gametest":
+        _, failed = gametest(E2E(mcp, a.out), a.name or "platformer")
+    else:
+        _, failed = E2E(mcp, a.out).run(a.name or "coin-chase", switch=not a.no_switch)
     sys.exit(1 if failed else 0)
 
 

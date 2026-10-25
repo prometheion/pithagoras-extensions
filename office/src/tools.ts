@@ -34,10 +34,9 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { jsZip } from "./jszip";
 import { portal } from "./host";
 import { canonical, createDoc, docPath, docsForHome, persistBytes, refresh, refreshAll, type DocMeta } from "./store";
-import { parseDocx, parseXlsx, editDocx, rewriteZip, type EditOp } from "./ooxml";
+import { parseDocx, parseXlsx, editDocx, readPart, rewriteZip, type EditOp } from "./ooxml";
 import { inSession, usersOf, isLocked } from "./live";
 import { drainWakeQueue } from "./ping";
 
@@ -380,10 +379,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const buf = readBytes(doc, chatId);
       let documentXml: string;
       try {
-        const zip = await (await jsZip()).loadAsync(buf);
-        const part = zip.file("word/document.xml");
-        if (!part) throw new Refusal("corrupt", `"${doc.title}" has no word/document.xml: it is not a Word document`);
-        documentXml = (await part.async("string")) ?? "";
+        // Within the caps every other read here keeps (256 MiB an entry, 1 GiB a zip): a part that inflates to gigabytes
+        // is refused before it is inflated, not held whole in the portal's memory.
+        const part = readPart(buf, "word/document.xml");
+        if (part === undefined) throw new Refusal("corrupt", `"${doc.title}" has no word/document.xml: it is not a Word document`);
+        documentXml = part;
       } catch (e) {
         if (e instanceof Refusal) throw e;
         throw new Refusal("corrupt", `"${doc.title}" could not be opened as a zip archive: ${e instanceof Error ? e.message : String(e)}`);

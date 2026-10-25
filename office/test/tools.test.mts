@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { registerTools, __resetToolsForTests } from "../src/tools";
 import { createDoc, getDoc } from "../src/store";
 import { parseDocx, rewriteZip } from "../src/ooxml";
@@ -422,6 +423,46 @@ test("office_edit: a stale revision is refused with a loud CONFLICT and the fres
   const ok = (await tool(s, "office_edit").execute("f4", { id: doc.docId, ops: [{ quote: "New document", replacement: "Retried after re-read" }], baseRevision: fresh })) as ToolResult;
   assert.ok(!ok.content[0].text.startsWith("error:"), ok.content[0].text);
   assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "Retried after re-read");
+});
+
+/** A .docx whose word/document.xml inflates to `mib` MiB of zeros from a few hundred KB: built a MiB at a time, so the
+ * test itself never holds it whole. */
+function bombDocx(mib: number): Buffer {
+  const chunk = Buffer.alloc(1024 * 1024);
+  let crc = 0;
+  const parts: Buffer[] = [];
+  const deflate = (data: Buffer, flush: number) => zlib.deflateRawSync(data, { finishFlush: flush });
+  // One raw deflate stream made of sync-flushed pieces and a final empty block.
+  for (let i = 0; i < mib; i++) {
+    crc = zlib.crc32(chunk, crc);
+    parts.push(deflate(chunk, zlib.constants.Z_SYNC_FLUSH));
+  }
+  parts.push(deflate(Buffer.alloc(0), zlib.constants.Z_FINISH));
+  const data = Buffer.concat(parts);
+  const name = Buffer.from("word/document.xml");
+  const usize = mib * 1024 * 1024;
+  const lfh = Buffer.alloc(30);
+  lfh.writeUInt32LE(0x04034b50, 0); lfh.writeUInt16LE(20, 4); lfh.writeUInt16LE(8, 8); lfh.writeUInt32LE(crc >>> 0, 14);
+  lfh.writeUInt32LE(data.length, 18); lfh.writeUInt32LE(usize, 22); lfh.writeUInt16LE(name.length, 26);
+  const cd = Buffer.alloc(46);
+  cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(20, 4); cd.writeUInt16LE(20, 6); cd.writeUInt16LE(8, 10); cd.writeUInt32LE(crc >>> 0, 16);
+  cd.writeUInt32LE(data.length, 20); cd.writeUInt32LE(usize, 24); cd.writeUInt16LE(name.length, 28); cd.writeUInt32LE(0, 42);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(46 + name.length, 12); eocd.writeUInt32LE(30 + name.length + data.length, 16);
+  return Buffer.concat([lfh, name, data, cd, name, eocd]);
+}
+
+test("office_edit on a document whose text part inflates past the cap (600 MiB from 600 KB): refused before it is inflated, the portal's memory untouched", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Bomb", type: "word", owner: "/f/atlas" }, s.root);
+  const file = path.join(s.root, "docs", doc.docId, "Bomb.docx");
+  fs.writeFileSync(file, bombDocx(600));
+  bumpRevision(s.root, doc.docId, Date.now() - 1000);
+  const peak = process.resourceUsage().maxRSS; // KiB
+  const msg = await refused(tool(s, "office_edit").execute("b", { id: doc.docId, ops: [{ quote: "x", replacement: "y" }], baseRevision: getDoc(doc.docId, s.root)!.mtimeMs }), "bomb");
+  assert.match(msg, /^error:corrupt .*cap/);
+  assert.ok(process.resourceUsage().maxRSS - peak < 200 * 1024, `the peak memory rose by ${Math.round((process.resourceUsage().maxRSS - peak) / 1024)} MiB`);
 });
 
 /* ------------------------------------------------------------------ */

@@ -21,6 +21,8 @@ export interface OfficeDoc {
   /** Mentions in its comments that opened it to those agents' or projects' folders. */
   grants: { folder: string; commentId: string; at: number }[];
   createdBy?: string;
+  /** Since when its file has been gone: it stays listed a week, in case it comes back. */
+  missingSince?: number;
   /** Which workspace dir the doc lives in, stamped by the scan (store.ts); ABSENT for library-made docs -- the UI shows "library". */
   workspace?: string;
 }

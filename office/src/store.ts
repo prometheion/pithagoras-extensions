@@ -48,6 +48,8 @@ export type DocMeta = {
   importedKeys?: string[];
   /** A workspace-scanned doc lives in PLACE: its real, absolute file path (realpathSync'd at index time). ABSENT for library-created docs, whose bytes are docs/<docId>/<title>.<ext> under the library root -- docPath() prefers this field when present. */
   path?: string;
+  /** Since when its file has been gone (pruneMissingDocs): kept meanwhile, in case it comes back. */
+  missingSince?: number;
   /** Which workspace a scanned doc lives in -- the "workspace" sort key of the UI: the FIRST path segment under the scan
    * root that contains it (scanWorkspace; deepest matching root wins, so /root/repos/pithagoras/... labels "pithagoras"),
    * and for a file straight in a root that root's OWN dir name. Stamped at index time and BACKFILLED on every rescan;
@@ -494,24 +496,39 @@ export function sweepTrash(root = dataDir()): number {
   return removed;
 }
 
-/** The settleKept half of index-vs-disk reconciliation (server.ts calls it at boot and on the interval): drop the
- * index entries whose library file is gone from disk -- someone deleted a docs/<docId>/ dir out-of-band, or its bytes
- * were lost. The index is the source of truth in BOTH directions: a docs/<id>/ dir with NO index entry is NOT added
- * (an orphan sweep is not v1). Returns the dropped docIds; writes nothing when nothing is missing. */
-export function pruneMissingDocs(root = dataDir()): string[] {
+/** How long a document whose file is gone stays in the index, in case the file comes back (a git checkout of another
+ * branch, a move and back): its owner, grants, comments seen and an open session's save stay with it meanwhile. */
+const MISSING_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The settleKept half of index-vs-disk reconciliation (server.ts calls it at boot and on the interval): a document
+ * whose file is gone is marked (`missingSince`), and dropped from the index only once it has been gone for
+ * MISSING_GRACE_MS; one whose file is back is unmarked. The index is the source of truth in BOTH directions: a
+ * docs/<id>/ dir with NO index entry is NOT added. Returns the dropped docIds; writes nothing when nothing changed. */
+export function pruneMissingDocs(root = dataDir(), now = Date.now()): string[] {
   const rootDir = root ?? dataDir();
   const index = readIndex(rootDir);
   const kept: DocMeta[] = [];
   const dropped: string[] = [];
+  let changed = false;
   for (const doc of index.docs) {
-    try {
-      fs.accessSync(docPath(doc, rootDir));
+    if (fs.existsSync(docPath(doc, rootDir))) {
+      if (doc.missingSince !== undefined) {
+        delete doc.missingSince;
+        changed = true;
+      }
       kept.push(doc);
-    } catch {
+    } else if (doc.missingSince === undefined) {
+      doc.missingSince = now;
+      changed = true;
+      kept.push(doc);
+    } else if (now - doc.missingSince > MISSING_GRACE_MS) {
       dropped.push(doc.docId);
+      changed = true;
+    } else {
+      kept.push(doc);
     }
   }
-  if (dropped.length) writeIndex(rootDir, { version: 1, docs: kept });
+  if (changed) writeIndex(rootDir, { version: 1, docs: kept });
   return dropped;
 }
 

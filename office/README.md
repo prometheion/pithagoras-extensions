@@ -32,7 +32,9 @@ same page).
 - **The library**, on the portal's Office tab: create blank Word documents and spreadsheets, open one full screen in
   the embedded editor, sort the list by name, modified, size or type, and download a copy. Every `.docx` and `.xlsx` in
   the agents' and projects' folders (what the portal lists as folders) is indexed when the extension starts, and again
-  with **Rescan**, **in place**: the scanned file is the document, and editing it edits that file. Deleting one moves
+  with **Rescan**, **in place**: the scanned file is the document, and editing it edits that file. One whose file is
+  gone (a git checkout of another branch, say) stays listed for a week, marked, with its owner and grants, and is the
+  same document again when the file comes back. Deleting one moves
   its real file into the library's trash (`.trash/` in the data folder), where it is kept for 7 days and then removed;
   there is no button to restore it, but the file can be moved back by hand.
 - **A panel beside each chat** with the documents that chat's agent or project sees (below), and a card in the chat

@@ -231,6 +231,7 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
   const doc = store.refresh(docId, dd);
   if (!doc) return { res: { status: 404, body: { error: `no document with id ${docId}`, code: "not_found" } } };
 
+  if (!fs.existsSync(fileFor(dd, doc))) return { res: { status: 404, body: { error: `the file of "${doc.title}" is gone from disk; it stays listed for a week, in case it comes back`, code: "not_found" } } };
   const record = container.readDsRecord(dd);
   if (!record) return { res: { status: 503, body: { error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" } } };
 

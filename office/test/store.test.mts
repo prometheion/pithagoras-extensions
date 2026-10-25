@@ -594,12 +594,39 @@ test("deleteDoc on a scanned doc moves its REAL file to the office trash; an alr
   deleteDoc(gone.docId, root); // and: no throw, just the index drop -- pruneMissingDocs semantics on demand
   assert.equal(listDocs(root).length, 0);
 
-  // and pruneMissingDocs agrees with that: it drops the orphaned entry, nothing else
+  // and pruneMissingDocs drops the orphaned entry, once it has been gone for the grace period
   fs.writeFileSync(path.join(ws, "fleeing.docx"), Buffer.from("gone before the sweep"));
   scanWorkspace([ws], root);
   fs.rmSync(path.join(ws, "fleeing.docx"));
   const fleeingId = listDocs(root)[0].docId;
-  assert.deepEqual(pruneMissingDocs(root), [fleeingId], "the orphaned scanned entry is dropped by the next settleKept");
+  const now = Date.now();
+  assert.deepEqual(pruneMissingDocs(root, now), [], "marked, not dropped");
+  assert.equal(getDoc(fleeingId, root)!.missingSince, now);
+  assert.deepEqual(pruneMissingDocs(root, now + 8 * 24 * 60 * 60 * 1000), [fleeingId], "dropped once gone for a week");
   assert.equal(listDocs(root).length, 0);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("pruneMissingDocs: a file gone for a while (a git checkout of another branch) keeps its entry, owner, grants and id, and is taken back as it was when it returns", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-away-")));
+  const file = path.join(ws, "report.docx");
+  fs.writeFileSync(file, await templateDocx());
+  scanWorkspace([ws], root);
+  const doc = listDocs(root)[0]!;
+  addGrant(doc.docId, "/homes/b", "c1", 1, root);
+  const away = fs.readFileSync(file);
+  fs.rmSync(file);
+  pruneMissingDocs(root);
+  scanWorkspace([ws], root); // a Rescan while it is away adds nothing and drops nothing
+  assert.equal(listDocs(root).length, 1);
+  fs.writeFileSync(file, away);
+  pruneMissingDocs(root);
+  scanWorkspace([ws], root);
+  const back = listDocs(root);
+  assert.equal(back.length, 1);
+  assert.equal(back[0]!.docId, doc.docId, "the same document, not a new one");
+  assert.deepEqual(back[0]!.grants.map((g) => g.folder), ["/homes/b"]);
+  assert.equal(back[0]!.missingSince, undefined);
   fs.rmSync(ws, { recursive: true, force: true });
 });

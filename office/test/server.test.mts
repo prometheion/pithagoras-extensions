@@ -696,7 +696,11 @@ test("settleKept: stale index entries are pruned, orphan dirs stay, fresh trash 
 
   const out = settleKept(root);
   assert.equal(out.sweptTrash, 1);
-  assert.deepEqual(out.prunedDocs, ["ghost-1"]);
+  assert.deepEqual(out.prunedDocs, [], "a gone file is kept a while, in case it comes back");
+  const marked = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8")) as { docs: store.DocMeta[] };
+  marked.docs.find((d) => d.docId === "ghost-1")!.missingSince = now - 8 * day;
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(marked));
+  assert.deepEqual(settleKept(root).prunedDocs, ["ghost-1"]);
 
   const idx = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8")) as { docs: store.DocMeta[] };
   assert.deepEqual(idx.docs.map((d) => d.docId), ["real-1"], "the ghost entry is gone and the orphan dir was NOT indexed");

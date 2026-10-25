@@ -40,6 +40,11 @@ function ownerChips(doc: OfficeDoc) {
       ) : (
         <span className="po-chip">{t("unowned")}</span>
       )}
+      {doc.missingSince !== undefined && (
+        <span className="po-chip po-chip-stale" title={t("Its file is gone; it stays listed for a week, in case it comes back.")}>
+          {t("file missing")}
+        </span>
+      )}
       {doc.grants.length > 0 && (
         <span className="po-chip" title={doc.grants.map((g) => g.folder).join(", ")}>
           {doc.grants.length === 1 ? t("1 granted") : t("{n} granted", { n: doc.grants.length })}

@@ -74,7 +74,6 @@ npm ci                     # what every extension is built and tested with
 npm run build              # each extension's browser and server halves
 npx playwright install chromium firefox   # once: Inline UI's card is tested in both
 npm test                   # the unit tests, with Docker, the portal and the server faked
-OFFICE_IT_DOCKER=1 npm test -w office   # also Office's three integration tests, which need a Docker CLI that answers
 ./scripts/pithagoras.sh    # Pithagoras at the extension API's version (or PITHAGORAS_REF), into .pithagoras/
 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
 ```

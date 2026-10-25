@@ -1,32 +1,22 @@
 /**
- * Integration tests for @pithagoras/office, each skipped with a clear reason when the gate below does not hold.
- * What they assert:
+ * Integration tests for @pithagoras/office: the real server half and its real loopback listener, over a tmp dataDir,
+ * with a small server of the test's own standing in for the Document Server's files. What they assert:
  *
  *   1. A ticketed GET on the REAL loopback listener serves a document LARGER than 1 MB byte-for-byte
  *      (the whole reason the cookie-free listener exists is that portal-managed files cap at MAX_EDIT_BYTES
  *      = 1 MB in the portal) and rejects an expired ticket.
  *   2. A synthetic OnlyOffice callback with status 2 arrives on the loopback POST /callback WITHOUT any
  *      session cookie, persists (bytes on disk changed to exactly what body.url served), bumps the index
- *      revision, writes history/<doc>/<rev>.zip from changesurl, and clears the lock AFTER the persist.
+ *      revision, and clears the lock AFTER the persist.
  *   3. office_edit against a doc whose editor seat was minted but never confirmed by the Document Server: it does
  *      not hold the edit up, and a revision that moved underneath (a save landing first) surfaces as
  *      error:revision_mismatch CONFLICT -- nothing is overwritten. One the Document Server confirmed refuses the
  *      edit (tools.test.mts).
  *
- * The gate (why it is an env flag + a docker CLI probe instead of host.docker()): these tests need a docker,
- * but src/host.ts' docker() mirrors the portal's
- * extensions.use("pithagoras-docker") -- it only exists inside a RUNNING portal process, and this file (like
- * every unit test) must never reach portal(). The closest honest probe OUTSIDE a portal is: the operator
- * has declared intent via OFFICE_IT_DOCKER=1 AND `docker info` answers from the CLI. When both hold we
- * assume the operator pre-started the DS container; these three assertions
- * themselves run against a tmp dataDir + the real in-process loopback listener, with a tiny second ephemeral
- * server standing in for the DS download endpoint (body.url / changesurl), so they exercise exactly the
- * HTTP boundary a real DS crosses. The full save loop with a real DS url and the DocEditor browser assertions
- * need a running portal and are not covered here.
+ * They need no Docker and start none: the real Document Server is test/portal/e2e.test.mts's, opt-in.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -49,27 +39,6 @@ const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url));
 /** The committed sample docx doubles as the "what the DS saved" payload in test 2: it differs from the
  * blank store template on disk, so "bytes changed" is a meaningful assertion. */
 const SAVED_DOCX = fs.readFileSync(`${FIXTURES}sample.docx`);
-
-/* ------------------------------------------------------------------ */
-/* the docker gate                                                     */
-/* ------------------------------------------------------------------ */
-
-/** Reason every test below must be skipped, or undefined when the gate holds. */
-function gateReason(): string | undefined {
-  if (process.env.OFFICE_IT_DOCKER !== "1") {
-    return 'docker-gated integration test: set OFFICE_IT_DOCKER=1 to run it (the operator starts the DS container first; host.docker() is unusable outside a running portal process)';
-  }
-  const probe = spawnSync("docker", ["info"], { encoding: "utf8", timeout: 20_000 });
-  if (probe.error) return `docker-gated: the docker CLI is unreachable (${(probe.error as NodeJS.ErrnoException).code ?? (probe.error as Error).message})`;
-  if (probe.status !== 0) return `docker-gated: "docker info" exited ${probe.status}`;
-  return undefined; // a working docker host exists -- proceed
-}
-
-const SKIP = gateReason();
-/** Register an integration test; node:test reports it as skipped with the reason when SKIP is set. */
-function IT(name: string, fn: () => Promise<void>): void {
-  test(name, { skip: SKIP }, fn);
-}
 
 /* ------------------------------------------------------------------ */
 /* booting the real server half against a tmp dataDir + fake portal    */
@@ -119,7 +88,7 @@ function closeServer(server: http.Server): Promise<void> {
 /* 1. ticketed GET > 1 MB                                              */
 /* ------------------------------------------------------------------ */
 
-IT("ticketed GET on the real loopback listener serves a >1 MB document byte-for-byte and rejects an expired ticket", async () => {
+test("ticketed GET on the real loopback listener serves a >1 MB document byte-for-byte and rejects an expired ticket", async () => {
   const b = await boot();
   try {
     const doc = await store.createDoc({ title: "Heavy Report", type: "word" }, b.root);
@@ -166,7 +135,7 @@ IT("ticketed GET on the real loopback listener serves a >1 MB document byte-for-
 /* 2. synthetic status-2 callback without a session cookie             */
 /* ------------------------------------------------------------------ */
 
-IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (bytes changed, index bumped, history zip written) and the lock cleared", async () => {
+test("synthetic status-2 callback WITHOUT any session cookie: persist happened (bytes changed, index bumped) and the lock cleared", async () => {
   const b = await boot();
   try {
     // The listener's POST /callback was configured at boot to read this tmp root's ds.json + jwt-secret on
@@ -233,10 +202,8 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
     assert.ok(parseDocx(onDisk).comments.length === 2, "and they really ARE a docx -- our own parser reads it back");
     assert.notEqual(after.mtimeMs, before.mtimeMs, "the index revision (mtimeMs) bumped with the persist");
     assert.equal(after.sizeBytes, SAVED_DOCX.length);
-    const historyZip = path.join(b.root, "history", before.docId, `${after.mtimeMs}.zip`);
-    assert.ok(fs.existsSync(historyZip), `the changes archive is stored at history/<doc>/<rev>.zip (${historyZip})`);
-    assert.equal(Buffer.compare(fs.readFileSync(historyZip), changesArchive), 0, "the stored archive is exactly what changesurl served");
-    assert.deepEqual(hits.sort(), ["changes.zip", "saved"], "the listener fetched BOTH urls through the loopback path");
+
+    assert.deepEqual(hits, ["saved"], "the save was fetched from the Document Server; the changes archive, which nothing reads, was not");
     assert.deepEqual(live.usersOf(before.docId), [], "presence cleared by the status-2 terminal close");
     assert.equal(live.isLocked(before.docId), false, "the lock flag cleared AFTER the persist landed");
 
@@ -251,7 +218,7 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
 /* 3. co-editor model: open session + revision gate                    */
 /* ------------------------------------------------------------------ */
 
-IT("office_edit with a seat the Document Server never confirmed: proceeds under the revision gate (matching revision succeeds); an external save that moves the revision underneath is refused as a CONFLICT", async () => {
+test("office_edit with a seat the Document Server never confirmed: proceeds under the revision gate (matching revision succeeds); an external save that moves the revision underneath is refused as a CONFLICT", async () => {
   __resetToolsForTests(); // this file's process starts clean; be explicit
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-it-tools-"));
   const home = "chat-aegis-home";

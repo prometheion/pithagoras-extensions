@@ -153,11 +153,18 @@ tailwindcss, postcss, the extension API, react-icons and jszip).
 
 ```sh
 npm run build -w office    # web/ and server.js, then the type check of src/ and the tests
-npm test -w office         # the unit tests, with Docker, the portal and the Document Server faked
-OFFICE_IT_DOCKER=1 npm test -w office   # also the three integration tests that need a Docker CLI that answers
+npm test -w office         # the unit and integration tests, with Docker, the portal and the Document Server faked
 ```
 
 The integration tests start nothing in Docker: they run the extension's real loopback listener in the test process,
-with a small server of their own standing in for the Document Server's downloads. `scripts/make-fixtures.mjs` makes
-`fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ
-but not what the files contain).
+with a small server of their own standing in for the Document Server's downloads. The end-to-end test runs the real
+Document Server through Docker for extensions under the portal's own extension host, and opens, edits and saves a
+document in Chromium; it is opt-in, as it needs Docker Engine 28 or later, the image (about 3 GB) and a few minutes:
+
+```sh
+./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office
+```
+
+`scripts/make-fixtures.mjs` makes `fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node
+scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ but not what
+the files contain).

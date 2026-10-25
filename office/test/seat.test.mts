@@ -39,7 +39,8 @@ function browser(origin: string, handler: Handler) {
   const opened: { editorId: string; config: Record<string, any>; apiJs: string }[] = [];
   const closed: string[] = [];
   const plugins = new Map<string, { base: string; stop: AbortController }>();
-  const behaviour = { dead: false, slow: false, configs: [] as Response[] };
+  /** `states`: after an edit's outcome, what the page says of the editor's changes, each after its delay (ms). */
+  const behaviour = { dead: false, slow: false, configs: [] as Response[], states: [] as [boolean, number][] };
   let page = "";
   async function plugin(editorId: string, base: string) {
     const own = new AbortController();
@@ -59,7 +60,12 @@ function browser(origin: string, handler: Handler) {
       } catch (e) {
         outcome = { error: e };
       }
+      const states = job.kind.endsWith(".edit") ? behaviour.states : [];
       await fetch(`${base}done`, { method: "POST", body: JSON.stringify({ jobId: job.jobId, ...outcome }), signal: sig }).catch(() => {});
+      for (const [unsent, after] of states) {
+        await delay(after);
+        await fetch(`${page}event`, { method: "POST", body: JSON.stringify({ editorId, type: "state", data: unsent }), signal: sig }).catch(() => {});
+      }
     }
   }
   async function loop() {
@@ -124,7 +130,7 @@ function deps(origin: string, b: ReturnType<typeof browser>, over: Partial<SeatD
   return { d, calls, keys, standing };
 }
 
-const FAST = { connectMs: 2000, readyMs: 2000, jobMs: 1500, holdMs: 400, deadMs: 600, idleMs: 60_000, agentIdleMs: 60_000 };
+const FAST = { connectMs: 2000, readyMs: 2000, jobMs: 1500, holdMs: 400, deadMs: 600, idleMs: 60_000, agentIdleMs: 60_000, quietMs: 100, sentMs: 1500 };
 
 async function setup(handler: Handler = (job) => ({ echo: job }), limits: Partial<typeof LIMITS> = {}, over: Partial<SeatDeps> = {}) {
   const { server, origin } = await listener();
@@ -436,6 +442,52 @@ test("tuneSeats changes the limits of seats already running: a shorter idle clos
     tuneSeats({ idleMs: 200 });
     for (let i = 0; i < 40 && seats().length; i++) await delay(50);
     assert.equal(seats().length, 0);
+  } finally {
+    await s.done();
+  }
+});
+
+test("an edit answers once the editor says its changes are sent to the Document Server, whichever request comes first", async () => {
+  const s = await setup(() => ({ ops: 1 }));
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    // The editor says it holds unsent changes, and 400 ms later that they are sent.
+    s.b.behaviour.states = [[true, 0], [false, 400]];
+    const started = Date.now();
+    await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} });
+    assert.ok(Date.now() - started >= 390, `waited for the sent changes (${Date.now() - started} ms)`);
+    // An edit that changes nothing: the editor says nothing, and the call answers after the quiet time.
+    s.b.behaviour.states = [];
+    const quiet = Date.now();
+    await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} });
+    assert.ok(Date.now() - quiet >= 90 && Date.now() - quiet < 1000, `${Date.now() - quiet} ms`);
+    // A read waits for nothing of it.
+    s.b.behaviour.states = [[true, 0], [false, 400]];
+    const read = Date.now();
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    assert.ok(Date.now() - read < 300);
+  } finally {
+    await s.done();
+  }
+});
+
+test("an edit whose changes the editor does not send in time is error:editor_not_saved", async () => {
+  const s = await setup(() => ({ ops: 1 }));
+  try {
+    s.b.behaviour.states = [[true, 0]];
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "cell.edit", args: {} }), code("editor_not_saved"));
+  } finally {
+    await s.done();
+  }
+});
+
+test("a view-mode editor is never handed an edit: error:read_only before its plugin is asked", async () => {
+  const handed: string[] = [];
+  const s = await setup((job) => handed.push(job.kind));
+  try {
+    await run("/homes/a", "doc-1", "view", { kind: "word.read", args: {} });
+    await assert.rejects(run("/homes/a", "doc-1", "view", { kind: "word.edit", args: {} }), code("read_only"));
+    assert.deepEqual(handed, ["word.read"]);
   } finally {
     await s.done();
   }

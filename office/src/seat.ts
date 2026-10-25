@@ -68,9 +68,13 @@ export const LIMITS = {
   holdMs: HOLD_MS,
   /** The most a plugin's result may carry. */
   maxDone: 8 * 1024 * 1024,
+  /** An edit's changes sent to the Document Server by the editor. */
+  sentMs: 10_000,
+  /** An edit after which the editor says nothing of its changes this long changed nothing to send. */
+  quietMs: 2_000,
 };
 
-type Job = { id: string; kind: string; args: unknown; settle: (outcome: { result?: unknown; error?: { code?: string; message?: string; op?: number } }) => void; handed: boolean };
+type Job = { id: string; kind: string; args: unknown; settle: (outcome: { result?: unknown; error?: { code?: string; message?: string; op?: number } }) => void; handed: boolean; handedAt: number };
 
 type Editor = {
   id: string;
@@ -90,6 +94,13 @@ type Editor = {
   reopened: boolean;
   queue: Job[];
   held: ServerResponse | null;
+  /** When the editor last said it holds changes it has not sent to the Document Server (its onDocumentStateChange
+   * true), and when it last said it sent them all (false). */
+  unsentAt: number;
+  /** The order of those two (a count of the editor's state events): which came last. */
+  unsentSeq: number;
+  sentSeq: number;
+  stateWaiters: (() => void)[];
 };
 
 /** A coded refusal the tools pass on as `error:<code> <message>`. */
@@ -110,6 +121,8 @@ let pageWaiters: (() => void)[] = [];
 let lastEditorClosed = 0;
 let sweeper: NodeJS.Timeout | undefined;
 let agentRunning = false;
+/** Counts the editors' state events, to tell which of two came last. */
+let stateSeq = 0;
 
 function log(line: string): void {
   (deps?.log ?? ((l: string) => console.error(l)))(`@pithagoras/office: seat: ${line}`);
@@ -171,12 +184,15 @@ export function seats(): { home: string; docId: string; mode: SeatMode; key: str
  */
 export async function run(home: string, docId: string, mode: SeatMode, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<unknown> {
   if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
+  // A view-mode editor takes no edit: refused here, before its plugin is asked.
+  if (mode === "view" && job.kind.endsWith(".edit")) throw new SeatError("read_only", "the agent's editor of this document is read-only");
   const editor = await editorFor(home, docId, mode, options.signal);
   editor.busy = true;
   editor.lastUsed = Date.now();
   try {
     const outcome = await handOver(editor, job, options);
     if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op);
+    if (job.kind.endsWith(".edit")) await sent(editor, outcome.handedAt ?? 0, Date.now(), options.signal);
     return outcome.result;
   } finally {
     editor.busy = false;
@@ -238,7 +254,7 @@ async function open(home: string, docId: string, mode: SeatMode, signal?: AbortS
     close(idle, "room for another document");
   }
   const token = randomBytes(16).toString("hex");
-  const editor: Editor = { id: randomUUID(), home, docId, key: "", mode, token, ready: false, waiters: [], lastUsed: Date.now(), lastPoll: Date.now(), busy: true, reopened: false, queue: [], held: null };
+  const editor: Editor = { id: randomUUID(), home, docId, key: "", mode, token, ready: false, waiters: [], lastUsed: Date.now(), lastPoll: Date.now(), busy: true, reopened: false, queue: [], held: null, unsentAt: 0, unsentSeq: 0, sentSeq: 0, stateWaiters: [] };
   editors.set(editor.id, editor);
   try {
     const minted = await d.mint({ home, docId, mode, pluginUrl: `${d.listenerOrigin()}/plugin/${token}/` });
@@ -263,6 +279,25 @@ async function connected(signal?: AbortSignal): Promise<void> {
   await d.ensureAgent(pageUrl());
   agentRunning = true;
   await waitFor((wake) => pageWaiters.push(wake), () => pageSeen >= since, limits.connectMs, signal, () => new SeatError("agent_unavailable", `the agent's editor did not start within ${limits.connectMs / 1000} s`));
+}
+
+/** The edit's changes sent to the Document Server: since the job was handed (`since`) the editor said it held changes
+ * unsent, and said after that it sent them all; or it said nothing of changes for quietMs after the command's outcome
+ * came (`at`: the edit changed nothing). The page and the plugin speak over requests of their own, so either may come
+ * first. Rejects with editor_not_saved where they are not sent within sentMs: the edit is made in the editor, and
+ * reaches the file with a later save. */
+async function sent(editor: Editor, since: number, at: number, signal?: AbortSignal): Promise<void> {
+  const done = () =>
+    !editors.has(editor.id) ||
+    (editor.unsentAt >= since ? editor.sentSeq > editor.unsentSeq : Date.now() - at >= limits.quietMs);
+  const quiet = setTimeout(() => {
+    for (const wake of editor.stateWaiters.splice(0)) wake();
+  }, limits.quietMs);
+  try {
+    await waitFor((wake) => editor.stateWaiters.push(wake), done, limits.sentMs, signal, () => new SeatError("editor_not_saved", `the edit is made in the agent's editor, but the editor did not send it to the Document Server within ${limits.sentMs / 1000} s; it reaches the file with a later save`));
+  } finally {
+    clearTimeout(quiet);
+  }
 }
 
 async function ready(editor: Editor, signal?: AbortSignal): Promise<void> {
@@ -305,7 +340,7 @@ function waitFor(listen: (wake: () => void) => void, done: () => boolean, ms: nu
 
 /** The job handed to the editor's plugin (now, where it waits, or at its next poll) and its outcome waited for. A job
  * with no outcome in time closes the editor: what it did is unknown. */
-function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<{ result?: unknown; error?: { code?: string; message?: string; op?: number } }> {
+function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<{ result?: unknown; error?: { code?: string; message?: string; op?: number }; handedAt?: number }> {
   const ms = options.timeoutMs ?? limits.jobMs;
   return new Promise((resolve, reject) => {
     let over = false;
@@ -314,12 +349,13 @@ function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal;
       kind: job.kind,
       args: job.args,
       handed: false,
+      handedAt: 0,
       settle: (outcome) => {
         if (over) return;
         over = true;
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", aborted);
-        resolve(outcome);
+        resolve({ ...outcome, handedAt: queued.handedAt });
       },
     };
     const timer = setTimeout(() => {
@@ -351,6 +387,7 @@ function feed(editor: Editor): void {
   const res = editor.held;
   editor.held = null;
   job.handed = true;
+  job.handedAt = Date.now();
   json(res, 200, { jobId: job.id, kind: job.kind, args: job.args });
 }
 
@@ -369,6 +406,7 @@ function close(editor: Editor, why: string): void {
   for (const job of editor.queue) job.settle({ error: { code: "editor_closed", message: `the agent's editor of this document was closed (${why}); try again` } });
   editor.queue = [];
   for (const wake of editor.waiters.splice(0)) wake();
+  for (const wake of editor.stateWaiters.splice(0)) wake();
   order({ close: editor.id });
   if (!editors.size) lastEditorClosed = Date.now();
 }
@@ -528,6 +566,14 @@ function seatRoute(req: IncomingMessage, res: ServerResponse, rest: string): boo
         for (const wake of editor.waiters.splice(0)) wake();
       }
       if (editor && event.type === "error") log(`the agent's editor of ${editor.docId} reported an error: ${JSON.stringify(event.data ?? null).slice(0, 300)}`);
+      if (editor && event.type === "state") {
+        stateSeq++;
+        if (event.data === true) {
+          editor.unsentAt = Date.now();
+          editor.unsentSeq = stateSeq;
+        } else editor.sentSeq = stateSeq;
+        for (const wake of editor.stateWaiters.splice(0)) wake();
+      }
       json(res, 200, {});
     });
     return true;

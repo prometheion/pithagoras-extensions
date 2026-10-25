@@ -18,8 +18,10 @@
  *   grows over text added to it, and one whose run was deleted whole takes no text any more.
  * - A table goes in through its parent's `AddElement`: `InsertParagraph` takes paragraphs only.
  * - `GetText` ends a paragraph's text with "\r\n" (and a table cell's with "\t"), which is taken off.
- * - An editor sends its changes to the Document Server a moment after they were made; a forcesave asked before that
- *   finds nothing to save (error 4). `Api.Save()` at the end of an edit sends them at once.
+ * - An editor sends its changes to the Document Server a moment after they were made, and a forcesave saves what the
+ *   Document Server has: one asked before that misses the edit (error 4 where nothing else is unsaved, or a save of
+ *   the people's typing alone). `Api.Save()` at the end of an edit sends them sooner, and the seat waits until the
+ *   editor says they are sent (onDocumentStateChange false) before the save is asked for.
  */
 
 /** The plugin's GUID, which only the agents' editor configs name (server.ts): people's editors run no plugin. */
@@ -359,7 +361,8 @@ export function pluginIndex(ds: string): string {
 /**
  * The seat page: it long-polls the listener (`poll`) for what to open and close, opens each editor in a frame of its
  * own (`new DocsAPI.DocEditor`, with the config the half minted and signed), and tells the listener what each editor
- * says of itself (`event`: ready, or an error, which ends the wait for it).
+ * says of itself (`event`: ready; an error, which ends the wait for it; whether it holds changes it has not sent to
+ * the Document Server yet, which an edit's save waits for).
  */
 export const SEAT_PAGE_JS = `(function () {
   var apis = {};
@@ -383,7 +386,9 @@ export const SEAT_PAGE_JS = `(function () {
       var config = order.config;
       config.events = {
         onDocumentReady: function () { tell(order.editorId, "ready"); },
-        onError: function (e) { tell(order.editorId, "error", e && e.data); }
+        onError: function (e) { tell(order.editorId, "error", e && e.data); },
+        // true: the editor holds changes it has not sent to the Document Server yet; false: all of them are sent.
+        onDocumentStateChange: function (e) { tell(order.editorId, "state", Boolean(e && e.data === true)); }
       };
       editors[order.editorId] = new window.DocsAPI.DocEditor(box.id, config);
     }, function (e) { tell(order.editorId, "error", { errorDescription: String(e && e.message || e) }); });

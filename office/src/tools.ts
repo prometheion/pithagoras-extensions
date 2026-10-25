@@ -255,6 +255,7 @@ const SEAT_ADVICE: Record<string, string> = {
   behind: "Read it again with office_read before you edit.",
   timeout: "",
   editor_closed: "",
+  editor_not_saved: "Do not make it again: read the document if you need to see it.",
 };
 
 /** What a tool may throw out to the agent: refusals as-is, the seat's and the ops' coded errors by their code, coded

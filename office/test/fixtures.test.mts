@@ -5,13 +5,15 @@
  *
  * The fixtures are binary files committed in this extension's fixtures/ directory; they were generated
  * by scripts/make-fixtures.mjs (hand-written OOXML parts zipped through OUR OWN ooxml.writeZip, so these
- * tests read back material our own writer produced -- if the reader and writer disagree, that shows here).
+ * tests read back material our own writer produced -- if the reader and writer disagree, that shows here; a bug both
+ * share would not, which is why the last test has other readers than ours read the same files).
  * Re-generate with: node scripts/make-fixtures.mjs (run in office/).
  * jszip is used below ONLY to pull a part's raw bytes out for editDocx input -- parsing and editing go
  * through ooxml exclusively, exactly as the runtime paths do.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
@@ -130,4 +132,29 @@ test("sample.xlsx: the same bytes still load in jszip -- both zippers agree on t
   for (const name of ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/sharedStrings.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"]) {
     assert.ok(zip.file(name), `fixture xlsx carries ${name}`);
   }
+});
+
+/* ---------------- read by other readers than our own ---------------- */
+
+/** Every entry of a zip as another implementation reads it (jszip's own inflate, with its CRC check), by name. */
+async function readByJszip(buf: Buffer): Promise<Record<string, Buffer>> {
+  const zip = await JSZip.loadAsync(buf, { checkCRC32: true });
+  const out: Record<string, Buffer> = {};
+  for (const [name, entry] of Object.entries(zip.files)) if (!entry.dir) out[name] = await entry.async("nodebuffer");
+  return out;
+}
+
+test("the fixtures and what rewriteZip writes are read alike by other zip readers than our own: jszip, and Python's zipfile", async () => {
+  const edited = rewriteZip(DOCX, { "word/document.xml": editDocx(await documentXml(), [{ quote: "were revised after", replacement: "changed after" }]) });
+  for (const [what, buf] of [["sample.docx", DOCX], ["sample.xlsx", XLSX], ["an edit of sample.docx", edited]] as const) {
+    const theirs = await readByJszip(buf);
+    assert.ok(Object.keys(theirs).length >= 4, what);
+    // Python's zipfile checks every entry's CRC and its headers on its own (testzip: the first bad entry, or None).
+    const py = spawnSync("python3", ["-I", "-c", "import sys, zipfile, io; z = zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())); print(z.testzip()); print('\\n'.join(sorted(z.namelist())))"], { input: buf, encoding: "utf8" });
+    assert.equal(py.status, 0, py.stderr);
+    const [bad, ...names] = py.stdout.trim().split("\n");
+    assert.equal(bad, "None", `${what}: Python's zipfile finds every entry sound`);
+    assert.deepEqual(names, Object.keys(theirs).sort(), what);
+  }
+  assert.match((await readByJszip(edited))["word/document.xml"]!.toString("utf8"), /changed after/);
 });

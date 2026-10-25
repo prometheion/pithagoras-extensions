@@ -1,27 +1,22 @@
 /**
  * The agent's office tools: list, create, read, edit and list the comments of the documents
- * in this home's office-library scope (store.docsForHome -- every UNOWNED doc: the workspace-scanned and
- * human-made docs are shared by all homes -- plus what this home owns or was granted), in the style of the
- * portal's document tools -- named by id, base-revision writes, coded error prefixes ("error:<code> <message>").
+ * the agent's or project's folder sees (store.visibleTo: what it made or was granted, the scanned documents in its
+ * own folder, and the person's library documents), in the style of the portal's document tools -- named by id,
+ * base-revision writes, coded error prefixes ("error:<code> <message>").
  *
- * Ownership scope: `registerTools` walks every chat through portal.chats.extend; for a
- * chat it resolves the workspace folder (chats.folder(chat.id)), finds it in folders.list() by path
- * and REGISTER ONLY when its kind is "agent" or "project". The tool scope is then docsForHome(home),
- * where `home` is the folder's home chat: the sessions working in that folder (chats.inFolder) are
- * its home chats, deterministically picked as the lowest id -- exactly ping.ts' resolveMention rule,
- * so a doc created here is owned by the same chat a mention wakes it to. Docs outside the scope are
- * invisible to every tool: office_read asks for them and hears the same "no document with that id"
- * as for a nonexistent one (no other chat's documents leak through).
+ * Ownership scope: `registerTools` walks every chat through portal.chats.extend; for a chat it resolves the
+ * workspace folder (chats.folder(chat.id)), finds it in folders.list() by path and REGISTERS ONLY when its kind is
+ * "agent" or "project". That folder is the home: a document is owned by and granted to a folder, not a chat, as an
+ * agent's chats come and go. Docs outside the scope are invisible to every tool: office_read asks for them and hears
+ * the same "no document with that id" as for a nonexistent one.
  *
- * Revision model: the mtimeMs of the library file IS the revision. office_edit
- * takes baseRevision (= the mtimeMs office_read showed), GATES FIRST (>1 ms drift ->
- * "error:revision_mismatch ..." with the fresh mtime, nothing written), and store.persistBytes re-
- * gates strictly at write time anyway (ZERO tolerance: stat-vs-meta must match exactly). The agent is
- * a CO-EDITOR alongside human editor sessions (live.ts) -- like Office 365 there is NO switch and NO
- * session check: the edit proceeds under that gate regardless of who else has the document open. If the
- * file moved on in between (a co-editor's save), NOTHING is written and the tool answers a loud CONFLICT
- * ("error:revision_mismatch ...", naming the open editor session when one stands) -- re-read and retry.
- * A stale baseRevision always fails that way.
+ * Reading: a scanned document is read through the portal's own file functions (portal.files.open), as the chat's
+ * agent would read it: with the sandbox on, a file the agent could not read itself is refused, and a name that a link
+ * leads elsewhere is not followed.
+ *
+ * Revision model: the mtimeMs of the library file IS the revision. office_edit takes baseRevision (= the mtimeMs
+ * office_read showed), GATES FIRST (>1 ms drift -> "error:revision_mismatch ..." with the fresh mtime, nothing
+ * written), and store.persistBytes re-gates strictly at write time anyway (ZERO tolerance).
  *
  * Wakes (the drain side): ping.ts only QUEUES wakes server-side and rings the
  * bell with chats.tell(chatId, {type:"ping"}). The office pi extension registered from THIS factory
@@ -30,17 +25,16 @@
  * {deliverAs:"followUp", triggerTurn:true}).
  *
  * Injection seams (unit tests must never reach portal()): registerTools(opts) takes the portal bits
- * -- chats.extend registrar, chat->folder lookup, folders list, folder->sessions, store root, audit
+ * -- chats.extend registrar, chat->folder lookup, folders list, the file reader, store root, audit
  * record fn, log fn. EVERY one defaults LAZY: the real portal() is read only when a default is used
  * (in production). Mutating ops (office_create, office_edit) call record({subject, reason, chatId})
- * after the write; the default seam is a one-line log via portal().log (ping.ts pattern; a real audit sink can
- * be passed).
+ * after the write.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { jsZip } from "./jszip";
 import { portal } from "./host";
-import { getDoc, docsForHome, createDoc, persistBytes, type DocMeta } from "./store";
+import { canonical, createDoc, docPath, docsForHome, getDoc, persistBytes, type DocMeta } from "./store";
 import { parseDocx, parseXlsx, editDocx, rewriteZip, type EditOp } from "./ooxml";
 import { usersOf, isLocked } from "./live";
 import { drainWakeQueue } from "./ping";
@@ -62,8 +56,9 @@ export type ToolsDeps = {
   chatFolder?: (chatId: string) => string;
   /** The folders the agents work in. Default: () => portal().folders.list(). */
   folders?: () => ToolsFolderInfo[];
-  /** The sessions working in a folder path (home-chat resolution). Default: (p) => portal().chats.inFolder(p). */
-  inFolder?: (folderPath: string) => { id: string }[];
+  /** A scanned document's bytes, read for `chatId`'s agent as it could read them itself (`file` is the document's own
+   * path). Default: portal().files.open with likeParent, the chat, and no link followed. */
+  readFile?: (file: string, chatId: string) => Buffer;
   /** Store/state root override. Default: lazy portal().dataDir(). */
   root?: string;
   /** The audit sink for mutating ops. Default: a one-line log via the log seam (ping.ts pattern). */
@@ -92,8 +87,23 @@ function chatFolder(chatId: string): string {
 function folders(): ToolsFolderInfo[] {
   return (cfg.folders ?? (() => portal().folders.list()))();
 }
-function inChats(folderPath: string): { id: string }[] {
-  return (cfg.inFolder ?? ((p: string) => portal().chats.inFolder(p)))(folderPath);
+/** A file read through the portal as the agent of `chatId` reads: refused where that agent could not read it, and
+ * never through a link. Whole, from the descriptor the portal opened (no size cap: a .docx is often over 1 MB). */
+function readAsAgent(file: string, chatId: string): Buffer {
+  if (cfg.readFile) return cfg.readFile(file, chatId);
+  const opened = portal().files.open(path.dirname(file), path.basename(file), { likeParent: true, chats: [chatId], direct: true });
+  try {
+    const out = Buffer.alloc(opened.size);
+    let read = 0;
+    while (read < out.length) {
+      const n = fs.readSync(opened.fd, out, read, out.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return out.subarray(0, read);
+  } finally {
+    fs.closeSync(opened.fd);
+  }
 }
 function logLine(line: string): void {
   (cfg.log ?? ((l: string) => portal().log(l)))(line);
@@ -118,7 +128,7 @@ export function registerTools(opts?: ToolsDeps): void {
   registrar((pi, chat) => installForChat(pi, chat));
 }
 
-/** The chats.extend factory body: resolve the chat's folder via chats.folder -> folders.list() by path -> kind; RETURN UNLESS "agent" or "project"; then register the tools on that chat's pi. */
+/** The chats.extend factory body: resolve the chat's folder via chats.folder -> folders.list() by path -> kind; RETURN UNLESS "agent" or "project"; then register the tools on that chat's pi, for that folder. */
 function installForChat(pi: unknown, chat: { id: string }): void {
   let folderPath: string;
   try {
@@ -129,15 +139,8 @@ function installForChat(pi: unknown, chat: { id: string }): void {
   }
   const folder = folders().find((f) => f.path === folderPath);
   if (!folder || (folder.kind !== "agent" && folder.kind !== "project")) return; // not an agent/project home: no tools
-  const home = homeChatFor(folder, chat.id);
-  installTools(pi, home);
+  installTools(pi, canonical(folder.path), chat.id);
   hearOfficePings(pi, chat.id); // the same factory owns the drain side of the wake queue
-}
-
-/** The folder's home chat id (meta.owner is the creating agent/project's home chat): the sessions working in the folder are its home chats, lowest id stands for them all (ping.ts' resolveMention rule). `fallback` covers a folder with no listed sessions -- the calling chat itself is in it by construction. */
-function homeChatFor(folder: ToolsFolderInfo, fallback: string): string {
-  const chats = [...inChats(folder.path)].sort((a, b) => a.id.localeCompare(b.id));
-  return chats.length ? chats[0]!.id : fallback;
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,17 +177,17 @@ const text = (content: string, details?: unknown) => ({ content: [{ type: "text"
  * office_read's sibling office_comments truncate at this length with an explicit marker. */
 const MAX_READ_CHARS = 200_000;
 
-/** The library file of a doc (docs/<docId>/<title>.<ext>), or a not_found refusal. */
-function readBytes(doc: DocMeta, root = rootDir()): Buffer {
-  const p = path.join(root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
-  let buf: Buffer;
+/** A doc's bytes, for the agent of `chatId`: a scanned doc's own file as that agent could read it (portal.files), a
+ * library doc's from the extension's own folder, which no agent can write; a not_found refusal where it is gone. */
+function readBytes(doc: DocMeta, chatId: string): Buffer {
   try {
-    buf = fs.readFileSync(p);
+    return doc.path ? readAsAgent(doc.path, chatId) : fs.readFileSync(docPath(doc, rootDir()));
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new Refusal("not_found", `the library file of "${doc.title}" is missing from disk`);
+    const err = e as NodeJS.ErrnoException & { code?: string };
+    if (err.code === "ENOENT" || err.code === "missing") throw new Refusal("not_found", `the file of "${doc.title}" is missing from disk`);
+    if (err.code === "invalid") throw new Refusal("not_found", `"${doc.title}" is not a file your agent can read (${err.message})`);
     throw e;
   }
-  return buf;
 }
 
 /** The most editing humans, and whether the doc is locked right now, as one readable line ("" when nobody). */
@@ -199,10 +202,10 @@ const lockLine = (doc: DocMeta) => {
 /* per-chat tools                                                       */
 /* ------------------------------------------------------------------ */
 
-function installTools(pi: unknown, home: string): void {
+function installTools(pi: unknown, home: string, chatId: string): void {
   const p = pi as any; // portal's extend factory hands a pi that carries registerTool (host mode) or not.
 
-  /** A doc in THIS home's scope by id -- owner === home OR granted to home (docsForHome); anything else is `not_found` with the SAME words as a nonexistent id, so another home's docs do not leak into view. */
+  /** A doc in THIS home's scope by id (store.visibleTo); anything else is `not_found` with the SAME words as a nonexistent id, so another home's docs do not leak into view. */
   function visibleDoc(id: unknown): DocMeta {
     if (typeof id !== "string" || !id) throw new Refusal("not_found", "There is no document with that id. Ids come from office_list and office_create");
     const doc = docsForHome(home, rootDir()).find((d) => d.docId === id);
@@ -221,7 +224,7 @@ function installTools(pi: unknown, home: string): void {
   p.registerTool({
     name: "office_list",
     label: "List office documents",
-    description: "List the office documents of your library: every Word (.docx) and spreadsheet (.xlsx) document you own or were granted (by being mentioned in one of its comments). Each line has the id, title, format, owner, how many grants it holds, its current revision (mtimeMs -- pass that back as baseRevision to office_edit) and whether a human is editing it right now.",
+    description: "List the office documents of your library: every Word (.docx) and spreadsheet (.xlsx) document in your folder, the ones you made or were granted (by being mentioned in one of its comments), and the ones the person made in the library. Each line has the id, title, format, owner, how many grants it holds, its current revision (mtimeMs -- pass that back as baseRevision to office_edit) and whether a human is editing it right now.",
     promptSnippet: "List the office documents you own or were granted",
     parameters: {
       type: "object",
@@ -232,7 +235,7 @@ function installTools(pi: unknown, home: string): void {
       if (!docs.length) return text("No documents in your office library yet. Make one with office_create.", { action: "list", home, documents: [] });
       const lines = docs.map((doc) => {
         const users = usersOf(doc.docId);
-        return `- ${doc.docId}  "${doc.title}"  ${doc.ext}  owner ${doc.owner ?? "(ownerless)"}  ${doc.grants.length} grant${doc.grants.length === 1 ? "" : "s"}  revision ${doc.mtimeMs}${users.length ? `  ${users.length} editing now` : ""}`;
+        return `- ${doc.docId}  "${doc.title}"  ${doc.ext}  owner ${doc.owner === home ? "you" : doc.owner ?? "(nobody)"}  ${doc.grants.length} grant${doc.grants.length === 1 ? "" : "s"}  revision ${doc.mtimeMs}${users.length ? `  ${users.length} editing now` : ""}`;
       });
       return text(`${docs.length} document${docs.length === 1 ? "" : "s"}:\n${lines.join("\n")}`, {
         action: "list",
@@ -261,7 +264,7 @@ function installTools(pi: unknown, home: string): void {
       if (!t) throw new Refusal("invalid", "A document needs a title");
       if (type !== "word" && type !== "cell") throw new Refusal("unsupported_format", `type is \"word\" or \"cell\" (got ${typeof type === "string" ? `"${type}"` : String(type)})`);
       const doc = await createDoc({ title: t, type, owner: home, createdBy: "agent" }, rootDir()); // throws {code:"exists"} on a duplicate title+type
-      record({ subject: doc.title, reason: `office_create: new ${doc.ext} document ${doc.docId}, owner ${home}`, chatId: home });
+      record({ subject: doc.title, reason: `office_create: new ${doc.ext} document ${doc.docId}, owner ${home}`, chatId });
       return text(`Created "${doc.title}" (id ${doc.docId}, ${doc.ext}, revision ${doc.mtimeMs}). Edit it with office_edit, which needs that revision as baseRevision.`, { action: "create", id: doc.docId, title: doc.title, ext: doc.ext, mtimeMs: doc.mtimeMs, owner: doc.owner });
     }),
   });
@@ -280,7 +283,7 @@ function installTools(pi: unknown, home: string): void {
     },
     execute: guarded(async ({ id }) => {
       const doc = visibleDoc(id);
-      const buf = readBytes(doc);
+      const buf = readBytes(doc, chatId);
       const lock = lockLine(doc);
       if (doc.ext === "xlsx") {
         // office_read returns a grid of cell values for xlsx; its COMMENTS are not read yet (xl/commentsN.xml + VML).
@@ -362,7 +365,7 @@ function installTools(pi: unknown, home: string): void {
       if (Math.abs(meta.mtimeMs - base) > 1) throw stale(meta);
 
       // word/document.xml out of the archive; damage is `corrupt`, quote problems pass through ooxml's codes.
-      const buf = readBytes(doc);
+      const buf = readBytes(doc, chatId);
       let documentXml: string;
       try {
         const zip = await (await jsZip()).loadAsync(buf);
@@ -391,7 +394,7 @@ function installTools(pi: unknown, home: string): void {
         }
         throw e;
       }
-      record({ subject: doc.title, reason: `office_edit: ${ops.length} op(s) applied, revision ${meta.mtimeMs} -> ${saved.mtimeMs}`, chatId: home });
+      record({ subject: doc.title, reason: `office_edit: ${ops.length} op(s) applied, revision ${meta.mtimeMs} -> ${saved.mtimeMs}`, chatId });
       const n = ops.length;
       return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"} made): now at revision ${saved.mtimeMs}. Pass that as baseRevision for the next edit.`, { action: "edit", id: doc.docId, from: meta.mtimeMs, to: saved.mtimeMs, ops: n });
     }),
@@ -412,9 +415,9 @@ function installTools(pi: unknown, home: string): void {
     execute: guarded(async ({ id }) => {
       const doc = visibleDoc(id);
       if (doc.ext === "xlsx") throw new Refusal("unsupported_format", `"${doc.title}" is an .xlsx spreadsheet: its comments live in a different part layout and are not read yet`);
-      const parsed = parseDocx(readBytes(doc)); // corrupt mapping via failed()
+      const parsed = parseDocx(readBytes(doc, chatId)); // corrupt mapping via failed()
       const commentLines = parsed.comments.length ? parsed.comments.map((c) => `- ${c.id}  ${c.author}${c.date ? `  ${c.date}` : ""}: ${c.text.replace(/\n/g, " ")}`).join("\n") : "(none)";
-      const grantLines = doc.grants.length ? doc.grants.map((g) => `- ${g.chatId}  via comment ${g.commentId}  at ${new Date(g.at).toISOString()}`).join("\n") : "(none -- only the owner can see this document)";
+      const grantLines = doc.grants.length ? doc.grants.map((g) => `- ${g.folder}  via comment ${g.commentId}  at ${new Date(g.at).toISOString()}`).join("\n") : "(none)";
       let said = `"${doc.title}" (id ${doc.docId})\n\nComments (${parsed.comments.length}):\n${commentLines}\n\nGrants:\n${grantLines}`;
       // Same cap and marker as office_read: aggregated comment text is unbounded input and must not blow the agent context.
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_comments: it exceeds 200,000 characters]";

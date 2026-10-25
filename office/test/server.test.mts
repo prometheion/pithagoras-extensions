@@ -47,14 +47,15 @@ class MiniRouter {
   /** Express-shaped fake request: the plain fields PLUS the stream surface -- an async iterator over the body
    * (real IncomingMessages are async-iterable, and the /ds proxy's POST forwarding reads `for await (req)`). */
   private fakeReq(method: string, urlPath: string, params: Record<string, string>, body: unknown, headers: Record<string, string>): unknown {
-    const o: Record<PropertyKey, unknown> = { method, url: urlPath, params, query: {}, body, headers };
+    const query = Object.fromEntries(new URLSearchParams(urlPath.includes("?") ? urlPath.slice(urlPath.indexOf("?") + 1) : ""));
+    const o: Record<PropertyKey, unknown> = { method, url: urlPath, params, query, body, headers };
     const data = typeof body === "string" ? Buffer.from(body, "utf8") : Buffer.isBuffer(body) ? body : undefined;
     o[Symbol.asyncIterator] = async function* () { if (data && data.length > 0) yield data; };
     return o;
   }
 
   async dispatch(method: string, urlPath: string, body: unknown, headers: Record<string, string> = {}): Promise<FakeRes> {
-    const us = urlPath.split("/").filter(Boolean);
+    const us = urlPath.split("?")[0].split("/").filter(Boolean);
     for (const route of this.routes) {
       if (route.method !== method) continue;
       // Express regex paths match the WHOLE raw url (query included); groups land in params[0..].
@@ -119,7 +120,7 @@ interface Booted {
   cleanup: () => Promise<void>;
 }
 
-async function boot(root?: string, dock = fakeDocker()): Promise<Booted> {
+async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<string, string> = {}): Promise<Booted> {
   container.forgetReach();
   const rootDir = root ?? fs.mkdtempSync(path.join(os.tmpdir(), "office-server-"));
   const logs: string[] = [];
@@ -135,7 +136,7 @@ async function boot(root?: string, dock = fakeDocker()): Promise<Booted> {
     router,
     http: { json: (_o?: unknown) => (_req: unknown, _res: unknown, next: () => void) => next(), text: () => () => undefined, raw: () => () => undefined, send: () => () => {}, upgrade: () => undefined },
     folders: { list: () => [] as never[], allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: () => ({ name: "" }) },
-    chats: { extend: (_f: unknown) => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: () => { throw new Error("none"); }, send: () => {}, tell: async () => false },
+    chats: { extend: (_f: unknown) => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false },
     extensions: { use: () => ddock },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
@@ -360,6 +361,33 @@ test("editor-config (xlsx): documentType cell, also for a portal in a container;
   assert.equal(res.statusCode, 404);
   assert.equal((res.body as Record<string, unknown>).code, "not_found");
   await b.cleanup();
+});
+
+test("/scope: what the agent of a chat's folder sees, by the tools' own rule; a chat with no folder sees the person's library documents", async () => {
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-scope-")));
+  const [a, b] = [path.join(ws, "a"), path.join(ws, "b")];
+  fs.mkdirSync(a);
+  fs.mkdirSync(b);
+  fs.writeFileSync(path.join(b, "theirs.docx"), await store.templateDocx());
+  const bt = await boot(undefined, fakeDocker(), { "chat-a": a, "chat-b": b });
+  store.scanWorkspace([a, b], bt.root);
+  const human = await store.createDoc({ title: "The person's", type: "word" }, bt.root);
+  const mine = await store.createDoc({ title: "A's", type: "word", owner: a }, bt.root);
+  const theirs = store.listDocs(bt.root).find((d) => d.title === "theirs")!;
+  const scope = async (chat: string) => ((await bt.router.dispatch("GET", `/scope?chat=${chat}`)).body as { docIds: string[] }).docIds.sort();
+  assert.deepEqual(await scope("chat-a"), [human.docId, mine.docId].sort());
+  assert.deepEqual(await scope("chat-b"), [human.docId, theirs.docId].sort());
+  assert.deepEqual(await scope("chat-gone"), [human.docId]);
+  await bt.cleanup();
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("boot moves owners and grants that named a chat to that chat's folder", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-migrate-"));
+  const doc = await store.createDoc({ title: "Owned before", type: "word", owner: "chat-a" }, root);
+  const bt = await boot(root, fakeDocker(), { "chat-a": "/homes/a" });
+  assert.equal(store.getDoc(doc.docId, root)!.owner, "/homes/a");
+  await bt.cleanup();
 });
 
 /* ---------------- /state ---------------- */

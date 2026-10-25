@@ -29,7 +29,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
-import { addGrant as storeAddGrant, getDoc } from "./store";
+import { addGrant as storeAddGrant, canonical, getDoc, within } from "./store";
 import { parseDocx, diffComments, type Comment } from "./ooxml";
 import { onPersisted } from "./callback";
 
@@ -105,7 +105,8 @@ export function officeWakeMessage(docTitle: string, author: string, commentText:
 }
 
 /** The mention grammar:
- *  - literal "@agent" token -> the doc's OWNER home chat (meta.owner); ownerless docs: logged + skipped.
+ *  - literal "@agent" token -> the doc's OWNER folder (meta.owner), or for a scanned doc the agent or project whose
+ *    folder it is in; a doc that is neither's: logged + skipped.
  *  - "@project:<name>" and any other bare "@<name>" -> case-insensitive EXACT display-name match among folders of kind "project"|"agent". Both forms search both kinds; names are non-whitespace runs, so folder names containing spaces cannot be mentioned in v1 (documented limitation).
  *  Unresolvable names and DUPLICATE names (two folders sharing a display name, e.g. agent "Twin" and project "Twin") get no wake and a log line -- no silent disambiguation. */
 const MENTION_RE = /(?<![\w.])(?:@(project:(\S+)|agent(?![\w-])|([A-Za-z0-9_][\w-]*)))/g;
@@ -151,19 +152,29 @@ function writeSeen(rootDir: string, docId: string, ids: Iterable<string>): void 
  * temp+rename): the grant must be persisted BEFORE the bell rings (the woken pi's office_* tools read
  * docsForHome, which reads index.json). This wrapper keeps this module's log lines: a vanished doc is logged,
  * a duplicate adds nothing; "added"/"duplicate" are both fine to ring the bell for. */
-function addGrant(rootDir: string, docId: string, chatId: string, commentId: string, at: number): void {
-  const outcome = storeAddGrant(docId, chatId, commentId, at, rootDir);
+function addGrant(rootDir: string, docId: string, folder: string, commentId: string, at: number): void {
+  const outcome = storeAddGrant(docId, folder, commentId, at, rootDir);
   if (outcome === null) logLine(`office ping: document ${docId} vanished from index between resolve and grant -- skipped`);
 }
 
-/** Resolve one mention to a home chat id, or null (reason logged). */
-function resolveMention(mention: Mention, metaOwner: string | null): string | null {
+/** The agent's or project's folder that `file` (a scanned document) is in: the deepest one that holds it. */
+function homeOf(file: string): string | null {
+  let best: string | null = null;
+  for (const f of folders()) {
+    if (f.kind !== "agent" && f.kind !== "project") continue;
+    const at = canonical(f.path);
+    if (within(at, file) && (!best || at.length > best.length)) best = at;
+  }
+  return best;
+}
+
+/** Resolve one mention to the folder of the agent or project it names, or null (reason logged). `@agent` names the
+ * document's owner, or for a scanned document the agent or project whose folder it is in. */
+function resolveMention(mention: Mention, meta: { owner: string | null; path?: string }): string | null {
   if (mention.owner) {
-    if (!metaOwner) {
-      logLine("office ping: @agent in a comment on an ownerless document -- no wake");
-      return null;
-    }
-    return metaOwner; // meta.owner IS the creating agent/project's home chat id
+    const home = meta.owner ?? (meta.path ? homeOf(meta.path) : null);
+    if (!home) logLine("office ping: @agent in a comment on a document no agent or project owns -- no wake");
+    return home;
   }
   const name = mention.name;
   if (!name) return null;
@@ -176,28 +187,33 @@ function resolveMention(mention: Mention, metaOwner: string | null): string | nu
     logLine(`office ping: @${name} is ambiguous (${matches.map((f) => `${f.kind}:${f.name}`).join(", ")}) -- no silent disambiguation, no wake`);
     return null;
   }
-  // Home chat: a folder's workspace path is exactly what
-  // chats.folder(id) resolves to, so the sessions working in that folder (chats.inFolder) are its home chats.
-  // Deterministic pick: lowest id (the extension queues wakes per chat; any session of the home answers).
-  const chats = inFolder(matches[0]!.path).sort((a, b) => a.id.localeCompare(b.id));
-  if (chats.length === 0) {
-    logLine(`office ping: folder "${matches[0]!.name}" has no sessions to wake -- no wake`);
-    return null;
-  }
-  return chats[0]!.id;
+  return canonical(matches[0]!.path);
 }
 
-function processComment(docId: string, title: string, owner: string | null, c: Comment): void {
+/** The chat a folder's wake goes to, found when it is woken: the sessions working in the folder (chats.inFolder) all
+ * stand for it, the lowest id is asked. Null where none works there. */
+function wakeChat(folder: string): string | null {
+  const known = folders().find((f) => canonical(f.path) === folder);
+  const chats = inFolder(known?.path ?? folder).sort((a, b) => a.id.localeCompare(b.id));
+  return chats[0]?.id ?? null;
+}
+
+function processComment(docId: string, meta: { title: string; owner: string | null; path?: string }, c: Comment): void {
   const mentions = parseMentions(c.text);
   if (mentions.length === 0) return;
   const at = Date.now();
-  // Dedupe per comment AND per pass: one audit/grant/queue/tell per target chat, however often it is mentioned.
-  for (const chatId of new Set(mentions.map((m) => resolveMention(m, owner)).filter((x): x is string => x !== null))) {
-    addGrant(root(), docId, chatId, c.id, at);
-    record({ subject: title, reason: `comment mention ${c.id} by ${c.author}: access to this document granted and home woken`, chatId });
+  // Dedupe per comment AND per pass: one audit/grant/queue/tell per target folder, however often it is mentioned.
+  for (const folder of new Set(mentions.map((m) => resolveMention(m, meta)).filter((x): x is string => x !== null))) {
+    addGrant(root(), docId, folder, c.id, at);
+    const chatId = wakeChat(folder);
+    if (!chatId) {
+      record({ subject: meta.title, reason: `comment mention ${c.id} by ${c.author}: access to this document granted to ${folder}, which has no chat to wake`, chatId: "" });
+      continue;
+    }
+    record({ subject: meta.title, reason: `comment mention ${c.id} by ${c.author}: access to this document granted and home woken`, chatId });
     const queue = wakes.get(chatId) ?? [];
     if (!queue.some((e) => e.details.docId === docId && e.details.commentId === c.id)) {
-      queue.push({ text: officeWakeMessage(title, c.author, c.text), details: { docId, commentId: c.id } });
+      queue.push({ text: officeWakeMessage(meta.title, c.author, c.text), details: { docId, commentId: c.id } });
       wakes.set(chatId, queue);
     }
     const told = (cfg.tell ?? ((id: string, data: unknown) => portal().chats.tell(id, data)))(chatId, { type: "ping" });
@@ -226,7 +242,7 @@ export function handlePersisted(docId: string, buffer: Buffer): void {
       for (const c of comments) {
         if (!known || preExisting.has(c.id)) continue; // fallback or imported history: baselined, never woken
         try {
-          processComment(docId, meta.title, meta.owner, c);
+          processComment(docId, meta, c);
           seen.add(c.id);
         } catch (err) {
           logLine("office ping: comment " + c.id + " of " + docId + " could not be processed and stays unseen for retry: " + ((err as Error)?.message ?? err));
@@ -244,7 +260,7 @@ export function handlePersisted(docId: string, buffer: Buffer): void {
     const seen = new Set(prev ? prev.ids : []);
     for (const c of added) {
       try {
-        processComment(docId, meta.title, meta.owner, c);
+        processComment(docId, meta, c);
         seen.add(c.id);
       } catch (err) {
         logLine("office ping: comment " + c.id + " of " + docId + " could not be processed and stays unseen for retry: " + ((err as Error)?.message ?? err));

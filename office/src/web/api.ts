@@ -16,10 +16,10 @@ export interface OfficeDoc {
   sizeBytes: number;
   /** The document's current revision: its file's mtimeMs, what office_edit passes back as baseRevision. */
   mtimeMs: number;
-  /** The home chat that created it, or null for one made from the global page. */
+  /** The folder of the agent or project that made it, or null for one made from the library page or scanned. */
   owner: string | null;
-  /** Mentions in its comments that opened it to those homes. */
-  grants: { chatId: string; commentId: string; at: number }[];
+  /** Mentions in its comments that opened it to those agents' or projects' folders. */
+  grants: { folder: string; commentId: string; at: number }[];
   createdBy?: string;
   /** Which workspace dir the doc lives in, stamped by the scan (store.ts); ABSENT for library-made docs -- the UI shows "library". */
   workspace?: string;
@@ -70,6 +70,8 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => portal.a
 
 export const api = {
   state: () => call<OfficeState>("/state"),
+  /** The documents the agent or project of a chat sees: the panel beside it shows those. */
+  scope: (chatId: string) => call<{ docIds: string[] }>(`/scope?chat=${encodeURIComponent(chatId)}`),
   createDocument: (body: { title: string; type: "word" | "cell"; owner?: string }) =>
     call<OfficeDoc>("/documents", { method: "POST", body: JSON.stringify(body) }),
   renameDocument: (id: string, title: string) =>

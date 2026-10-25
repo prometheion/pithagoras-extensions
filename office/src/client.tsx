@@ -1,5 +1,5 @@
 import "../style.css";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import type { ChatProps, PanelProps, Portal, ToolCallView } from "@pithagoras/extension-api";
 import { LuFileText, LuPresentation, LuTable } from "react-icons/lu";
 import type { ReactNode } from "react";
@@ -18,22 +18,28 @@ import { de } from "./de";
  * load as chunks, the way Understory's do (ui.lazy + Suspense).
  */
 
-/** A document beside a home chat: every UNOWNED one (workspace-scanned or human-made -- shared by all chats),
- * plus ones it owns or a comment mention granted it -- derived from GET /state (the server half keeps no per-chat
- * route; owner and grants ride in every doc's meta). The sort choice is the one of web/sort.tsx,
- * persisted under "po-sort" so this panel and the full Office page share it. */
+/** The documents beside a chat: what its agent or project sees (GET /scope, the tools' own rule): the ones in its
+ * folder, the ones it made or was granted, and the person's library documents. The sort choice is the one of
+ * web/sort.tsx, persisted under "po-sort" so this panel and the full Office page share it. */
 function OfficePanel({ chat }: PanelProps) {
   portal.locale.use();
   const state = useOfficeState();
   const [sort, setSort] = useState<SortChoice>(loadSort);
-  if (!state) return <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />;
+  // What this chat's agent or project sees, by the server half's own rule: asked again whenever the state moves.
+  const [scope, setScope] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    let gone = false;
+    api.scope(chat.id).then((s) => !gone && setScope(new Set(s.docIds)), () => {});
+    return () => {
+      gone = true;
+    };
+  }, [chat.id, state]);
+  if (!state || !scope) return <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />;
   const chooseSort = (next: SortChoice) => {
     setSort(next);
     saveSort(next);
   };
-  const mine = [...state.docs]
-    .filter((d) => d.owner === null || d.owner === chat.id || d.grants.some((g) => g.chatId === chat.id))
-    .sort((a, b) => compareDocs(a, b, sort.key, sort.dir));
+  const mine = [...state.docs].filter((d) => scope.has(d.docId)).sort((a, b) => compareDocs(a, b, sort.key, sort.dir));
   return (
     <div className="space-y-1 p-2">
       <PanelNewDocument />

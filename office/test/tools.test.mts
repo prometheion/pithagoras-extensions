@@ -3,7 +3,7 @@
  *   node --import tsx --test test/tools.test.mts
  * Self-contained: tmp dataDir per test, real docx/xlsx via store.createDoc (real templates), comment
  * XML injected with ooxml.rewriteZip, every portal bit (extend registrar, chat->folder, folders list,
- * inFolder, root, record, log) injected through registerTools -- the tests NEVER reach portal().
+ * the file reader, root, record, log) injected through registerTools -- the tests NEVER reach portal().
  * The co-editor model is under test here too: a live human session neither blocks nor helps office_edit;
  * only the revision gate decides (fail loud, re-read + retry).
  *
@@ -30,10 +30,6 @@ const FOLDERS: FolderLite[] = [
   { path: "/f/acme", name: "Acme", kind: "project" },
   { path: "/f/notes", name: "Notes", kind: "chat" }, // wrong kind: never gets tools
 ];
-const HOME_BY_FOLDER: Record<string, string[]> = {
-  "/f/atlas": ["chat-atlas-home"],
-  "/f/acme": ["zzz-acme-b", "aaa-acme-a"], // two sessions; the deterministic pick must be the lowest id
-};
 const CHAT_TO_FOLDER: Record<string, string> = {
   "chat-atlas-home": "/f/atlas",
   "aaa-acme-a": "/f/acme",
@@ -88,7 +84,6 @@ function setup(chatId = "chat-atlas-home"): { root: string; seen: Seen; pi: PiFa
       return p;
     },
     folders: () => FOLDERS,
-    inFolder: (p) => (HOME_BY_FOLDER[p] ?? []).map((id) => ({ id })),
     root,
     record: (e) => seen.records.push(e),
     log: (l) => seen.logs.push(l),
@@ -134,10 +129,10 @@ function commentsXml(cs: { id: string; author: string; text: string }[]): string
   );
 }
 
-function addGrant(root: string, docId: string, chatId: string, commentId: string): void {
+function addGrant(root: string, docId: string, folder: string, commentId: string): void {
   const p = path.join(root, "index.json");
   const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-  raw.docs.find((d: any) => d.docId === docId).grants.push({ chatId, commentId, at: Date.now() });
+  raw.docs.find((d: any) => d.docId === docId).grants.push({ folder, commentId, at: Date.now() });
   fs.writeFileSync(p, JSON.stringify(raw, null, 2));
 }
 
@@ -173,7 +168,6 @@ test("registers office_* only in agent and project home chats", () => {
     extend: (f) => f(notes, { id: "chat-notes" }),
     chatFolder: (id) => CHAT_TO_FOLDER[id],
     folders: () => FOLDERS,
-    inFolder: (p) => (HOME_BY_FOLDER[p] ?? []).map((id) => ({ id })),
     root: s.root,
     log: (l) => s.seen.logs.push(l),
   });
@@ -187,7 +181,6 @@ test("registers office_* only in agent and project home chats", () => {
       throw new Error("folder gone");
     },
     folders: () => FOLDERS,
-    inFolder: () => [],
     root: s.root,
     log: (l) => s.seen.logs.push(l),
   });
@@ -195,18 +188,23 @@ test("registers office_* only in agent and project home chats", () => {
   assert.ok(s.seen.logs.some((l) => l.includes("no workspace folder for chat chat-gone")));
 });
 
-test("home chat of a multi-session project folder is the lowest id (ping.ts rule)", async () => {
+test("a document is owned by the project's folder, whichever of its sessions made it", async () => {
   const s = setup("zzz-acme-b"); // a NON-lowest session of the Acme project
   const made = await tool(s, "office_create").execute("c", { title: "Acme Note", type: "word" });
-  assert.equal(getDoc(made.details.id, s.root)!.owner, "aaa-acme-a"); // owner = the deterministic home, not the acting session
+  assert.equal(getDoc(made.details.id, s.root)!.owner, "/f/acme");
+  // and so every session of the folder sees it, the lowest one too
+  const other = setup("aaa-acme-a");
+  fs.cpSync(s.root, other.root, { recursive: true });
+  const listed = (await tool(other, "office_list").execute("c", {})) as ToolResult;
+  assert.match(listed.content[0].text, /"Acme Note".*owner you/);
 });
 
 test("scope: owned and granted docs visible; another home's doc invisible to list AND read", async () => {
   const s = setup();
-  const home = "chat-atlas-home";
+  const home = "/f/atlas";
   await createDoc({ title: "Mine", type: "word", owner: home }, s.root);
-  const theirs = await createDoc({ title: "Theirs Secret Doc", type: "word", owner: "chat-other" }, s.root); // no grant to us
-  const granted = await createDoc({ title: "Shared One", type: "cell", owner: "chat-other" }, s.root);
+  const theirs = await createDoc({ title: "Theirs Secret Doc", type: "word", owner: "/f/acme" }, s.root); // no grant to us
+  const granted = await createDoc({ title: "Shared One", type: "cell", owner: "/f/acme" }, s.root);
   addGrant(s.root, granted.docId, home, "c-grant");
 
   (setup as any).__run();
@@ -226,6 +224,74 @@ test("scope: owned and granted docs visible; another home's doc invisible to lis
   assert.ok(shared.content[0].text.includes('"Shared One"'));
 });
 
+test("scanned documents: the ones in the agent's own folder are read and edited from their own file, through the portal as the agent; another agent's are not there", async () => {
+  __resetToolsForTests();
+  resetLive();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-tools-"));
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-")));
+  const [mine, theirs] = [path.join(ws, "atlas"), path.join(ws, "bolt")];
+  fs.mkdirSync(path.join(mine, "notes"), { recursive: true });
+  fs.mkdirSync(theirs);
+  const template = await (await import("../src/store")).templateDocx();
+  fs.writeFileSync(path.join(mine, "notes", "report.docx"), template);
+  fs.writeFileSync(path.join(theirs, "salary.docx"), template);
+  const { scanWorkspace } = await import("../src/store");
+  scanWorkspace([mine, theirs], root);
+  const reads: [string, string][] = [];
+  const pi = makePi();
+  registerTools({
+    extend: (f) => f(pi, { id: "chat-a" }),
+    chatFolder: () => mine,
+    folders: () => [{ path: mine, name: "Atlas", kind: "agent" }, { path: theirs, name: "Bolt", kind: "agent" }],
+    readFile: (file, chatId) => {
+      reads.push([file, chatId]);
+      return fs.readFileSync(file);
+    },
+    root,
+    record: () => {},
+    log: () => {},
+  });
+  const find = (name: string) => pi.registered.find((t) => t.name === name)!;
+  const listed = ((await find("office_list").execute("c", {})) as ToolResult).content[0].text;
+  assert.match(listed, /"report"/);
+  assert.doesNotMatch(listed, /salary/, "another agent's scanned document is not in its list");
+  const report = (await import("../src/store")).listDocs(root).find((d) => d.title === "report")!;
+  const salary = (await import("../src/store")).listDocs(root).find((d) => d.title === "salary")!;
+  const read = (await find("office_read").execute("c", { id: report.docId })) as ToolResult;
+  assert.match(read.content[0].text, /New document/);
+  assert.deepEqual(reads, [[path.join(mine, "notes", "report.docx"), "chat-a"]], "read from its own file, through the portal, for that chat");
+  await find("office_edit").execute("c", { id: report.docId, ops: [{ quote: "New document", replacement: "Edited in place" }], baseRevision: report.mtimeMs });
+  assert.match(parseDocx(fs.readFileSync(path.join(mine, "notes", "report.docx"))).text, /Edited in place/, "the edit is in the workspace file");
+  await refused(find("office_read").execute("c", { id: salary.docId }), "another agent's");
+  await refused(find("office_edit").execute("c", { id: salary.docId, ops: [{ quote: "New document", replacement: "x" }], baseRevision: salary.mtimeMs }), "another agent's");
+  assert.match(parseDocx(fs.readFileSync(path.join(theirs, "salary.docx"))).text, /New document/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("scanned documents: a file the portal refuses to read for the agent (the sandbox closed it, or a link) is not read", async () => {
+  __resetToolsForTests();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-tools-"));
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-")));
+  fs.writeFileSync(path.join(ws, "closed.docx"), await (await import("../src/store")).templateDocx());
+  (await import("../src/store")).scanWorkspace([ws], root);
+  const pi = makePi();
+  registerTools({
+    extend: (f) => f(pi, { id: "chat-a" }),
+    chatFolder: () => ws,
+    folders: () => [{ path: ws, name: "Atlas", kind: "agent" }],
+    readFile: () => {
+      throw Object.assign(new Error("That folder is not one its agent may use"), { code: "invalid" });
+    },
+    root,
+    record: () => {},
+    log: () => {},
+  });
+  const doc = (await import("../src/store")).listDocs(root)[0]!;
+  const msg = await refused(pi.registered.find((t) => t.name === "office_read")!.execute("c", { id: doc.docId }), "closed");
+  assert.match(msg, /^error:not_found .*not a file your agent can read/);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 /* ------------------------------------------------------------------ */
 /* office_create                                                       */
 /* ------------------------------------------------------------------ */
@@ -236,7 +302,7 @@ test("office_create: happy path returns id + meta, owner is the home; duplicate 
   const res = (await t.execute("c1", { title: "Budget", type: "cell" })) as ToolResult;
   const meta = getDoc(res.details.id, s.root)!;
   assert.ok(meta); // exists in the index and on disk
-  assert.equal(meta.owner, "chat-atlas-home");
+  assert.equal(meta.owner, "/f/atlas");
   assert.equal(meta.ext, "xlsx");
   assert.equal(typeof res.details.mtimeMs, "number");
   assert.ok(res.content[0].text.includes(res.details.id));
@@ -260,7 +326,7 @@ test("office_create: happy path returns id + meta, owner is the home; duplicate 
 
 test("office_edit: applies ops to the stored bytes, bumps the revision; old baseRevision -> error:revision_mismatch with the fresh mtime; quote_not_found passes through", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Edit Me", type: "word", owner: "chat-atlas-home" }, s.root);
+  const doc = await createDoc({ title: "Edit Me", type: "word", owner: "/f/atlas" }, s.root);
   const base1 = getDoc(doc.docId, s.root)!.mtimeMs;
   assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "New document");
 
@@ -288,7 +354,7 @@ test("office_edit: applies ops to the stored bytes, bumps the revision; old base
   assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "Final words"); // still nothing written
 
   // spreadsheets cannot be edited in v1 (document.xml run-level edits are Word-only)
-  const sheet = await createDoc({ title: "Grid", type: "cell", owner: "chat-atlas-home" }, s.root);
+  const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
   assert.match(await refused(t.execute("e5", { id: sheet.docId, ops: [{ quote: "a", replacement: "b" }], baseRevision: getDoc(sheet.docId, s.root)!.mtimeMs }), "xlsx edit"), /^error:unsupported_format /);
 
   // audit recorded for the two successful edits only
@@ -297,7 +363,7 @@ test("office_edit: applies ops to the stored bytes, bumps the revision; old base
 
 test("office_edit co-editor model: a live human session neither blocks nor gates; a stale revision is refused with a loud CONFLICT", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Co Edit", type: "word", owner: "chat-atlas-home" }, s.root);
+  const doc = await createDoc({ title: "Co Edit", type: "word", owner: "/f/atlas" }, s.root);
   // Pin the file mtime to an exact value AND mirror it in the index so the ZERO-tolerance gate is deterministic
   // (a fresh create can leave a sub-ms stat drift on some filesystems).
   const REV1 = Date.now() - 5000;
@@ -342,11 +408,11 @@ test("office_edit co-editor model: a live human session neither blocks nor gates
 
 test("office_comments: docx lists comment ids/authors/text + grants; xlsx -> unsupported note", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Commented", type: "word", owner: "chat-atlas-home" }, s.root);
+  const doc = await createDoc({ title: "Commented", type: "word", owner: "/f/atlas" }, s.root);
   // inject a comments part into the stored bytes (mtime moves -- the tool re-reads the meta anyway)
   const file = path.join(s.root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
   fs.writeFileSync(file, rewriteZip(readDocBytes(s.root, doc.docId), { "word/comments.xml": commentsXml([{ id: "c1", author: "Ada Person", text: "@agent please fix this" }, { id: "c2", author: "Bob", text: "second note" }]) }));
-  addGrant(s.root, doc.docId, "chat-other", "c1");
+  addGrant(s.root, doc.docId, "/f/acme", "c1");
 
   const res = (await tool(s, "office_comments").execute("cm", { id: doc.docId })) as ToolResult;
   const t = res.content[0].text;
@@ -354,17 +420,17 @@ test("office_comments: docx lists comment ids/authors/text + grants; xlsx -> uns
   assert.match(t, /c1\s+Ada Person/);
   assert.match(t, /@agent please fix this/);
   assert.match(t, /c2\s+Bob/);
-  assert.match(t, /chat-other.*via comment c1/s);
+  assert.match(t, /\/f\/acme.*via comment c1/s);
   assert.equal(res.details.comments.length, 2);
-  assert.equal(res.details.grants[0].chatId, "chat-other");
+  assert.equal(res.details.grants[0].folder, "/f/acme");
 
   // a doc with no comments -> a readable "(none)", not an error
-  const bare = await createDoc({ title: "Bare", type: "word", owner: "chat-atlas-home" }, s.root);
+  const bare = await createDoc({ title: "Bare", type: "word", owner: "/f/atlas" }, s.root);
   const bareRes = (await tool(s, "office_comments").execute("cm2", { id: bare.docId })) as ToolResult;
   assert.match(bareRes.content[0].text, /Comments \(0\):\n\(none\)/);
 
   // xlsx: the unsupported note with the code prefix (xlsx comments are not read yet)
-  const sheet = await createDoc({ title: "Sheet", type: "cell", owner: "chat-atlas-home" }, s.root);
+  const sheet = await createDoc({ title: "Sheet", type: "cell", owner: "/f/atlas" }, s.root);
   assert.match(await refused(tool(s, "office_comments").execute("cm3", { id: sheet.docId }), "xlsx comments"), /^error:unsupported_format /);
 });
 
@@ -372,7 +438,7 @@ test("office_comments: aggregated comment output is capped like office_read (mar
   const s = setup();
   // 300 comments x ~750 chars of text -- comfortably over the shared 200,000-character cap
   const many = Array.from({ length: 300 }, (_, i) => ({ id: String(i), author: "Crowd", text: `note ${i}: ${"x".repeat(750)}` }));
-  const doc = await createDoc({ title: "Wall of Notes", type: "word", owner: "chat-atlas-home" }, s.root);
+  const doc = await createDoc({ title: "Wall of Notes", type: "word", owner: "/f/atlas" }, s.root);
   const file = path.join(s.root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
   fs.writeFileSync(file, rewriteZip(readDocBytes(s.root, doc.docId), { "word/comments.xml": commentsXml(many) }));
 
@@ -395,8 +461,8 @@ test("office_comments: aggregated comment output is capped like office_read (mar
 
 test("every refusal the agent reads starts with \"error:<code> \"", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Fmt", type: "word", owner: "chat-atlas-home" }, s.root);
-  const sheet = await createDoc({ title: "F2", type: "cell", owner: "chat-atlas-home" }, s.root);
+  const doc = await createDoc({ title: "Fmt", type: "word", owner: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "F2", type: "cell", owner: "/f/atlas" }, s.root);
 
   assert.match(await refused(tool(s, "office_read").execute("x1", { id: "nope" }), "not_found"), /^error:not_found /);
   const stale = await refused(tool(s, "office_edit").execute("x2", { id: doc.docId, ops: [{ quote: "New document", replacement: "r" }], baseRevision: getDoc(doc.docId, s.root)!.mtimeMs - 9000 }), "stale gate");
@@ -423,7 +489,6 @@ test("the factory also registers the UI_RECEIVE ping drain for office chats only
     extend: (f) => f(notes, { id: "chat-notes" }),
     chatFolder: () => "/f/notes",
     folders: () => FOLDERS,
-    inFolder: () => [],
     root: s.root,
     log: (l) => s.seen.logs.push(l),
   });

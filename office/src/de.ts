@@ -43,7 +43,6 @@ export const de: Record<string, string | Plural> = {
   "OnlyOffice Document Server": "OnlyOffice Document Server",
   "Open in Office": "In Office öffnen",
   "Open the Office settings": "Die Office-Einstellungen öffnen",
-  "Owned by this agent/project's home": "Gehört dem Zuhause dieses Agenten bzw. Projekts",
   "Pulling the image": "Lädt das Image",
   "Read a document": "Ein Dokument gelesen",
   "Read the comments of a document": "Die Kommentare eines Dokuments gelesen",

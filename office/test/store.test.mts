@@ -13,7 +13,7 @@ import JSZip from "jszip";
 import {
   listDocs, getDoc, docsForHome, createDoc, renameDoc, deleteDoc, sweepTrash,
   importFile, exportDoc, persistBytes, templateDocx, templateXlsx, slugify,
-  scanWorkspace, pruneMissingDocs,
+  scanWorkspace, pruneMissingDocs, addGrant, migrateOwners,
 } from "../src/store";
 import { parseDocx, parseXlsx } from "../src/ooxml";
 
@@ -94,52 +94,62 @@ test("listDocs: titles ascending; getDoc miss -> null", async () => {
 
 test("docsForHome: owner path, grant path, dedupe of owned-and-granted doc; others' docs excluded", async () => {
   const root = tmpRoot();
-  const homeA = "chat-A";
-  const homeB = "chat-B";
-  const owned = await createDoc({ title: "A owned doc", owner: homeA }, root);
-  const granted = await createDoc({ title: "B doc granted to A", owner: homeB }, root);
-  const stranger = await createDoc({ title: "C doc nobody shares", owner: "chat-C" }, root);
+  const homeA = "/homes/a";
+  const homeB = "/homes/b";
+  const owned = await createDoc({ title: "A owned doc", type: "word", owner: homeA }, root);
+  const granted = await createDoc({ title: "B doc granted to A", type: "word", owner: homeB }, root);
+  const stranger = await createDoc({ title: "C doc nobody shares", type: "word", owner: "/homes/c" }, root);
 
-  // grant A access to the B doc (what ping.ts does on a mention)
-  const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
-  const entry = index.docs.find((d: { docId: string }) => d.docId === granted.docId);
-  entry.grants.push({ chatId: homeA, commentId: "c1", at: Date.now() });
-  // the A-owned doc is ALSO granted to A: dedupe must keep it exactly once
-  const ownedEntry = index.docs.find((d: { docId: string }) => d.docId === owned.docId);
-  ownedEntry.grants.push({ chatId: homeA, commentId: "c2", at: Date.now() });
-  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
+  // grant A access to the B doc (what ping.ts does on a mention), and the A-owned doc too: it is listed once
+  assert.equal(addGrant(granted.docId, homeA, "c1", Date.now(), root), "added");
+  assert.equal(addGrant(owned.docId, homeA, "c2", Date.now(), root), "added");
+  assert.equal(addGrant(owned.docId, homeA, "c2", Date.now(), root), "duplicate");
 
   const visible = docsForHome(homeA, root).map((d) => d.docId);
   assert.deepEqual(visible.sort(), [granted.docId, owned.docId].sort());
-  assert.equal(visible.filter((id) => id === owned.docId).length, 1); // deduped
   assert.ok(!visible.includes(stranger.docId));
-
-  const bView = docsForHome(homeB, root).map((d) => d.docId);
-  assert.deepEqual(bView, [granted.docId]);
+  assert.deepEqual(docsForHome(homeB, root).map((d) => d.docId), [granted.docId]);
 });
 
-test("docsForHome: UNOWNED docs (workspace-scanned and human-made) are visible to EVERY home", async () => {
+test("docsForHome: a scanned document is its folder's (at any depth), not every agent's; the person's library documents are everyone's", async () => {
   const root = tmpRoot();
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "office-unowned-"));
-  fs.writeFileSync(path.join(ws, "shared plan.docx"), Buffer.from("a shared docx of sorts"));
-  assert.deepEqual(scanWorkspace([ws], root), { added: 1, updated: 0 });
-  const scanned = getDoc(listDocs(root)[0].docId, root)!;
-  assert.equal(scanned.owner, null);
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-unowned-")));
+  const [a, b] = [path.join(ws, "a"), path.join(ws, "b")];
+  fs.mkdirSync(path.join(a, "deep"), { recursive: true });
+  fs.mkdirSync(b);
+  fs.writeFileSync(path.join(a, "deep", "plan.docx"), Buffer.from("a docx of sorts"));
+  fs.writeFileSync(path.join(b, "salary.docx"), Buffer.from("another"));
+  assert.deepEqual(scanWorkspace([a, b], root), { added: 2, updated: 0 });
+  const plan = listDocs(root).find((d) => d.title === "plan")!;
+  const salary = listDocs(root).find((d) => d.title === "salary")!;
+  assert.equal(plan.owner, null);
+  const human = await createDoc({ title: "Human-made", type: "word" }, root);
+  const onlyB = await createDoc({ title: "B only", type: "word", owner: b }, root);
 
-  // a human-made doc (no owner passed) is shared too, while another home's OWNED doc stays private to it
-  const human = await createDoc({ title: "Human-made" }, root);
-  assert.equal(human.owner, null);
-  const onlyB = await createDoc({ title: "B only", owner: "chat-B" }, root);
-
-  for (const home of ["chat-A", "chat-C"]) {
-    const visible = docsForHome(home, root).map((d) => d.docId);
-    assert.ok(visible.includes(scanned.docId), `${home} sees the unowned scanned doc`);
-    assert.ok(visible.includes(human.docId), `${home} sees the unowned human doc`);
-    assert.ok(!visible.includes(onlyB.docId), `${home} does NOT see chat-B's owned doc`);
-  }
-  const bView = docsForHome("chat-B", root).map((d) => d.docId);
-  assert.deepEqual(bView.sort(), [scanned.docId, human.docId, onlyB.docId].sort());
+  assert.deepEqual(docsForHome(a, root).map((d) => d.docId).sort(), [human.docId, plan.docId].sort());
+  assert.deepEqual(docsForHome(b, root).map((d) => d.docId).sort(), [human.docId, onlyB.docId, salary.docId].sort());
+  // A link to a's folder is the same folder.
+  fs.symlinkSync(a, path.join(ws, "link-to-a"));
+  assert.ok(docsForHome(path.join(ws, "link-to-a"), root).some((d) => d.docId === plan.docId));
+  // A folder whose name only begins like a's is not a's.
+  fs.mkdirSync(`${a}-other`);
+  assert.ok(!docsForHome(`${a}-other`, root).some((d) => d.docId === plan.docId));
   fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("migrateOwners: owners and grants that named a chat name that chat's folder; one of a chat that is gone stays as it was", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Old owner", type: "word", owner: "chat-a" }, root);
+  const gone = await createDoc({ title: "Gone owner", type: "word", owner: "chat-gone" }, root);
+  const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
+  index.docs.find((d: { docId: string }) => d.docId === doc.docId).grants = [{ chatId: "chat-b", commentId: "c1", at: 1 }];
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
+  const folders: Record<string, string> = { "chat-a": "/homes/a", "chat-b": "/homes/b" };
+  assert.equal(migrateOwners((id) => folders[id], root), 1);
+  assert.equal(getDoc(doc.docId, root)!.owner, "/homes/a");
+  assert.deepEqual(getDoc(doc.docId, root)!.grants, [{ folder: "/homes/b", commentId: "c1", at: 1 }]);
+  assert.equal(getDoc(gone.docId, root)!.owner, "chat-gone", "seen by no agent, rather than by every one");
+  assert.equal(migrateOwners((id) => folders[id], root), 0, "once is enough");
 });
 
 /* ---------------- rename / delete / trash ---------------- */

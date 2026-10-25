@@ -155,7 +155,7 @@ function codedResponse(res: { status: (c: number) => { json: (b: unknown) => voi
 
 /** Where a doc's bytes live NOW: a scanned doc's real workspace file (DocMeta.path), else its library folder. */
 function fileFor(root: string, doc: store.DocMeta): string {
-  return doc.path ?? path.join(root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
+  return store.docPath(doc, root);
 }
 
 /** Content-Disposition for a download: an ASCII fallback name plus the RFC 5987 UTF-8 form for any non-ASCII title. */
@@ -286,6 +286,20 @@ function registerRoutes(dd: string, secret: string): void {
       locks[d.docId] = live.usersOf(d.docId).map((u) => ({ id: u.id, name: u.name }));
     }
     res.json({ enabled: s.enabled, imageTag: s.imageTag, container: c, docs, locks });
+  });
+
+  /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat's folder sees (store.docsForHome, the
+   * tools' own rule), for the panel beside the chat. A chat whose folder is gone sees the person's library documents. */
+  r.get("/scope", async (req, res) => {
+    const chatId = typeof req.query?.chat === "string" ? req.query.chat : "";
+    let folder = "";
+    try {
+      folder = chatId ? portal().chats.folder(chatId) : "";
+    } catch {
+      folder = "";
+    }
+    const docs = folder ? store.docsForHome(folder, dd) : store.listDocs(dd).filter((d) => d.owner === null && !d.path);
+    res.json({ docIds: docs.map((d) => d.docId) });
   });
 
   /** POST /documents {title, type:"word"|"cell", owner?} -> 201 meta; 409 exists. A failure is logged too, so a live
@@ -696,6 +710,19 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   // NOTE: there is NO co-editing switch and no flush-before-write hook to install here -- office_edit runs under
   // the strict mtime/revision gate with human editor sessions open or not (co-editor model; fail loud, re-read + retry).
   registerTools({ root: dd, record: recordAudit });
+  // Owners and grants were chat ids before: moved to the folders those chats work in.
+  try {
+    const moved = store.migrateOwners((chatId) => {
+      try {
+        return portal().chats.folder(chatId);
+      } catch {
+        return undefined;
+      }
+    }, dd);
+    if (moved) logLine(`@pithagoras/office: ${moved} document(s) now owned by a folder instead of a chat`);
+  } catch (e) {
+    logLine(`@pithagoras/office: owners could not be moved to folders: ${(e as Error).message}`);
+  }
   wirePing({ root: dd, record: recordAudit });
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd });
   live.setMetaResolver((docId) => store.getDoc(docId, dd)?.mtimeMs ?? null);

@@ -24,6 +24,9 @@ import { jsZip } from "./jszip";
 import { dataDir } from "./host";
 import { parseDocx } from "./ooxml"; // importFile + scanWorkspace baseline the source file's comment ids at import/index time (ping.ts first-save rule)
 
+/** A mention that opened a document to an agent's or project's folder (its path, as `owner`). */
+export type Grant = { folder: string; commentId: string; at: number };
+
 export type DocMeta = {
   docId: string;
   title: string;
@@ -32,8 +35,10 @@ export type DocMeta = {
   updatedAt: number;
   sizeBytes: number;
   mtimeMs: number;
+  /** The agent or project that made it, by its folder (the path the portal lists it at, resolved): an agent's chats
+   * come and go, and which of them stands for the folder changes, but the folder stays. Null for the person's own. */
   owner: string | null;
-  grants: { chatId: string; commentId: string; at: number }[];
+  grants: Grant[];
   createdBy?: string;
   /** Set for workspace-scanned docs only (importFile stamps it too, for its copy flow). ping.ts uses it as the first-save rule: a scanned doc's pre-existing comments are baselined without wakes; a created (blank) doc gets no such baseline. */
   imported?: boolean;
@@ -83,7 +88,8 @@ function writeIndex(root: string, index: IndexFile): void {
   fs.renameSync(tmp, dest);
 }
 
-function docPath(doc: DocMeta, root: string): string {
+/** Where a document's bytes are: a scanned doc's own file (`path`), else its file in the library. */
+export function docPath(doc: DocMeta, root: string): string {
   // A scanned doc's bytes are the workspace file itself; only library-created docs live under docs/<docId>/.
   return doc.path ?? path.join(root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
 }
@@ -217,35 +223,79 @@ export function getDoc(docId: string, root?: string): DocMeta | null {
 }
 
 /** The ONE index writer for mention grants (ping.ts used to read-modify-write index.json on its own): fresh
- * read, dedupe by (chatId, commentId) -- a re-sent comment never adds a second row -- atomic tmp+rename through
+ * read, dedupe by (folder, commentId) -- a re-sent comment never adds a second row -- atomic tmp+rename through
  * the store's writeIndex. Sync like everything here and no logging. Returns "added",
  * "duplicate" (already granted: nothing written), or null when the doc is not in the index any more.
  * A corrupt index throws the usual {code:"index_corrupt"} -- a bad file, not a vanished doc. */
-export function addGrant(docId: string, chatId: string, commentId: string, at: number, root = dataDir()): "added" | "duplicate" | null {
+export function addGrant(docId: string, folder: string, commentId: string, at: number, root = dataDir()): "added" | "duplicate" | null {
   const index = readIndex(root);
   const doc = index.docs.find((d) => d.docId === docId);
   if (!doc) return null;
   const grants = (doc.grants ??= []);
-  if (grants.some((g) => g.chatId === chatId && g.commentId === commentId)) return "duplicate";
-  grants.push({ chatId, commentId, at });
+  if (grants.some((g) => g.folder === folder && g.commentId === commentId)) return "duplicate";
+  grants.push({ folder, commentId, at });
   writeIndex(root, index);
   return "added";
 }
 
-/** The documents a home chat sees in its panel and office tools: every UNOWNED doc -- the
- * workspace-scanned and human-made docs (owner null), shared by definition and visible to all homes -- plus ones it
- * OWNS or holds a mention-GRANT for; deduped by docId (a doc owned and granted to the same home appears once). */
-export function docsForHome(homeChatId: string, root = dataDir()): DocMeta[] {
-  const seen = new Set<string>();
-  const out: DocMeta[] = [];
-  for (const doc of readIndex(root).docs) {
-    if (seen.has(doc.docId)) continue;
-    if (doc.owner === null || doc.owner === homeChatId || doc.grants.some((g) => g.chatId === homeChatId)) {
-      seen.add(doc.docId);
-      out.push(doc);
-    }
+/** A folder as the store keeps it: resolved through links, so that a home's path and a scanned file's real path
+ * compare; as given where it cannot be resolved (gone). */
+export function canonical(folder: string): string {
+  try {
+    return fs.realpathSync(folder);
+  } catch {
+    return path.resolve(folder);
   }
-  return out.sort((a, b) => a.title.localeCompare(b.title));
+}
+
+/** Whether `file` is inside `folder` (both resolved), at any depth. */
+export function within(folder: string, file: string): boolean {
+  const rel = path.relative(folder, file);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+/** Whether the agent or project of `home` (a canonical folder) sees `doc`: what it made or was granted, the scanned
+ * documents in its own folder, and the documents the person made in the library. A scanned document in another
+ * agent's or project's folder is not its: the sandbox keeps that folder from its agent, and the tools must not hand
+ * it what is in it. */
+export function visibleTo(doc: DocMeta, home: string): boolean {
+  if (doc.owner === home || doc.grants.some((g) => g.folder === home)) return true;
+  return doc.path ? within(home, doc.path) : doc.owner === null;
+}
+
+/** The documents the agent or project of `home` (a folder, resolved here) sees in its panel and office tools
+ * (`visibleTo`), by title. */
+export function docsForHome(home: string, root = dataDir()): DocMeta[] {
+  const at = canonical(home);
+  return readIndex(root).docs.filter((doc) => visibleTo(doc, at)).sort((a, b) => a.title.localeCompare(b.title));
+}
+
+/**
+ * Owners and grants of the version before, which named a chat (whichever chat of a folder had the lowest id), moved
+ * to that chat's folder (`folderOf`, the portal's chats.folder). One that cannot be resolved (a chat deleted since)
+ * stays as it is: it names no folder, so no agent sees the document by it, and the person still does. Returns how
+ * many documents changed.
+ */
+export function migrateOwners(folderOf: (chatId: string) => string | undefined, root = dataDir()): number {
+  const index = readIndex(root);
+  let changed = 0;
+  const moved = (who: string): string => {
+    if (path.isAbsolute(who)) return who;
+    const folder = folderOf(who);
+    return folder ? canonical(folder) : who;
+  };
+  for (const doc of index.docs) {
+    const before = JSON.stringify([doc.owner, doc.grants]);
+    if (doc.owner !== null) doc.owner = moved(doc.owner);
+    doc.grants = (doc.grants ?? []).map((g) => {
+      const old = g as Grant & { chatId?: string };
+      const { chatId, ...rest } = old;
+      return { ...rest, folder: moved(old.folder ?? chatId ?? "") };
+    });
+    if (JSON.stringify([doc.owner, doc.grants]) !== before) changed++;
+  }
+  if (changed) writeIndex(root, index);
+  return changed;
 }
 
 function freshDocId(existing: DocMeta[], title: string): string {
@@ -281,7 +331,7 @@ function storeDoc(doc: DocMeta, bytes: Buffer, rootDir: string): DocMeta { // sy
 /** Create a document from the blank template of its type. docId = slug(title) + "-" + 6 random chars (see
  * randomSuffix for the alphabet). Duplicate -- an existing entry with the SAME docId or the SAME title AND same
  * type (case-sensitive) -- throws Error{code:"exists"} before anything touches disk. The owner is the creating
- * home chat (agent tools pass it) or null for human-created docs; createdBy records who actually did it. */
+ * agent's or project's folder (agent tools pass it) or null for human-created docs; createdBy records who did it. */
 export async function createDoc(input: { title: string; type: "word" | "cell"; owner?: string | null; createdBy?: string }, root = dataDir()): Promise<DocMeta> {
   const rootDir = root ?? dataDir();
   assertSafeTitle(input.title); // titles are file names
@@ -459,7 +509,7 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
     updatedAt: now,
     sizeBytes: st.size,
     mtimeMs: st.mtimeMs, // the file's OWN mtime IS its revision from day one -- the mtime-gated flow edits it in place
-    owner: null, // a human doc: no home owns it -- it shows in the global library, exactly like a human-made created doc
+    owner: null, // nobody made it here: the agent or project whose folder it is in sees it (visibleTo), and the person
     grants: [],
     imported: true, // ping.ts first-save rule for the stamped baseline above
     path: real, // IN PLACE: the scanned file IS the document; nothing is copied into the library

@@ -35,12 +35,15 @@ same page).
   with **Rescan**, **in place**: the scanned file is the document, and editing it edits that file. Deleting one moves
   its real file into the library's trash (`.trash/` in the data folder), where it is kept for 7 days and then removed;
   there is no button to restore it, but the file can be moved back by hand.
-- **A panel beside each chat** with the documents nobody owns (the ones scanned or made by you) and the ones that
-  chat's agent owns or was granted, and a card in the chat for each call of the agent's tools that names its document.
+- **A panel beside each chat** with the documents that chat's agent or project sees (below), and a card in the chat
+  for each call of the agent's tools that names its document.
 - **The agent's tools**, in the chats of agents and projects: `office_list`, `office_create`, `office_read`,
-  `office_edit` and `office_comments`. An agent sees the documents nobody owns (the ones scanned or made by you), the
-  ones it owns and the ones it was granted; another agent's are not there for it, and asking for one gets the same
-  answer as for a document that does not exist.
+  `office_edit` and `office_comments`. An agent sees the documents in its own folder, the ones it made and the ones it
+  was granted by a mention, and the ones you made in the library; another agent's, and the files in another agent's or
+  project's folder, are not there for it, and asking for one gets the same answer as for a document that does not
+  exist. What an agent makes or is granted belongs to its folder, not to one of its chats. A file in its folder is read
+  through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
+  and a link is not followed.
 - **Co-editing, with no switch**: the agent is a co-editor like any other. You and the agent can have the same
   document open and edited at once. Every write goes through a revision check: a document's revision is its file's
   modification time, `office_read` shows it, and `office_edit` takes it as `baseRevision` and replaces quoted text

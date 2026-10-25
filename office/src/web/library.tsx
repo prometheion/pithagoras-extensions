@@ -34,14 +34,14 @@ function ownerChips(doc: OfficeDoc) {
   return (
     <>
       {doc.owner ? (
-        <span className="po-chip po-chip-owner" title={t("Owned by this agent/project's home")}>
-          {t("owned")} · {doc.owner}
+        <span className="po-chip po-chip-owner" title={doc.owner}>
+          {t("owned")} · {doc.owner.split("/").filter(Boolean).pop() ?? doc.owner}
         </span>
       ) : (
         <span className="po-chip">{t("unowned")}</span>
       )}
       {doc.grants.length > 0 && (
-        <span className="po-chip" title={doc.grants.map((g) => g.chatId).join(", ")}>
+        <span className="po-chip" title={doc.grants.map((g) => g.folder).join(", ")}>
           {doc.grants.length === 1 ? t("1 granted") : t("{n} granted", { n: doc.grants.length })}
         </span>
       )}

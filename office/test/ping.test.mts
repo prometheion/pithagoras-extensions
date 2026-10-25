@@ -19,7 +19,7 @@ import {
   type PingAuditEntry,
   type WakeEntry,
 } from "../src/ping";
-import { createDoc, getDoc, importFile, templateDocx } from "../src/store";
+import { createDoc, getDoc, importFile, listDocs, scanWorkspace, templateDocx } from "../src/store";
 import { rewriteZip, parseDocx } from "../src/ooxml";
 
 /* ------------------------------------------------------------------ */
@@ -111,7 +111,7 @@ test("officeWakeMessage renders the exact template", () => {
 
 test("created doc, first save: a mention IS processed (no baseline swallows first-session intent)", async () => {
   const { root, seen } = setup();
-  const meta = await makeDoc(root, "Budget", { owner: "chat-atlas-home" });
+  const meta = await makeDoc(root, "Budget", { owner: "/f/atlas" });
   persistWith(root, meta.docId, meta.title, meta.ext, [
     { id: "1", author: "Alice", text: "@agent please review this" }, // created docs get NO baseline: the mention wakes on save #1
     { id: "2", author: "Bob", text: "notes for later" },
@@ -122,7 +122,7 @@ test("created doc, first save: a mention IS processed (no baseline swallows firs
   assert.deepEqual(state.ids.sort(), ["1", "2"]);
   const grants = getDoc(meta.docId, root)?.grants ?? [];
   assert.equal(grants.length, 1);
-  assert.equal(grants[0].chatId, "chat-atlas-home");
+  assert.equal(grants[0].folder, "/f/atlas");
   assert.equal(grants[0].commentId, "1");
 });
 
@@ -164,7 +164,7 @@ test("imported doc, first save: its existing comments are baselined WITHOUT wake
 
 test("second persist: @agent wakes the owner; @project:<name> matches case-insensitively, grant + wake queued; re-send dedupes", async () => {
   const { root, seen } = setup();
-  const meta = await makeDoc(root, "Budget", { owner: "chat-atlas-home" });
+  const meta = await makeDoc(root, "Budget", { owner: "/f/atlas" });
   persistWith(root, meta.docId, meta.title, meta.ext, [{ id: "1", author: "Alice", text: "baseline" }]);
   assert.deepEqual(seen.tells, []);
 
@@ -188,8 +188,8 @@ test("second persist: @agent wakes the owner; @project:<name> matches case-insen
   // grants added (deduped by commentId) and audited
   const grants = getDoc(meta.docId, root)?.grants ?? [];
   for (const g of grants) assert.equal(typeof g.at, "number");
-  assert.ok(grants.some((g) => g.chatId === "chat-atlas-home" && g.commentId === "2"));
-  assert.ok(grants.some((g) => g.chatId === "chat-acme-home" && g.commentId === "3"));
+  assert.ok(grants.some((g) => g.folder === "/f/atlas" && g.commentId === "2"));
+  assert.ok(grants.some((g) => g.folder === "/f/acme" && g.commentId === "3"));
   assert.equal(grants.length, 2);
   assert.equal(seen.records.length, 2);
   for (const r of seen.records) {
@@ -232,12 +232,12 @@ test("bare @name matches an agent folder case-insensitively; unmatched and ambig
   // chat-kind folders are never mention targets: @notes would be unmatched (not asserted above) -- but grants confirm only real targets landed
   const grants = getDoc(meta.docId, root)?.grants ?? [];
   assert.deepEqual(
-    grants.map((g) => [g.chatId, g.commentId]).sort(),
-    [["chat-acme-home", "5"], ["chat-helper-home", "2"]].sort()
+    grants.map((g) => [g.folder, g.commentId]).sort(),
+    [["/f/acme", "5"], ["/f/helper", "2"]].sort()
   );
 });
 
-test("@agent on an ownerless doc is skipped with a log line, no crash", async () => {
+test("@agent on a document of the person's is skipped with a log line, no crash", async () => {
   const { root, seen } = setup();
   const meta = await makeDoc(root, "Solo", {}); // owner omitted -> null
   assert.equal(meta.owner, null);
@@ -248,15 +248,37 @@ test("@agent on an ownerless doc is skipped with a log line, no crash", async ()
   ]);
   assert.deepEqual(seen.tells, []);
   assert.deepEqual(seen.records, []);
-  assert.match(seen.logs.join("\n"), /@agent .* ownerless document -- no wake/);
+  assert.match(seen.logs.join("\n"), /@agent .* no agent or project owns -- no wake/);
   // ids still recorded so a later save diff stays sane
   const state = JSON.parse(fs.readFileSync(stateFile(root, meta.docId), "utf8")) as { ids: string[] };
   assert.deepEqual(state.ids.sort(), ["1", "2"]);
 });
 
+test("@agent on a scanned document wakes the agent whose folder it is in; the wake goes to a chat of the folder found when it is woken", async () => {
+  __resetPingForTests();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-ping-"));
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ping-ws-")));
+  fs.mkdirSync(path.join(ws, "sub"));
+  fs.writeFileSync(path.join(ws, "sub", "found.docx"), await templateDocx());
+  scanWorkspace([ws], root);
+  const doc = listDocs(root)[0]!;
+  const tells: string[] = [];
+  let sessions = [{ id: "chat-old" }];
+  wirePing({ root, folders: () => [{ path: ws, name: "Scout", kind: "agent" }], inFolder: () => sessions, tell: (id) => (tells.push(id), true), record: () => {}, log: () => {} });
+  const file = fs.readFileSync(doc.path!);
+  handlePersisted(doc.docId, rewriteZip(file, { "word/comments.xml": commentsXml([{ id: "1", author: "A", text: "old" }]) }));
+  // The chat that stood for the folder is gone; another works there now.
+  sessions = [{ id: "chat-new" }];
+  handlePersisted(doc.docId, rewriteZip(file, { "word/comments.xml": commentsXml([{ id: "1", author: "A", text: "old" }, { id: "2", author: "B", text: "@agent please look" }]) }));
+  assert.deepEqual(tells, ["chat-new"]);
+  assert.deepEqual(getDoc(doc.docId, root)!.grants.map((g) => g.folder), [ws]);
+  assert.equal(drainWakeQueue("chat-new").length, 1);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test("xlsx persist is a no-op (v1 wakes docx only)", async () => {
   const { root, seen } = setup();
-  const meta = await makeDoc(root, "Sheet", { type: "cell", owner: "chat-atlas-home" });
+  const meta = await makeDoc(root, "Sheet", { type: "cell", owner: "/f/atlas" });
   assert.equal(meta.ext, "xlsx");
   // even a complete garbage buffer must be ignored without touching state or pings
   handlePersisted(meta.docId, Buffer.from("not a zip at all"));
@@ -267,7 +289,7 @@ test("xlsx persist is a no-op (v1 wakes docx only)", async () => {
 
 test("corrupt state file: logged, previous set treated as empty, mentions processed once, state restored", async () => {
   const { root, seen } = setup();
-  const meta = await makeDoc(root, "Ledger", { owner: "chat-atlas-home" });
+  const meta = await makeDoc(root, "Ledger", { owner: "/f/atlas" });
   persistWith(root, meta.docId, meta.title, meta.ext, [{ id: "1", author: "A", text: "@agent baseline ask" }]); // created doc: the @agent mention IS processed on its very first save (no baseline)
   fs.writeFileSync(stateFile(root, meta.docId), "{ this is not json");
 
@@ -285,8 +307,8 @@ test("corrupt state file: logged, previous set treated as empty, mentions proces
   // wake queue dedupes per (docId, commentId) but grants also dedupe: both asks land once
   const grants = getDoc(meta.docId, root)?.grants ?? [];
   assert.deepEqual(
-    grants.map((g) => [g.chatId, g.commentId]).sort(),
-    [["chat-atlas-home", "1"], ["chat-atlas-home", "2"]].sort()
+    grants.map((g) => [g.folder, g.commentId]).sort(),
+    [["/f/atlas", "1"], ["/f/atlas", "2"]].sort()
   );
   const state = JSON.parse(fs.readFileSync(stateFile(root, meta.docId), "utf8")) as { ids: string[] };
   assert.deepEqual(state.ids.sort(), ["1", "2"]); // restored to a sane file

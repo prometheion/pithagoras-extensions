@@ -1,26 +1,26 @@
 /**
  * Wake on comment mention. Server-side only.
  *
- * On every docx persist (callback status 2/6 fires the `onPersisted` hooks), the saved buffer is
- * re-parsed (`parseDocx`) and its word/comments.xml comments are diffed against the last-seen set
- * kept in `<root>/state/<docId>.json`. Each NEW comment is scanned for mentions (grammar below);
- * per resolved mention, per target chat: a grant on this one doc (deduped by comment id), an audit
- * line, a queued wake text (`officeWakeMessage`), and `chats.tell(chatId, {type:"ping"})` so the
- * target's pi extension drains the queue off its UI_RECEIVE bell (drain side = the tools' factory in
- * tools.ts; this module only QUEUES). The seen set is written back AFTER processing.
+ * On every docx persist (callback status 2/6 fires the `onPersisted` hooks), the saved buffer is re-parsed
+ * (`parseDocx`: word/comments.xml and OnlyOffice's document comments) and its comments are compared with the
+ * last-seen set kept in `<root>/state/<docId>.json`, by their keys (ooxml.commentKeys: author and text, as the
+ * Document Server numbers the comments anew at every save). Each NEW comment is scanned for mentions (grammar below);
+ * per resolved mention, per target folder: a grant on this one doc (deduped by comment key), an audit line, a queued
+ * wake text (`officeWakeMessage`) for a chat of that folder, and `chats.tell(chatId, {type:"ping"})` so the target's
+ * pi extension drains the queue off its UI_RECEIVE bell (drain side = the tools' factory in tools.ts; this module
+ * only QUEUES). The seen set is written back AFTER processing.
  *
- * First-save decision: an IMPORTED document arrives with its own comment history -- importFile records
- * the file's comment ids in DocMeta.importedBaseline AT IMPORT TIME, and a persist with NO prior state file baselines exactly
- * those ids WITHOUT resolving mentions (they predate this library and must not ring bells). A comment that appears AFTER the
- * import but BEFORE the first save is NEW to this library and IS processed on that first save, so its wake is not lost. When
- * the source did not parse at import the field is absent and we fall back to baselining whatever the first save holds.
- * A CREATED blank document gets no baseline: its seen set starts empty, so an @mention typed during the very first editing
- * session is processed on its first save like any later one. (store.ts marks imported documents with DocMeta.imported; see importFile / scanWorkspace.)
- * Corrupt/undecodable state file: logged, previous set treated as EMPTY (every current comment is
- * then "new", its mentions processed once; the immediately-following write restores a sane file).
- * Erring toward notifying beats silently dropping a mention after a corruption event. A re-send of
- * an already-seen comment adds nothing (pure id diff), so normal re-saves never double-ping or
- * double-grant.
+ * First-save decision: a SCANNED (or imported) document arrives with its own comment history -- the scan records the
+ * file's comment keys in DocMeta.importedKeys AT INDEX TIME, and a persist with NO prior state file takes exactly those
+ * as seen WITHOUT resolving mentions (they predate this library and must not ring bells). A comment that appears after
+ * indexing but before the first save is NEW and IS processed on that first save, so its wake is not lost. Where the
+ * keys are not known (the source did not parse, or an index of the version before, which kept ids) everything the first
+ * save holds is taken as seen. A CREATED blank document gets no baseline: its seen set starts empty, so an @mention
+ * typed during the very first editing session is processed on its first save like any later one.
+ * Corrupt/undecodable state file: logged, previous set treated as EMPTY (every current comment is then "new", its
+ * mentions processed once; the immediately-following write restores a sane file). A re-send of an already-seen
+ * comment adds nothing, so normal re-saves never double-ping or double-grant; a comment whose text is changed is a
+ * new one.
  *
  * v1 wakes docx ONLY: xlsx comments live in xl/commentsN.xml + VML anchors (not read yet), so the hook is a no-op for
  * non-docx docs. onPersisted hands over (docId, buffer) only, so this module resolves the meta
@@ -30,7 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
 import { addGrant as storeAddGrant, canonical, getDoc, within } from "./store";
-import { parseDocx, diffComments, type Comment } from "./ooxml";
+import { commentKeys, parseDocx, type Comment } from "./ooxml";
 import { onPersisted } from "./callback";
 
 /** A line the audit seam records per resolved mention (subject = doc title; reason carries what happened; chatId = woken home). */
@@ -127,16 +127,21 @@ function statePath(rootDir: string, docId: string): string {
   return path.join(rootDir, "state", `${docId}.json`);
 }
 
-/** Last-seen comment ids. Missing file -> null (first save). Undecodable or bad shape -> empty set with a log line (module header). */
-function readSeen(rootDir: string, docId: string): { ids: Set<string>; first: boolean } | null {
+/** The comments last seen, by their keys (ooxml.commentKeys). Missing file -> null (first save). A file of the version
+ * before, which kept the Document Server's ids (renumbered at every save, so they name nothing), is a first save of
+ * which nothing may wake: `stale`. Undecodable or bad shape -> empty set with a log line (module header). */
+function readSeen(rootDir: string, docId: string): { keys: Set<string>; stale?: boolean } | null {
   try {
     const raw: unknown = JSON.parse(fs.readFileSync(statePath(rootDir, docId), "utf8"));
-    if (typeof raw !== "object" || raw === null || !Array.isArray((raw as Record<string, unknown>).ids)) throw new Error("bad shape");
-    return { ids: new Set((raw as { ids: unknown[] }).ids.filter((x) => typeof x === "string")), first: false };
+    if (typeof raw === "object" && raw !== null && Array.isArray((raw as Record<string, unknown>).keys)) {
+      return { keys: new Set((raw as { keys: unknown[] }).keys.filter((x): x is string => typeof x === "string")) };
+    }
+    if (typeof raw === "object" && raw !== null && Array.isArray((raw as Record<string, unknown>).ids)) return { keys: new Set(), stale: true };
+    throw new Error("bad shape");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     logLine(`office ping: state file ${statePath(rootDir, docId)} is corrupt -- treating the last-seen set as empty`);
-    return { ids: new Set(), first: false };
+    return { keys: new Set() };
   }
 }
 
@@ -144,7 +149,7 @@ function writeSeen(rootDir: string, docId: string, ids: Iterable<string>): void 
   const p = statePath(rootDir, docId);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   const tmp = path.join(path.dirname(p), `.${path.basename(p)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify({ ids: [...new Set(ids)] }, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify({ keys: [...new Set(ids)] }, null, 2));
   fs.renameSync(tmp, p);
 }
 
@@ -198,22 +203,22 @@ function wakeChat(folder: string): string | null {
   return chats[0]?.id ?? null;
 }
 
-function processComment(docId: string, meta: { title: string; owner: string | null; path?: string }, c: Comment): void {
+function processComment(docId: string, meta: { title: string; owner: string | null; path?: string }, c: Comment, key: string): void {
   const mentions = parseMentions(c.text);
   if (mentions.length === 0) return;
   const at = Date.now();
   // Dedupe per comment AND per pass: one audit/grant/queue/tell per target folder, however often it is mentioned.
   for (const folder of new Set(mentions.map((m) => resolveMention(m, meta)).filter((x): x is string => x !== null))) {
-    addGrant(root(), docId, folder, c.id, at);
+    addGrant(root(), docId, folder, key, at);
     const chatId = wakeChat(folder);
     if (!chatId) {
-      record({ subject: meta.title, reason: `comment mention ${c.id} by ${c.author}: access to this document granted to ${folder}, which has no chat to wake`, chatId: "" });
+      record({ subject: meta.title, reason: `comment mention ${key} by ${c.author}: access to this document granted to ${folder}, which has no chat to wake`, chatId: "" });
       continue;
     }
-    record({ subject: meta.title, reason: `comment mention ${c.id} by ${c.author}: access to this document granted and home woken`, chatId });
+    record({ subject: meta.title, reason: `comment mention ${key} by ${c.author}: access to this document granted and home woken`, chatId });
     const queue = wakes.get(chatId) ?? [];
-    if (!queue.some((e) => e.details.docId === docId && e.details.commentId === c.id)) {
-      queue.push({ text: officeWakeMessage(meta.title, c.author, c.text), details: { docId, commentId: c.id } });
+    if (!queue.some((e) => e.details.docId === docId && e.details.commentId === key)) {
+      queue.push({ text: officeWakeMessage(meta.title, c.author, c.text), details: { docId, commentId: key } });
       wakes.set(chatId, queue);
     }
     const told = (cfg.tell ?? ((id: string, data: unknown) => portal().chats.tell(id, data)))(chatId, { type: "ping" });
@@ -231,41 +236,30 @@ export function handlePersisted(docId: string, buffer: Buffer): void {
     if (!meta) return; // deleted between fetch and persist -- nothing to diff
     if (meta.ext !== "docx") return; // v1: docx only, xlsx comments are not read yet
     const { comments } = parseDocx(buffer);
+    const keys = commentKeys(comments);
     const prev = readSeen(rootDir, docId);
-    if (prev === null && meta.imported) { // imported with its own comment history: baseline what importFile recorded at IMPORT time --
-      // an id NOT in that set appeared AFTER the file was imported (e.g. a mention added before the first save): it is new to
-      // this library and gets processed so its wake is not lost; only if processing succeeds does it become seen (retry rule as
-      // below). When the field is absent (unparseable source) we fall back to baselining everything this save holds.
-      const known = meta.importedBaseline !== undefined;
-      const preExisting = new Set(known ? meta.importedBaseline : comments.map((c) => c.id));
-      const seen = new Set(preExisting);
-      for (const c of comments) {
-        if (!known || preExisting.has(c.id)) continue; // fallback or imported history: baselined, never woken
-        try {
-          processComment(docId, meta, c);
-          seen.add(c.id);
-        } catch (err) {
-          logLine("office ping: comment " + c.id + " of " + docId + " could not be processed and stays unseen for retry: " + ((err as Error)?.message ?? err));
-        }
-      }
-      writeSeen(rootDir, docId, [...seen]);
-      return;
-    }
-    // Write the seen set AFTER processing and only with ids handled successfully: a comment whose wake failed
-    // stays unseen and is re-reported by diffComments on the next persist (retry), while one later failure must
-    // not leave earlier comments permanently unseen either.
-    // prev === null here means a created doc on its very first save (imported docs returned above): the seen set
-    // starts EMPTY, so every current comment -- including mentions typed during the first editing session -- is processed.
-    const added = diffComments([...(prev ? prev.ids : [])].map((id): Comment => ({ id, author: "", text: "" })), comments).added;
-    const seen = new Set(prev ? prev.ids : []);
-    for (const c of added) {
+    // What is seen before this save: the comments seen at the save before; for a document scanned (or imported) with
+    // comments of its own, at its first save, those it had when it was indexed (`importedKeys`) -- a comment not among
+    // them appeared since (a mention added before the first save) and is new. Where that is not known (a source that
+    // did not parse, an index or a state file of the version before, which kept ids), everything this save holds is
+    // taken as seen: a pre-existing mention never wakes anybody.
+    let seen: Set<string>;
+    if (prev && !prev.stale) seen = new Set(prev.keys);
+    else if (prev === null && !meta.imported) seen = new Set(); // a created doc's first save: every mention is new
+    else if (prev === null && meta.importedKeys !== undefined) seen = new Set(meta.importedKeys);
+    else seen = new Set(keys);
+    // Write the seen set AFTER processing and only with keys handled successfully: a comment whose wake failed
+    // stays unseen and is reported again at the next persist (retry).
+    comments.forEach((c, i) => {
+      const key = keys[i]!;
+      if (seen.has(key)) return;
       try {
-        processComment(docId, meta, c);
-        seen.add(c.id);
+        processComment(docId, meta, c, key);
+        seen.add(key);
       } catch (err) {
-        logLine("office ping: comment " + c.id + " of " + docId + " could not be processed and stays unseen for retry: " + ((err as Error)?.message ?? err));
+        logLine("office ping: comment " + key + " of " + docId + " could not be processed and stays unseen for retry: " + ((err as Error)?.message ?? err));
       }
-    }
+    });
     writeSeen(rootDir, docId, [...seen]);
   } catch (err) {
     logLine(`office ping: persist of ${docId} failed: ${(err as Error)?.message ?? err}`);

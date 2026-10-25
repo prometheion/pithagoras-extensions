@@ -18,7 +18,7 @@ import { fakeDocker } from "./fake-docker.mts";
 import * as container from "../src/container";
 import officeServer, { dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept } from "../src/server";
 import * as store from "../src/store";
-import { rewriteZip } from "../src/ooxml";
+import { commentKeys, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
 import { verifyJwt } from "../src/jwt";
@@ -554,7 +554,7 @@ fs.mkdirSync(path.join(ws, "node_modules", "pkg"), { recursive: true });
   await b.cleanup();
 });
 
-test("/documents/rescan: a docx with pre-existing comments is stamped with an importedBaseline at index time", async () => {
+test("/documents/rescan: a docx with pre-existing comments is stamped with their keys at index time", async () => {
   const b = await boot();
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-baseline-"));
   const docBytes = rewriteZip(await store.templateDocx(), { "word/comments.xml": commentsXmlWith([
@@ -566,7 +566,7 @@ test("/documents/rescan: a docx with pre-existing comments is stamped with an im
   const res = await b.router.dispatch("POST", "/documents/rescan");
   assert.equal(res.statusCode, 200);
   const doc = store.listDocs(b.root).find((d) => d.title === "legacy")!;
-  assert.deepEqual(doc.importedBaseline, ["1"], "the file's own comment history is the first-save baseline -- index time must not wake anyone");
+  assert.deepEqual(doc.importedKeys, commentKeys([{ id: "1", author: "Cara", text: "a mention from before the library existed" }]), "the file's own comment history is the first-save baseline -- index time must not wake anyone");
   fs.rmSync(ws, { recursive: true, force: true });
   await b.cleanup();
 });

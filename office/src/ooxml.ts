@@ -10,6 +10,7 @@
  * content-preserving -- every untouched entry re-extracts byte-identical -- but recompresses, so an
  * output zip is NOT compression-byte-identical to its input. node builtins only; jszip stays for templates.
  */
+import { createHash } from "node:crypto";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 
 export type Comment = { id: string; author: string; date?: string; text: string };
@@ -195,6 +196,12 @@ export function writeZip(entries: { name: string; data: Buffer; time?: { time: n
   return Buffer.concat([...chunks, cdBuf, eocd]);
 }
 
+/** One part of a zip as text, read within the same caps as every other (256 MiB an entry, 1 GiB a zip); undefined
+ * where there is none. */
+export function readPart(buf: Buffer, name: string): string | undefined {
+  return readZipParts(buf)[name]?.toString("utf8");
+}
+
 /** All file parts of a zip as uncompressed bytes; duplicate names: last one wins (jszip behavior). */
 function readZipParts(buf: Buffer): Record<string, Buffer> {
   const parts: Record<string, Buffer> = {};
@@ -281,9 +288,44 @@ export function parseDocx(buf: Buffer): { text: string; paragraphs: string[]; co
     const content = para.contentStart === 0 && para.contentEnd === 0 ? "" : xml.slice(para.contentStart, para.contentEnd);
     paragraphs.push(paragraphText(content));
   }
-  let comments: Comment[] = [];
-  if (parts["word/comments.xml"]) comments = parseComments(parts["word/comments.xml"].toString("utf8"));
+  const comments: Comment[] = [];
+  for (const part of commentParts(parts)) comments.push(...parseComments(parts[part]!.toString("utf8")));
   return { text: paragraphs.join("\n"), paragraphs, comments };
+}
+
+/** The relationship type OnlyOffice files a document's comments that are anchored to no text under ("document
+ * comments"), in a part of their own beside word/comments.xml. */
+const ONLYOFFICE_DOCUMENT_COMMENTS = "http://schemas.onlyoffice.com/commentsDocument";
+
+/** The parts that hold a docx's comments: word/comments.xml, and what word/document.xml's relationships name as
+ * OnlyOffice's document comments (word/commentsDocument.xml where they name nothing). */
+function commentParts(parts: Record<string, Buffer>): string[] {
+  const found = new Set<string>();
+  if (parts["word/comments.xml"]) found.add("word/comments.xml");
+  const rels = parts["word/_rels/document.xml.rels"]?.toString("utf8") ?? "";
+  for (const m of rels.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+    const attrs = parseAttributes(m[1]);
+    if (attrs["Type"] !== ONLYOFFICE_DOCUMENT_COMMENTS || !attrs["Target"]) continue;
+    const target = attrs["Target"].startsWith("/") ? attrs["Target"].slice(1) : `word/${attrs["Target"]}`;
+    if (parts[target]) found.add(target);
+  }
+  if (parts["word/commentsDocument.xml"]) found.add("word/commentsDocument.xml");
+  return [...found];
+}
+
+/**
+ * What tells one comment from another across saves: its author and its text (spaces folded), hashed, with the
+ * number of the same before it for a second one alike. Not its id: the Document Server numbers the comments anew from
+ * 0 at every save, so an id says nothing of which comment it is, and a new comment can get the id an old one had.
+ */
+export function commentKeys(comments: Comment[]): string[] {
+  const seen = new Map<string, number>();
+  return comments.map((c) => {
+    const base = createHash("sha256").update(`${c.author.trim()}\n${c.text.replace(/\s+/g, " ").trim()}`).digest("hex").slice(0, 16);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}#${n}`;
+  });
 }
 
 /** The w:comment elements of a comments.xml; each comment's text is its w:p/w:r/w:t runs joined in order. */

@@ -10,10 +10,10 @@ import { EDITOR_HTML, editorPageJs } from "./page.mts";
 
 /**
  * The Office page's editor (src/web/office-editor.tsx) in a browser, with the portal's own React, against routes that
- * answer as the server half does and a stand-in for the Document Server's api.js: what it loads, when it reloads the
- * document for an agent's edit (only once the editor has sent what is typed: what it has not sent, a reload drops),
- * the badge of a file changed on disk, and the banner of a reload that failed. The real Document Server is
- * e2e.test.mts's, which opens this same page.
+ * answer as the server half does and a stand-in for the Document Server's api.js: what it loads, that nothing an
+ * agent does reloads it (the agent edits the same session in an editor of its own, so its edits come live), the badge
+ * of a file changed on disk, and the banner of a reload that failed. The real Document Server is e2e.test.mts's, which
+ * opens this same page.
  *
  *   ./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office
  */
@@ -37,7 +37,7 @@ const FAKE_API = `window.DocsAPI = { DocEditor: function (id, config) {
 
 /** What the routes answer: the key a new config gets, how an editor of an older key stands, and whether a config is
  * refused (the Document Server away). */
-const routes = { key: "k1", standing: "current" as "current" | "follow" | "behind", refuse: false };
+const routes = { key: "k1", standing: "current" as string, refuse: false };
 let pageJs = "";
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
@@ -89,29 +89,23 @@ const fake = (page: Page) => page.evaluate(() => (window as unknown as { __fake:
 /** What the editor tells the page: true, it holds typing it has not sent yet; false, all of it is sent. */
 const typing = (page: Page, unsent: boolean) => page.evaluate((data) => (window as unknown as { __page: { onDocumentStateChange?(e: { data: boolean }): void } }).__page.onDocumentStateChange?.({ data }), unsent);
 
-test("an agent's edit made on top of what the editor saved: the editor loads it in place, but only once it has sent what is being typed", async () => {
+test("nothing but a change on disk reloads the editor: an agent's edits come live in its own session, and no chip is shown for them", async () => {
   const page = await opened();
-  await typing(page, true);
+  // A newer key and any answer but "behind" (what the page once loaded an agent's revision for): nothing happens.
   Object.assign(routes, { key: "k2", standing: "follow" });
   await delay(2500);
-  assert.deepEqual((await fake(page)).refreshed, [], "no reload while the editor holds typing it has not sent: the reload would drop it");
-  await typing(page, false);
-  await waitFor(page, () => (window as unknown as { __fake: { refreshed: string[] } }).__fake.refreshed.length > 0);
-  assert.deepEqual((await fake(page)).refreshed, ["k2"], "loaded under the new key, in the same editor");
-  assert.equal(await page.getByText("Loaded the agent's edit, made on top of what you typed").count(), 1);
-  // Asked again: it is on the new key, and stays there.
-  await delay(1500);
-  assert.deepEqual((await fake(page)).refreshed, ["k2"]);
+  const made = await fake(page);
+  assert.deepEqual(made.refreshed, [], "not reloaded");
+  assert.deepEqual(made.opened, ["k1"], "not made again");
+  assert.equal(await page.getByText("This document changed on disk since it opened").count(), 0);
+  assert.equal(await page.locator(".po-editor-bar .po-chip").count(), 0, "no chip for an agent's edit");
   await page.context().close();
 });
 
-test("an editor without refreshFile is made again for the agent's edit, also only once what is typed is sent", async () => {
+test("an editor without refreshFile is made again by the badge's button", async () => {
   const page = await opened({ noRefreshFile: true });
-  await typing(page, true);
-  Object.assign(routes, { key: "k2", standing: "follow" });
-  await delay(2500);
-  assert.deepEqual((await fake(page)).opened, ["k1"]);
-  await typing(page, false);
+  Object.assign(routes, { key: "k2", standing: "behind" });
+  await page.getByRole("button", { name: "reload it (what you typed here since is kept as a copy)" }).click({ timeout: 5000 });
   await waitFor(page, () => (window as unknown as { __fake: { opened: string[] } }).__fake.opened.length > 1);
   const made = await fake(page);
   assert.deepEqual(made.opened, ["k1", "k2"]);
@@ -144,11 +138,14 @@ test("the editor asks to be loaded again (its session ended): loaded at once, as
 
 test("a reload that fails says so, and the banner goes once a later one loads", async () => {
   const page = await opened();
-  Object.assign(routes, { key: "k2", standing: "follow", refuse: true });
+  Object.assign(routes, { key: "k2", standing: "behind", refuse: true });
+  const button = page.getByRole("button", { name: "reload it (what you typed here since is kept as a copy)" });
+  await button.click({ timeout: 5000 });
   const banner = page.getByRole("alert");
   await banner.waitFor({ timeout: 5000 });
   assert.match(await banner.innerText(), /the document server did not answer/);
   routes.refuse = false;
+  await button.click();
   await waitFor(page, () => (window as unknown as { __fake: { refreshed: string[] } }).__fake.refreshed.length > 0);
   await banner.waitFor({ state: "detached", timeout: 5000 });
   await page.context().close();

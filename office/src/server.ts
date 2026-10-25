@@ -494,7 +494,7 @@ function registerRoutes(dd: string, secret: string): void {
   });
 
   /** POST /settings {enabled?, imageTag?} -> saved + side effects: enabling fires ensureContainer WITHOUT
-   * (There is NO co-editing switch in this payload: the agent is a co-editor under the revision gate, full stop.)
+   * (There is NO co-editing switch in this payload: the agent is a co-editor in its own editor, full stop.)
    * awaiting it forever (catch+log; the response says `starting:true` and reports the container state AS OF NOW --
    * a poller watches it arrive), disabling stops it now. :latest is refused -- a moved tag bricks co-editing keys. */
   r.post("/settings", json, async (req, res) => {
@@ -588,8 +588,7 @@ function registerRoutes(dd: string, secret: string): void {
   });
 
   /** GET /editor-state?doc=<id>&key=<key> -> { standing }: how the editor that opened `doc` with `key` stands to the
-   * document now (callback.keyStanding). "follow": an agent's edit was made on top of everything its session had
-   * saved, and the editor loads the new revision; "behind": the file changed outside the editor, which the page says;
+   * document now (callback.keyStanding). "behind": the file changed outside the editor, which the page says;
    * "current": nothing to do. The editor page asks every second while it is open. */
   r.get("/editor-state", async (req, res) => {
     const docId = typeof req.query?.doc === "string" ? req.query.doc : "";
@@ -763,27 +762,6 @@ function wireSeats(dd: string, secret: string): void {
     dsOrigin: () => `http://${container.NAMES.container}`,
     log: logLine,
   });
-}
-
-/* ------------------------------------------------------------------ */
-/* the editing sessions open on a document                             */
-/* ------------------------------------------------------------------ */
-
-/**
- * The keys of the editing sessions the Document Server has open on `doc`: those its callbacks named, or, as a half
- * that started again since knows of none, the key of the document's current revision where the Document Server's own
- * `info` command knows it (error 0: a session with that key is open; 1: none). Where it cannot be asked, the
- * callbacks alone say.
- */
-async function sessionKeys(dd: string, doc: store.DocMeta): Promise<string[]> {
-  const known = live.sessionKeys(doc.docId);
-  if (known.length || !container.readDsRecord(dd)) return known;
-  const key = callback.makeKey(doc.docId, doc.mtimeMs);
-  try {
-    return (await callback.command({ c: "info", key }, 5000)).error === 0 ? [key] : [];
-  } catch {
-    return [];
-  }
 }
 
 /* ------------------------------------------------------------------ */

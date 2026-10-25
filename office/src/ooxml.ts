@@ -1,8 +1,8 @@
 /**
- * OOXML primitives for @pithagoras/office: parse docx/xlsx into text and comments, apply quote-based
- * edits to a document.xml string, and rewrite the zip around changed parts. All functions here are
- * pure over Buffers/strings (no fs, no settings, no network); store.ts owns
- * disk, tools.ts owns the tool surface.
+ * OOXML primitives for @pithagoras/office: parse docx/xlsx into text and comments (the comment wake, office_comments,
+ * and office_read while Office is stopped), and write or rewrite a zip (the fixtures, and the tests that build
+ * documents). The agent's edits are made in the editor, not here (seat-page.ts). All functions here are pure over
+ * Buffers/strings (no fs, no settings, no network); store.ts owns disk, tools.ts owns the tool surface.
  *
  * ZIP I/O is a small synchronous reader/writer on node:zlib rather than jszip: parseDocx/parseXlsx/rewriteZip
  * are synchronous (the ping diff and the office_* tools run
@@ -15,8 +15,6 @@ import { deflateRawSync, inflateRawSync } from "node:zlib";
 
 export type Comment = { id: string; author: string; date?: string; text: string };
 
-/** One agent edit: quote a unique passage of the document text and say what replaces it. */
-export type EditOp = { quote: string; replacement: string };
 
 function ooxmlError(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
@@ -244,11 +242,6 @@ function decodeEntities(s: string): string {
   });
 }
 
-/** Escape a string for use as w:t / t element content. */
-function escapeXmlText(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 /** Attribute name="value" pairs of a tag (double-quoted, OOXML style); keys keep their local part (w:id -> id). */
 function parseAttributes(tag: string): Record<string, string> {
   const attrs: Record<string, string> = {};
@@ -256,22 +249,10 @@ function parseAttributes(tag: string): Record<string, string> {
   return attrs;
 }
 
-type Span = { tagStart: number; tagEnd: number; text: string }; // absolute offsets in the XML string
-
-/** Every w:t of one paragraph-content string as decoded-text spans (ordered, so their concatenation is the paragraph text). */
-function wtSpans(content: string, base: number): Span[] {
-  const spans: Span[] = [];
-  for (const m of content.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)) {
-    if (m.index === undefined) continue;
-    spans.push({ tagStart: base + m.index, tagEnd: base + m.index + m[0].length, text: decodeEntities(m[1]) });
-  }
-  return spans;
-}
-
 type Para = { contentStart: number; contentEnd: number }; // paragraph-content offsets in the XML string (self-closing w:p: equal)
 
 /** Every top-level w:p of a document.xml body in order. Nested paragraphs (text boxes, w:txbxContent) are out of scope
- *  (only "w:p > w:r > w:t" is read); such content would be read as the outer paragraph's trailing run and editing it is unsupported. */
+ *  (only "w:p > w:r > w:t" is read); such content would be read as the outer paragraph's trailing run. */
 function findParagraphs(xml: string): Para[] {
   const paras: Para[] = [];
   for (const m of xml.matchAll(/<w:p(?:\s[^>]*?)?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) {
@@ -362,76 +343,6 @@ function parseComments(xml: string): Comment[] {
     comments.push(comment);
   }
   return comments;
-}
-
-/**
- * Apply quote-based edits to a document.xml string, in order -- op n+1 quotes the document as op n left it.
- * A quote must occur exactly once (distinct occurrences) in the concatenated paragraph text -- the same text
- * parseDocx would extract (exact substring, case-sensitive). The replacement lands where the quote sat: the
- * first affected w:t keeps the run's leftover prefix plus the new text (plain runs), fully covered w:t elements
- * are dropped, and a partially covered final w:t keeps its suffix. Surrounding XML is untouched; rewritten
- * w:t tags get xml:space="preserve" when their content has leading or trailing spaces so Word does not strip them.
- * Throws {code:"quote_not_found"} (also for an empty quote) and {code:"quote_ambiguous"}.
- */
-export function editDocx(documentXml: string, ops: EditOp[]): string {
-  let xml = documentXml;
-  for (const op of ops) xml = applyEdit(xml, op);
-  return xml;
-}
-
-function applyEdit(xml: string, op: EditOp): string {
-  const paras = findParagraphs(xml);
-  const spanLists = paras.map((p) => wtSpans(p.contentStart === 0 && p.contentEnd === 0 ? "" : xml.slice(p.contentStart, p.contentEnd), p.contentStart));
-  // The virtual text: each paragraph's runs in order, paragraphs joined with "\n" (matching parseDocx). Map every
-  // w:t span back to its offsets in that text.
-  const paraRanges: { start: number; length: number }[] = [];
-  let cursor = 0;
-  paras.forEach((_, i) => {
-    const length = spanLists[i].reduce((n, s) => n + s.text.length, 0);
-    paraRanges.push({ start: cursor, length });
-    cursor += length + (i < paras.length - 1 ? 1 : 0); // the joining "\n" has no XML behind it
-  });
-  const virtual = paras.map((_, i) => spanLists[i].map((s) => s.text).join("")).join("\n");
-
-  if (op.quote === "") throw ooxmlError("quote must not be empty", "quote_not_found");
-  const at = virtual.indexOf(op.quote);
-  if (at === -1) throw ooxmlError("quote_not_found: the quoted passage is not in the document", "quote_not_found");
-  if (virtual.indexOf(op.quote, at + 1) !== -1) throw ooxmlError("quote_ambiguous: the quoted passage occurs more than once", "quote_ambiguous");
-
-  const qEnd = at + op.quote.length;
-  // Tag-level edits in the xml string: for each w:t span the quote touches, rewrite its content.
-  const edits: { start: number; end: number; text: string }[] = [];
-  let firstDone = false;
-  paras.forEach((para, i) => {
-    if (para.contentStart === para.contentEnd) return;
-    const pLo = Math.max(at, paraRanges[i].start);
-    const pHi = Math.min(qEnd, paraRanges[i].start + paraRanges[i].length);
-    if (pLo >= pHi) return; // this paragraph is outside the quote
-    let spanOffset = paraRanges[i].start; // where this span's text starts in the virtual string
-    for (const span of spanLists[i]) {
-      const spanStart = spanOffset;
-      const spanEnd = spanOffset + span.text.length;
-      const lo = Math.max(pLo, spanStart);
-      const hi = Math.min(pHi, spanEnd);
-      spanOffset = spanEnd;
-      if (lo >= hi) continue; // span untouched by this quote
-      const prefix = span.text.slice(0, lo - spanStart); // of the first touched span, what stays before the quote
-      const suffix = span.text.slice(hi - spanStart); // of a last touched span, what stays after the quote (empty when it ends exactly at the span's end)
-      let writeContent: string;
-      if (!firstDone) { writeContent = prefix + op.replacement + suffix; firstDone = true; } // the replacement lands in the first touched span, its leftover text around it stays
-      else writeContent = suffix; // earlier spans already consumed everything up to `hi`; a later touched span keeps only its tail
-      if (writeContent === "") edits.push({ start: span.tagStart, end: span.tagEnd, text: "" }); // fully covered: drop the w:t element
-      else {
-        const preserve = /^[ \t\r\n]|[ \t\r\n]$/.test(writeContent);
-        edits.push({ start: span.tagStart, end: span.tagEnd, text: `<w:t${preserve ? ' xml:space="preserve"' : ""}>${escapeXmlText(writeContent)}</w:t>` });
-      }
-    }
-  });
-  // A quote that touches no w:t span at all (e.g. one spanning only paragraph breaks) passed the uniqueness
-  // check above but would leave the XML unchanged -- persisting it as a successful edit is wrong, so reject it.
-  if (!firstDone) throw ooxmlError("quote_not_found: the quoted passage covers no text runs (paragraph breaks only)", "quote_not_found");
-  for (const edit of edits.sort((a, b) => b.start - a.start)) xml = xml.slice(0, edit.start) + edit.text + xml.slice(edit.end);
-  return xml;
 }
 
 /* ------------------------------------------------------------------ */

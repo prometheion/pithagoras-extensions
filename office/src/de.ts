@@ -30,7 +30,6 @@ export const de: Record<string, string | Plural> = {
   "Kind": "Art",
   "Listed the office documents": "Die Office-Dokumente aufgelistet",
   "Listing office documents": "Office-Dokumente auflisten",
-  "Loaded the agent's edit, made on top of what you typed": "Die Änderung des Agenten wurde geladen, aufbauend auf dem, was du geschrieben hast",
   "Loading the editor — the first start of a Document Server can take a while…": "Der Editor wird geladen – der erste Start eines Document Servers kann eine Weile dauern…",
   "The Document Server is still setting itself up after its first start, which takes about two minutes. The editor opens once it is done…": "Der Document Server richtet sich nach seinem ersten Start noch ein, das dauert etwa zwei Minuten. Der Editor öffnet sich, sobald er fertig ist…",
   "Loading…": "Lädt…",

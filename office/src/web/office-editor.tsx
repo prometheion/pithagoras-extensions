@@ -12,11 +12,12 @@ import { startingUp } from "../office-ui";
  * the JWT covers exactly the minted object (the JWT signs what is sent, so nothing of it is changed). The lock badge
  * ("N editing now") comes from the shared 5 s poll of /state.
  *
- * Every second it asks GET /editor-state how its key stands. Where an agent's edit was made on top of what the
- * editor had saved ("follow"), it loads the new revision in place: a new config, handed to the editor's own
- * refreshFile, which reopens the document in the same frame with the new key. The same happens when the editor asks
- * for it (onRequestRefreshFile: it reconnected to a session that has ended). Where the file changed outside the
- * editor ("behind"), a badge says so, and its button loads the new revision the same way.
+ * An agent edits the same session through an editor of its own (seat.ts), so its edits show here as anyone's do,
+ * and nothing is reloaded for them. Every second the page asks GET /editor-state how its key stands: where the file
+ * changed outside the editor ("behind": a script, a git pull), a badge says so, and its button loads the new revision
+ * in place: a new config, handed to the editor's own refreshFile, which reopens the document in the same frame with
+ * the new key. The same happens when the editor asks for it (onRequestRefreshFile: it reconnected to a session that
+ * has ended).
  *
  * The editor sends what is typed to the Document Server only once the person pauses, and a reload drops what it has
  * not sent yet: that is in no session, and no copy can keep it. So a reload waits until the editor says everything is
@@ -40,8 +41,7 @@ declare global {
   }
 }
 
-/** How often the open editor asks whether to load a newer revision: what is typed between an agent's edit and that
- * load is kept as a copy, so the window is kept short. */
+/** How often the open editor asks whether its file changed outside it. */
 const STANDING_POLL_MS = 1000;
 
 /** api.js per address, loaded once per page: the promise is cached, and a failure stays said until the page reloads. */
@@ -71,8 +71,6 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   const [settingUp, setSettingUp] = useState(false);
   /** The file changed outside the editor since it opened (a script, a git pull): the badge with its button. */
   const [behind, setBehind] = useState(false);
-  /** The editor just loaded the revision an agent's edit made on top of what was typed here. */
-  const [followed, setFollowed] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const editor = useRef<DestroyableEditor | null>(null);
   /** Loads the document's newest revision into the open editor (set by the effect below, for the badge's button). */
@@ -83,7 +81,6 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
     let watch: ReturnType<typeof setInterval> | undefined;
     let again: ReturnType<typeof setTimeout> | undefined;
     let standing: ReturnType<typeof setInterval> | undefined;
-    let shown: ReturnType<typeof setTimeout> | undefined;
     /** The document.key the editor has open now. */
     let key = "";
     let reloading = false;
@@ -91,13 +88,10 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
     let unsent = false;
     /** A reload was asked for while there was such typing: it is made once that is sent. */
     let wanted = false;
-    /** The reload is for an agent's edit: the chip says so once it is loaded. */
-    let forAgent = false;
     setProblem(null);
     setReady(false);
     setSettingUp(false);
     setBehind(false);
-    setFollowed(false);
 
     /** A minted config as DocsAPI takes it: apiJs dropped (the JWT was signed over the config without it), the page's
      * events added (DocsAPI keeps them out of what it sends on). */
@@ -166,13 +160,7 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
             build(config);
           }
           unsent = false;
-          if (forAgent) {
-            setFollowed(true);
-            if (shown !== undefined) clearTimeout(shown);
-            shown = setTimeout(() => setFollowed(false), 8000);
-          }
         }
-        forAgent = false;
         setBehind(false);
         setProblem(null);
       } catch (e) {
@@ -210,14 +198,9 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
         standing = setInterval(() => {
           if (reloading || !key) return;
           const asked = key;
-          api.editorState(docId, asked).then(async (answer) => {
+          api.editorState(docId, asked).then((answer) => {
             if (!alive || asked !== key) return;
-            if (answer.standing === "follow") {
-              forAgent = true;
-              await reload.current();
-            } else {
-              setBehind(answer.standing === "behind");
-            }
+            setBehind(answer.standing === "behind");
           }, () => {
             // the server half restarting, or the network: asked again in a second
           });
@@ -232,7 +215,6 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
       if (watch !== undefined) clearInterval(watch);
       if (again !== undefined) clearTimeout(again);
       if (standing !== undefined) clearInterval(standing);
-      if (shown !== undefined) clearTimeout(shown);
       reload.current = async () => {};
       try {
         editor.current?.destroyEditor?.(); // where the loaded api.js exposes it
@@ -260,7 +242,6 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
             {users.length === 1 ? t("1 editing now") : t("{n} editing now", { n: users.length })}
           </span>
         )}
-        {followed && <span className="po-chip">{t("Loaded the agent's edit, made on top of what you typed")}</span>}
         {behind && (
           <span className="po-chip po-chip-stale">
             {t("This document changed on disk since it opened")}

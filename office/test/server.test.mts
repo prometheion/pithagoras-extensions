@@ -24,7 +24,7 @@ import { commentKeys, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
 import { signJwt, verifyJwt } from "../src/jwt";
-import { docIdOf, followTo, keyIdOf, makeKey, parseKey, revHashOf } from "../src/callback";
+import { docIdOf, keyIdOf, makeKey, parseKey, revHashOf } from "../src/callback";
 
 const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 
@@ -446,7 +446,7 @@ async function savedBySession(b: Booted, doc: store.DocMeta, key: string, bytes:
   return store.getDoc(doc.docId, b.root)!.mtimeMs;
 }
 
-test("/editor-state: an editor's key is current on its own revision and on what its session saved, follows an agent's edit made on top of it, and is behind a change made outside", async () => {
+test("/editor-state: an editor's key is current on its own revision and on what its session saved, and is behind a change made outside", async () => {
   const b = await boot();
   writeDsJson(b);
   const doc = await store.createDoc({ title: "Standing", type: "word" }, b.root);
@@ -455,12 +455,8 @@ test("/editor-state: an editor's key is current on its own revision and on what 
   assert.deepEqual(await ask(), { standing: "current" });
   const saved = await savedBySession(b, doc, key, "saved by the session");
   assert.deepEqual(await ask(), { standing: "current" }, "its own save does not take it off its revision");
-  // An agent's edit on top of what the session saved: the editor loads it.
+  assert.ok(saved > doc.mtimeMs);
   const file = path.join(b.root, "docs", doc.docId, "Standing.docx");
-  const edited = store.persistBytes(store.getDoc(doc.docId, b.root)!, Buffer.from("and the agent's edit"), b.root).mtimeMs;
-  assert.notEqual(edited, saved);
-  followTo(key, edited);
-  assert.deepEqual(await ask(), { standing: "follow" });
   // A script writes the file: nothing the editor's session had is in that revision.
   fs.writeFileSync(file, "a script's");
   fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));

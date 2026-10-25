@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import JSZip from "jszip";
-import { parseDocx, parseXlsx, editDocx, rewriteZip, diffComments, type Comment } from "../src/ooxml";
+import { parseDocx, parseXlsx, rewriteZip, diffComments, type Comment } from "../src/ooxml";
 
 /* ---------------- fixture building (jszip) ---------------- */
 
@@ -142,48 +142,6 @@ test("parseXlsx bounds the dense grid of sparse far-out cells (memory/CPU cap, h
   }
 });
 
-/* ---------------- editDocx ---------------- */
-
-/** editDocx works on the XML string; wrap its result into a docx and reparse it. */
-async function reparsed(documentXml: string, commentsXml: string | null = null) {
-  return parseDocx(await buildDocxZip(documentXml, commentsXml));
-}
-
-test("editDocx replaces a quote inside a single run and keeps entities round-tripping", async () => {
-  const doc = await reparsed(editDocx(DOCUMENT_XML, [{ quote: "Gamma one", replacement: "Delta & nine" }]));
-  assert.deepEqual(doc.paragraphs[3], "Delta & nine and gamma two"); // the & in the replacement is escaped in XML, decoded on reparse
-});
-
-test("editDocx spans multiple runs at w:t boundaries", async () => {
-  // "Alpha beta" lives in runs ["Alp","ha"," beta"]; "lpha be" starts inside run 2 and ends inside run 3.
-  const doc = await reparsed(editDocx(DOCUMENT_XML, [{ quote: "lpha be", replacement: "middle" }]));
-  assert.deepEqual(doc.paragraphs[1], "Amiddleta"); // "A" + "middle" + "ta"
-});
-
-test("editDocx applies ops sequentially -- op two quotes op one's output", async () => {
-  const doc = await reparsed(editDocx(DOCUMENT_XML, [
-    { quote: "Gamma one", replacement: "Delta nine" },
-    { quote: "Delta nine", replacement: "Final answer" }, // sees the first edit
-  ]));
-  assert.deepEqual(doc.paragraphs[3], "Final answer and gamma two");
-  // and a stale op that quotes the pre-edit text fails with quote_not_found:
-  const err = thrown(() => editDocx(DOCUMENT_XML, [
-    { quote: "Gamma one", replacement: "Delta nine" },
-    { quote: "Gamma one", replacement: "x" },
-  ]));
-  assert.equal(err.code, "quote_not_found");
-});
-
-test("editDocx throws quote_not_found and quote_ambiguous", () => {
-  const missing = thrown(() => editDocx(DOCUMENT_XML, [{ quote: "not in the document", replacement: "x" }]));
-  assert.equal(missing.code, "quote_not_found");
-  // a quote appearing in two paragraphs must be refused
-  const duplicated = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>` +
-    `<w:p><w:r><w:t>alpha</w:t></w:r></w:p><w:p><w:r><w:t>beta alpha omega</w:t></w:r></w:p></w:body></w:document>`;
-  const ambiguous = thrown(() => editDocx(duplicated, [{ quote: "alpha", replacement: "x" }]));
-  assert.equal(ambiguous.code, "quote_ambiguous");
-});
-
 /* ---------------- rewriteZip ---------------- */
 
 test("rewriteZip with no changes round-trips: parse-equal and every entry content-identical", async () => {
@@ -198,7 +156,7 @@ test("rewriteZip with no changes round-trips: parse-equal and every entry conten
 
 test("rewriteZip replaces word/document.xml in place and reflects it on reparse", async () => {
   const original = await buildDocxZip();
-  const edited = editDocx(DOCUMENT_XML, [{ quote: "Gamma one", replacement: "Delta nine" }]);
+  const edited = DOCUMENT_XML.replace("Gamma one", "Delta nine");
   const rewritten = rewriteZip(original, { "word/document.xml": edited });
   assert.equal(parseDocx(rewritten).paragraphs[3], "Delta nine and gamma two");
   assert.deepEqual(parseDocx(rewritten).comments, parseDocx(original).comments);
@@ -224,13 +182,13 @@ test("rewriteZip matches part names case-insensitively (no shadow duplicate) and
   const beforeNames = Object.keys(await entryBytes(original)).sort();
 
   // a key that differs only in case from the existing part must OVERWRITE it in place (original name kept), not shadow it
-  const edited = editDocx(DOCUMENT_XML, [{ quote: "Gamma one", replacement: "Case fixed" }]);
+  const edited = DOCUMENT_XML.replace("Gamma one", "Case fixed");
   const out1 = rewriteZip(original, { "WORD/DOCUMENT.XML": edited });
   assert.deepEqual(Object.keys(await entryBytes(out1)).sort(), beforeNames, "no shadow part was added");
   assert.equal(parseDocx(out1).paragraphs[3], "Case fixed and gamma two");
 
   // two change keys differing only in case dedupe to the LAST one (jszip last-one-wins), still exactly one part
-  const other = editDocx(DOCUMENT_XML, [{ quote: "Gamma one", replacement: "Last wins" }]);
+  const other = DOCUMENT_XML.replace("Gamma one", "Last wins");
   const out2 = rewriteZip(original, { "word/document.xml": edited, "WORD/DOCUMENT.XML": other });
   assert.equal(parseDocx(out2).paragraphs[3], "Last wins and gamma two");
   assert.deepEqual(Object.keys(await entryBytes(out2)).sort(), beforeNames);

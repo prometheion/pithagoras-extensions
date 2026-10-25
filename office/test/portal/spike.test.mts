@@ -155,7 +155,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   async function forcesave(docId: string, as = home): Promise<void> {
     const key = seat.keyOf(as, docId)!;
     const userdata = `office-${randomUUID()}`;
-    const waiting = callback.awaitForcesave(userdata, key);
+    const waiting = callback.awaitForcesave(userdata);
     const answer = await callback.command({ c: "forcesave", key, userdata });
     assert.equal(answer.error, 0, JSON.stringify(answer));
     const saved = await Promise.race([waiting.done, delay(30_000).then(() => "timeout")]);

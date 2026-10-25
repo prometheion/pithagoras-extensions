@@ -1,15 +1,15 @@
 /**
  * Cross-check of the zip reader/writer against NON-TRIVIAL committed files : parse fixtures/sample.docx and fixtures/sample.xlsx with
- * ooxml.parseDocx/parseXlsx and assert the exact structure, then edit a quote that SPANS two w:t runs
- * in the docx through ooxml.editDocx + rewriteZip and re-parse the output.
+ * ooxml.parseDocx/parseXlsx and assert the exact structure, and have other zip readers read them and what rewriteZip
+ * writes.
  *
  * The fixtures are binary files committed in this extension's fixtures/ directory; they were generated
  * by scripts/make-fixtures.mjs (hand-written OOXML parts zipped through OUR OWN ooxml.writeZip, so these
  * tests read back material our own writer produced -- if the reader and writer disagree, that shows here; a bug both
  * share would not, which is why the last test has other readers than ours read the same files).
  * Re-generate with: node scripts/make-fixtures.mjs (run in office/).
- * jszip is used below ONLY to pull a part's raw bytes out for editDocx input -- parsing and editing go
- * through ooxml exclusively, exactly as the runtime paths do.
+ * jszip is used below ONLY to pull a part's raw bytes out, and as another reader -- parsing goes through ooxml
+ * exclusively, exactly as the runtime paths do.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
-import { parseDocx, parseXlsx, editDocx, rewriteZip } from "../src/ooxml";
+import { parseDocx, parseXlsx, rewriteZip } from "../src/ooxml";
 
 const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url));
 const DOCX = fs.readFileSync(`${FIXTURES}sample.docx`);
@@ -67,45 +67,6 @@ test("sample.docx: comments.xml parses two comments from different authors with 
   assert.equal(d.comments[1].text, "@agent the appendix needs re-stating before we ship."); // single run, mention grammar intact
 });
 
-test("sample.docx: editDocx replaces a quote that SPANS two runs; the rewritten zip still parses and keeps every other part", async () => {
-  const xml = await documentXml();
-  // "revised after the" starts inside run 2 ("were revised after ") and ends inside run 3
-  // ("the audit found a discrepancy.") -- a classic Word run-split that naive substring edits corrupt.
-  const edited = editDocx(xml, [
-    { quote: "revised after the", replacement: "walked back before any" },
-    // a second op on the RESULT (ops apply one after the other): single-run target in paragraph 0
-    { quote: "Quarterly & annual report", replacement: "Quarterly and annual report" },
-  ]);
-
-  const out = rewriteZip(DOCX, { "word/document.xml": edited });
-  const after = parseDocx(out); // round-trip through our own reader
-  assert.deepEqual(after.paragraphs, [
-    "Quarterly and annual report for <Meridian Labs>",
-    "Revenue figures were walked back before any audit found a discrepancy.",
-    "",
-    "Note: 5 & 7 were checked against the ledger (see <Appendix B>).",
-    "Footnote: \u2014 total is \u20AC42,300.",
-  ]);
-  // untouched parts survive byte-for-byte in CONTENT, comments included
-  assert.deepEqual(after.comments, parseDocx(DOCX).comments);
-
-  const beforeParts = await JSZip.loadAsync(DOCX);
-  const afterParts = await JSZip.loadAsync(out);
-  assert.deepEqual(Object.keys(afterParts.files).sort(), Object.keys(beforeParts.files).sort(), "no part added or dropped");
-  for (const name of Object.keys(beforeParts.files)) {
-    if (name === "word/document.xml") continue; // the edited part legitimately changed
-    const a = await beforeParts.file(name)!.async("nodebuffer");
-    const b = await afterParts.file(name)!.async("nodebuffer");
-    assert.ok(Buffer.compare(a, b) === 0, `untouched part ${name} re-extracts byte-identical`);
-  }
-
-  // and a quote spanning runs that does not exist in the fixture is refused with ooxml's code
-  assert.throws(() => editDocx(xml, [{ quote: "revised after THAT", replacement: "" }]), (e: unknown) => {
-    const err = e as Error & { code?: string };
-    return err.code === "quote_not_found";
-  });
-});
-
 /* ---------------- sample.xlsx ---------------- */
 
 test("sample.xlsx: two sheets by name; shared strings (incl. a multi-run <si> with an entity) + inline strings + sparse fill", () => {
@@ -145,7 +106,7 @@ async function readByJszip(buf: Buffer): Promise<Record<string, Buffer>> {
 }
 
 test("the fixtures and what rewriteZip writes are read alike by other zip readers than our own: jszip, and Python's zipfile", async () => {
-  const edited = rewriteZip(DOCX, { "word/document.xml": editDocx(await documentXml(), [{ quote: "were revised after", replacement: "changed after" }]) });
+  const edited = rewriteZip(DOCX, { "word/document.xml": (await documentXml()).replace("were revised after", "changed after") });
   for (const [what, buf] of [["sample.docx", DOCX], ["sample.xlsx", XLSX], ["an edit of sample.docx", edited]] as const) {
     const theirs = await readByJszip(buf);
     assert.ok(Object.keys(theirs).length >= 4, what);

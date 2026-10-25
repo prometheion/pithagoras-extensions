@@ -9,7 +9,7 @@ import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { closeDoc, configureSeat, keyOf, LIMITS, pageUrl, run, SeatError, seats, stopSeats, handleSeat, type SeatDeps } from "../src/seat";
+import { closeDoc, configureSeat, keyOf, LIMITS, pageUrl, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
 import { BRIDGE_JS, PLUGIN_GUID } from "../src/seat-page";
 
 const DS = "http://office-ds";
@@ -424,6 +424,18 @@ test("an abort stops the wait; a job not handed yet never runs", async () => {
     abort.abort();
     await assert.rejects(call, code("aborted"));
     assert.deepEqual(ran, ["warm"]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("tuneSeats changes the limits of seats already running: a shorter idle closes the open editor", async () => {
+  const s = await setup(undefined, { idleMs: 60_000 });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    tuneSeats({ idleMs: 200 });
+    for (let i = 0; i < 40 && seats().length; i++) await delay(50);
+    assert.equal(seats().length, 0);
   } finally {
     await s.done();
   }

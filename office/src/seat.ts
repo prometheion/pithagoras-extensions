@@ -132,6 +132,14 @@ export function configureSeat(d: SeatDeps, overrides: Partial<typeof LIMITS> = {
   sweeper.unref();
 }
 
+/** Changes the limits of the seats as they run (the end-to-end test, which cannot wait five minutes for an idle close). */
+export function tuneSeats(overrides: Partial<typeof LIMITS>): void {
+  limits = { ...limits, ...overrides };
+  if (sweeper) clearInterval(sweeper);
+  sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2));
+  sweeper.unref();
+}
+
 /** Every seat closed and the sweeper stopped: the half stops. */
 export function stopSeats(): void {
   closeAll();

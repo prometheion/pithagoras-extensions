@@ -141,7 +141,7 @@ test("imported doc, first save: its existing comments are baselined WITHOUT wake
   assert.equal(meta.imported, true);
   assert.deepEqual([...meta.importedKeys!].sort(), keys({ author: "Cara", text: "carry-over note" }, { author: "Dan", text: "old @agent mention" })); // stamped from the file at IMPORT time
 
-  // A mention added AFTER the import but BEFORE the first save is NEW to this library (not in importedBaseline) -> it IS
+  // A mention added AFTER the import but BEFORE the first save is NEW to this library (not in importedKeys) -> it IS
   // processed on save #1; the imported history (7, 8) baselines silently.
   persistWith(root, meta.docId, meta.title, meta.ext, [
     { id: "7", author: "Cara", text: "carry-over note" },

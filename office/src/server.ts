@@ -251,6 +251,10 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
       mode: "edit",
       lang: "en", // v1 default -- portal exposes no per-user locale seam
       user: { id: EDITOR_USER.id, name: EDITOR_USER.name },
+      // The editor runs on the portal's own origin (the /ds proxy), where a script has the person's session for the
+      // whole portal API. A document's macros and the editor's plugins would run there, held only by OnlyOffice's
+      // in-page guard around eval, so neither runs: signed into the config, which the page cannot change.
+      customization: { macros: false, plugins: false },
     },
   };
   live.setUser(doc.docId, { id: EDITOR_USER.id, name: EDITOR_USER.name }, true); // the seat opens: presence on mint

@@ -81,6 +81,10 @@ purpose, in the same page).
   asset) only through `/api/x/@pithagoras/office/ds/…`, a proxy under the extension's routes, which the portal gates
   like all of them. It forwards GET requests and the POSTs the editor's socket.io channel sends, and only to the
   Document Server, and tells it the address the browser used, which it builds the editor's own addresses from.
+  The editor therefore runs on the portal's own origin, where a script has the signed-in person's session: a
+  document's macros and the editor's plugins are switched off in the signed editor config, which the page cannot
+  change, as OnlyOffice holds macros apart only by a guard inside the page. A Document Server on an origin of its own
+  would be the full answer; it is not done here.
 - **The agent can only write what its revision check allows**, and each document-changing call is recorded in the
   portal's audit log with the chat that made it.
 

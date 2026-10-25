@@ -321,6 +321,8 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
   assert.equal(ec.callbackUrl, "http://pithagoras-office-ds-relay:3891/callback");
   assert.equal(ec.mode, "edit");
   assert.deepEqual(ec.user, { id: "portal-user", name: "Portal" });
+  // no document macros and no plugins on the portal's origin, and that is signed
+  assert.deepEqual(ec.customization, { macros: false, plugins: false });
   // the JWT wrap: payload == the WHOLE plain config (minus token/apiJs), 15-minute life, verifies with the same secret
   const claims = verifyJwt(body.token, secret);
   assert.ok(claims, "the signed config verifies");

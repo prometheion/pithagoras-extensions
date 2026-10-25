@@ -121,6 +121,8 @@ let pageWaiters: (() => void)[] = [];
 let lastEditorClosed = 0;
 let sweeper: NodeJS.Timeout | undefined;
 let agentRunning = false;
+/** The browser's stop under way, if any: a start waits for it, or it would find the browser it removes. */
+let stopping: Promise<void> = Promise.resolve();
 /** Counts the editors' state events, to tell which of two came last. */
 let stateSeq = 0;
 
@@ -271,10 +273,12 @@ async function open(home: string, docId: string, mode: SeatMode, signal?: AbortS
   return editor;
 }
 
-/** The browser started (where it does not run) and its page polling. */
+/** The browser started (where it does not run) and its page polling. A poll held from a browser that was stopped is no
+ * page that listens: after a stop, only a poll that came after the new start counts. */
 async function connected(signal?: AbortSignal): Promise<void> {
   const d = deps!;
-  if (page || Date.now() - pageSeen < limits.holdMs + 5_000) return;
+  if (agentRunning && (page || Date.now() - pageSeen < limits.holdMs + 5_000)) return;
+  await stopping;
   const since = Date.now();
   await d.ensureAgent(pageUrl());
   agentRunning = true;
@@ -452,7 +456,7 @@ function sweep(): void {
     // Its page goes with it: a poll it held is not taken for a page that still listens.
     if (page) noContent(page);
     page = null;
-    deps.stopAgent().catch((e) => log(`could not stop the agents' browser: ${(e as Error).message}`));
+    stopping = deps.stopAgent().catch((e) => log(`could not stop the agents' browser: ${(e as Error).message}`));
   }
 }
 

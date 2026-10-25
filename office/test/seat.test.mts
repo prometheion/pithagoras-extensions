@@ -492,3 +492,32 @@ test("a view-mode editor is never handed an edit: error:read_only before its plu
     await s.done();
   }
 });
+
+test("after the browser stopped for idleness, the next call starts it again even while a poll of the old page is still held", async () => {
+  let stops = 0;
+  let release: () => void = () => {};
+  const s = await setup(undefined, { idleMs: 200, agentIdleMs: 200 }, {
+    // A stop that takes a while, as Docker removing a container does; the old page keeps polling meanwhile.
+    stopAgent: () => {
+      stops++;
+      return new Promise<void>((r) => (release = r));
+    },
+  });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    for (let i = 0; i < 60 && stops === 0; i++) await delay(50);
+    assert.equal(stops, 1, "the browser is being stopped");
+    // The old page polls again (its container is not gone yet).
+    const stale = fetch(`${pageUrl()}poll`).catch(() => null);
+    await delay(50);
+    const next = run("/homes/a", "doc-2", "edit", { kind: "word.read", args: {} });
+    await delay(100);
+    assert.equal(s.calls.filter((c) => c === "ensureAgent").length, 1, "the start waits for the stop");
+    release();
+    await next;
+    assert.equal(s.calls.filter((c) => c === "ensureAgent").length, 2, "started again, not taken for running");
+    await stale;
+  } finally {
+    await s.done();
+  }
+});

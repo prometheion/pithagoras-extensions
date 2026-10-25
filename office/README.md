@@ -161,6 +161,7 @@ tailwindcss, postcss, the extension API, react-icons and jszip).
 ```sh
 npm run build -w office    # web/ and server.js, then the type check of src/ and the tests
 npm test -w office         # the unit and integration tests, with Docker, the portal and the Document Server faked
+./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office   # under the portal's own extension host
 ```
 
 The integration tests start nothing in Docker: they run the extension's real loopback listener in the test process,

@@ -32,6 +32,9 @@ const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 
 class MiniRouter {
   routes: Array<{ method: string; pattern: string | RegExp; handler: (req: unknown, res: FakeRes) => Promise<void> | void }> = [];
+  /** What `use` was given: run before every route, as express runs a router's middleware. */
+  middleware: ((req: unknown, res: FakeRes, next: () => void) => void)[] = [];
+  use(fn: (req: unknown, res: FakeRes, next: () => void) => void) { this.middleware.push(fn); }
   private reg(method: string, pattern: string | RegExp, rest: unknown[]) {
     const handler = rest[rest.length - 1] as (req: unknown, res: FakeRes) => Promise<void> | void;
     this.routes.push({ method, pattern, handler });
@@ -52,7 +55,15 @@ class MiniRouter {
     return o;
   }
 
-  async dispatch(method: string, urlPath: string, body?: unknown, headers: Record<string, string> = {}): Promise<FakeRes> {
+  /** A request as one of the portal's own pages sends it, unless the test says otherwise (its headers win). */
+  async dispatch(method: string, urlPath: string, body?: unknown, given: Record<string, string> = {}): Promise<FakeRes> {
+    const headers = { host: "portal.test", origin: "http://portal.test", ...given };
+    for (const fn of this.middleware) {
+      const res = fakeRes();
+      let passed = false;
+      fn(this.fakeReq(method, urlPath, {}, body, headers), res, () => void (passed = true));
+      if (!passed) return res;
+    }
     const us = urlPath.split("?")[0].split("/").filter(Boolean);
     for (const route of this.routes) {
       if (route.method !== method) continue;
@@ -425,6 +436,19 @@ test("boot moves owners and grants that named a chat to that chat's folder", asy
   const bt = await boot(root, fakeDocker(), { "chat-a": "/homes/a" });
   assert.equal(store.getDoc(doc.docId, root)!.owner, "/homes/a");
   await bt.cleanup();
+});
+
+test("a change asked from another page than the portal's own is refused; a read is not", async () => {
+  const b = await boot();
+  const doc = await store.createDoc({ title: "Kept", type: "word" }, b.root);
+  const elsewhere = { origin: "http://portal.test:8081" };
+  for (const [method, url, body] of [["DELETE", `/documents/${doc.docId}`], ["POST", "/container/remove", { data: true }], ["POST", "/settings", { imageTag: "x/y:1" }]] as const) {
+    const res = await b.router.dispatch(method, url, body, elsewhere);
+    assert.equal(res.statusCode, 403, `${method} ${url}`);
+  }
+  assert.ok(store.getDoc(doc.docId, b.root), "nothing was deleted");
+  assert.equal((await b.router.dispatch("GET", "/state", undefined, elsewhere)).statusCode, 200);
+  await b.cleanup();
 });
 
 /* ---------------- /state ---------------- */

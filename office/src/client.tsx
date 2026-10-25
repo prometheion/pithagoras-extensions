@@ -1,4 +1,4 @@
-import "../style.css";
+import "./client.css";
 import { Suspense, useEffect, useState } from "react";
 import type { ChatProps, PanelProps, Portal, ToolCallView } from "@pithagoras/extension-api";
 import { LuFileText, LuPresentation, LuTable } from "react-icons/lu";
@@ -11,7 +11,7 @@ import { editorsIn } from "./office-ui";
 import { de } from "./de";
 
 /**
- * @pithagoras/office: its browser half. The Office tab -- the full library with its own workbench chrome (style.css),
+ * @pithagoras/office: its browser half. The Office tab -- the full library with its own workbench chrome (client.css),
  * opened documents in a full-bleed OnlyOffice editor; the office panel beside an agent/project's home chat, the tool
  * cards of its office_* calls, and its page in Settings where the Document Server is run. It registers
  * nav.page + chat.panel + chat.tool entries + settings.page. Its heavy parts
@@ -214,7 +214,7 @@ export default function office(given: Portal): void {
   const Settings = portal.ui.lazy(() => import("./web/settings"), "OfficeSettings");
   const fallback = <PageFallback />;
 
-  // The Office tab: the full library at /x/@pithagoras/office/office, its chrome its own (style.css), a document
+  // The Office tab: the full library at /x/@pithagoras/office/office, its chrome its own (client.css), a document
   // open as ?doc=<id> in the whole page.
   portal.slots.register("nav.page", {
     id: "office",

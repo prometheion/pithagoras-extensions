@@ -97,6 +97,10 @@ same page).
   document's macros and the editor's plugins are switched off in the signed editor config, which the page cannot
   change, as OnlyOffice holds macros apart only by a guard inside the page. A Document Server on an origin of its own
   would be the full answer; it is not done here.
+- **Changes only from the portal's pages.** Every request of the extension's that changes something (a document
+  created, renamed or deleted, the Document Server started, stopped or removed, the settings) is refused unless it
+  comes from the portal's own pages: the portal's cookie is SameSite=Lax, which a page on another port or another
+  name of the same site is still sent.
 - **What the tools return is outside content to the guard**: the text, comments and file names of documents anybody
   may have written. A wake on a mention names the document and nothing of the comment; the agent reads the comment
   with `office_comments`, whose result the guard holds as outside content.

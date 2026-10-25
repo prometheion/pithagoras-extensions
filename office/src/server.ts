@@ -46,6 +46,7 @@ import * as callback from "./callback";
 import { wirePing } from "./ping";
 import { registerTools } from "./tools";
 import { floatingTag } from "./office-ui";
+import { writesFromHere } from "../../shared/proxy";
 
 /* ------------------------------------------------------------------ */
 /* constants                                                           */
@@ -293,6 +294,10 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
 function registerRoutes(dd: string, secret: string): void {
   const r = portal().router;
   const json = portal().http.json();
+  // Changes only from the portal's own pages, as Blender's and Godot's routes: the portal's cookie is SameSite=Lax,
+  // which a page on another port or name of the same site is still sent, and these routes delete documents, remove
+  // the Document Server and change its image.
+  r.use(writesFromHere);
 
   /** GET /state -> settings + container status + the document list + who has what open. The poller's payload. */
   r.get("/state", async (_req, res) => {

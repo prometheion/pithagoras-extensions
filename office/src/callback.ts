@@ -4,9 +4,10 @@
  * DS container holds no cookie.
  *
  * Flow: verify the HS256 JWT BEFORE dispatch, parse the envelope, branch on the status. The token arrives in the
- * X-Auth-Token header -- that is where it lives because the container env we mint sets JWT_HEADER=X-Auth-Token and
- * JWT_IN_BODY=false (src/container.ts dsEnv); an embedded body.token is accepted ONLY as a defensive fallback for DS
- * builds that ignore those vars.
+ * X-Auth-Token header as "Bearer <jwt>" -- the container env we mint sets JWT_HEADER=X-Auth-Token and JWT_IN_BODY=false
+ * (src/container.ts dsEnv), and the image's token.outbox.prefix is "Bearer " -- with the envelope under `payload` and
+ * `operation: "callback"` in its claims; an embedded body.token is accepted ONLY as a defensive fallback for DS builds
+ * that ignore those vars.
  *
  * document.key format: keyIdOf(docId) + "." + base64url-no-pad(sha256(String(expectedMtimeMs))) (makeKey).
  * The hash pins the revision the config was minted against, so a stale session's save-back can never clobber a
@@ -310,6 +311,9 @@ async function handleDispatch(
   // and nothing below ever touches the disk.
   const headerToken = req.headers["x-auth-token"];
   let token = typeof headerToken === "string" ? headerToken : Array.isArray(headerToken) ? headerToken[0] : undefined;
+  // The Document Server prefixes its token with its outbox prefix, "Bearer " (JWT_HEADER only renames the header):
+  // taken off before the token is verified, as a bare token is taken too.
+  if (token !== undefined) token = token.replace(/^Bearer\s+/i, "");
   if (token === undefined && typeof body.token === "string") token = body.token;
   // Verify the token ONCE and keep its claims: a second verifyJwt call below would add nothing except a race --
   // a token that expires in between makes that call return null and the envelope binding blow up as a 500.
@@ -331,6 +335,12 @@ async function handleDispatch(
   // our own non-callback tokens (editor config, fetch) carry no envelope and are rejected below. The body is
   // ignored from here on.
   const claims = verified; // the verification made above -- exactly once per request
+  // The Document Server says what a token it signs is for: a token of another of its operations is not a callback.
+  if (claims.operation !== undefined && claims.operation !== "callback") {
+    log(`rejected callback: the token is for ${JSON.stringify(claims.operation)}, not a callback`);
+    respond(res, 401, 1);
+    return;
+  }
   const signed = (claims.payload && typeof claims.payload === "object" && !Array.isArray(claims.payload))
     ? claims.payload as Record<string, unknown>
     : claims;

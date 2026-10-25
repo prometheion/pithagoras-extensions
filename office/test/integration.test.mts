@@ -214,7 +214,8 @@ IT("synthetic status-2 callback WITHOUT any session cookie: persist happened (by
       url: "http://portal.example/api/x/%40pithagoras/office/ds/cache/files/saved?md5=a&expires=9",
       changesurl: "http://portal.example/api/x/%40pithagoras/office/ds/cache/files/changes.zip?md5=b&expires=9",
     };
-    const token = signJwt(envelope, 60_000, secret);
+    // As the Document Server signs it: the envelope under `payload`, its operation named, "Bearer " in front.
+    const token = `Bearer ${signJwt({ payload: envelope, operation: "callback" }, 60_000, secret)}`;
 
     // POSTed to the loopback listener exactly as DS would (X-Auth-Token per the container env) -- node's fetch
     // sends no cookies, so structurally NOTHING like a session cookie crosses on this request.

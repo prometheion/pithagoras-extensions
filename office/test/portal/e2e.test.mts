@@ -90,6 +90,8 @@ window.__events = [];
   };
 
   after(async () => {
+    // OFFICE_E2E_KEEP=1 leaves the containers for a look at the Document Server's logs; `docker rm -f` them after.
+    if (process.env.OFFICE_E2E_KEEP === "1") return void (await host.stopServerHalves());
     await json(`${at}/container/remove`, { method: "POST", body: JSON.stringify({ data: true }) }).catch(() => {});
     await host.stopServerHalves();
     server.closeAllConnections();

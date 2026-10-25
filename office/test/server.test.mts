@@ -411,6 +411,34 @@ test("editor-config while a new Document Server still makes its fonts: 503 ds_st
   await b.cleanup();
 });
 
+test("editor-config while a start is under way (no ds.json until it ends): 503 ds_starting, not \"not configured\"", async () => {
+  const b = await boot();
+  const doc = await store.createDoc({ title: "Soon", type: "word" }, b.root);
+  // The image download holds the start until the test lets it go.
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const ensure = b.dock.docker.images.ensure;
+  b.dock.docker.images.ensure = async (image, onProgress) => {
+    await held;
+    return ensure(image, onProgress);
+  };
+  b.dock.state.exec = { output: "", exitCode: 0, timedOut: false }; // set up as soon as it runs
+  const started = b.router.dispatch("POST", "/container/start", {});
+  let res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
+  assert.equal(res.statusCode, 503);
+  assert.equal((res.body as Record<string, unknown>).code, "ds_starting");
+  release();
+  assert.equal((await started).statusCode, 200);
+  res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
+  assert.equal(res.statusCode, 200);
+  live.clearDoc(doc.docId);
+  // Never started: said so, as before.
+  fs.rmSync(path.join(b.root, "ds.json"));
+  res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
+  assert.equal((res.body as Record<string, unknown>).code, "ds_not_configured");
+  await b.cleanup();
+});
+
 test("editor-config (xlsx): documentType cell, also for a portal in a container; unconfigured -> 503; unknown doc -> 404", async () => {
   const b = await boot(undefined, fakeDocker({ sharedNetwork: "container:9f3a1c2d", reach: { host: "pithagoras-office-ds-relay", port: 3890 } }));
   writeDsJson(b, "http://pithagoras-office-ds-relay:3890");

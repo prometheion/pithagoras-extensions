@@ -326,6 +326,12 @@ async function wanted(d: Docker, r: string, island: NetworkInfo, tag: string): P
 // Serialized: two callers at once (the boot look and a Start) would race create/start/ds.json.
 let ensuring: Promise<{ started: boolean }> | null = null;
 
+/** Whether a start is under way: until it ends, there may be no ds.json yet, and the Document Server is starting, not
+ * missing (the editor waits for it rather than saying it was never started). */
+export function starting(): boolean {
+  return ensuring !== null;
+}
+
 export function ensureContainer(docker?: Docker, onPull?: (state: PullState) => void, root?: string): Promise<{ started: boolean }> {
   ensuring ??= ensureContainerOnce(docker, onPull, root).finally(() => {
     ensuring = null;

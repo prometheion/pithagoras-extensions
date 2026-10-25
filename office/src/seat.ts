@@ -1,0 +1,576 @@
+/**
+ * The agents' seats in the documents: each agent that works in a document (one per agent home and document) has an
+ * OnlyOffice editor of its own open in it, in the agents' browser on the island (container.ts), beside the people in
+ * the document. A tool call hands its edit to that editor as a job, which the editor's plugin (seat-page.ts) makes
+ * with one fixed command, so people see it at once, and what they typed and have not saved yet is read and kept.
+ *
+ *   tool -> seat.run -> job queue -> plugin long-poll (POST /plugin/<token>/next) -> command in the editor
+ *        <- result <- POST /plugin/<token>/done <-
+ *
+ * The browser opens one page, the seat page (`GET /seat/<secret>/`), from the loopback listener through the relay's
+ * way back, as the Document Server reaches it; the page long-polls what to open and close (`GET /seat/<secret>/poll`).
+ * `secret` is new in each run of the half and is known only to this module and the browser's command line: anything
+ * else that reaches the listener (the Document Server, through the relay) gets the listener's 404 for every /seat
+ * path. Each editor's plugin is served under a token of its own (`/plugin/<token>/`), which is in that editor's
+ * config and so known to the Document Server too: it gives the jobs of that one editor and nothing else, and is gone
+ * when the editor closes. The Document Server holds the documents and the JWT secret already; the page's secret,
+ * which would hand out every editor's config, is never in a config.
+ *
+ * Limits: MAX_EDITORS across the portal, one per agent home and document; the least recently used idle one closes for
+ * a new one, and where all are busy the call is refused (`busy`). An editor closes after IDLE_MS without a job, when
+ * its key no longer stands (the file changed outside: `behind`), when its document is trashed, when a job of it timed
+ * out, and when it would have to open in another mode (the agent's write permission changed); the next call opens it
+ * again. A plugin that has not polled for DEAD_MS is taken for dead and its editor opened anew, once. The browser
+ * stops AGENT_IDLE_MS after its last editor closed.
+ */
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { BRIDGE_JS, HOLD_MS, pluginConfig, pluginIndex, SEAT_PAGE_HTML, SEAT_PAGE_JS } from "./seat-page";
+
+export type SeatMode = "edit" | "view";
+export type SeatJob = { kind: string; args: unknown };
+
+/** What the seats need from the rest of the half (server.ts gives the real ones, tests their own). */
+export interface SeatDeps {
+  /** The agents' browser running, opening `pageUrl` (container.ensureAgent); rejects with a coded error. */
+  ensureAgent(pageUrl: string): Promise<void>;
+  /** The agents' browser gone (container.stopAgent). */
+  stopAgent(): Promise<void>;
+  /** A signed editor config for an agent: `pluginUrl` is the base its plugin is served from. */
+  mint(input: { home: string; docId: string; mode: SeatMode; pluginUrl: string }): Promise<{ config: Record<string, unknown>; apiJs: string; key: string }>;
+  /** How an editor opened with `key` stands to the document now (callback.keyStanding on its revision): only a
+   * "current" one is used; null where the document is gone. */
+  standing(docId: string, key: string): "current" | "behind" | null;
+  /** Where the browser reaches the listener (the relay's way back), `http://<relay>:<port>`. */
+  listenerOrigin(): string;
+  /** Where the browser reaches the Document Server, `http://<container>`: the origin the plugin's config is fetched
+   * from, and the plugin SDK's. */
+  dsOrigin(): string;
+  log?: (line: string) => void;
+}
+
+/** The limits, as constants (owner decision); tests change them through `configureSeat`. */
+export const LIMITS = {
+  maxEditors: 3,
+  /** The browser's first poll after it was started. */
+  connectMs: 60_000,
+  /** An editor's plugin's first poll after the editor was opened. */
+  readyMs: 30_000,
+  /** One job's result. */
+  jobMs: 20_000,
+  /** An editor with no job closes. */
+  idleMs: 5 * 60_000,
+  /** The browser stops after its last editor closed. */
+  agentIdleMs: 10 * 60_000,
+  /** A plugin that has not polled since counts as dead. */
+  deadMs: 30_000,
+  /** A held long-poll is answered with nothing. */
+  holdMs: HOLD_MS,
+  /** The most a plugin's result may carry. */
+  maxDone: 8 * 1024 * 1024,
+};
+
+type Job = { id: string; kind: string; args: unknown; settle: (outcome: { result?: unknown; error?: { code?: string; message?: string; op?: number } }) => void; handed: boolean };
+
+type Editor = {
+  id: string;
+  home: string;
+  docId: string;
+  key: string;
+  mode: SeatMode;
+  token: string;
+  /** Its plugin polled at least once. */
+  ready: boolean;
+  /** What the page said went wrong while it opened. */
+  failed?: string;
+  waiters: (() => void)[];
+  lastUsed: number;
+  lastPoll: number;
+  busy: boolean;
+  reopened: boolean;
+  queue: Job[];
+  held: ServerResponse | null;
+};
+
+/** A coded refusal the tools pass on as `error:<code> <message>`. */
+export class SeatError extends Error {
+  constructor(public readonly code: string, message: string, public readonly op?: number) {
+    super(message);
+  }
+}
+
+let deps: SeatDeps | null = null;
+let limits = { ...LIMITS };
+let secret = randomBytes(32).toString("hex");
+const editors = new Map<string, Editor>();
+const orders: Record<string, unknown>[] = [];
+let page: ServerResponse | null = null;
+let pageSeen = 0;
+let pageWaiters: (() => void)[] = [];
+let lastEditorClosed = 0;
+let sweeper: NodeJS.Timeout | undefined;
+let agentRunning = false;
+
+function log(line: string): void {
+  (deps?.log ?? ((l: string) => console.error(l)))(`@pithagoras/office: seat: ${line}`);
+}
+
+/**
+ * Sets the seats up for a run of the half: a new page secret (a browser left from before is refused), no editors, and
+ * the sweeper that closes idle editors and stops the browser. `overrides` changes the limits (tests).
+ */
+export function configureSeat(d: SeatDeps, overrides: Partial<typeof LIMITS> = {}): void {
+  closeAll();
+  deps = d;
+  limits = { ...LIMITS, ...overrides };
+  secret = randomBytes(32).toString("hex");
+  pageSeen = 0;
+  agentRunning = false;
+  lastEditorClosed = Date.now();
+  if (sweeper) clearInterval(sweeper);
+  sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2));
+  sweeper.unref();
+}
+
+/** Every seat closed and the sweeper stopped: the half stops. */
+export function stopSeats(): void {
+  closeAll();
+  if (sweeper) clearInterval(sweeper);
+  sweeper = undefined;
+  deps = null;
+}
+
+/** The address of the seat page, as the browser opens it. */
+export function pageUrl(): string {
+  if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
+  return `${deps.listenerOrigin()}/seat/${secret}/`;
+}
+
+/** The agent seats open now, for office_list and the tests: who is in which document. */
+export function seats(): { home: string; docId: string; mode: SeatMode; key: string; ready: boolean }[] {
+  return [...editors.values()].map((e) => ({ home: e.home, docId: e.docId, mode: e.mode, key: e.key, ready: e.ready }));
+}
+
+/* ------------------------------------------------------------------ */
+/* running a job                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Runs `job` in the editor of (`home`, `docId`) in `mode`, opening it (and the browser) where it is not open, and
+ * answers the command's result. Rejects with a SeatError: the codes of section 2.9 of the plan (`agent_unavailable`,
+ * `editor_not_ready`, `timeout`, `busy`, `behind`, and the command's own, such as `quote_not_found`), or the coded
+ * errors of `ensureAgent` and `mint`. An abort (`signal`) only stops the wait: a job the plugin took runs to its end.
+ */
+export async function run(home: string, docId: string, mode: SeatMode, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<unknown> {
+  if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
+  const editor = await editorFor(home, docId, mode, options.signal);
+  editor.busy = true;
+  editor.lastUsed = Date.now();
+  try {
+    const outcome = await handOver(editor, job, options);
+    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op);
+    return outcome.result;
+  } finally {
+    editor.busy = false;
+    editor.lastUsed = Date.now();
+  }
+}
+
+/** The key the editor of (`home`, `docId`) has open, where one is open: the session an edit's save is asked of. */
+export function keyOf(home: string, docId: string): string | undefined {
+  return find(home, docId)?.key;
+}
+
+function find(home: string, docId: string): Editor | undefined {
+  for (const e of editors.values()) if (e.home === home && e.docId === docId) return e;
+  return undefined;
+}
+
+async function editorFor(home: string, docId: string, mode: SeatMode, signal?: AbortSignal): Promise<Editor> {
+  const d = deps!;
+  let editor = find(home, docId);
+  if (editor && !editor.ready) {
+    // Another call opens it right now.
+    await ready(editor, signal);
+  }
+  if (editor) {
+    const standing = d.standing(docId, editor.key);
+    if (standing !== "current") {
+      close(editor, "its document changed outside the editor");
+      if (standing === "behind") throw new SeatError("behind", "the document's file changed outside the editor while the agent's editor had it open; that editor is closed, and the next call opens the file as it is now");
+      throw new SeatError("not_found", "the document is gone");
+    }
+    if (editor.mode !== mode) {
+      close(editor, `it opens in ${mode} mode now`);
+      editor = undefined;
+    } else if (editor.ready && !editor.held && Date.now() - editor.lastPoll > limits.deadMs) {
+      // Its plugin stopped polling (a crashed frame, a reload of the browser): opened anew, once.
+      if (editor.reopened) {
+        close(editor, "its plugin stopped polling again");
+        throw new SeatError("editor_not_ready", "the agent's editor of this document stopped answering twice; try again");
+      }
+      close(editor, "its plugin stopped polling");
+      editor = await open(home, docId, mode, signal);
+      editor.reopened = true;
+      return editor;
+    }
+  }
+  return editor ?? open(home, docId, mode, signal);
+}
+
+/** Opens an editor: the browser and its page first, room made under the limit, the config minted, the page told, and
+ * the editor's plugin waited for. */
+async function open(home: string, docId: string, mode: SeatMode, signal?: AbortSignal): Promise<Editor> {
+  const d = deps!;
+  await connected(signal);
+  // Room is made and the place taken at once, before anything is waited for: opens at the same time count each other.
+  while (editors.size >= limits.maxEditors) {
+    const idle = [...editors.values()].filter((e) => !e.busy).sort((a, b) => a.lastUsed - b.lastUsed)[0];
+    if (!idle) throw new SeatError("busy", `the agents have ${limits.maxEditors} documents open in the editor and all of them are busy; try again in a moment`);
+    close(idle, "room for another document");
+  }
+  const token = randomBytes(16).toString("hex");
+  const editor: Editor = { id: randomUUID(), home, docId, key: "", mode, token, ready: false, waiters: [], lastUsed: Date.now(), lastPoll: Date.now(), busy: true, reopened: false, queue: [], held: null };
+  editors.set(editor.id, editor);
+  try {
+    const minted = await d.mint({ home, docId, mode, pluginUrl: `${d.listenerOrigin()}/plugin/${token}/` });
+    editor.key = minted.key;
+    if (!editors.has(editor.id)) throw new SeatError("editor_not_ready", "the agent's editor of this document was closed while it opened");
+    order({ open: { editorId: editor.id, apiJs: minted.apiJs, config: minted.config } });
+    await ready(editor, signal);
+  } catch (e) {
+    close(editor, "it did not open");
+    throw e;
+  } finally {
+    editor.busy = false;
+  }
+  return editor;
+}
+
+/** The browser started (where it does not run) and its page polling. */
+async function connected(signal?: AbortSignal): Promise<void> {
+  const d = deps!;
+  if (page || Date.now() - pageSeen < limits.holdMs + 5_000) return;
+  const since = Date.now();
+  await d.ensureAgent(pageUrl());
+  agentRunning = true;
+  await waitFor((wake) => pageWaiters.push(wake), () => pageSeen >= since, limits.connectMs, signal, () => new SeatError("agent_unavailable", `the agent's editor did not start within ${limits.connectMs / 1000} s`));
+}
+
+async function ready(editor: Editor, signal?: AbortSignal): Promise<void> {
+  if (editor.ready) return;
+  await waitFor(
+    (wake) => editor.waiters.push(wake),
+    () => editor.ready || editor.failed !== undefined || !editors.has(editor.id),
+    limits.readyMs,
+    signal,
+    () => new SeatError("editor_not_ready", `the agent's editor did not open the document within ${limits.readyMs / 1000} s`),
+  );
+  if (editor.failed !== undefined) throw new SeatError("editor_not_ready", `the agent's editor could not open the document: ${editor.failed}`);
+  if (!editors.has(editor.id)) throw new SeatError("editor_not_ready", "the agent's editor of this document was closed while it opened");
+}
+
+/** Waits until `done()` holds, woken by whoever `listen` hands the wake to; rejects at `ms` or on an abort. */
+function waitFor(listen: (wake: () => void) => void, done: () => boolean, ms: number, signal: AbortSignal | undefined, late: () => Error): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (done()) return resolve();
+    let over = false;
+    const finish = (e?: Error) => {
+      if (over) return;
+      over = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      if (e) reject(e);
+      else resolve();
+    };
+    const wake = () => {
+      if (done()) finish();
+      else if (!over) listen(wake);
+    };
+    const aborted = () => finish(new SeatError("aborted", "the call was aborted"));
+    const timer = setTimeout(() => finish(late()), ms);
+    signal?.addEventListener("abort", aborted);
+    if (signal?.aborted) return aborted();
+    listen(wake);
+  });
+}
+
+/** The job handed to the editor's plugin (now, where it waits, or at its next poll) and its outcome waited for. A job
+ * with no outcome in time closes the editor: what it did is unknown. */
+function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<{ result?: unknown; error?: { code?: string; message?: string; op?: number } }> {
+  const ms = options.timeoutMs ?? limits.jobMs;
+  return new Promise((resolve, reject) => {
+    let over = false;
+    const queued: Job = {
+      id: randomUUID(),
+      kind: job.kind,
+      args: job.args,
+      handed: false,
+      settle: (outcome) => {
+        if (over) return;
+        over = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", aborted);
+        resolve(outcome);
+      },
+    };
+    const timer = setTimeout(() => {
+      if (over) return;
+      over = true;
+      options.signal?.removeEventListener("abort", aborted);
+      close(editor, "a job of it timed out");
+      reject(new SeatError("timeout", `the agent's editor gave no result within ${ms / 1000} s; what the call did is unknown: read the document again before you go on`));
+    }, ms);
+    const aborted = () => {
+      if (over) return;
+      over = true;
+      clearTimeout(timer);
+      // Not handed yet: it never runs. Handed: it runs to its end, and its outcome is dropped.
+      if (!queued.handed) editor.queue = editor.queue.filter((j) => j !== queued);
+      reject(new SeatError("aborted", "the call was aborted"));
+    };
+    options.signal?.addEventListener("abort", aborted);
+    if (options.signal?.aborted) return aborted();
+    editor.queue.push(queued);
+    feed(editor);
+  });
+}
+
+/** The next job to the plugin's held poll, where both are there. */
+function feed(editor: Editor): void {
+  const job = editor.queue.find((j) => !j.handed);
+  if (!job || !editor.held) return;
+  const res = editor.held;
+  editor.held = null;
+  job.handed = true;
+  json(res, 200, { jobId: job.id, kind: job.kind, args: job.args });
+}
+
+/* ------------------------------------------------------------------ */
+/* closing                                                             */
+/* ------------------------------------------------------------------ */
+
+function close(editor: Editor, why: string): void {
+  if (!editors.delete(editor.id)) return;
+  log(`closed the agent's editor of ${editor.docId} (${editor.home}): ${why}`);
+  // Its plugin hears 404 and stops; a job it has not taken never runs; one it took is not waited for any more.
+  if (editor.held) {
+    notFound(editor.held);
+    editor.held = null;
+  }
+  for (const job of editor.queue) job.settle({ error: { code: "editor_closed", message: `the agent's editor of this document was closed (${why}); try again` } });
+  editor.queue = [];
+  for (const wake of editor.waiters.splice(0)) wake();
+  order({ close: editor.id });
+  if (!editors.size) lastEditorClosed = Date.now();
+}
+
+/** Closes the seats in `docId` (it was trashed, or its file changed outside). */
+export function closeDoc(docId: string, why = "its document was deleted"): void {
+  for (const e of [...editors.values()]) if (e.docId === docId) close(e, why);
+}
+
+/** Every seat closed: the person stopped Office, or removed its Document Server, and the browser went with it
+ * (container.stopContainer). The next call starts it again, where Office runs again. */
+export function closeSeats(): void {
+  closeAll();
+  agentRunning = false;
+  pageSeen = 0;
+}
+
+function closeAll(): void {
+  for (const e of [...editors.values()]) close(e, "the seats stop");
+  orders.length = 0;
+  if (page) notFound(page);
+  page = null;
+  for (const wake of pageWaiters.splice(0)) wake();
+}
+
+/** What the page is to do, handed to its held poll or kept for its next. */
+function order(o: Record<string, unknown>): void {
+  if (page) {
+    const res = page;
+    page = null;
+    json(res, 200, o);
+  } else orders.push(o);
+}
+
+/** Every 30 s (or more often for short limits): idle editors closed, and the browser stopped once none was open for a
+ * while. */
+function sweep(): void {
+  const now = Date.now();
+  for (const e of [...editors.values()]) if (!e.busy && now - e.lastUsed > limits.idleMs) close(e, "idle");
+  if (agentRunning && !editors.size && now - lastEditorClosed > limits.agentIdleMs && deps) {
+    agentRunning = false;
+    pageSeen = 0;
+    deps.stopAgent().catch((e) => log(`could not stop the agents' browser: ${(e as Error).message}`));
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* the routes on the loopback listener                                 */
+/* ------------------------------------------------------------------ */
+
+function json(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+  if (res.headersSent || res.destroyed) return;
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
+  res.end(JSON.stringify(body));
+}
+
+function notFound(res: ServerResponse): void {
+  json(res, 404, { error: "no such endpoint on the office loopback listener", code: "not_found" });
+}
+
+function noContent(res: ServerResponse): void {
+  if (res.headersSent || res.destroyed) return;
+  res.writeHead(204, { "Cache-Control": "no-store" });
+  res.end();
+}
+
+function same(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+function readBody(req: IncomingMessage, max: number): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > max) {
+        req.destroy();
+        resolve(null);
+      } else chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", () => resolve(null));
+  });
+}
+
+/** Holds `res` as the long-poll of `set`/`get`, answered with 204 after holdMs, and let go when the client goes. */
+function hold(res: ServerResponse, set: (r: ServerResponse | null) => void, get: () => ServerResponse | null): void {
+  set(res);
+  const timer = setTimeout(() => {
+    if (get() !== res) return;
+    set(null);
+    noContent(res);
+  }, limits.holdMs);
+  res.on("close", () => {
+    clearTimeout(timer);
+    if (get() === res) set(null);
+  });
+}
+
+/**
+ * The seat routes of the loopback listener (server.ts hands it every request): true where it answered. Anything under
+ * /seat/ without this run's secret, and anything under /plugin/ without an open editor's token, is left to the
+ * listener's own 404, so nobody learns more from it than from any other path.
+ */
+export function handleSeat(req: IncomingMessage, res: ServerResponse, pathname: string): boolean {
+  if (!deps) return false;
+  const seat = /^\/seat\/([0-9a-f]{64})\/([a-z.]*)$/.exec(pathname);
+  if (seat && same(seat[1], secret)) return seatRoute(req, res, seat[2]);
+  const plugin = /^\/plugin\/([0-9a-f]{32})\/([a-z.]+)$/.exec(pathname);
+  if (plugin) {
+    const editor = [...editors.values()].find((e) => same(e.token, plugin[1]));
+    if (editor) return pluginRoute(req, res, editor, plugin[2]);
+  }
+  return false;
+}
+
+function seatRoute(req: IncomingMessage, res: ServerResponse, rest: string): boolean {
+  if (req.method === "GET" && rest === "") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(SEAT_PAGE_HTML);
+    return true;
+  }
+  if (req.method === "GET" && rest === "page.js") {
+    res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(SEAT_PAGE_JS);
+    return true;
+  }
+  if (req.method === "GET" && rest === "poll") {
+    pageSeen = Date.now();
+    for (const wake of pageWaiters.splice(0)) wake();
+    if (orders.length) {
+      json(res, 200, orders.shift());
+      return true;
+    }
+    if (page) noContent(page); // a poll of before that the browser gave up on: the newest one waits
+    hold(res, (r) => (page = r), () => page);
+    for (const wake of pageWaiters.splice(0)) wake();
+    return true;
+  }
+  if (req.method === "POST" && rest === "event") {
+    void readBody(req, 64 * 1024).then((body) => {
+      let event: { editorId?: unknown; type?: unknown; data?: unknown } = {};
+      try {
+        event = JSON.parse(body?.toString("utf8") ?? "{}");
+      } catch {
+        event = {};
+      }
+      const editor = typeof event.editorId === "string" ? editors.get(event.editorId) : undefined;
+      if (editor && event.type === "error" && !editor.ready) {
+        editor.failed = JSON.stringify(event.data ?? null).slice(0, 300);
+        for (const wake of editor.waiters.splice(0)) wake();
+      }
+      if (editor && event.type === "error") log(`the agent's editor of ${editor.docId} reported an error: ${JSON.stringify(event.data ?? null).slice(0, 300)}`);
+      json(res, 200, {});
+    });
+    return true;
+  }
+  return false;
+}
+
+function pluginRoute(req: IncomingMessage, res: ServerResponse, editor: Editor, rest: string): boolean {
+  const d = deps!;
+  if (req.method === "GET" && rest === "config.json") {
+    // Fetched by the editor's own frame, which is on the Document Server's origin.
+    json(res, 200, JSON.parse(pluginConfig()), { "Access-Control-Allow-Origin": d.dsOrigin() });
+    return true;
+  }
+  if (req.method === "GET" && rest === "index.html") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(pluginIndex(d.dsOrigin()));
+    return true;
+  }
+  if (req.method === "GET" && rest === "bridge.js") {
+    res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(BRIDGE_JS);
+    return true;
+  }
+  if (req.method === "POST" && rest === "next") {
+    req.resume();
+    editor.lastPoll = Date.now();
+    if (!editor.ready) {
+      editor.ready = true;
+      for (const wake of editor.waiters.splice(0)) wake();
+    }
+    if (editor.held) noContent(editor.held);
+    hold(res, (r) => (editor.held = r), () => editor.held);
+    feed(editor);
+    return true;
+  }
+  if (req.method === "POST" && rest === "done") {
+    editor.lastPoll = Date.now();
+    void readBody(req, limits.maxDone).then((body) => {
+      if (!body) return json(res, 413, { error: "the result is too large", code: "too_large" });
+      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number } } = {};
+      try {
+        done = JSON.parse(body.toString("utf8"));
+      } catch {
+        done = {};
+      }
+      const job = editor.queue.find((j) => j.handed && j.id === done.jobId);
+      if (job) {
+        editor.queue = editor.queue.filter((j) => j !== job);
+        job.settle(done.error ? { error: done.error } : { result: done.result });
+      }
+      json(res, 200, {});
+    });
+    return true;
+  }
+  return false;
+}

@@ -42,7 +42,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataDir, docker as hostDocker, portal } from "./host";
 import { loadSettings } from "./settings";
-import { namesFrom, SPEC_LABEL, stamped, type Names } from "../../shared/service";
+import { namesFrom, SPEC_LABEL, specHash, stamped, type Names } from "../../shared/service";
 import type { ContainerInfo, ContainerSpec, Docker, NetworkInfo, PullState, Reach } from "../../shared/docker-api";
 
 /** The names Office's containers go by, each one the portal's environment can change (`PITHAGORAS_OFFICE_*`): a test
@@ -50,6 +50,8 @@ import type { ContainerInfo, ContainerSpec, Docker, NetworkInfo, PullState, Reac
 export interface OfficeNames extends Names {
   /** The relay on the island: the way in, and the way back. */
   relay: string;
+  /** The agents' own browser on the island, in which their editors run (seat.ts). */
+  agent: string;
   /** The Document Server's volumes, by the path in its container each is bound at (see DS_PATHS). */
   volumes: Record<string, string>;
 }
@@ -72,7 +74,7 @@ export function officeNames(env: NodeJS.ProcessEnv = process.env): OfficeNames {
   const base = namesFrom(env, "office", { container: "pithagoras-office-ds", port: 3890, image: "" });
   // The data volume keeps its own setting (PITHAGORAS_OFFICE_VOLUME), as it had one before the others were named.
   const volumes = Object.fromEntries(Object.entries(DS_PATHS).map(([at, end]) => [at, end === "data" ? base.volume : `${base.container}-${end}`]));
-  return { ...base, relay: `${base.container}-relay`, volumes };
+  return { ...base, relay: `${base.container}-relay`, agent: `${base.container}-agent`, volumes };
 }
 
 export const NAMES = officeNames();
@@ -234,6 +236,117 @@ export function relaySpec(island: string, key: string, names: OfficeNames = NAME
     Env: [`IN_PORT=${names.port}`, `DS_HOST=${names.container}`, "DS_PORT=80", `BACK_PORT=${BACK_PORT}`, `TUNNEL_KEY=${key}`],
     HostConfig: { NetworkMode: island, ...HARDENED },
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* the agents' browser                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The agents' browser: Chromium's headless shell, pinned by its digest, on the island beside the Document Server.
+ * The tag names it for a download (Docker for extensions takes an image by its tag), the digest is what a container
+ * is made from: a tag that came to name another build since is not run, and the Office page offers the download
+ * again. About 540 MB on disk.
+ */
+export const AGENT_IMAGE_TAG = "chromedp/headless-shell:157.0.8103.15";
+export const AGENT_IMAGE_DIGEST = "sha256:f76fce2964611eb1e25b90d906727884db12a8918a6d85a0df2619a9ef845c7c";
+export const AGENT_IMAGE = `chromedp/headless-shell@${AGENT_IMAGE_DIGEST}`;
+
+/** How much the browser may use: about 0.9 GB for one open document, and three at most (seat.ts). */
+const AGENT_MEMORY = 3 * 1024 ** 3;
+
+/**
+ * The browser, on the island alone and with no port published: it reaches the Document Server by its name and the
+ * relay's way back, and nothing else (the island has no way out). Hardened as the relay is, as a user that is not
+ * root, with a read-only root and its profile in memory. Chromium's own sandbox is off (`--no-sandbox`): it needs
+ * namespaces that the default seccomp profile and no-new-privileges refuse, and this container is the boundary. It
+ * opens the seat page (`url`, which carries the page's secret) and nothing else, with no debugging port: the portal
+ * talks to it only through that page.
+ */
+export function agentSpec(island: string, url: string): ContainerSpec {
+  return {
+    Image: AGENT_IMAGE,
+    User: "1000:1000",
+    Entrypoint: ["/headless-shell/headless-shell"],
+    Cmd: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", url],
+    Env: ["HOME=/tmp"],
+    HostConfig: {
+      NetworkMode: island,
+      ...HARDENED,
+      Memory: AGENT_MEMORY,
+      PidsLimit: 512,
+      ShmSize: 512 * 1024 ** 2,
+      Tmpfs: { "/tmp": "rw,nosuid,nodev,size=512m" },
+    },
+  };
+}
+
+/** The spec as the browser is made with it: its hash as its label, and never started again by Docker by itself (its
+ * page's secret is of one run of the half, so one started after a restart of Docker could only be refused). */
+function agentStamped(spec: ContainerSpec): ContainerSpec {
+  const host = (spec.HostConfig ?? {}) as Record<string, unknown>;
+  const withPolicy = { ...spec, HostConfig: { ...host, RestartPolicy: { Name: "no" } } };
+  return { ...withPolicy, Labels: { [SPEC_LABEL]: specHash(withPolicy) } };
+}
+
+/** A coded error the tools pass on to the agent as `error:<code>`. */
+function coded(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+/** The last download of the browser's image, in memory, for the Office page. */
+let agentPull: PullState | null = null;
+
+/** Whether the browser's image is there (by its digest), and how its download goes. */
+export async function agentImage(docker?: Docker): Promise<{ present: boolean; pull: PullState | null }> {
+  let present = false;
+  try {
+    present = await (await reachable(docker)).images.present(AGENT_IMAGE);
+  } catch {
+    present = false;
+  }
+  return { present, pull: agentPull ? { ...agentPull } : null };
+}
+
+/** Downloads the browser's image (the Office page's button; a tool never does). Refused where the tag names another
+ * build than the pinned digest now. */
+export async function pullAgentImage(docker?: Docker): Promise<void> {
+  const d = await reachable(docker);
+  await d.images.ensure(AGENT_IMAGE_TAG, (state) => {
+    agentPull = state;
+  });
+  if (!(await d.images.present(AGENT_IMAGE))) {
+    agentPull = { active: false, line: "", error: `${AGENT_IMAGE_TAG} is not the build this version of Office runs (${AGENT_IMAGE_DIGEST})` };
+    throw coded("agent_editor_missing", agentPull.error!);
+  }
+}
+
+/**
+ * The browser running, opening `url`: made where there is none or it is not as it would be made now (another page
+ * secret, after a restart of the half), started where it stopped. Refused where the person stopped Office
+ * (`office_stopped`), the image is not there (`agent_editor_missing`: never downloaded here), or the island is not
+ * (the Document Server was never started or was removed).
+ */
+export async function ensureAgent(url: string, docker?: Docker, root?: string): Promise<void> {
+  const d = await reachable(docker);
+  if (userStopped(root)) throw coded("office_stopped", "the person stopped Office");
+  if (!(await d.images.present(AGENT_IMAGE))) throw coded("agent_editor_missing", `the agent's editor (${AGENT_IMAGE_TAG}) is not downloaded`);
+  const island = await d.networks.get(NAMES.network);
+  if (!island) throw coded("office_stopped", "the Document Server's network is not there: Office was never started, or was removed");
+  const spec = agentStamped(agentSpec(island.name, url));
+  const detail = await claim(d, NAMES.agent);
+  if (!detail || !current(detail, spec, island)) {
+    await d.containers.create(NAMES.agent, spec);
+    await d.containers.start(NAMES.agent);
+  } else if (!running(detail)) await d.containers.start(NAMES.agent);
+}
+
+/** The browser gone: when its last editor closed a while ago, when Office stops, and at the half's start (one left
+ * from the run before has a page secret nobody knows any more, and holds the Document Server's sessions open). */
+export async function stopAgent(docker?: Docker): Promise<void> {
+  const d = await reachable(docker);
+  const found = await d.containers.get(NAMES.agent);
+  if (found && found.owner === ownName()) await d.containers.remove(NAMES.agent);
 }
 
 /** The key the portal's tunnels open with (server.ts makes the file at boot, as it makes jwt-secret). */
@@ -457,6 +570,8 @@ export async function stopContainer(docker?: Docker, root?: string): Promise<voi
   writeAtomic(path.join(r, USER_STOPPED_FILE), Buffer.from("user stopped the document server\n"));
   const existing = await d.containers.get(NAMES.container);
   if (existing && existing.owner === ownName() && existing.state !== "exited") await d.containers.stop(NAMES.container);
+  // The agents' editors are in the Document Server's sessions: they go with it.
+  await stopAgent(d);
 }
 
 /**
@@ -471,7 +586,7 @@ export async function removeContainers(removeData: boolean, docker?: Docker, roo
   const r = resolvedRoot(root);
   fs.mkdirSync(r, { recursive: true });
   writeAtomic(path.join(r, USER_STOPPED_FILE), Buffer.from("user removed the document server\n"));
-  for (const name of [NAMES.relay, NAMES.container]) {
+  for (const name of [NAMES.agent, NAMES.relay, NAMES.container]) {
     const found = await d.containers.get(name);
     if (found && found.owner === ownName()) await d.containers.remove(name);
   }

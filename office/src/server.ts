@@ -46,6 +46,8 @@ import * as callback from "./callback";
 import { wirePing } from "./ping";
 import { holdWayBack } from "./back";
 import { registerTools } from "./tools";
+import * as seat from "./seat";
+import { PLUGIN_GUID } from "./seat-page";
 import { floatingTag } from "./office-ui";
 import { writesFromHere } from "../../shared/proxy";
 
@@ -238,6 +240,8 @@ function makeLoopbackHandler(dd: string, tickets: string): (req: http.IncomingMe
       callback.handleCallback(req, res);
       return;
     }
+    // The agents' browser: its seat page under this run's secret, and each editor's plugin under its token.
+    if (seat.handleSeat(req, res, pathname)) return;
     jsonRaw(res, 404, { error: `no such endpoint on the office loopback listener (${req.method} ${pathname})`, code: "not_found" });
   };
 }
@@ -246,10 +250,15 @@ function makeLoopbackHandler(dd: string, tickets: string): (req: http.IncomingMe
 /* editor-config                                                       */
 /* ------------------------------------------------------------------ */
 
+/** Whose editor a config is for: a person's, from the Office page (the one route that hands configs out), or an
+ * agent's, for its seat in the agents' browser (seat.ts, the only caller of that variant: its configs leave the half
+ * only through the seat page's secret route). */
+export type EditorAs = { kind: "person" } | { kind: "agent"; home: string; label: string; mode: "edit" | "view"; pluginUrl: string };
+
 /** Build (or refuse) the new DocsAPI.DocEditor config for `docId`. The plain object is signed WHOLE -- per the DS
  * signing rule ("the payload must have the same structure as the config"; since 7.1 sign exactly what you send) --
  * and returned as {...config, token, apiJs}: the page drops `apiJs` before calling DocEditor, everything else goes in. */
-function buildEditorConfig(dd: string, secret: string, docId: string): { res?: unknown; config?: Record<string, unknown>; ticketUrl?: string } {
+export function buildEditorConfig(dd: string, secret: string, docId: string, as: EditorAs = { kind: "person" }): { res?: unknown; config?: Record<string, unknown>; ticketUrl?: string; key?: string } {
   // As the file is now: a change made outside the extension is a new revision, so a new key, which the Document
   // Server downloads afresh, and which a save of the old session cannot overwrite.
   const doc = store.refresh(docId, dd);
@@ -263,6 +272,10 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
   // document.url is the ticketed GET on the loopback listener and callbackUrl sits right next door, both through the
   // island's relay: the one address the Document Server reaches, which passes them on to the listener (container.ts).
   const base = `http://${container.NAMES.relay}:${container.BACK_PORT}`;
+  // The key of the session already open on this revision where there is one (its own save wrote this revision, so
+  // its key pins an older one): the editor joins it instead of opening a second session beside it. People and agents
+  // alike: an agent's editor joins the people in the document, and they join it.
+  const key = live.sessionKeys(doc.docId).find((k) => callback.keyStanding(k, doc.mtimeMs) === "current") ?? callback.makeKey(doc.docId, doc.mtimeMs);
   const config: Record<string, unknown> = {
     documentType: doc.ext === "docx" ? "word" : "cell",
     // The full editor: "embedded" is OnlyOffice's read-only viewer for a page, with no toolbar and no editing.
@@ -270,9 +283,7 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
     title: doc.title,
     document: {
       fileType: doc.ext,
-      // The key of the session already open on this revision where there is one (its own save wrote this revision,
-      // so its key pins an older one): the editor joins it instead of opening a second session beside it.
-      key: live.sessionKeys(doc.docId).find((key) => callback.keyStanding(key, doc.mtimeMs) === "current") ?? callback.makeKey(doc.docId, doc.mtimeMs),
+      key,
       title: `${doc.title}.${doc.ext}`,
       url: `${base}/doc/${ticket}`,
     },
@@ -287,8 +298,20 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
       customization: { macros: false, plugins: false },
     },
   };
+  if (as.kind === "agent") {
+    const editorConfig = config.editorConfig as Record<string, unknown>;
+    editorConfig.mode = as.mode;
+    editorConfig.user = { id: `agent:${callback.keyIdOf(as.home)}`, name: `${as.label} (agent)`, group: "agents" };
+    // Live in view mode too: a viewer's default is "strict", which shows nobody's changes until they save.
+    editorConfig.coEditing = { mode: "fast", change: false };
+    // The one editor with a plugin: Office's own, which makes the agent's edits (seat-page.ts). It runs in the agents'
+    // browser on the island, on the Document Server's origin, where no person's session is.
+    editorConfig.customization = { macros: false, plugins: true, compactHeader: true };
+    editorConfig.plugins = { pluginsData: [`${as.pluginUrl}config.json`], autostart: [PLUGIN_GUID] };
+    return { config, ticketUrl: `${base}/doc/${ticket}`, key };
+  }
   live.setUser(doc.docId, { id: EDITOR_USER.id, name: EDITOR_USER.name }, true); // the seat opens: presence on mint
-  return { config, ticketUrl: `${base}/doc/${ticket}` };
+  return { config, ticketUrl: `${base}/doc/${ticket}`, key };
 }
 
 /* ------------------------------------------------------------------ */
@@ -411,6 +434,7 @@ function registerRoutes(dd: string, secret: string): void {
       return;
     }
     live.clearDoc(id); // nobody "has it open" for a gone doc anymore
+    seat.closeDoc(id); // and no agent's editor holds it
     recordAudit({ subject: id, reason: "deleted (moved to .trash)" });
     res.json({ ok: true });
   });
@@ -502,6 +526,7 @@ function registerRoutes(dd: string, secret: string): void {
     if (patch.enabled === false && before.enabled) {
       try {
         await container.stopContainer(undefined, dd); // records the user-stopped intent either way
+        seat.closeSeats();
       } catch (e) {
         return res.status(503).json({ error: `settings were saved but the container could not be stopped: ${(e as Error).message}`, code: "no_docker", settings });
       }
@@ -538,6 +563,7 @@ function registerRoutes(dd: string, secret: string): void {
   r.post("/container/stop", async (_req, res) => {
     try {
       await container.stopContainer(undefined, dd);
+      seat.closeSeats();
       recordAudit({ subject: container.DS_NAME, reason: "document server stopped" });
       res.json({ container: await container.status() });
     } catch (e) {
@@ -551,6 +577,7 @@ function registerRoutes(dd: string, secret: string): void {
     const body = (req.body ?? {}) as Record<string, unknown>;
     try {
       await container.removeContainers(body.data === true, undefined, dd);
+      seat.closeSeats();
       recordAudit({ subject: container.DS_NAME, reason: body.data === true ? "document server removed, with its volumes" : "document server removed" });
       res.json({ container: await container.status() });
     } catch (e) {
@@ -683,6 +710,52 @@ function registerRoutes(dd: string, secret: string): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* the agents' seats                                                   */
+/* ------------------------------------------------------------------ */
+
+/** The name people see for an agent in a document: its folder's ("Research (agent)"), or the folder's base name. */
+function folderLabel(home: string): string {
+  try {
+    const folder = portal().folders.list().find((f) => store.canonical(f.path) === home);
+    if (folder?.name) return folder.name;
+  } catch {
+    // no portal folders (a test): the base name below
+  }
+  return path.basename(home) || "Agent";
+}
+
+/** The seats' wiring (seat.ts): the browser through container.ts, an agent's editor config from buildEditorConfig,
+ * signed as a person's is. A browser left from a run before is removed first: its page secret is gone with that run,
+ * and it holds the Document Server's sessions open. */
+function wireSeats(dd: string, secret: string): void {
+  const cleared = container.stopAgent().catch(() => {});
+  seat.configureSeat({
+    ensureAgent: async (url) => {
+      await cleared;
+      await container.ensureAgent(url, undefined, dd);
+    },
+    stopAgent: () => container.stopAgent(),
+    mint: async ({ home, docId, mode, pluginUrl }) => {
+      const built = buildEditorConfig(dd, secret, docId, { kind: "agent", home, label: folderLabel(home), mode, pluginUrl });
+      if (built.res) {
+        const body = (built.res as { body: { error: string; code?: string } }).body;
+        throw new seat.SeatError(body.code === "ds_not_configured" ? "office_stopped" : body.code ?? "failed", body.error);
+      }
+      const config = built.config as Record<string, unknown>;
+      return { config: { ...config, token: signJwt(config, CONFIG_TTL_MS, secret, "editor-config") }, apiJs: `http://${container.NAMES.container}/web-apps/apps/api/documents/api.js`, key: built.key as string };
+    },
+    standing: (docId, key) => {
+      const doc = store.refresh(docId, dd);
+      if (!doc) return null;
+      return callback.keyStanding(key, doc.mtimeMs) === "current" ? "current" : "behind";
+    },
+    listenerOrigin: () => `http://${container.NAMES.relay}:${container.BACK_PORT}`,
+    dsOrigin: () => `http://${container.NAMES.container}`,
+    log: logLine,
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* the editing sessions open on a document                             */
 /* ------------------------------------------------------------------ */
 
@@ -797,6 +870,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);
 
   registerRoutes(dd, secret);
+  wireSeats(dd, secret);
 
   // the cookie-free loopback listener, on 127.0.0.1 alone, and the way back to it (back.ts)
   const server = http.createServer(makeLoopbackHandler(dd, tickets));
@@ -857,6 +931,8 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     stopped = true;
     clearInterval(timer);
     loopPort = 0;
+    seat.stopSeats();
+    await container.stopAgent().catch(() => {});
     container.whenReached(undefined);
     wayBack.stop();
     // close() alone would wait on keep-alive connections held open by clients (undici fetch among them);

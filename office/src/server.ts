@@ -807,7 +807,19 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   } catch (e) {
     logLine(`workspace scan at boot failed: ${(e as Error).message}`);
   }
-  container.lookAfter(undefined, dd); // fire-and-forget; logs its own failures
+  void container.lookAfter(undefined, dd); // fire-and-forget; logs its own failures
+
+  // Saves the Document Server kept as forgotten while this half was away (its callback refused until its retries ran
+  // out) are taken back once in each run, as soon as the Document Server answers: asked again at each look until then.
+  let recovered = false;
+  const recover = () => {
+    if (recovered || !container.readDsRecord(dd)) return;
+    callback.recoverForgotten().then((n) => {
+      recovered = true;
+      if (n) recordAudit({ subject: container.DS_NAME, reason: `${n} save(s) the document server had kept as forgotten were taken back` });
+    }, () => {});
+  };
+  recover();
 
   let stopped = false;
   const timer = setInterval(() => {
@@ -817,7 +829,8 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     } catch (e) {
       logLine(`settleKept failed: ${(e as Error).message}`);
     }
-    container.lookAfter(undefined, dd);
+    void container.lookAfter(undefined, dd);
+    recover();
   }, 30_000);
   timer.unref(); // never hold the portal process open
 

@@ -470,7 +470,13 @@ async function persistSaved(
   unlockAfter: boolean,
   res: ServerResponse,
 ): Promise<void> {
-  const fail = (): void => respond(res, 200, 1);
+  respond(res, 200, await persistCore(log, cfg, docId, keyRevHash, body, unlockAfter));
+}
+
+/** The persist itself, for a callback and for a save recovered from the Document Server (`recoverForgotten`): the
+ * error code the Document Server is to be answered with, 0 for saved (or kept as a copy), 1 for not. */
+async function persistCore(log: (line: string) => void, cfg: CallbackConfig, docId: string, keyRevHash: string, body: Envelope, unlockAfter: boolean): Promise<0 | 1> {
+  const fail = (): 1 => 1;
   const rootDir = () => cfg.root ?? dataDir();
 
   const meta = store.getDoc(docId, rootDir());
@@ -490,8 +496,7 @@ async function persistSaved(
       log(`persist for ${docId}: this save was already persisted at revision ${meta.mtimeMs} -- treating as done`);
       if (unlockAfter) live.clearDoc(docId); // a status-2 re-send closes the session
       else live.setLocked(docId, true); // status 6: editing continues, stay locked
-      respond(res, 200, 0);
-      return;
+      return 0;
     }
   }
 
@@ -522,7 +527,7 @@ async function persistSaved(
   /** A save that would overwrite a newer revision is not thrown away: it is kept as a copy beside the document, which
    * the person finds in the library and the audit log, and the Document Server is told it was saved, so it does not
    * hold it as forgotten under a key nobody opens again. */
-  const keepAsCopy = (why: string): void => {
+  const keepAsCopy = (why: string): 0 | 1 => {
     if (unlockAfter) live.clearDoc(docId); // terminal close: the session is over, drop flag AND presence
     let copy: store.DocMeta;
     try {
@@ -533,7 +538,7 @@ async function persistSaved(
     }
     log(`persist for ${docId}: ${why} -- NOT overwriting it; the save is kept as "${copy.title}" (${copy.docId})`);
     cfg.record?.({ subject: meta.title, reason: `a save from the editor was not written over a newer revision; kept as "${copy.title}.${copy.ext}" (${copy.docId})` });
-    respond(res, 200, 0);
+    return 0;
   };
   if (stale) return keepAsCopy(`stale key (current revision ${meta.mtimeMs}, the session opened another)`);
 
@@ -561,8 +566,47 @@ async function persistSaved(
   else live.setLocked(docId, true); // status 6: editing continues, stay locked
 
   // Success is only answered once the document AND the lock state are settled -- DS reads this JSON field to
-  // decide the save outcome. Every earlier branch already answered itself.
-  respond(res, 200, 0);
+  // decide the save outcome.
+  return 0;
+}
+
+/**
+ * Saves the Document Server could not hand over, taken back: a save whose callback failed until its retries ran out
+ * (the portal was down, or restarted on another port) is kept by the Document Server as "forgotten", under its key.
+ * Each one of a document still in the library is persisted as a callback's would be (under the revision its key
+ * pins; one that would overwrite a newer revision is kept as a copy), and then let go. Returns how many were taken.
+ * Asked once the Document Server answers after the half starts (server.ts).
+ */
+export async function recoverForgotten(config: CallbackConfig | null = configured): Promise<number> {
+  if (!config) return 0;
+  const log = config.log ?? defaultLog;
+  const secret = config.getSecret();
+  if (!secret || !config.getState()) return 0;
+  const origin = await config.getOrigin();
+  const command = async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const res = await fetch(`${origin}/command`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Auth-Token": `Bearer ${signJwt(body, 60_000, secret)}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    return (await res.json()) as Record<string, unknown>;
+  };
+  const list = await command({ c: "getForgottenList" });
+  if (list.error !== 0 || !Array.isArray(list.keys)) return 0;
+  let taken = 0;
+  for (const key of list.keys) {
+    const parsed = typeof key === "string" ? parseKey(key) : null;
+    const docId = parsed ? docIdOf(parsed.keyId, config.root ?? dataDir()) : null;
+    if (!parsed || !docId) continue; // not one of ours, or a document gone since: left to the Document Server
+    const got = await command({ c: "getForgotten", key });
+    if (got.error !== 0 || typeof got.url !== "string") continue;
+    if ((await persistCore(log, config, docId, parsed.revHash, { key, url: got.url }, true)) !== 0) continue;
+    await command({ c: "deleteForgotten", key });
+    log(`recovered a save of ${docId} the document server had kept as forgotten`);
+    taken++;
+  }
+  return taken;
 }
 
 /** The dispatch already verified a non-null secret; keep persistSaved's signature lean. */

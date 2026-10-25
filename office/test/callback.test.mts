@@ -17,7 +17,7 @@ import { createHmac, createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { signJwt, verifyJwt } from "../src/jwt";
 import {
-  CallbackState, configure, createCallbackHandler, docIdOf, handleCallback, keyIdOf, makeKey, onDocumentServer, onPersisted, parseKey, revHashOf,
+  CallbackState, configure, createCallbackHandler, docIdOf, handleCallback, keyIdOf, makeKey, onDocumentServer, onPersisted, parseKey, recoverForgotten, revHashOf,
 } from "../src/callback";
 import { createDoc, getDoc, listDocs, scanWorkspace } from "../src/store";
 import * as live from "../src/live";
@@ -683,6 +683,59 @@ test("status 2: an address outside the Document Server's files is refused withou
 test("onDocumentServer: the path from /cache/files/ on and the query, on the Document Server's origin", () => {
   assert.equal(onDocumentServer("https://a.example/p/ds/cache/files/data/k_1/output.docx/output.docx?md5=x&expires=2", "http://relay:3890"), "http://relay:3890/cache/files/data/k_1/output.docx/output.docx?md5=x&expires=2");
   assert.throws(() => onDocumentServer("https://a.example/web-apps/x", "http://relay:3890"), /outside/);
+});
+
+/* ------------------------------------------------------------------ */
+/* saves the Document Server kept as forgotten                          */
+/* ------------------------------------------------------------------ */
+
+/** The Document Server's command service and its forgotten files, as far as recoverForgotten asks them: every
+ * command must carry its JWT as the Document Server takes it. */
+async function startForgetfulDs(forgotten: Record<string, Buffer>) {
+  const deleted: string[] = [];
+  const server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url?.startsWith("/cache/files/forgotten/")) {
+      const key = decodeURIComponent(req.url.split("/")[4]!);
+      res.end(forgotten[key]);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const token = String(req.headers["x-auth-token"] ?? "").replace(/^Bearer /, "");
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (req.url !== "/command" || !verifyJwt(token, SECRET)) return void res.end(JSON.stringify({ error: 6 }));
+      if (body.c === "getForgottenList") return void res.end(JSON.stringify({ error: 0, keys: Object.keys(forgotten) }));
+      if (body.c === "getForgotten") return void res.end(JSON.stringify({ error: 0, key: body.key, url: `http://ds.example/cache/files/forgotten/${encodeURIComponent(body.key)}/output.docx/output.docx?md5=x` }));
+      if (body.c === "deleteForgotten") {
+        deleted.push(body.key);
+        return void res.end(JSON.stringify({ error: 0, key: body.key }));
+      }
+      res.end(JSON.stringify({ error: 5 }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { origin: `http://127.0.0.1:${(server.address() as { port: number }).port}`, deleted, close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }) };
+}
+
+test("recoverForgotten: a save the Document Server kept as forgotten (the portal was away) is taken back and let go; one over a newer revision is kept as a copy; another's key is left alone", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Away", type: "word" }, root);
+  const moved = await createDoc({ title: "Moved on", type: "word" }, root);
+  const forgotten = {
+    [makeKey(doc.docId, doc.mtimeMs)]: Buffer.from("typed while the portal was away"),
+    [makeKey(moved.docId, moved.mtimeMs - 1000)]: Buffer.from("typed on an older revision"),
+    "someone-elses-key": Buffer.from("not ours"),
+  };
+  const ds = await startForgetfulDs(forgotten);
+  const taken = await recoverForgotten({ getState: () => DS_STATE, getSecret: () => SECRET, getOrigin: async () => ds.origin, root, log: () => {}, retryDelaysMs: [] });
+  await ds.close();
+  assert.equal(taken, 2);
+  assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "typed while the portal was away");
+  assert.notEqual(fs.readFileSync(docFile(root, moved), "utf8"), "typed on an older revision", "the newer revision is not overwritten");
+  const copy = listDocs(root).find((d) => d.title.startsWith("Moved on (conflict"))!;
+  assert.equal(fs.readFileSync(docFile(root, copy), "utf8"), "typed on an older revision");
+  assert.deepEqual(ds.deleted.sort(), [makeKey(doc.docId, doc.mtimeMs), makeKey(moved.docId, moved.mtimeMs - 1000)].sort());
 });
 
 /* ------------------------------------------------------------------ */

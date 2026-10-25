@@ -55,7 +55,8 @@ same page).
   revision; if it moved on, nothing is written and the tool answers `error:revision_mismatch`. A change made outside
   the extension (a script, a git pull) is a new revision at once. A save from the editor that would overwrite a newer
   revision (the file changed on disk while it was open) is not lost and does not overwrite it: it is kept beside the
-  document as "<title> (conflict <date time>)", and the audit log says so. An open editor says within about 5
+  document as "<title> (conflict <date time>)", and the audit log says so. A save the Document Server could not hand
+  over while the portal was away (it keeps such a save as "forgotten") is taken back once the portal runs again. An open editor says within about 5
   seconds when the file changed on disk; reloading it opens the new revision.
 - **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document, or
   in whose folder it is), or `@<name>` or `@project:<name>` for an agent or project by name, and save, a chat of that

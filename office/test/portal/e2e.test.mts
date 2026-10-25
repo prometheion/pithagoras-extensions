@@ -91,11 +91,12 @@ window.__events = [];
 
   after(async () => {
     // OFFICE_E2E_KEEP=1 leaves the containers for a look at the Document Server's logs; `docker rm -f` them after.
-    if (process.env.OFFICE_E2E_KEEP === "1") return void (await host.stopServerHalves());
-    await json(`${at}/container/remove`, { method: "POST", body: JSON.stringify({ data: true }) }).catch(() => {});
+    const keep = process.env.OFFICE_E2E_KEEP === "1";
+    if (!keep) await json(`${at}/container/remove`, { method: "POST", body: JSON.stringify({ data: true }) }).catch(() => {});
     await host.stopServerHalves();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    if (keep) return;
     // What Docker for extensions made for the way in goes with the network; anything a failed run left, by name.
     for (const name of [`${PREFIX}-portal`, `${PREFIX}-relay`, `${PREFIX}-relay-forward`, PREFIX]) execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
   });

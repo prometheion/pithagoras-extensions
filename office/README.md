@@ -61,7 +61,8 @@ as an editor opened before would lose what is typed in it.
   the agent's edit. It loads it only once it has sent what is being typed to the Document Server (it sends at each
   short pause): a reload drops what it has not sent. Nothing typed is written over: where the editor does not save
   within 30 seconds, the edit is refused (`error:editor_not_saved`), nothing is written, and the agent tries again; a
-  save that was asked for earlier and is still under way is waited for first. An editor that is closing is waited for
+  save that was asked for earlier and is still under way is waited for first, and one whose callback the Document
+  Server gave up (it could not reach the portal) is asked for anew. An editor that is closing is waited for
   until its last save lands, and a last save the Document Server could not hand over is taken back from it first.
   What is typed between that save and the reload is kept beside the document as "<title> (conflict <date time>)", as
   it lacks the agent's edit. An editor that opened an older revision than the file has (it changed on disk) does not
@@ -175,7 +176,8 @@ remove an image, so the images stay on disk: `docker image rm onlyoffice/documen
   first by an agent's edit after it, as the portal no longer knows its key: what is typed there is kept as a conflict
   copy, at the latest when it closes. Its later saves are kept as such copies too, not written.
 - The editor's reload for an agent's edit reopens the document in the same frame; where the cursor and the view go
-  then is the editor's choice.
+  then is the editor's choice (the Document Server 10.0 puts the cursor at the start). Keys pressed in the second
+  while it reopens are not taken: they do not show, and are not in the document.
 
 ## Licences
 

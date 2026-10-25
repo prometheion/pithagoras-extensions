@@ -248,6 +248,15 @@ export function unsavedOf(key: string): string[] {
  * `over`: nothing more comes of it (saved, or the Document Server gave it up); a persist that failed is sent again. */
 function forcesaveDone(body: Envelope, ok: boolean, over: boolean): void {
   if (body.forcesavetype !== 0 || typeof body.userdata !== "string") return;
+  // A save that landed holds everything typed in its session until it was asked for, so one of the same session asked
+  // for before it and not landed is not waited for any more: the Document Server gives up a callback it cannot deliver
+  // after a few tries (the session keeps what was typed), and would otherwise be waited for until the session closes.
+  if (over && ok && unsaved.has(body.userdata)) {
+    for (const [userdata, key] of unsaved) {
+      if (userdata === body.userdata) break;
+      if (key === body.key) unsaved.delete(userdata);
+    }
+  }
   if (over) unsaved.delete(body.userdata);
   forcesaves.get(body.userdata)?.(ok);
 }

@@ -287,6 +287,57 @@ test("office_edit on an open document whose earlier save is still under way (its
   assert.equal(keyStanding(w.key, getDoc(w.doc.docId, w.root)!.mtimeMs), "follow");
 });
 
+test("office_edit on an open document whose earlier save the Document Server gave up (its callback could not be delivered): the retry has it save again, edits on top of that, and a later one does not wait for the given-up save", async () => {
+  const person = await typed("Typed by the person");
+  // The first forcesave starts, but its callback never comes: the Document Server could not reach the portal and gave
+  // it up after its few tries. Asked again, it answers 0 and saves everything once more; later, with nothing typed
+  // since, it answers 4.
+  const w = await world(() => {
+    const n = w.ds.asked.length;
+    if (n === 1) return { error: 0 };
+    if (n <= 3) return { error: 0, then: { status: 6, bytes: person } };
+    return { error: 4 };
+  }, 300);
+  await assert.rejects(
+    w.edit.execute("e1", { id: w.doc.docId, ops: [{ quote: "the person", replacement: "the person and the agent" }], baseRevision: w.base }),
+    (e: Error) => /^error:editor_not_saved /.test(e.message),
+  );
+  assert.equal(w.text(), "New document", "nothing written");
+  // The agent tries again: the save lands, but its quote is not there, so nothing is edited, and the editor stays.
+  await assert.rejects(w.edit.execute("e2", { id: w.doc.docId, ops: [{ quote: "not there", replacement: "x" }], baseRevision: w.base }), /quote_not_found/);
+  assert.equal(w.text(), "Typed by the person", "the retry had the editor save");
+  const saved = getDoc(w.doc.docId, w.root)!.mtimeMs;
+  // And once more, with a quote that is there: the save asked for now lands, the one given up is not waited for.
+  const started = Date.now();
+  const done = await w.edit.execute("e3", { id: w.doc.docId, ops: [{ quote: "the person", replacement: "the person and the agent" }], baseRevision: saved });
+  assert.match(done.content[0].text, /open in the editor/, done.content[0].text);
+  assert.equal(w.text(), "Typed by the person and the agent");
+  assert.equal(w.ds.asked.length, 3);
+  // Then nothing is typed: the command answers 4, and the given-up save is not waited for either.
+  await saveOpenSessions(w.doc.docId, "Open", [w.key], { timeoutMs: 300 });
+  assert.ok(Date.now() - started < 250, `not after the wait (${Date.now() - started} ms)`);
+  assert.equal(listDocs(w.root).length, 1, "no conflict copy");
+});
+
+test("office_edit on an open document whose earlier save lands while a new one is asked for (a failed callback the Document Server sends again, and none for the new one): it is asked once more, and the edit made on top", async () => {
+  const person = await typed("Typed by the person");
+  const w = await world(() => {
+    const n = w.ds.asked.length;
+    if (n === 1) return { error: 0, then: { status: 6, bytes: person, afterMs: 500 } };
+    if (n === 2) return { error: 0 };
+    return { error: 4 };
+  }, 400);
+  await assert.rejects(
+    w.edit.execute("e1", { id: w.doc.docId, ops: [{ quote: "the person", replacement: "the person and the agent" }], baseRevision: w.base }),
+    (e: Error) => /^error:editor_not_saved /.test(e.message),
+  );
+  const done = await w.edit.execute("e2", { id: w.doc.docId, ops: [{ quote: "the person", replacement: "the person and the agent" }], baseRevision: w.base });
+  assert.match(done.content[0].text, /open in the editor/, done.content[0].text);
+  assert.equal(w.text(), "Typed by the person and the agent");
+  assert.equal(w.ds.asked.length, 3, "asked again once the earlier save landed");
+  assert.equal(listDocs(w.root).length, 1, "no conflict copy");
+});
+
 test("office_edit on an open document whose editor is closing (the command answers 3 until the close's save comes): waits for that save, and edits on top of it", async () => {
   const person = await typed("Typed before closing");
   const w = await world(() => ({ error: 3, then: { status: 2, bytes: person, afterMs: 300 } }), 5000);

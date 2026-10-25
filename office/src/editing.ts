@@ -41,11 +41,14 @@ const POLL_MS = 100;
 /**
  * Has the Document Server save each editing session open on the document (`keys`) now, and waits until each is saved:
  * its callback persisted (or kept as a copy). Afterwards everything typed in those sessions until now is on disk.
- * First a forcesave asked before and not landed yet (a wait that timed out, a persist the Document Server sends again)
- * is waited for: while it is under way the command answers 4 though what it holds is not on disk. Then the command:
+ * The command answers:
  * - 0: the forcesave started; its callback is waited for. A session that is closing calls back with its close
- *   instead (status 2, a few seconds after the last editor left), which saves everything it held as well.
- * - 4: nothing was typed since the session's last save; nothing to wait for.
+ *   instead (status 2, a few seconds after the last editor left), which saves everything it held as well. A forcesave
+ *   asked before and not landed (a wait that timed out) is then not under way any more: the Document Server gave its
+ *   callback up, and this save holds what it held. One that lands meanwhile (a failed persist the Document Server
+ *   sends again) is all it calls back with for the moment, and it is asked again.
+ * - 4: nothing was typed since the session's last save; nothing to wait for. Or a forcesave asked before is still
+ *   under way, though what it holds is not on disk: that one is waited for, and it is asked again.
  * - 3: the Document Server cannot save it now, as while the session closes: its close is waited for.
  * - 1: the Document Server has no session of that key. Its close's save that could not be handed over is kept as
  *   forgotten there, and is taken back now (callback.takeForgotten); one still on its way is waited for while the key
@@ -58,42 +61,85 @@ export async function saveOpenSessions(docId: string, title: string, keys: strin
   const timeoutMs = deps.timeoutMs ?? SAVE_TIMEOUT_MS;
   for (const key of keys) {
     const until = Date.now() + timeoutMs;
-    if (!(await earlierSaved(key, until))) throw notSaved(title, `a save it was asked for before has not landed within ${timeoutMs / 1000} s`);
-    const userdata = `office-${randomUUID()}`;
-    // Waiting before asking: the callback can come before the command's own answer.
-    const waiting = callback.awaitForcesave(userdata, key);
-    let answer: Record<string, unknown>;
-    try {
-      answer = await ask({ c: "forcesave", key, userdata });
-    } catch (e) {
-      waiting.forget();
-      throw notSaved(title, `the Document Server could not be asked to save it (${e instanceof Error ? e.message : String(e)})`);
+    for (;;) {
+      // Asked for before and not landed: either still under way (then the command answers 4), or given up by the
+      // Document Server, which drops a callback it could not deliver after a few tries (then it answers 0 and saves
+      // everything again). Which one the answer below tells.
+      const earlier = callback.unsavedOf(key);
+      const userdata = `office-${randomUUID()}`;
+      // Waiting before asking: the callback can come before the command's own answer.
+      const waiting = callback.awaitForcesave(userdata, key);
+      let answer: Record<string, unknown>;
+      try {
+        answer = await ask({ c: "forcesave", key, userdata });
+      } catch (e) {
+        waiting.forget();
+        throw notSaved(title, `the Document Server could not be asked to save it (${e instanceof Error ? e.message : String(e)})`);
+      }
+      if (answer.error === 4) {
+        waiting.forget();
+        if (!earlier.length) break;
+        // One asked for before is still under way: it is waited for, and then the Document Server is asked again.
+        if (!(await earlierSaved(key, until))) throw notSaved(title, `a save it was asked for before has not landed within ${timeoutMs / 1000} s`);
+        continue;
+      }
+      if (answer.error === 3) {
+        waiting.forget();
+        if (!(await closed(key, until))) throw notSaved(title, `the Document Server could not save it now (error 3), and it did not close within ${timeoutMs / 1000} s`);
+        break;
+      }
+      if (answer.error === 1) {
+        waiting.forget();
+        await sessionGone(docId, key, until, title);
+        break;
+      }
+      if (answer.error !== 0) {
+        waiting.forget();
+        throw notSaved(title, `the Document Server refused to save it (error ${String(answer.error)})`);
+      }
+      // Under way now. One asked for before that lands meanwhile (a failed callback the Document Server sends again) is
+      // all it calls back with for the moment: it is asked once more then.
+      const closing = watchClosed(key, until);
+      const before = watchLanded(key, earlier, until);
+      const ok = await Promise.race([
+        waiting.done,
+        closing.done.then((gone) => (gone ? true : ("timeout" as const))),
+        before.done.then((landed) => (landed ? ("earlier" as const) : new Promise<never>(() => {}))),
+      ]);
+      closing.stop();
+      before.stop();
+      if (ok === "earlier") {
+        waiting.forget();
+        continue;
+      }
+      waiting.cancel();
+      if (ok === "timeout") throw notSaved(title, `the Document Server did not save what is typed there within ${timeoutMs / 1000} s`);
+      if (!ok) throw notSaved(title, "the Document Server could not save what is typed there");
+      break;
     }
-    if (answer.error === 4) {
-      waiting.forget();
-      continue;
-    }
-    if (answer.error === 3) {
-      waiting.forget();
-      if (!(await closed(key, until))) throw notSaved(title, `the Document Server could not save it now (error 3), and it did not close within ${timeoutMs / 1000} s`);
-      continue;
-    }
-    if (answer.error === 1) {
-      waiting.forget();
-      await sessionGone(docId, key, until, title);
-      continue;
-    }
-    if (answer.error !== 0) {
-      waiting.forget();
-      throw notSaved(title, `the Document Server refused to save it (error ${String(answer.error)})`);
-    }
-    const closing = watchClosed(key, until);
-    const ok = await Promise.race([waiting.done, closing.done.then((gone) => (gone ? true : ("timeout" as const)))]);
-    closing.stop();
-    waiting.cancel();
-    if (ok === "timeout") throw notSaved(title, `the Document Server did not save what is typed there within ${timeoutMs / 1000} s`);
-    if (!ok) throw notSaved(title, "the Document Server could not save what is typed there");
   }
+}
+
+/** Whether one of the forcesaves `earlier` landed (it is no longer among those not landed, callback.unsavedOf) by
+ * `until`, looked at every POLL_MS: true once one did, false at `until` or once stopped, and for none. */
+function watchLanded(key: string, earlier: string[], until: number): { done: Promise<boolean>; stop(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stop: () => void = () => {};
+  const done = new Promise<boolean>((resolve) => {
+    if (!earlier.length) return resolve(false);
+    const look = () => {
+      const left = callback.unsavedOf(key);
+      if (earlier.some((userdata) => !left.includes(userdata))) return resolve(true);
+      if (Date.now() >= until) return resolve(false);
+      timer = setTimeout(look, POLL_MS);
+    };
+    stop = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    look();
+  });
+  return { done, stop };
 }
 
 /** Every forcesave of `key` asked before and not landed yet has landed by `until`: true, or false where one did not. A

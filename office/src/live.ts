@@ -68,6 +68,10 @@ function isStale(u: PresenceRecord, now: number): boolean {
 
 /** docId -> userId -> PresenceRecord. Maps (not arrays) so a re-join of the same user never duplicates. */
 const presence = new Map<string, Map<string, PresenceRecord>>();
+/** docId -> document.key -> the ids of the users the Document Server says are in the editing session of that key (its
+ * status-1 callbacks). A document has more than one for a moment when an editor loads a newer revision: the editor is
+ * in the new key's session at once, and the old key's closes a few seconds later. */
+const sessions = new Map<string, Map<string, Set<string>>>();
 /** docIds explicitly locked by a callback command (statuses 1/2/4/6). */
 const locked = new Set<string>();
 /** Injected source of "the document's current mtimeMs revision"; null until server.ts registers one. */
@@ -117,6 +121,46 @@ export function inSession(docId: string): boolean {
   return [...(presence.get(docId)?.values() ?? [])].some((u) => u.confirmed);
 }
 
+/** The Document Server's word on who is in the editing session of `key` (a status-1 callback): its users now, an empty
+ * list for none left. Presence follows every session of the document together: a user still in another key's session
+ * stays. */
+export function setSession(docId: string, key: string, userIds: string[]): void {
+  let keys = sessions.get(docId);
+  if (!keys) {
+    keys = new Map();
+    sessions.set(docId, keys);
+  }
+  if (userIds.length) keys.set(key, new Set(userIds));
+  else keys.delete(key);
+  const still = sessionUsers(docId);
+  for (const tracked of usersOf(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
+  if (!keys.size) sessions.delete(docId);
+}
+
+/** The session of `key` is over (status 2 or 4, its terminal close). With none left on the document, nobody is in it:
+ * presence and the flag go (clearDoc). Another key's session (an editor that already loads a newer revision) keeps
+ * its users and the lock. */
+export function endSession(docId: string, key: string): void {
+  const keys = sessions.get(docId);
+  keys?.delete(key);
+  if (!keys?.size) {
+    clearDoc(docId);
+    return;
+  }
+  const still = sessionUsers(docId);
+  for (const tracked of usersOf(docId)) if (!still.has(tracked.id)) setUser(docId, { id: tracked.id }, false);
+}
+
+/** The keys of the editing sessions the Document Server said are open on the document: what an agent's write has it
+ * save first. */
+export function sessionKeys(docId: string): string[] {
+  return [...(sessions.get(docId)?.keys() ?? [])];
+}
+
+function sessionUsers(docId: string): Set<string> {
+  return new Set([...(sessions.get(docId)?.values() ?? [])].flatMap((users) => [...users]));
+}
+
 /** The explicit lock flag (callback statuses 1/2/4/6 set it). */
 export function setLocked(docId: string, isLocked: boolean): void {
   if (isLocked) locked.add(docId);
@@ -156,6 +200,7 @@ export function setMetaResolver(resolver: ((docId: string) => number | null) | n
  * phantom lock badge. */
 export function clearDoc(docId: string): void {
   presence.delete(docId);
+  sessions.delete(docId);
   locked.delete(docId);
 }
 
@@ -163,6 +208,7 @@ export function clearDoc(docId: string): void {
  * share one process; safe to call at any other time -- it only loses in-memory lock badges, nothing on disk. */
 export function resetLive(): void {
   presence.clear();
+  sessions.clear();
   locked.clear();
   resolveMeta = null;
   presenceTtlMs = DEFAULT_PRESENCE_TTL_MS;

@@ -17,8 +17,11 @@
  * Revision model: the mtimeMs of the library file IS the revision. office_edit takes baseRevision (= the mtimeMs
  * office_read showed), GATES FIRST (>1 ms drift -> "error:revision_mismatch ..." with the fresh mtime, nothing
  * written), and store.persistBytes re-gates strictly at write time anyway (ZERO tolerance). While the document is open
- * in the editor, office_edit refuses (error:open_in_editor): the Document Server saves what was typed only as the
- * last editor closes, under the revision it opened, and an agent's edit landing first would turn that save stale.
+ * in the editor, office_edit first has the Document Server save what is typed there (editing.ts), makes its edit on
+ * top of that save, and the editor loads the result; where the editor does not save in time, it refuses
+ * (error:editor_not_saved) and writes nothing. The edits of one document run one at a time (oneAtATime): a second
+ * waits for the first, and then meets the revision the first wrote. office_create never writes over a document (a
+ * taken name is refused) and office_comments only reads, so office_edit is the one write that needs this.
  *
  * Wakes (the drain side): ping.ts only QUEUES wakes server-side and rings the
  * bell with chats.tell(chatId, {type:"ping"}). The office pi extension registered from THIS factory
@@ -37,7 +40,9 @@ import path from "node:path";
 import { portal } from "./host";
 import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, persistBytes, readDoc, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
 import { parseDocx, parseXlsx, editDocx, readPart, rewriteZip, type EditOp } from "./ooxml";
-import { inSession, usersOf, isLocked } from "./live";
+import { sessionKeys as liveSessionKeys, usersOf, isLocked } from "./live";
+import { followTo, savedRevision } from "./callback";
+import { saveOpenSessions } from "./editing";
 import { drainWakeQueue } from "./ping";
 
 /** The UI_RECEIVE bus event chats.tell rings (the portal's own document tools listen on the same name). */
@@ -94,10 +99,12 @@ export type ToolsDeps = {
   mayWrite?: (file: string, chatId: string) => void;
   /** Store/state root override. Default: lazy portal().dataDir(). */
   root?: string;
-  /** Whether the Document Server has an editing session open on the document at its current revision. Default:
-   * a seat the Document Server confirmed (live.inSession); server.ts gives its own, which also asks the Document
-   * Server. */
-  sessionOpen?: (doc: DocMeta) => Promise<boolean>;
+  /** The keys of the editing sessions the Document Server has open on the document. Default: those its callbacks
+   * named (live.sessionKeys); server.ts gives its own, which also asks the Document Server after a restart. */
+  sessionKeys?: (doc: DocMeta) => Promise<string[]>;
+  /** Has the Document Server save those sessions now and waits for it (editing.saveOpenSessions by default); rejects
+   * with `editor_not_saved` where they are not saved in time. */
+  saveSessions?: (doc: DocMeta, keys: string[]) => Promise<void>;
   /** The audit sink for mutating ops. Default: a one-line log via the log seam (ping.ts pattern). */
   record?: (entry: OfficeAuditEntry) => void;
   /** Log line. Default: lazy portal().log. */
@@ -159,6 +166,21 @@ function logLine(line: string): void {
 function record(entry: OfficeAuditEntry): void {
   // Lazy default is a one-line log (a real audit sink can be passed via registerTools({record})).
   (cfg.record ?? ((e: OfficeAuditEntry) => logLine(`office audit: ${e.subject}: ${e.reason} (chat ${e.chatId})`)))(entry);
+}
+
+/** docId -> the end of the last write queued on it. */
+const queued = new Map<string, Promise<unknown>>();
+
+/** Runs the writes of one document one at a time, in the order they came: a write waits for the open editor's save, and
+ * another write of the same document must not slip in between that save and the write made on top of it. */
+function oneAtATime<T>(docId: string, work: () => Promise<T>): Promise<T> {
+  const run = (queued.get(docId) ?? Promise.resolve()).then(work);
+  const end = run.catch(() => {});
+  queued.set(docId, end);
+  void end.then(() => {
+    if (queued.get(docId) === end) queued.delete(docId);
+  });
+  return run;
 }
 
 /* ------------------------------------------------------------------ */
@@ -243,7 +265,7 @@ const lockLine = (doc: DocMeta) => {
   const users = usersOf(doc.docId);
   if (!users.length && !isLocked(doc.docId)) return "";
   const who = users.map((u) => u.name || u.id).join(", ");
-  return `\n${users.length ? `${users.length} person${users.length === 1 ? "" : "s"} editing now (${who}).` : ""}${isLocked(doc.docId) && !users.length ? "\nThe document is currently locked by the editor." : ""}`;
+  return `\n${users.length ? `${users.length} person${users.length === 1 ? "" : "s"} editing now (${who}): what they typed since the editor last saved is not in this text yet; office_edit has the editor save it first and edits on top of it.` : ""}${isLocked(doc.docId) && !users.length ? "\nThe document is currently locked by the editor." : ""}`;
 };
 
 /* ------------------------------------------------------------------ */
@@ -370,7 +392,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_edit",
     label: LABELS.office_edit,
     guard: GUARDS.office_edit,
-    description: `Change a Word document of your library by replacing quoted text, as office_read shows it. Each op is {quote, replacement}: the quote must appear in the extracted text (empty replacement removes it), ops apply one after another. While a person has the document open in the editor, the edit is refused (error:open_in_editor): what they type is saved when they close it, so wait and try again then. Every edit goes through the revision gate: baseRevision is the mtimeMs you read (or that your last edit returned), and if the document moved on since NOTHING is written and you hear a CONFLICT with the fresh revision -- re-read and retry. You never clobber a newer revision. Spreadsheets cannot be edited in v1 (a later milestone). All ops are made or none.`,
+    description: `Change a Word document of your library by replacing quoted text, as office_read shows it. Each op is {quote, replacement}: the quote must appear in the extracted text (empty replacement removes it), ops apply one after another. While a person has the document open in the editor, what they typed is saved first, your edit is made on top of it (so quote the text as it stands, which may hold their newest typing), and their editor loads the result; if the editor does not save within 30 s, the edit is refused (error:editor_not_saved), nothing is written, and you try again in a moment. Every edit goes through the revision gate: baseRevision is the mtimeMs you read (or that your last edit returned), and if the document moved on since NOTHING is written and you hear a CONFLICT with the fresh revision -- re-read and retry. You never clobber a newer revision. Spreadsheets cannot be edited in v1 (a later milestone). All ops are made or none.`,
     promptSnippet: "Edit a Word document: quoted replacements on the revision you read",
     executionMode: "sequential",
     parameters: {
@@ -403,61 +425,73 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const base = Number(baseRevision);
       if (baseRevision === undefined || baseRevision === null || !Number.isFinite(base)) throw new Refusal("invalid", "baseRevision is the mtimeMs revision office_list/office_read showed you");
 
-      // GATE FIRST: the meta as it stands now vs what the agent read; >1 ms drift means a save
-      // moved since -- refuse with the FRESH mtime in the message, and write nothing. store.persistBytes
-      // re-gates strictly at write time too, so this is belt and not only braces.
-      let meta = refresh(doc.docId, rootDir());
-      if (!meta) throw new Refusal("not_found", `"${doc.title}" vanished from the library between list and edit`);
-      // Not while the document is open in the editor: the Document Server saves what is typed there only when the
-      // last editor closes, under the revision it opened, and an edit landing first would make that save stale --
-      // the person's whole session would be refused. So the agent waits until it is closed.
-      if (await (cfg.sessionOpen ?? (async (d: DocMeta) => inSession(d.docId)))(meta)) {
-        throw new Refusal("open_in_editor", `"${meta.title}" is open in the editor right now: what is typed there is saved when it is closed, and an edit now would be in its way. Nothing was written. Try again once it is closed (office_list says when nobody is editing it).`);
-      }
-      // When the revision gate refuses, say LOUDLY that this is a CONFLICT and point at the fresh revision to re-read + retry.
-      const stale = (fresh: DocMeta) => {
-        const humans = usersOf(fresh.docId);
-        const openEditorNote = humans.length > 0 ? ` A human editor (${humans.map((h) => h.name ?? h.id).join(", ")}) still has the document open, so a co-editor is likely behind the change.` : "";
-        return new Refusal("revision_mismatch", `CONFLICT: "${fresh.title}" is at revision ${fresh.mtimeMs}, not ${base}: it changed since you read it. Nothing was written.${openEditorNote} Read it again with office_read, then redo the edit with baseRevision ${fresh.mtimeMs}.`);
-      };
-      if (Math.abs(meta.mtimeMs - base) > 1) throw stale(meta);
+      return oneAtATime(doc.docId, async () => {
+        // GATE FIRST: the meta as it stands now vs what the agent read; >1 ms drift means a save
+        // moved since -- refuse with the FRESH mtime in the message, and write nothing. store.persistBytes
+        // re-gates strictly at write time too, so this is belt and not only braces.
+        let meta = refresh(doc.docId, rootDir());
+        if (!meta) throw new Refusal("not_found", `"${doc.title}" vanished from the library between list and edit`);
+        // When the revision gate refuses, say LOUDLY that this is a CONFLICT and point at the fresh revision to re-read + retry.
+        const stale = (fresh: DocMeta) => {
+          const humans = usersOf(fresh.docId);
+          const openEditorNote = humans.length > 0 ? ` A human editor (${humans.map((h) => h.name ?? h.id).join(", ")}) still has the document open, so a co-editor is likely behind the change.` : "";
+          return new Refusal("revision_mismatch", `CONFLICT: "${fresh.title}" is at revision ${fresh.mtimeMs}, not ${base}: it changed since you read it. Nothing was written.${openEditorNote} Read it again with office_read, then redo the edit with baseRevision ${fresh.mtimeMs}.`);
+        };
+        if (Math.abs(meta.mtimeMs - base) > 1) throw stale(meta);
 
-      // word/document.xml out of the archive; damage is `corrupt`, quote problems pass through ooxml's codes.
-      const buf = readBytes(doc, chatId);
-      let documentXml: string;
-      try {
-        // Within the caps every other read here keeps (256 MiB an entry, 1 GiB a zip): a part that inflates to gigabytes
-        // is refused before it is inflated, not held whole in the portal's memory.
-        const part = readPart(buf, "word/document.xml");
-        if (part === undefined) throw new Refusal("corrupt", `"${doc.title}" has no word/document.xml: it is not a Word document`);
-        documentXml = part;
-      } catch (e) {
-        if (e instanceof Refusal) throw e;
-        throw new Refusal("corrupt", `"${doc.title}" could not be opened as a zip archive: ${e instanceof Error ? e.message : String(e)}`);
-      }
-
-      // Written with the portal's rights: only where the agent could have written it itself.
-      if (doc.path) assertMayWrite(doc.path, chatId, doc.title);
-      const editedXml = editDocx(documentXml, ops as EditOp[]); // throws {code:"quote_not_found"|"quote_ambiguous"} -- surfaced unchanged by failed()
-      const out = rewriteZip(buf, { "word/document.xml": editedXml }); // {code:"invalid_zip"} -> corrupt
-      let saved: { mtimeMs: number };
-      try {
-        saved = persistBytes(meta, out, rootDir()); // the strict ZERO-tolerance final gate + index update
-      } catch (e) {
-        const err = e as (Error & { code?: string; currentMtimeMs?: number }) | null;
-        if (err?.code === "revision_mismatch") {
-          // The file moved underneath us between the pre-gate read and the write (a co-editor's save landing
-          // on disk through the DS callback persist path). Refuse LOUD as a conflict with the FRESH revision,
-          // generic wording here: this is the safety mechanism of the co-editor model (fail loud, re-read + retry).
-          const humans = usersOf(doc.docId);
-          const note = humans.length > 0 ? ` A human editor (${humans.map((h) => h.name ?? h.id).join(", ")}) has the document open -- a co-editor's save is the likely change.` : "";
-          throw new Refusal("revision_mismatch", `CONFLICT: "${doc.title}" changed while this edit was in flight: it is now at revision ${err.currentMtimeMs ?? "unknown"}, you based the edit on ${base}. Nothing was written.${note} Read it again with office_read, then redo the edit with baseRevision ${err.currentMtimeMs ?? "the fresh revision office_list shows"}.`);
+        // Open in the editor: what is typed there is saved first (the Document Server writes it through its callback,
+        // under the revision gate), and the edit is made on top of that save. Only that save may have moved the
+        // revision since the gate above: anything else did write over what the agent read, and is a conflict.
+        const keys = await (cfg.sessionKeys ?? (async (d: DocMeta) => liveSessionKeys(d.docId)))(meta);
+        if (keys.length) {
+          await (cfg.saveSessions ?? ((d: DocMeta, k: string[]) => saveOpenSessions(d.docId, d.title, k)))(meta, keys);
+          const saved = refresh(doc.docId, rootDir());
+          if (!saved) throw new Refusal("not_found", `"${doc.title}" vanished from the library while the editor saved it`);
+          if (saved.mtimeMs !== meta.mtimeMs && !keys.some((k) => savedRevision(k) === saved.mtimeMs)) throw stale(saved);
+          meta = saved;
         }
-        throw e;
-      }
-      record({ subject: doc.title, reason: `office_edit: ${ops.length} op(s) applied, revision ${meta.mtimeMs} -> ${saved.mtimeMs}`, chatId });
-      const n = ops.length;
-      return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"} made): now at revision ${saved.mtimeMs}. Pass that as baseRevision for the next edit.`, { action: "edit", id: doc.docId, from: meta.mtimeMs, to: saved.mtimeMs, ops: n });
+        // From here to the write nothing waits: no other write of the file (a callback's among them) comes in between.
+
+        // word/document.xml out of the archive; damage is `corrupt`, quote problems pass through ooxml's codes.
+        const buf = readBytes(meta, chatId);
+        let documentXml: string;
+        try {
+          // Within the caps every other read here keeps (256 MiB an entry, 1 GiB a zip): a part that inflates to gigabytes
+          // is refused before it is inflated, not held whole in the portal's memory.
+          const part = readPart(buf, "word/document.xml");
+          if (part === undefined) throw new Refusal("corrupt", `"${doc.title}" has no word/document.xml: it is not a Word document`);
+          documentXml = part;
+        } catch (e) {
+          if (e instanceof Refusal) throw e;
+          throw new Refusal("corrupt", `"${doc.title}" could not be opened as a zip archive: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        // Written with the portal's rights: only where the agent could have written it itself.
+        if (doc.path) assertMayWrite(doc.path, chatId, doc.title);
+        const editedXml = editDocx(documentXml, ops as EditOp[]); // throws {code:"quote_not_found"|"quote_ambiguous"} -- surfaced unchanged by failed()
+        const out = rewriteZip(buf, { "word/document.xml": editedXml }); // {code:"invalid_zip"} -> corrupt
+        let saved: { mtimeMs: number };
+        try {
+          saved = persistBytes(meta, out, rootDir()); // the strict ZERO-tolerance final gate + index update
+        } catch (e) {
+          const err = e as (Error & { code?: string; currentMtimeMs?: number }) | null;
+          if (err?.code === "revision_mismatch") {
+            // The file moved underneath us between the pre-gate read and the write (a co-editor's save landing
+            // on disk through the DS callback persist path). Refuse LOUD as a conflict with the FRESH revision,
+            // generic wording here: this is the safety mechanism of the co-editor model (fail loud, re-read + retry).
+            const humans = usersOf(doc.docId);
+            const note = humans.length > 0 ? ` A human editor (${humans.map((h) => h.name ?? h.id).join(", ")}) has the document open -- a co-editor's save is the likely change.` : "";
+            throw new Refusal("revision_mismatch", `CONFLICT: "${doc.title}" changed while this edit was in flight: it is now at revision ${err.currentMtimeMs ?? "unknown"}, you based the edit on ${base}. Nothing was written.${note} Read it again with office_read, then redo the edit with baseRevision ${err.currentMtimeMs ?? "the fresh revision office_list shows"}.`);
+          }
+          throw e;
+        }
+        // Everything those sessions had is in this revision now: their editors load it.
+        for (const key of keys) followTo(key, saved.mtimeMs);
+        record({ subject: doc.title, reason: `office_edit: ${ops.length} op(s) applied, revision ${meta.mtimeMs} -> ${saved.mtimeMs}${keys.length ? " (on top of what the open editor saved first)" : ""}`, chatId });
+        const n = ops.length;
+        const opened = keys.length ? ` It was open in the editor: what was typed there was saved first, your edit made on top of it, and the editor loads this revision now.` : "";
+        return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"} made): now at revision ${saved.mtimeMs}.${opened} Pass that as baseRevision for the next edit.`, { action: "edit", id: doc.docId, from: meta.mtimeMs, to: saved.mtimeMs, ops: n });
+      });
     }),
   });
 

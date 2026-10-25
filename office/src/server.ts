@@ -270,7 +270,9 @@ function buildEditorConfig(dd: string, secret: string, docId: string): { res?: u
     title: doc.title,
     document: {
       fileType: doc.ext,
-      key: callback.makeKey(doc.docId, doc.mtimeMs),
+      // The key of the session already open on this revision where there is one (its own save wrote this revision,
+      // so its key pins an older one): the editor joins it instead of opening a second session beside it.
+      key: live.sessionKeys(doc.docId).find((key) => callback.keyStanding(key, doc.mtimeMs) === "current") ?? callback.makeKey(doc.docId, doc.mtimeMs),
       title: `${doc.title}.${doc.ext}`,
       url: `${base}/doc/${ticket}`,
     },
@@ -556,6 +558,20 @@ function registerRoutes(dd: string, secret: string): void {
     }
   });
 
+  /** GET /editor-state?doc=<id>&key=<key> -> { standing }: how the editor that opened `doc` with `key` stands to the
+   * document now (callback.keyStanding). "follow": an agent's edit was made on top of everything its session had
+   * saved, and the editor loads the new revision; "behind": the file changed outside the editor, which the page says;
+   * "current": nothing to do. The editor page asks every second while it is open. */
+  r.get("/editor-state", async (req, res) => {
+    const docId = typeof req.query?.doc === "string" ? req.query.doc : "";
+    const key = typeof req.query?.key === "string" ? req.query.key : "";
+    const parsed = callback.parseKey(key);
+    if (!docId || !parsed || parsed.keyId !== callback.keyIdOf(docId)) return res.status(400).json({ error: "the query needs { doc, key } of an editor opened on that document", code: "invalid" });
+    const doc = store.refresh(docId, dd);
+    if (!doc) return res.status(404).json({ error: `no document with id ${docId}`, code: "not_found" });
+    res.json({ standing: callback.keyStanding(key, doc.mtimeMs) });
+  });
+
   /** GET+POST /ds/<rest...> -> a thin reverse proxy for the browser's Document Server traffic (api.js, the editor
    * iframe and its assets -- AND the socket.io POLLING channel). The editor app talks to docserver over engine.io:
    * GET <app>/10.0.0-<buildhash>/doc/<key>/c/?EIO=4&transport=polling handshakes, then the client's packets (the
@@ -667,29 +683,23 @@ function registerRoutes(dd: string, secret: string): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* is the document open in the editor                                  */
+/* the editing sessions open on a document                             */
 /* ------------------------------------------------------------------ */
 
 /**
- * Whether the Document Server has an editing session open on `doc` at its current revision: a seat it confirmed
- * through its callbacks, or, as a half that started again since knows of none, its own answer to the `info` command
- * for the document's key (error 0: a session with that key is open; 1: none). Where the Document Server cannot be
- * asked, the seats alone say.
+ * The keys of the editing sessions the Document Server has open on `doc`: those its callbacks named, or, as a half
+ * that started again since knows of none, the key of the document's current revision where the Document Server's own
+ * `info` command knows it (error 0: a session with that key is open; 1: none). Where it cannot be asked, the
+ * callbacks alone say.
  */
-async function sessionOpen(dd: string, secret: string, doc: store.DocMeta): Promise<boolean> {
-  if (live.inSession(doc.docId)) return true;
-  if (!container.readDsRecord(dd)) return false;
-  const body = { c: "info", key: callback.makeKey(doc.docId, doc.mtimeMs) };
+async function sessionKeys(dd: string, doc: store.DocMeta): Promise<string[]> {
+  const known = live.sessionKeys(doc.docId);
+  if (known.length || !container.readDsRecord(dd)) return known;
+  const key = callback.makeKey(doc.docId, doc.mtimeMs);
   try {
-    const res = await fetch(`${await container.dsOrigin()}/command`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Auth-Token": `Bearer ${signJwt(body, 60_000, secret)}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
-    });
-    return ((await res.json()) as { error?: unknown }).error === 0;
+    return (await callback.command({ c: "info", key }, 5000)).error === 0 ? [key] : [];
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -701,10 +711,11 @@ async function sessionOpen(dd: string, secret: string, doc: store.DocMeta): Prom
 const MAX_DS_BODY = 128 * 1024 * 1024;
 
 /** The Document Server's own endpoints that no browser needs: its statistics and licence (`info`), its cluster
- * switches (`internal`), its command and conversion services for integrators, and its AI proxy. The rest of what
- * its nginx serves (the editor's files, the socket.io channel, the converted files, downloadas, upload, print...) is
- * the editor's. */
-const DS_DENIED = new Set(["info", "internal", "coauthoring", "converter", "convertservice.ashx", "docbuilder", "ai-proxy"]);
+ * switches (`internal`), its command service (`command`, and the older `coauthoring/CommandService.ashx`), which the
+ * server half alone calls, through Office's own way in, its conversion services for integrators, and its AI proxy.
+ * The rest of what its nginx serves (the editor's files, the socket.io channel, the converted files, downloadas,
+ * upload, print...) is the editor's. */
+const DS_DENIED = new Set(["info", "internal", "command", "coauthoring", "converter", "convertservice.ashx", "docbuilder", "ai-proxy"]);
 
 /** Whether the /ds proxy passes `rest` (the path after /ds/, with its query) on: as the Document Server's nginx reads a
  * path -- decoded, slashes merged, dot segments resolved, the versioned prefix (`/10.0.0-169/`) taken off -- its first
@@ -765,10 +776,9 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   const tickets = ensureSecret(dd, "ticket-secret"); // the document tickets', which the Document Server never sees
   const relayKey = ensureSecret(dd, "relay-secret"); // the key the way back's tunnels open with at the relay
 
-  // the seams, as their module headers describe them (audit lands in portal().audit AND a log line).
-  // NOTE: there is NO co-editing switch and no flush-before-write hook to install here -- office_edit runs under
-  // the strict mtime/revision gate with human editor sessions open or not (co-editor model; fail loud, re-read + retry).
-  registerTools({ root: dd, record: recordAudit, sessionOpen: (doc) => sessionOpen(dd, secret, doc) });
+  // the seams, as their module headers describe them (audit lands in portal().audit AND a log line). office_edit on a
+  // document open in the editor has the Document Server save it first (editing.ts), through the command service.
+  registerTools({ root: dd, record: recordAudit, sessionKeys: (doc) => sessionKeys(dd, doc) });
   // Owners and grants were chat ids before: moved to the folders those chats work in.
   try {
     const moved = store.migrateOwners((chatId) => {

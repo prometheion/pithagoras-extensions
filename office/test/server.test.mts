@@ -21,8 +21,8 @@ import * as store from "../src/store";
 import { commentKeys, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
-import { verifyJwt } from "../src/jwt";
-import { docIdOf, makeKey, parseKey, revHashOf } from "../src/callback";
+import { signJwt, verifyJwt } from "../src/jwt";
+import { docIdOf, followTo, makeKey, parseKey, revHashOf } from "../src/callback";
 
 const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 
@@ -406,6 +406,67 @@ test("editor-config: a file written outside the extension is opened at its new r
   assert.equal(second.document.key, makeKey(doc.docId, fs.statSync(file).mtimeMs));
   assert.equal(store.getDoc(doc.docId, b.root)!.mtimeMs, fs.statSync(file).mtimeMs, "and the index has it");
   live.clearDoc(doc.docId);
+  await b.cleanup();
+});
+
+test("editor-config: an editor opened while a session that saved this revision is open joins that session (its key), not a second one beside it", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  const doc = await store.createDoc({ title: "Joined", type: "word" }, b.root);
+  const opened = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
+  const key = opened.document.key;
+  live.setSession(doc.docId, key, ["portal-user"]);
+  // The session saved (a forcesave): a new revision, which its key does not name.
+  const saved = await savedBySession(b, doc, key, "saved by the open session");
+  assert.notEqual(makeKey(doc.docId, saved), key);
+  const second = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
+  assert.equal(second.document.key, key, "the second editor joins the open session");
+  // Once that session is over, a new editor opens the revision under its own key.
+  live.endSession(doc.docId, key);
+  const third = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
+  assert.equal(third.document.key, makeKey(doc.docId, saved));
+  live.resetLive();
+  await b.cleanup();
+});
+
+/** `bytes` saved by the session of `key` through the loopback listener's callback (a status-6 forcesave), as the
+ * Document Server saves it: the new revision. */
+async function savedBySession(b: Booted, doc: store.DocMeta, key: string, bytes: string): Promise<number> {
+  const files = http.createServer((_req, res) => res.end(bytes));
+  await new Promise<void>((resolve) => files.listen(0, "127.0.0.1", resolve));
+  writeDsJson(b, `http://127.0.0.1:${(files.address() as AddressInfo).port}`);
+  const envelope = { key, status: 6, url: "http://portal.test/api/x/%40pithagoras/office/ds/cache/files/data/x/output.docx?md5=x", forcesavetype: 0 };
+  const answer = await fetch(`http://127.0.0.1:${loopbackPort()}/callback`, { method: "POST", headers: { "content-type": "application/json", "x-auth-token": `Bearer ${signJwt({ payload: envelope, operation: "callback" }, 60_000, jwtSecret(b.root))}` }, body: "{}" });
+  assert.deepEqual(await answer.json(), { error: 0 });
+  files.closeAllConnections();
+  files.close();
+  return store.getDoc(doc.docId, b.root)!.mtimeMs;
+}
+
+test("/editor-state: an editor's key is current on its own revision and on what its session saved, follows an agent's edit made on top of it, and is behind a change made outside", async () => {
+  const b = await boot();
+  writeDsJson(b);
+  const doc = await store.createDoc({ title: "Standing", type: "word" }, b.root);
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  const ask = async (k = key) => (await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}&key=${encodeURIComponent(k)}`)).body;
+  assert.deepEqual(await ask(), { standing: "current" });
+  const saved = await savedBySession(b, doc, key, "saved by the session");
+  assert.deepEqual(await ask(), { standing: "current" }, "its own save does not take it off its revision");
+  // An agent's edit on top of what the session saved: the editor loads it.
+  const file = path.join(b.root, "docs", doc.docId, "Standing.docx");
+  const edited = store.persistBytes(store.getDoc(doc.docId, b.root)!, Buffer.from("and the agent's edit"), b.root).mtimeMs;
+  assert.notEqual(edited, saved);
+  followTo(key, edited);
+  assert.deepEqual(await ask(), { standing: "follow" });
+  // A script writes the file: nothing the editor's session had is in that revision.
+  fs.writeFileSync(file, "a script's");
+  fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+  assert.deepEqual(await ask(), { standing: "behind" });
+  // A key of another document, or none, is refused.
+  const other = await store.createDoc({ title: "Other", type: "word" }, b.root);
+  assert.equal((await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}&key=${encodeURIComponent(makeKey(other.docId, other.mtimeMs))}`)).statusCode, 400);
+  assert.equal((await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}`)).statusCode, 400);
+  live.resetLive();
   await b.cleanup();
 });
 
@@ -1012,10 +1073,13 @@ test("/ds proxy: the Document Server's own endpoints are not passed on, however 
   const ds = await startFakeDs();
   try {
     writeDsJson(b, `http://127.0.0.1:${ds.port}`);
-    for (const p of ["info/info.json", "internal/cluster/inactive", "10.0.0-169/info/info.json", "INFO/info.json", "%69nfo/info.json", "web-apps/../info/info.json", "web-apps/%2e%2e/internal/connections/edit", "//internal/x", "coauthoring/CommandService.ashx", "ConvertService.ashx", "ai-proxy/x", "%zz"]) {
+    for (const p of ["info/info.json", "internal/cluster/inactive", "10.0.0-169/info/info.json", "INFO/info.json", "%69nfo/info.json", "web-apps/../info/info.json", "web-apps/%2e%2e/internal/connections/edit", "//internal/x", "coauthoring/CommandService.ashx", "command", "Command?c=forcesave", "10.0.0-169/command", "web-apps/../command", "ConvertService.ashx", "ai-proxy/x", "%zz"]) {
       const res = await b.router.dispatch("GET", `/ds/${p}`);
       assert.equal(res.statusCode, 404, p);
     }
+    // The command service is the server half's alone (it saves an open editor before an agent writes): a POST of the
+    // browser's never reaches it.
+    assert.equal((await b.router.dispatch("POST", "/ds/command", JSON.stringify({ c: "forcesave", key: "k" }), { "content-type": "application/json" })).statusCode, 404);
     assert.deepEqual(ds.urls, [], "none reached the Document Server");
     for (const p of ["web-apps/apps/api/documents/api.js", "10.0.0-169/web-apps/apps/documenteditor/main/index.html", "cache/files/data/k/Editor.bin/Editor.bin?md5=x", "10.0.0-169/doc/k/c/?EIO=4", "downloadas/k?cmd=x", "fonts/x", "sdkjs/x", "meta/formats", "healthcheck"]) {
       assert.equal(dsPathAllowed(p), true, p);

@@ -20,7 +20,7 @@ import { GUARDS, LABELS, registerTools, __resetToolsForTests } from "../src/tool
 import { de } from "../src/de";
 import { createDoc, getDoc } from "../src/store";
 import { parseDocx, rewriteZip } from "../src/ooxml";
-import { setUser, resetLive } from "../src/live";
+import { resetLive } from "../src/live";
 
 /* ------------------------------------------------------------------ */
 /* fakes                                                               */
@@ -452,32 +452,79 @@ test("office_edit: applies ops to the stored bytes, bumps the revision; old base
   assert.equal(s.seen.records.filter((r) => r.reason.includes("office_edit")).length, 2);
 });
 
-test("office_edit while the document is open in the editor: refused, nothing written; a seat the Document Server never confirmed does not hold it up", async () => {
+test("office_edit on a document open in the editor has the sessions it is given saved first; where they are not saved in time, nothing is written (editor_not_saved)", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Open One", type: "word", owner: "/f/atlas" }, s.root);
   bumpRevision(s.root, doc.docId, Date.now() - 5000);
   const base = getDoc(doc.docId, s.root)!.mtimeMs;
-  // The Document Server said somebody is in it.
-  setUser(doc.docId, { id: "portal-user", name: "Portal" }, true, { confirmed: true });
-  const msg = await refused(tool(s, "office_edit").execute("f1", { id: doc.docId, ops: [{ quote: "New document", replacement: "Too early" }], baseRevision: base }), "open in the editor");
-  assert.match(msg, /^error:open_in_editor /);
-  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "New document");
+  const asked: string[][] = [];
+  registerTools({
+    sessionKeys: async (d) => [`key-of-${d.docId}`],
+    saveSessions: async (d, keys) => {
+      asked.push(keys);
+      throw Object.assign(new Error(`"${d.title}" is open in the editor, and the Document Server did not save what is typed there within 30 s, so the edit was not made`), { code: "editor_not_saved" });
+    },
+  });
+  const msg = await refused(tool(s, "office_edit").execute("f1", { id: doc.docId, ops: [{ quote: "New document", replacement: "Too early" }], baseRevision: base }), "not saved in time");
+  assert.match(msg, /^error:editor_not_saved /);
+  assert.deepEqual(asked, [[`key-of-${doc.docId}`]], "the open sessions were asked to save");
+  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "New document", "nothing written");
   assert.equal(getDoc(doc.docId, s.root)!.mtimeMs, base);
-  // Closed: the edit goes through.
-  resetLive();
-  setUser(doc.docId, { id: "portal-user", name: "Portal" }, true); // minted only: the editor never loaded
+  // No session open: nothing to save first, and the edit goes through.
+  asked.length = 0;
+  registerTools({ sessionKeys: async () => [] });
   await tool(s, "office_edit").execute("f2", { id: doc.docId, ops: [{ quote: "New document", replacement: "After closing" }], baseRevision: base });
+  assert.deepEqual(asked, []);
   assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "After closing");
 });
 
-test("office_edit asks the session check it is given (the Document Server's own answer after a restart)", async () => {
+test("office_edit on an open document: a write between the editor's save and the edit that is not the session's own is a conflict, and nothing is written over it", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Asked", type: "word", owner: "/f/atlas" }, s.root);
-  const asked: string[] = [];
-  registerTools({ sessionOpen: async (d) => (asked.push(d.docId), true) });
-  const msg = await refused(tool(s, "office_edit").execute("f1", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }], baseRevision: getDoc(doc.docId, s.root)!.mtimeMs }), "open");
-  assert.match(msg, /^error:open_in_editor /);
-  assert.deepEqual(asked, [doc.docId]);
+  const doc = await createDoc({ title: "Raced", type: "word", owner: "/f/atlas" }, s.root);
+  bumpRevision(s.root, doc.docId, Date.now() - 5000);
+  const base = getDoc(doc.docId, s.root)!.mtimeMs;
+  const outside = Buffer.from(rewriteZip(readDocBytes(s.root, doc.docId), {}));
+  registerTools({
+    sessionKeys: async () => ["some-session"],
+    // While the editor saves, a script writes the file: a revision no session of the editor wrote.
+    saveSessions: async () => {
+      fs.writeFileSync(path.join(s.root, "docs", doc.docId, "Raced.docx"), outside);
+      fs.utimesSync(path.join(s.root, "docs", doc.docId, "Raced.docx"), new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+    },
+  });
+  const msg = await refused(tool(s, "office_edit").execute("g1", { id: doc.docId, ops: [{ quote: "New document", replacement: "Over it" }], baseRevision: base }), "moved by another");
+  assert.match(msg, /^error:revision_mismatch /);
+  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "New document", "the script's revision is not written over");
+});
+
+test("office_edit: two edits of one open document run one after the other; the second meets the revision the first wrote", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Twice", type: "word", owner: "/f/atlas" }, s.root);
+  bumpRevision(s.root, doc.docId, Date.now() - 5000);
+  const base = getDoc(doc.docId, s.root)!.mtimeMs;
+  let saving = 0;
+  let overlapped = false;
+  let saves = 0;
+  registerTools({
+    sessionKeys: async () => ["the-session"],
+    saveSessions: async () => {
+      saves++;
+      if (++saving > 1) overlapped = true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      saving--;
+    },
+  });
+  const t = tool(s, "office_edit");
+  const [one, two] = await Promise.allSettled([
+    t.execute("h1", { id: doc.docId, ops: [{ quote: "New document", replacement: "First" }], baseRevision: base }),
+    t.execute("h2", { id: doc.docId, ops: [{ quote: "New document", replacement: "Second" }], baseRevision: base }),
+  ]);
+  assert.equal(one.status, "fulfilled");
+  assert.equal(two.status, "rejected");
+  assert.match(String((two as PromiseRejectedResult).reason?.message), /^error:revision_mismatch /);
+  assert.equal(overlapped, false, "the second did not have the editor save while the first was under way");
+  assert.equal(saves, 1, "the second met the first's revision before it asked the editor");
+  assert.equal(parseDocx(readDocBytes(s.root, doc.docId)).text, "First");
 });
 
 test("office_edit: a stale revision is refused with a loud CONFLICT and the fresh revision; re-read and retry goes through", async () => {

@@ -202,6 +202,24 @@ export function readPart(buf: Buffer, name: string): string | undefined {
   return readZipParts(buf)[name]?.toString("utf8");
 }
 
+/** A digest of what a document holds: every part of the zip but its properties (`docProps/`, where the Document Server
+ * writes the time of each save), by name. Two saves of the same content compare equal, whatever their zip bytes and
+ * save times. Null for what is not a zip. */
+export function contentDigest(buf: Buffer): string | null {
+  let parts: Record<string, Buffer>;
+  try {
+    parts = readZipParts(buf);
+  } catch {
+    return null;
+  }
+  const hash = createHash("sha256");
+  for (const name of Object.keys(parts).sort()) {
+    if (name.startsWith("docProps/")) continue;
+    hash.update(`${name}\0${parts[name].length}\0`).update(parts[name]);
+  }
+  return hash.digest("hex");
+}
+
 /** All file parts of a zip as uncompressed bytes; duplicate names: last one wins (jszip behavior). */
 function readZipParts(buf: Buffer): Record<string, Buffer> {
   const parts: Record<string, Buffer> = {};

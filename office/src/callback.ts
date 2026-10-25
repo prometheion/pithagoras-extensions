@@ -11,8 +11,12 @@
  *
  * document.key format: keyIdOf(docId) + "." + base64url-no-pad(sha256(String(expectedMtimeMs))) (makeKey).
  * The hash pins the revision the config was minted against, so a stale session's save-back can never clobber a
- * newer revision (the file's mtime is the revision the tools compare against). The persist path re-derives the
- * hash from the CURRENT store.getDoc(docId) meta and refuses on mismatch -- see persistSaved.
+ * newer revision (the file's mtime is the revision the tools compare against). The persist path compares it with the
+ * CURRENT store.getDoc(docId) meta, and a session that saved since with the revision it wrote (keyStanding); a save
+ * that would overwrite anything else is kept as a conflict copy -- see persistCore.
+ *
+ * Forcesaves an agent's write asks for (editing.ts): the command service's forcesave carries a userdata the callback
+ * hands back (status 6, forcesavetype 0); awaitForcesave lets the write wait for it.
  *
  * Persistence (statuses 2/6 + the status-1 forcesave action): fetch body.url with retries (the DS can lag after
  * a save) from the Document Server itself (`onDocumentServer`: the envelope names the browser's address), run
@@ -40,6 +44,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dataDir, portal } from "./host";
 import { signJwt, verifyJwt } from "./jwt";
+import { contentDigest } from "./ooxml";
 import * as store from "./store";
 import * as live from "./live";
 
@@ -143,17 +148,87 @@ export function onPersisted(fn: (docId: string, buffer: Buffer) => void): void {
 }
 
 /**
- * Per-doc memo of our own last successful persist ({ url, mtimeMs }), module scope for the process's lifetime.
- * WHY IT EXISTS: DS can report one force-save twice -- a status-1 envelope carries a forcesave action (type 2)
- * whose result also arrives as the canonical status-6 callback. The second pass re-fetches with a key minted
- * against the OLD mtime, so its revHash no longer matches the meta WE just wrote; without this memo that pass
- * would look like an external agent edit and answer {error:1} (a spurious save-failure in the editor). The memo
- * fires only when BOTH the document's current revision AND the download url equal ours -- a newer change at a
- * different url still gets refused (a newer revision is never overwritten). Known accepted limit:
- * typing between our forcesave and session close is dropped on that refusal -- exactly the stale-overwrite
- * protection we want; the user reloads the page to pick up the newer file.
+ * What each key's editing session last saved: the revision it wrote and a digest of what it held (`digestOf`). A
+ * session that saved stays on the revision it wrote: its key still pins the revision it opened, but its next save
+ * lands on top of its own (after a forcesave, which an agent's write asks for, the session goes on). The digest tells
+ * a save that holds nothing new apart from one that does: the Document Server reports one forcesave twice (the
+ * status-1 forcesave action and its status 6), and a session closed after its last forcesave sends it all again as
+ * status 2, which must not become a conflict copy once an agent's edit was made on top of it.
+ * Process memory: after a restart, a session's save after a forcesave of the run before is kept as a copy.
  */
-const lastPersist = new Map<string, { url: string; mtimeMs: number }>();
+const keySaves = new Map<string, { mtimeMs: number; digest: string }>();
+
+/** Keys whose session's whole content is in a later revision: an agent's edit made on top of what the session had just
+ * saved (`followTo`). Their editors load that revision (`keyStanding`). */
+const followed = new Map<string, number>();
+
+/** The digest a save is compared by: what the document holds (contentDigest), or the bytes themselves for one that
+ * is not a zip. */
+function digestOf(bytes: Buffer): string {
+  return contentDigest(bytes) ?? createHash("sha256").update(bytes).digest("hex");
+}
+
+/** How an editor that opened with `key` stands to the document at revision `mtimeMs`:
+ * - "current": the revision is the one the key opened, or the one its own session saved last; its saves land.
+ * - "follow": an agent's edit was made on top of everything the session had saved; the editor loads that revision
+ *   (a new key) and loses nothing.
+ * - "behind": something else wrote the file (a script, a git pull); what is typed there is kept as a copy beside it. */
+export function keyStanding(key: string, mtimeMs: number): "current" | "follow" | "behind" {
+  const parsed = parseKey(key);
+  if (!parsed) return "behind";
+  if (parsed.revHash === revHashOf(mtimeMs) || keySaves.get(key)?.mtimeMs === mtimeMs) return "current";
+  return followed.get(key) === mtimeMs ? "follow" : "behind";
+}
+
+/** The revision `key`'s session last wrote, or undefined for none. */
+export function savedRevision(key: string): number | undefined {
+  return keySaves.get(key)?.mtimeMs;
+}
+
+/** An agent's edit was made on top of what `key`'s session saved, as revision `mtimeMs`: its editor loads it. */
+export function followTo(key: string, mtimeMs: number): void {
+  followed.set(key, mtimeMs);
+}
+
+/* ------------------------------------------------------------------ */
+/* forcesaves an agent's write waits for                               */
+/* ------------------------------------------------------------------ */
+
+/** userdata of a forcesave asked through the command service -> who waits for its callback. */
+const forcesaves = new Map<string, (ok: boolean) => void>();
+
+/** Wait for the callback of the forcesave asked with `userdata` (the command service hands it back in the callback):
+ * true once it is saved (or kept as a copy), false where the Document Server or the persist failed. `cancel` stops
+ * waiting (a command that was refused, or a timeout); a callback that comes later is persisted as any other. */
+export function awaitForcesave(userdata: string): { done: Promise<boolean>; cancel(): void } {
+  let settle!: (ok: boolean) => void;
+  const done = new Promise<boolean>((resolve) => (settle = resolve));
+  forcesaves.set(userdata, (ok) => {
+    forcesaves.delete(userdata);
+    settle(ok);
+  });
+  return { done, cancel: () => void forcesaves.delete(userdata) };
+}
+
+/** The callback of a forcesave asked through the command service (forcesavetype 0) is settled: tell whoever waits. */
+function forcesaveDone(body: Envelope, ok: boolean): void {
+  if (body.forcesavetype !== 0 || typeof body.userdata !== "string") return;
+  forcesaves.get(body.userdata)?.(ok);
+}
+
+/** One command to the Document Server's command service, signed as it takes them, through Office's own way in (the
+ * relay), never the browser's /ds proxy, which keeps it closed. Rejects where it does not answer. */
+export async function command(body: Record<string, unknown>, timeoutMs = 10_000, config: CallbackConfig | null = configured): Promise<Record<string, unknown>> {
+  const secret = config?.getSecret();
+  if (!config || !secret || !config.getState()) throw Object.assign(new Error("the document server is not set up"), { code: "ds_not_configured" });
+  const res = await fetch(`${await config.getOrigin()}/command`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-Auth-Token": `Bearer ${signJwt(body, 60_000, secret)}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return (await res.json()) as Record<string, unknown>;
+}
 
 /* ------------------------------------------------------------------ */
 /* small plumbing                                                      */
@@ -371,25 +446,27 @@ async function handleDispatch(
       // Being edited: presence is who body.users says is connected now (locked while anybody is). The Document Server
       // names them by the ids of the configs they opened with, as strings ("portal-user"): the name is the one the
       // editor config was minted with. An object with an id is taken too.
-      const snapshotIds = new Set<string>();
+      // The users are those of this key's session: another key's (an editor that loaded a newer revision while this
+      // one closes) keeps its own.
+      const snapshot: { id: string; name?: string }[] = [];
       if (Array.isArray(body.users)) {
         for (const u of body.users) {
           const id = typeof u === "string" ? u : u && typeof u === "object" && typeof (u as Record<string, unknown>).id === "string" ? (u as { id: string }).id : "";
           if (!id) continue;
           const name = u && typeof u === "object" ? (u as { name?: unknown }).name : undefined;
-          live.setUser(docId, { id, name: typeof name === "string" ? name : undefined }, true, { confirmed: true });
-          snapshotIds.add(id);
+          snapshot.push({ id, name: typeof name === "string" ? name : undefined });
         }
       }
-      for (const tracked of live.usersOf(docId)) if (!snapshotIds.has(tracked.id)) live.setUser(docId, { id: tracked.id }, false);
+      live.setSession(docId, body.key as string, snapshot.map((u) => u.id));
+      for (const u of snapshot) live.setUser(docId, u, true, { confirmed: true });
       live.setLocked(docId, live.usersOf(docId).length > 0);
 
       // Forcesave-click (actions[].type === 2) while the session continues -> persist NOW from body.url and STAY
-      // locked (status-6 rules; the canonical result may still arrive as a status-6 callback -- lastPersist
-      // absorbs that duplicate). The envelope's forcesavetype field belongs to statuses 6/7 only.
+      // locked (status-6 rules; the canonical result may still arrive as a status-6 callback -- the session's last
+      // save, keySaves, absorbs that duplicate). The envelope's forcesavetype field belongs to statuses 6/7 only.
       const actions = Array.isArray(body.actions) ? body.actions : [];
       if (actions.some((a) => a && typeof a === "object" && (a as { type?: unknown }).type === 2) && typeof body.url === "string") {
-        await persistSaved(log, cfg, docId, parsed.revHash, body, false, res); // stays locked
+        await persistSaved(log, cfg, docId, body, false, res); // stays locked
         return;
       }
       respond(res, 200, 0);
@@ -405,16 +482,18 @@ async function handleDispatch(
     }
 
     case 7: {
-      // Force-saving error AT DS: same treatment as status 3 (one line each, no disk).
+      // Force-saving error AT DS: same treatment as status 3 (one line each, no disk). An agent's write waiting on this
+      // forcesave hears that it failed.
       log(`status-7: document server reported a force-save error for ${docId} (forcesavetype=${JSON.stringify(body.forcesavetype ?? null)})`);
+      forcesaveDone(body, false);
       respond(res, 200, 0);
       return;
     }
 
     case 4: {
-      // Closed with no changes: terminal close -- nobody is connected anymore, so clear BOTH the flag and any
-      // tracked presence (no disk write of any kind).
-      live.clearDoc(docId);
+      // Closed with no changes: terminal close of this key's session -- nobody is connected to it anymore, so its
+      // users go, and with no other session on the document the flag too (no disk write of any kind).
+      live.endSession(docId, body.key as string);
       respond(res, 200, 0);
       return;
     }
@@ -422,8 +501,10 @@ async function handleDispatch(
     case 2:
     case 6: {
       // Ready-for-saving / force-saved: persist (fetch url w/ retries -> persistBytes gate ->
-      // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked.
-      await persistSaved(log, cfg, docId, parsed.revHash, body, status === 2, res);
+      // hooks); status 2 unlocks AFTER the persist, status 6 STAYS locked. A forcesave an agent's write asked for
+      // (forcesavetype 0, the command service, with its userdata) is answered to that write once it is settled.
+      const code = await persistSaved(log, cfg, docId, body, status === 2, res);
+      if (status === 6) forcesaveDone(body, code === 0);
       return;
     }
 
@@ -465,17 +546,18 @@ async function persistSaved(
   log: (line: string) => void,
   cfg: CallbackConfig,
   docId: string,
-  keyRevHash: string,
   body: Envelope,
   unlockAfter: boolean,
   res: ServerResponse,
-): Promise<void> {
-  respond(res, 200, await persistCore(log, cfg, docId, keyRevHash, body, unlockAfter));
+): Promise<0 | 1> {
+  const code = await persistCore(log, cfg, docId, body, unlockAfter);
+  respond(res, 200, code);
+  return code;
 }
 
 /** The persist itself, for a callback and for a save recovered from the Document Server (`recoverForgotten`): the
  * error code the Document Server is to be answered with, 0 for saved (or kept as a copy), 1 for not. */
-async function persistCore(log: (line: string) => void, cfg: CallbackConfig, docId: string, keyRevHash: string, body: Envelope, unlockAfter: boolean): Promise<0 | 1> {
+async function persistCore(log: (line: string) => void, cfg: CallbackConfig, docId: string, body: Envelope, unlockAfter: boolean): Promise<0 | 1> {
   const fail = (): 1 => 1;
   const rootDir = () => cfg.root ?? dataDir();
 
@@ -485,20 +567,14 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     return fail();
   }
 
-  // STALE-GATE: the key pins the revision the config was minted against; the CURRENT meta must match, else
-  // something already moved the revision and this save must NOT overwrite it. The double-save memo tells "we
-  // already wrote exactly this save" apart from "someone else won".
-  const stale = revHashOf(meta.mtimeMs) !== keyRevHash;
-  if (stale) {
-    const ours = lastPersist.get(docId);
-    if (ours && ours.mtimeMs === meta.mtimeMs && typeof body.url === "string" && ours.url === body.url) {
-      // The duplicate pass of a force-save we already persisted: report SUCCESS, apply the status's lock rule.
-      log(`persist for ${docId}: this save was already persisted at revision ${meta.mtimeMs} -- treating as done`);
-      if (unlockAfter) live.clearDoc(docId); // a status-2 re-send closes the session
-      else live.setLocked(docId, true); // status 6: editing continues, stay locked
-      return 0;
-    }
-  }
+  // STALE-GATE: the key pins the revision the config was minted against, and a session that saved since stays on the
+  // revision it wrote (keyStanding); anything else moved the revision and this save must NOT overwrite it.
+  const key = body.key as string;
+  const stale = keyStanding(key, meta.mtimeMs) !== "current";
+  const endOrStay = () => {
+    if (unlockAfter) live.endSession(docId, key); // terminal close of this key's session: drop its users (and the flag with none left)
+    else live.setLocked(docId, true); // status 6: editing continues, stay locked
+  };
 
   if (typeof body.url !== "string" || body.url === "") {
     log(`persist for ${docId}: callback carries no url to download`);
@@ -528,7 +604,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
    * the person finds in the library and the audit log, and the Document Server is told it was saved, so it does not
    * hold it as forgotten under a key nobody opens again. */
   const keepAsCopy = (why: string): 0 | 1 => {
-    if (unlockAfter) live.clearDoc(docId); // terminal close: the session is over, drop flag AND presence
+    if (unlockAfter) live.endSession(docId, key); // terminal close: the session is over
     let copy: store.DocMeta;
     try {
       copy = store.saveConflictCopy(meta, bytes, rootDir());
@@ -540,6 +616,14 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     cfg.record?.({ subject: meta.title, reason: `a save from the editor was not written over a newer revision; kept as "${copy.title}.${copy.ext}" (${copy.docId})` });
     return 0;
   };
+  // Nothing this session had not saved already: the same forcesave reported twice, or a session closed after its last
+  // forcesave with nothing typed since (an agent's edit made on top of it does not make that a conflict).
+  const digest = digestOf(bytes);
+  if (keySaves.get(key)?.digest === digest) {
+    log(`persist for ${docId}: this session saved exactly this already (at revision ${keySaves.get(key)!.mtimeMs}) -- treating as done`);
+    endOrStay();
+    return 0;
+  }
   if (stale) return keepAsCopy(`stale key (current revision ${meta.mtimeMs}, the session opened another)`);
 
   let newMtimeMs: number;
@@ -551,7 +635,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     return fail();
   }
 
-  lastPersist.set(docId, { url: body.url, mtimeMs: newMtimeMs });
+  keySaves.set(key, { mtimeMs: newMtimeMs, digest });
 
   // Wake hooks (ping.ts comment mentions register here): exact saved bytes; one bad hook must not kill the rest.
   for (const hook of persistedHooks) {
@@ -562,8 +646,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     }
   }
 
-  if (unlockAfter) live.clearDoc(docId); // status 2: terminal close AFTER persist -- drop flag AND presence
-  else live.setLocked(docId, true); // status 6: editing continues, stay locked
+  endOrStay(); // status 2: terminal close AFTER persist; status 6: editing continues, stay locked
 
   // Success is only answered once the document AND the lock state are settled -- DS reads this JSON field to
   // decide the save outcome.
@@ -582,27 +665,18 @@ export async function recoverForgotten(config: CallbackConfig | null = configure
   const log = config.log ?? defaultLog;
   const secret = config.getSecret();
   if (!secret || !config.getState()) return 0;
-  const origin = await config.getOrigin();
-  const command = async (body: Record<string, unknown>): Promise<Record<string, unknown>> => {
-    const res = await fetch(`${origin}/command`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "X-Auth-Token": `Bearer ${signJwt(body, 60_000, secret)}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-    return (await res.json()) as Record<string, unknown>;
-  };
-  const list = await command({ c: "getForgottenList" });
+  const ask = (body: Record<string, unknown>) => command(body, 10_000, config);
+  const list = await ask({ c: "getForgottenList" });
   if (list.error !== 0 || !Array.isArray(list.keys)) return 0;
   let taken = 0;
   for (const key of list.keys) {
     const parsed = typeof key === "string" ? parseKey(key) : null;
     const docId = parsed ? docIdOf(parsed.keyId, config.root ?? dataDir()) : null;
     if (!parsed || !docId) continue; // not one of ours, or a document gone since: left to the Document Server
-    const got = await command({ c: "getForgotten", key });
+    const got = await ask({ c: "getForgotten", key });
     if (got.error !== 0 || typeof got.url !== "string") continue;
-    if ((await persistCore(log, config, docId, parsed.revHash, { key, url: got.url }, true)) !== 0) continue;
-    await command({ c: "deleteForgotten", key });
+    if ((await persistCore(log, config, docId, { key, url: got.url }, true)) !== 0) continue;
+    await ask({ c: "deleteForgotten", key });
     log(`recovered a save of ${docId} the document server had kept as forgotten`);
     taken++;
   }

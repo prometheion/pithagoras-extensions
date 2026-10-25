@@ -334,6 +334,57 @@ test("duplicate force-save pass (same url + our revision): treated as done, no s
   await server.close();
 });
 
+test("a session's later save lands on top of its own forcesave (its key pins the revision it opened, not the one it wrote); another's is kept as a copy", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Goes On", type: "word" }, root);
+  const opened = getDoc(doc.docId, root)!;
+  let bytes = Buffer.from("forcesaved");
+  const server = await startFileServer(() => ({ status: 200, bytes }), null);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+  const key = makeKey(doc.docId, opened.mtimeMs);
+  const forced = { key, status: 6, url: `${server.base}/cache/files/saved?md5=a`, forcesavetype: 0, userdata: "office-x" };
+  assert.deepEqual(json(await post(handler, forced, { headers: dsHeaders(forced) })), { error: 0 });
+  assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "forcesaved");
+  // More typed in the same session, which then closes: its save is on the revision its own forcesave wrote.
+  bytes = Buffer.from("forcesaved, then more");
+  const closed = { key, status: 2, url: `${server.base}/cache/files/saved?md5=b` };
+  assert.deepEqual(json(await post(handler, closed, { headers: dsHeaders(closed) })), { error: 0 });
+  assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "forcesaved, then more", "written, not kept as a copy");
+  assert.equal(listDocs(root).length, 1);
+  // A session of another key, opened on the first revision, never saved: its save is stale and kept as a copy.
+  bytes = Buffer.from("from an old editor");
+  const old = { key: makeKey(doc.docId, opened.mtimeMs - 1000), status: 2, url: `${server.base}/cache/files/saved?md5=c` };
+  assert.deepEqual(json(await post(handler, old, { headers: dsHeaders(old) })), { error: 0 });
+  assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "forcesaved, then more");
+  assert.equal(listDocs(root).filter((d) => d.title.startsWith("Goes On (conflict")).length, 1);
+  await server.close();
+});
+
+test("two sessions of one document (an editor that loaded a newer revision while the old one closes): the old one's close keeps the new one's users and lock", async () => {
+  live.resetLive();
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Two Keys", type: "word" }, root);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
+  const oldKey = makeKey(doc.docId, doc.mtimeMs - 1000);
+  const newKey = makeKey(doc.docId, doc.mtimeMs);
+  for (const env of [{ key: oldKey, status: 1, users: ["portal-user"] }, { key: newKey, status: 1, users: ["portal-user"] }]) await post(handler, env, { headers: dsHeaders(env) });
+  assert.deepEqual(live.sessionKeys(doc.docId).sort(), [newKey, oldKey].sort());
+  const closed = { key: oldKey, status: 4 };
+  await post(handler, closed, { headers: dsHeaders(closed) });
+  assert.deepEqual(live.sessionKeys(doc.docId), [newKey]);
+  assert.deepEqual(live.usersOf(doc.docId).map((u) => u.id), ["portal-user"], "still in the new session");
+  assert.equal(live.inSession(doc.docId), true);
+  assert.equal(live.pollState(doc.docId, 0).locked, true);
+  // Its users leaving (a status 1 with nobody), and then its close, end it all.
+  const left = { key: newKey, status: 1, users: [] };
+  await post(handler, left, { headers: dsHeaders(left) });
+  assert.deepEqual(live.usersOf(doc.docId), []);
+  const end = { key: newKey, status: 4 };
+  await post(handler, end, { headers: dsHeaders(end) });
+  assert.deepEqual(live.sessionKeys(doc.docId), []);
+  assert.equal(live.pollState(doc.docId, 0).locked, false);
+});
+
 /* ------------------------------------------------------------------ */
 /* JWT verification                                                    */
 /* ------------------------------------------------------------------ */

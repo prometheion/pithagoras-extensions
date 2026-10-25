@@ -8,10 +8,15 @@ import { startingUp } from "../office-ui";
 /**
  * The Office editor's host: the page's half of `new DocsAPI.DocEditor`. It asks POST /editor-config for its
  * document, loads the Document Server's api.js ONCE (the script is not idempotent -- a second load on the same
- * page breaks it), drops ONLY apiJs from the answered config and hands the rest to DocsAPI as-is: the JWT covers
- * exactly that object (the JWT signs what is sent, so nothing is added to it). The lock badge ("N editing now")
- * and the "changed on disk" badge come from the shared 5 s poll of /state; the
- * editor's own refreshFile handshake, which would replace the page refresh, is not used yet.
+ * page breaks it), drops ONLY apiJs from the answered config and hands the rest to DocsAPI with the page's events:
+ * the JWT covers exactly the minted object (the JWT signs what is sent, so nothing of it is changed). The lock badge
+ * ("N editing now") comes from the shared 5 s poll of /state.
+ *
+ * Every second it asks GET /editor-state how its key stands. Where an agent's edit was made on top of what the
+ * editor had saved ("follow"), it loads the new revision in place: a new config, handed to the editor's own
+ * refreshFile, which reopens the document in the same frame with the new key. The same happens when the editor asks
+ * for it (onRequestRefreshFile: it reconnected to a session that has ended). Where the file changed outside the
+ * editor ("behind"), a badge says so, and its button loads the new revision the same way.
  */
 
 /** What DocsAPI leaves on window once api.js has loaded: only what is used, typed as it behaves. */
@@ -20,6 +25,9 @@ interface DocsApiLike {
 }
 interface DestroyableEditor {
   destroyEditor?: () => void;
+  /** Loads another revision (a config with a new document.key) in the open editor. Taken only where the config had
+   * an onRequestRefreshFile event. */
+  refreshFile?: (config: Record<string, unknown>) => void;
 }
 
 declare global {
@@ -27,6 +35,10 @@ declare global {
     DocsAPI?: DocsApiLike;
   }
 }
+
+/** How often the open editor asks whether to load a newer revision: what is typed between an agent's edit and that
+ * load is kept as a copy, so the window is kept short. */
+const STANDING_POLL_MS = 1000;
 
 /** api.js per address, loaded once per page: the promise is cached, and a failure stays said until the page reloads. */
 const scripts = new Map<string, Promise<void>>();
@@ -53,24 +65,84 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   const [ready, setReady] = useState(false);
   /** A new Document Server is still making its fonts (the server half's ds_starting): asked again until it is done. */
   const [settingUp, setSettingUp] = useState(false);
+  /** The file changed outside the editor since it opened (a script, a git pull): the badge with its button. */
+  const [behind, setBehind] = useState(false);
+  /** The editor just loaded the revision an agent's edit made on top of what was typed here. */
+  const [followed, setFollowed] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const editor = useRef<DestroyableEditor | null>(null);
-  // What mtimeMs was in effect when this view opened (the revision the minted key carries, as near as the page
-  // knows it -- /state already had the doc by the time it could be opened): a poll that is newer than it means
-  // an agent edited meanwhile, which tier 1 says with the badge below.
-  const openedAt = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (openedAt.current === null && doc) openedAt.current = doc.mtimeMs;
-  }, [doc]);
+  /** Loads the document's newest revision into the open editor (set by the effect below, for the badge's button). */
+  const reload = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     let alive = true;
     let watch: ReturnType<typeof setInterval> | undefined;
     let again: ReturnType<typeof setTimeout> | undefined;
+    let standing: ReturnType<typeof setInterval> | undefined;
+    let shown: ReturnType<typeof setTimeout> | undefined;
+    /** The document.key the editor has open now. */
+    let key = "";
+    let reloading = false;
     setProblem(null);
     setReady(false);
     setSettingUp(false);
+    setBehind(false);
+    setFollowed(false);
+
+    /** A minted config as DocsAPI takes it: apiJs dropped (the JWT was signed over the config without it), the page's
+     * events added (DocsAPI keeps them out of what it sends on). */
+    const asConfig = (minted: Awaited<ReturnType<typeof api.editorConfig>>): Record<string, unknown> => {
+      const config: Record<string, unknown> = { ...minted };
+      delete config.apiJs;
+      config.events = { onRequestRefreshFile: () => void reload.current() };
+      return config;
+    };
+    const keyOf = (config: Record<string, unknown>) => String((config.document as { key?: unknown } | undefined)?.key ?? "");
+
+    /** A new editor in the host box. */
+    const build = (config: Record<string, unknown>) => {
+      if (!window.DocsAPI) throw new Error("api.js loaded but DocsAPI is not on window -- the Document Server answered with something that is not its script");
+      if (!box.current) return;
+      // DocsAPI.DocEditor takes a PLACEHOLDER ID: api.js runs document.getElementById on the first argument and then
+      // replaces that element with its iframe. Pass the host box itself and getElementById stringifies it to
+      // "[object HTMLDivElement]", finds nothing, and silently builds no editor (reproduced live against DS 10.0).
+      const ph = document.createElement("div");
+      ph.id = "po-doceditor";
+      box.current.querySelector("#po-doceditor")?.remove(); // never stack placeholders across remounts
+      box.current.appendChild(ph);
+      editor.current = new window.DocsAPI.DocEditor(ph.id, config);
+      key = keyOf(config);
+    };
+
+    /** The newest revision into the open editor: a fresh config (a new key) through the editor's refreshFile, which
+     * keeps the frame and reopens the document in it; an editor without it is made again. */
+    reload.current = async () => {
+      if (reloading || !editor.current) return;
+      reloading = true;
+      try {
+        const config = asConfig(await api.editorConfig(docId));
+        if (!alive) return;
+        if (keyOf(config) !== key) {
+          if (typeof editor.current?.refreshFile === "function") {
+            editor.current.refreshFile(config);
+            key = keyOf(config);
+          } else {
+            try {
+              editor.current?.destroyEditor?.();
+            } catch {
+              // a half-built editor must not stop the new one
+            }
+            build(config);
+          }
+        }
+        setBehind(false);
+      } catch (e) {
+        if (alive) setProblem(sayError(e));
+      } finally {
+        reloading = false;
+      }
+    };
+
     const open = async () => {
       try {
         let minted: Awaited<ReturnType<typeof api.editorConfig>>;
@@ -88,18 +160,7 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
         if (!alive || !box.current) return;
         await loadScript(minted.apiJs);
         if (!alive || !box.current) return;
-        // The JWT was signed over the config WITHOUT these two fields: drop exactly apiJs, send the rest unaltered.
-        const config: Record<string, unknown> = { ...minted };
-        delete config.apiJs;
-        if (!window.DocsAPI) throw new Error("api.js loaded but DocsAPI is not on window -- the Document Server answered with something that is not its script");
-        // DocsAPI.DocEditor takes a PLACEHOLDER ID: api.js runs document.getElementById on the first argument and then
-        // replaces that element with its iframe. Pass the host box itself and getElementById stringifies it to
-        // "[object HTMLDivElement]", finds nothing, and silently builds no editor (reproduced live against DS 10.0).
-        const ph = document.createElement("div");
-        ph.id = "po-doceditor";
-        box.current.querySelector("#po-doceditor")?.remove(); // never stack placeholders across remounts
-        box.current.appendChild(ph);
-        editor.current = new window.DocsAPI.DocEditor(ph.id, config);
+        build(asConfig(minted));
         // onDocumentReady, as close to it as this tier can get: DS fills its own iframe into the placeholder.
         watch = setInterval(() => {
           if (box.current?.querySelector("iframe")) {
@@ -107,6 +168,24 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
             if (watch !== undefined) clearInterval(watch);
           }
         }, 500);
+        standing = setInterval(() => {
+          if (reloading || !key) return;
+          const asked = key;
+          api.editorState(docId, asked).then(async (answer) => {
+            if (!alive || asked !== key) return;
+            if (answer.standing === "follow") {
+              await reload.current();
+              if (!alive) return;
+              setFollowed(true);
+              if (shown !== undefined) clearTimeout(shown);
+              shown = setTimeout(() => setFollowed(false), 8000);
+            } else {
+              setBehind(answer.standing === "behind");
+            }
+          }, () => {
+            // the server half restarting, or the network: asked again in a second
+          });
+        }, STANDING_POLL_MS);
       } catch (e) {
         if (alive) setProblem(sayError(e));
       }
@@ -116,6 +195,9 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
       alive = false;
       if (watch !== undefined) clearInterval(watch);
       if (again !== undefined) clearTimeout(again);
+      if (standing !== undefined) clearInterval(standing);
+      if (shown !== undefined) clearTimeout(shown);
+      reload.current = async () => {};
       try {
         editor.current?.destroyEditor?.(); // where the loaded api.js exposes it
       } catch {
@@ -127,9 +209,6 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
   }, [docId]);
 
   const users = state?.locks[docId] ?? [];
-  // A newer revision than the one this view opened on, written outside the editor (a script, a git pull): the
-  // agent's own tools wait while the document is open. What was typed here is then saved as a copy beside it.
-  const stale = openedAt.current !== null && !!doc && doc.mtimeMs > openedAt.current;
 
   return (
     <div className="po-page po-editor po-editor-page">
@@ -145,11 +224,12 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
             {users.length === 1 ? t("1 editing now") : t("{n} editing now", { n: users.length })}
           </span>
         )}
-        {stale && (
+        {followed && <span className="po-chip">{t("Loaded the agent's edit, made on top of what you typed")}</span>}
+        {behind && (
           <span className="po-chip po-chip-stale">
             {t("This document changed on disk since it opened")}
             {" — "}
-            <button type="button" className="po-refresh" onClick={() => window.location.reload()}>
+            <button type="button" className="po-refresh" onClick={() => void reload.current()}>
               {t("reload it (what you typed here since is kept as a copy)")}
             </button>
           </span>

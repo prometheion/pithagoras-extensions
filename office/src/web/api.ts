@@ -82,6 +82,10 @@ export const api = {
   /** Re-run the workspace scan now (boot does it automatically): { added, updated }. */
   rescanLibrary: () => call<{ added: number; updated: number }>("/documents/rescan", { method: "POST" }),
   editorConfig: (docId: string) => call<EditorConfig>("/editor-config", { method: "POST", body: JSON.stringify({ doc: docId }) }),
+  /** How the editor opened with `key` stands to the document now: "follow" loads the agent's newer revision,
+   * "behind" means the file changed outside the editor. */
+  editorState: (docId: string, key: string) =>
+    call<{ standing: "current" | "follow" | "behind" }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
   saveSettings: (patch: SettingsPatch) => call<SettingsAnswer>("/settings", { method: "POST", body: JSON.stringify(patch) }),
   /** Awaits the whole first pull to completion -- the page shows its progress from /state meanwhile. */
   startContainer: () => call<{ started: boolean; container: OfficeContainer }>("/container/start", { method: "POST" }),

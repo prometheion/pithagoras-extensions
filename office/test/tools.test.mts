@@ -452,9 +452,9 @@ test("office_read (Word): the editor's blocks, numbered, with styles and tables;
 test("office_read (spreadsheet): cells by address, texts quoted, formulas after their values; one sheet by name", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Budget", type: "cell", owner: "/f/atlas" }, s.root);
-  s.seat.answer = () => ({ sheets: [{ name: "Sheet1", range: "A1:C3", cells: [{ a: "A1", v: 2 }, { a: "A3", v: 6, f: "=A1*A2" }, { a: "C1", v: "person" }, { a: "B2", v: true }], truncated: false }, { name: "Empty", range: "A1", cells: [], truncated: true }] });
+  s.seat.answer = () => ({ sheets: [{ name: "Sheet1", range: "A1:C3", cells: [{ a: "A1", v: 2 }, { a: "A3", v: 6, f: "=A1*A2" }, { a: "C1", v: "person" }, { a: "B2", v: true }], truncated: false }, { name: "Empty", range: "A1", cells: [], truncated: true }, { name: "Later", range: "", cells: [], truncated: true, skipped: true }] });
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
-  assert.match(t, /Sheet "Sheet1" \(A1:C3\):\nA1: 2\nA3: 6 \(=A1\*A2\)\nC1: "person"\nB2: TRUE\n\nSheet "Empty" \(A1\):\n\(empty\)\n\(only its first 20,000 cells are shown\)/);
+  assert.match(t, /Sheet "Sheet1" \(A1:C3\):\nA1: 2\nA3: 6 \(=A1\*A2\)\nC1: "person"\nB2: TRUE\n\nSheet "Empty" \(A1\):\n\(empty\)\n\(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most\)\n\nSheet "Later": not read \(the sheets before it filled the read; read it with sheet\)$/);
   await tool(s, "office_read").execute("r2", { id: doc.docId, sheet: "Sheet1" });
   assert.deepEqual(s.seat.runs.at(-1)!.args, { sheet: "Sheet1" });
 });
@@ -487,6 +487,23 @@ test("office_read without the agent's editor downloaded reads the saved file and
   // Anything else the editor says is no reason to read the saved file: it is said.
   s.seat.answer = () => Promise.reject(new SeatError("agent_unavailable", "the agent's editor did not start within 60 s"));
   assert.match(await refused(tool(s, "office_read").execute("r", { id: doc.docId })), /^error:agent_unavailable /);
+});
+
+test("office_read: a Word document the editor read only in part says it goes on", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Long", type: "word", owner: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ blocks: [{ p: "first" }], truncated: true });
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.match(t, /\[1\] first\n\n\(the document goes on: only its first 200,000 characters were read\)$/);
+});
+
+test("office_read: Office found stopped as the agent's editor starts (its network gone) reads the saved file", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Saved", type: "word", owner: "/f/atlas" }, s.root);
+  s.seat.answer = () => Promise.reject(Object.assign(new Error("the Document Server's network is not there"), { code: "office_stopped" }));
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.match(t, /\nSaved copy \(Office is stopped\): what the file holds\./);
+  assert.match(t, /\[1\] New document/);
 });
 
 test("office_read: a text past 200,000 characters is cut with a marker", async () => {
@@ -593,6 +610,50 @@ test("office_edit: how the save after the edit came out: saved, kept as a copy (
   assert.match(((await t.execute("e", op)) as ToolResult).content[0].text, /^Edited "Saving" \(1 op\), saved as revision/);
   // Each was recorded with what came of it.
   assert.deepEqual(s.seen.records.filter((r) => r.reason.startsWith("office_edit")).map((r) => r.reason.split("; ")[1]), ["not saved yet (timeout)", "not saved yet (failed)", "the save was kept as a conflict copy", `saved as revision ${getDoc(doc.docId, s.root)!.mtimeMs}`]);
+});
+
+test("office_edit: an edit the editor took and then gave no clear answer for is recorded all the same, with what came of it", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Unclear", type: "word", owner: "/f/atlas" }, s.root);
+  const t = tool(s, "office_edit");
+  const op = { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] };
+  for (const [code, ran] of [["editor_not_saved", true], ["timeout", true], ["aborted", true], ["editor_closed", true], ["timeout", false], ["aborted", false], ["busy", false]] as const) {
+    s.seat.answer = () => Promise.reject(new SeatError(code, `the ${code}`, undefined, ran));
+    assert.match(await refused(t.execute("e", op)), new RegExp(`^error:${code} `));
+  }
+  assert.deepEqual(s.seen.records.filter((r) => r.reason.startsWith("office_edit")).map((r) => r.reason.split("; ")[1]), [
+    "made in the editor, not saved yet (editor_not_saved)",
+    "outcome unknown (timeout)",
+    "outcome unknown (aborted)",
+    "outcome unknown (editor_closed)",
+  ]);
+  assert.match(s.seen.records[0].reason, new RegExp(`^office_edit: 1 op\\(s\\) \\(replace\\) on ${doc.docId} by /f/atlas; `));
+  assert.deepEqual(s.seat.saves, []);
+});
+
+test("office_edit: an edit that changed nothing has nothing to save, and says so; one that changed something and was not saved is editor_not_saved", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Same", type: "cell", owner: "/f/atlas" }, s.root);
+  const t = tool(s, "office_edit");
+  const op = { id: doc.docId, ops: [{ range: "A1", values: [[1]] }] };
+  s.seat.outcome = "nothing";
+  s.seat.answer = () => ({ cells: 1, changed: false });
+  const ok = (await t.execute("e", op)) as ToolResult;
+  assert.match(ok.content[0].text, new RegExp(`^Edited "Same" \\(1 op\\): that changed nothing, so there was nothing to save; the document is at revision ${doc.mtimeMs}, as it was\\.$`));
+  assert.equal(ok.details.changed, false);
+  s.seat.answer = () => ({ cells: 1, changed: true });
+  assert.match(await refused(t.execute("e", op)), /^error:editor_not_saved /);
+  assert.deepEqual(s.seen.records.filter((r) => r.reason.startsWith("office_edit")).map((r) => r.reason.split("; ")[1]), [`no change, revision ${doc.mtimeMs}`, "not saved yet (nothing)"]);
+});
+
+test("office_edit: an edit queued behind another starts from the revision that one saved", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Queued", type: "word", owner: "/f/atlas" }, s.root);
+  const t = tool(s, "office_edit");
+  const [one, two] = (await Promise.all([t.execute("a", { id: doc.docId, ops: [{ quote: "New document", replacement: "one" }] }), t.execute("b", { id: doc.docId, ops: [{ quote: "one", replacement: "two" }] })])) as ToolResult[];
+  assert.equal(one.details.from, doc.mtimeMs);
+  assert.equal(two.details.from, one.details.to, "from the first one's revision");
+  assert.notEqual(two.details.to, two.details.from);
 });
 
 test("office_edit: two edits of one document run one after the other, each with its save, never interleaved", async () => {

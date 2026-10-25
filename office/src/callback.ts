@@ -154,7 +154,8 @@ export function onPersisted(fn: (docId: string, buffer: Buffer) => void): void {
  * digests tell a save that holds nothing new apart from one that does: the Document Server reports one forcesave twice
  * (the status-1 forcesave action and its status 6, the same file), and a session closed after its last forcesave sends
  * it all again as status 2.
- * Process memory: after a restart, a session's save after a forcesave of the run before is kept as a copy.
+ * Process memory: after a restart, a session's save after a forcesave of the run before is kept as a copy, unless the
+ * file holds what it saves already (persistCore compares the content digests).
  */
 const keySaves = new Map<string, { mtimeMs: number; digest: string; sha: string }>();
 
@@ -575,7 +576,8 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
   const ended = () => live.endSession(docId, key);
   const endOrStay = () => {
     if (unlockAfter) ended();
-    else live.setLocked(docId, true); // status 6: editing continues, stay locked
+    // Status 6: editing continues, locked while a person is in it (as status 1 has it); agents' editors lock nothing.
+    else live.setLocked(docId, live.usersOf(docId).length > 0);
   };
 
   if (typeof body.url !== "string" || body.url === "") {
@@ -629,6 +631,23 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     log(`persist for ${docId}: this session saved exactly this already (at revision ${last.mtimeMs}) -- treating as done`);
     endOrStay();
     return { code: 0, kept: "same" };
+  }
+  if (stale && !last) {
+    // A session this run of the half never saw save, on a revision that moved on: after a restart, the close of a
+    // session whose last forcesave wrote the file in the run before (an agent's editor closing as the half stops). What
+    // the file holds already is no conflict.
+    let current: Buffer | undefined;
+    try {
+      current = store.readDoc(meta, rootDir());
+    } catch {
+      current = undefined;
+    }
+    if (current && digestOf(current) === digest) {
+      log(`persist for ${docId}: the file holds exactly this already (at revision ${meta.mtimeMs}) -- treating as done`);
+      keySaves.set(key, { mtimeMs: meta.mtimeMs, digest, sha });
+      endOrStay();
+      return { code: 0, kept: "same" };
+    }
   }
   if (stale) return keepAsCopy(`stale key (current revision ${meta.mtimeMs}, the session opened another)`);
 

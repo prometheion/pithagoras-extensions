@@ -360,6 +360,66 @@ test("a session's later save lands on top of its own forcesave (its key pins the
   await server.close();
 });
 
+/** callback.ts loaded anew, as a restart of the half has it: nothing of what the module kept in memory. */
+const freshCallback = async (n: number): Promise<typeof import("../src/callback")> => import(new URL(`../src/callback.ts?restart=${n}`, import.meta.url).href);
+
+test("after a restart of the half, a session's close that holds what its forcesave of the run before wrote is no conflict; one with more in it still is", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Agent Doc", type: "word" }, root);
+  const opened = getDoc(doc.docId, root)!;
+  let bytes = Buffer.from("the agent's edit, forcesaved");
+  const server = await startFileServer(() => ({ status: 200, bytes }), null);
+  const key = makeKey(doc.docId, opened.mtimeMs);
+  try {
+    const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+    const forced = { key, status: 6, url: `${server.base}/cache/files/saved?md5=a`, forcesavetype: 0, userdata: "office-x" };
+    assert.deepEqual(json(await post(handler, forced, { headers: dsHeaders(forced) })), { error: 0 });
+    // The half restarts (a fresh module: what the sessions saved is gone with the process), and the agent's editor's
+    // session closes with exactly what the file holds.
+    const fresh = await freshCallback(1);
+    const again = fresh.createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+    const closed = { key, status: 2, url: `${server.base}/cache/files/saved?md5=b` };
+    assert.deepEqual(json(await post(again, closed, { headers: dsHeaders(closed) })), { error: 0 });
+    assert.deepEqual(listDocs(root).map((d) => d.title), ["Agent Doc"], "no conflict copy");
+    assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "the agent's edit, forcesaved");
+    // Another session of that key after another restart, with something new in it: kept as a copy, as before.
+    const third = await freshCallback(2);
+    const later = third.createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+    bytes = Buffer.from("the agent's edit, and more typed after the restart");
+    assert.deepEqual(json(await post(later, closed, { headers: dsHeaders(closed) })), { error: 0 });
+    assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "the agent's edit, forcesaved");
+    assert.equal(listDocs(root).filter((d) => d.title.startsWith("Agent Doc (conflict")).length, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("status 6 in a session only agents' editors are in: saved, and the document is not locked; with a person in it, it is", async () => {
+  const root = tmpRoot();
+  const doc = await createDoc({ title: "Agent forcesave", type: "word" }, root);
+  const bytes = Buffer.from("the agent's edit");
+  const server = await startFileServer(() => ({ status: 200, bytes }), null);
+  const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
+  live.resetLive();
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  try {
+    const agentOnly = { key, status: 1, users: ["agent:abc"], actions: [{ type: 1, userid: "agent:abc" }] };
+    await post(handler, agentOnly, { headers: dsHeaders(agentOnly) });
+    const forced = { key, status: 6, url: `${server.base}/cache/files/saved?md5=a`, forcesavetype: 0, userdata: "office-x" };
+    assert.deepEqual(json(await post(handler, forced, { headers: dsHeaders(forced) })), { error: 0 });
+    assert.equal(fs.readFileSync(docFile(root, doc), "utf8"), "the agent's edit");
+    assert.equal(live.isLocked(doc.docId), false, "an agent's editor locks nothing");
+    const both = { key, status: 1, users: ["agent:abc", "portal-user"], actions: [{ type: 1, userid: "portal-user" }] };
+    await post(handler, both, { headers: dsHeaders(both) });
+    const again = { ...forced, url: `${server.base}/cache/files/saved?md5=b` };
+    assert.deepEqual(json(await post(handler, again, { headers: dsHeaders(again) })), { error: 0 });
+    assert.equal(live.isLocked(doc.docId), true, "a person is in it");
+  } finally {
+    live.resetLive();
+    await server.close();
+  }
+});
+
 test("two sessions of one document (an editor that loaded a newer revision while the old one closes): the old one's close keeps the new one's users and lock", async () => {
   live.resetLive();
   const root = tmpRoot();

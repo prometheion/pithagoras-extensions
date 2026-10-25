@@ -9,7 +9,7 @@ import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { closeDoc, configureSeat, keyOf, LIMITS, pageUrl, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
+import { closeDoc, configureSeat, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
 import { BRIDGE_JS, PLUGIN_GUID } from "../src/seat-page";
 
 const DS = "http://office-ds";
@@ -39,8 +39,9 @@ function browser(origin: string, handler: Handler) {
   const opened: { editorId: string; config: Record<string, any>; apiJs: string }[] = [];
   const closed: string[] = [];
   const plugins = new Map<string, { base: string; stop: AbortController }>();
-  /** `states`: after an edit's outcome, what the page says of the editor's changes, each after its delay (ms). */
-  const behaviour = { dead: false, slow: false, configs: [] as Response[], states: [] as [boolean, number][] };
+  /** `states`: after an edit's outcome, what the page says of the editor's changes, each after its delay (ms), with
+   * the number the page gave the event where one is given. */
+  const behaviour = { dead: false, slow: false, configs: [] as Response[], states: [] as ([boolean, number] | [boolean, number, number])[] };
   let page = "";
   async function plugin(editorId: string, base: string) {
     const own = new AbortController();
@@ -62,9 +63,9 @@ function browser(origin: string, handler: Handler) {
       }
       const states = job.kind.endsWith(".edit") ? behaviour.states : [];
       await fetch(`${base}done`, { method: "POST", body: JSON.stringify({ jobId: job.jobId, ...outcome }), signal: sig }).catch(() => {});
-      for (const [unsent, after] of states) {
+      for (const [unsent, after, seq] of states) {
         await delay(after);
-        await fetch(`${page}event`, { method: "POST", body: JSON.stringify({ editorId, type: "state", data: unsent }), signal: sig }).catch(() => {});
+        await fetch(`${page}event`, { method: "POST", body: JSON.stringify({ editorId, type: "state", data: unsent, ...(seq !== undefined ? { seq } : {}) }), signal: sig }).catch(() => {});
       }
     }
   }
@@ -517,6 +518,179 @@ test("after the browser stopped for idleness, the next call starts it again even
     await next;
     assert.equal(s.calls.filter((c) => c === "ensureAgent").length, 2, "started again, not taken for running");
     await stale;
+  } finally {
+    await s.done();
+  }
+});
+
+/** What the page says of an editor, as the seat page posts it. */
+const tell = (editorId: string, type: string, data: unknown, seq?: number) =>
+  fetch(`${pageUrl()}event`, { method: "POST", body: JSON.stringify({ editorId, type, data, ...(seq !== undefined ? { seq } : {}) }) });
+
+test("a browser being started is not stopped by the sweep before its page polls the first time", async () => {
+  let cancelled = 0;
+  let pending: NodeJS.Timeout | undefined;
+  const made: { b?: ReturnType<typeof browser> } = {};
+  const s = await setup(undefined, { idleMs: 200, agentIdleMs: 50 }, {
+    // The container is there at once, its page polls a moment later (Chromium starting).
+    ensureAgent: async (url) => {
+      pending = setTimeout(() => made.b!.start(url), 300);
+    },
+    stopAgent: async () => {
+      if (pending) clearTimeout(pending);
+      cancelled++;
+      made.b!.stop();
+    },
+  });
+  made.b = s.b;
+  try {
+    // Long after the seats were set up: the last close (there was none) is older than the browser's idle time.
+    await delay(150);
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: "x" });
+    assert.equal(cancelled, 0, "the start was not stopped");
+  } finally {
+    await s.done();
+  }
+});
+
+test("an edit the editor does not send closes the editor; the refusal says the command ran", async () => {
+  const s = await setup(() => ({ ops: 1 }));
+  try {
+    s.b.behaviour.states = [[true, 10]];
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), (e: SeatError) => e.code === "editor_not_saved" && e.ran === true);
+    assert.equal(seats().length, 0, "not used again: the next call opens it anew");
+    s.b.behaviour.states = [];
+    await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} });
+    assert.equal(s.b.opened.length, 2);
+  } finally {
+    await s.done();
+  }
+});
+
+test("an editor that still holds changes unsent when an edit is handed: only its word that they are sent ends the wait, never the quiet", async () => {
+  const s = await setup(() => ({ ops: 1 }));
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    const editorId = s.b.opened[0].editorId;
+    // The editor said it holds unsent changes (an edit before, or a session lost), and nothing since.
+    await tell(editorId, "state", true);
+    // An edit that adds to them raises no new event: it is not taken for one that changed nothing.
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), code("editor_not_saved"));
+    // Where the editor then says they are sent, the edit answers, as one that changed something.
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    await tell(s.b.opened[1].editorId, "state", true);
+    s.b.behaviour.states = [[false, 100]];
+    assert.deepEqual(await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), { ops: 1, changed: true });
+  } finally {
+    await s.done();
+  }
+});
+
+test("an edit says whether the editor had changes to send: none for one that changed nothing", async () => {
+  const s = await setup(() => ({ ops: 2 }));
+  try {
+    s.b.behaviour.states = [];
+    assert.deepEqual(await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), { ops: 2, changed: false });
+    s.b.behaviour.states = [[true, 0], [false, 50]];
+    assert.deepEqual(await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), { ops: 2, changed: true });
+  } finally {
+    await s.done();
+  }
+});
+
+test("an editor that reports an error after it opened is closed, and the next call opens it anew", async () => {
+  const s = await setup();
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    await tell(s.b.opened[0].editorId, "error", { errorCode: -1, errorDescription: "the editor asks to be reloaded" });
+    await delay(50);
+    assert.equal(seats().length, 0);
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    assert.equal(s.b.opened.length, 2);
+  } finally {
+    await s.done();
+  }
+});
+
+test("the editor's state events are taken in the order the page numbered them, whichever request arrives first", async () => {
+  const s = await setup(() => ({ ops: 1 }));
+  try {
+    // "sent" (2) arrives before "unsent" (1).
+    s.b.behaviour.states = [[false, 0, 2], [true, 20, 1]];
+    assert.deepEqual(await run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), { ops: 1, changed: true });
+  } finally {
+    await s.done();
+  }
+});
+
+test("a result larger than the most a result may carry is error:too_large at once, and the editor stays", async () => {
+  const s = await setup((job) => (job.kind === "big" ? "x".repeat(2 * 1024 * 1024) : "small"), { maxDone: 1024 * 1024, jobMs: 5000 });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    const started = Date.now();
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "big", args: {} }), code("too_large"));
+    assert.ok(Date.now() - started < 2000, "not after the job's time ran out");
+    assert.equal(seats().length, 1, "the editor stays");
+    assert.equal(await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} }), "small");
+    assert.equal(s.b.opened.length, 1);
+  } finally {
+    await s.done();
+  }
+});
+
+test("a job the plugin took, cut off by its editor's close, is of unknown effect: not to be tried again unseen", async () => {
+  const s = await setup();
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    s.b.behaviour.slow = true;
+    const call = run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} });
+    await delay(100);
+    closeDoc("doc-1");
+    await assert.rejects(call, (e: SeatError) => e.code === "editor_closed" && e.ran === true && /unknown/.test(e.message) && !/try again/.test(e.message));
+  } finally {
+    await s.done();
+  }
+});
+
+test("an editor a call has just found is not closed to make room for another document opening at the same moment", async () => {
+  const s = await setup((job) => job.args);
+  try {
+    for (const doc of ["d1", "d2", "d3"]) await run("/homes/a", doc, "edit", { kind: "word.read", args: doc });
+    // d1 is the least recently used; a fourth document opens, and d1 is called in the same moment.
+    const [four, one] = await Promise.all([run("/homes/a", "d4", "edit", { kind: "word.read", args: "d4" }), run("/homes/a", "d1", "edit", { kind: "word.read", args: "d1" })]);
+    assert.equal(four, "d4");
+    assert.equal(one, "d1");
+    assert.deepEqual(seats().map((x) => x.docId).sort(), ["d1", "d3", "d4"]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("a read of a document whose file changed outside the editor opens it anew; an edit hears error:behind", async () => {
+  const s = await setup((job) => job.kind);
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    s.standing.set("doc-1", "behind");
+    s.keys.set("doc-1", "key-doc-1-new");
+    const read = run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    s.standing.set("doc-1", "current"); // the new editor's key stands
+    assert.equal(await read, "word.read");
+    assert.equal(keyOf("/homes/a", "doc-1"), "key-doc-1-new");
+    s.standing.set("doc-1", "behind");
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), code("behind"));
+  } finally {
+    await s.done();
+  }
+});
+
+test("resetSeats (the Document Server started again): every editor closed and the browser stopped; the next call starts it anew", async () => {
+  const s = await setup();
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    resetSeats("its Document Server started again");
+    assert.equal(seats().length, 0);
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    assert.deepEqual(s.calls.filter((c) => c === "ensureAgent" || c === "stopAgent"), ["ensureAgent", "stopAgent", "ensureAgent"]);
   } finally {
     await s.done();
   }

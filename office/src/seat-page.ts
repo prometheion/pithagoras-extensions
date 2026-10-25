@@ -116,32 +116,44 @@ function collect(content, out) {
 function cellText(cell) { return collect(cell.GetContent(), []).map(function (x) { return x.text; }).join(" / "); }
 `;
 
+/** The most text the read commands give, in characters: what office_read shows at most (its own cap), and so far below
+ * the size a plugin's result may have (seat.LIMITS.maxDone) that a long document never fails its read. */
+export const MAX_READ_TEXT = 200_000;
+
 /** word.read: the document's blocks, in order: a paragraph's text (and its style where it has one other than the
- * default), a table's rows of cell texts. */
+ * default), a table's rows of cell texts; up to MAX_READ_TEXT characters (`truncated` where the document goes on). */
 const WORD_READ = `function () {
   ${WORD_COLLECT_SRC}
   try {
-    var doc = Api.GetDocument(), blocks = [];
+    var doc = Api.GetDocument(), blocks = [], size = 0, truncated = false;
     var add = function (content) {
       for (var i = 0; i < content.GetElementsCount(); i++) {
+        if (size > ${MAX_READ_TEXT}) { truncated = true; return; }
         var el = content.GetElement(i), type = el.GetClassType();
         if (type === "paragraph") {
           var style = "";
           try { var st = el.GetParaPr().GetStyle(); style = st ? st.GetName() : ""; } catch (e) { style = ""; }
-          blocks.push(style && style !== "Normal" ? { p: clean(el.GetText()), style: style } : { p: clean(el.GetText()) });
+          var text = clean(el.GetText());
+          size += text.length;
+          blocks.push(style && style !== "Normal" ? { p: text, style: style } : { p: text });
         } else if (type === "table") {
           var rows = [];
           for (var r = 0; r < el.GetRowsCount(); r++) {
             var row = el.GetRow(r), cells = [];
-            for (var c = 0; c < row.GetCellsCount(); c++) cells.push(cellText(row.GetCell(c)));
+            for (var c = 0; c < row.GetCellsCount(); c++) {
+              var t = cellText(row.GetCell(c));
+              size += t.length;
+              cells.push(t);
+            }
             rows.push(cells);
+            if (size > ${MAX_READ_TEXT}) { truncated = true; break; }
           }
           blocks.push({ table: rows });
         } else if (type === "blockLvlSdt") add(el.GetContent());
       }
     };
     add(doc);
-    return { result: { blocks: blocks } };
+    return { result: truncated ? { blocks: blocks, truncated: true } : { blocks: blocks } };
   } catch (e) {
     return { error: { code: "failed", message: String(e && e.message || e) } };
   }
@@ -222,14 +234,16 @@ function grid(v) { return Array.isArray(v) ? (v.length && !Array.isArray(v[0]) ?
 export const MAX_READ_CELLS = 20_000;
 
 /** cell.read: each sheet (or the one asked for): the cells of its used range that hold anything, by address, with the
- * value and, where the cell has one, the formula. */
+ * value and, where the cell has one, the formula; up to MAX_READ_CELLS cells of a sheet, and MAX_READ_TEXT characters
+ * of all of them (a sheet cut short is `truncated`, one not read at all for that `skipped` too). */
 const CELL_READ = `function () {
   ${CELL_ADDRESS_SRC}
   try {
     var want = Asc.scope.args.sheet, sheets = want ? [Api.GetSheet(want)] : Api.GetSheets();
     if (want && !sheets[0]) return { error: { code: "not_found", message: "there is no sheet named " + JSON.stringify(want) + " (the sheets: " + Api.GetSheets().map(function (s) { return s.GetName(); }).join(", ") + ")" } };
-    var out = [];
+    var out = [], size = 0;
     for (var i = 0; i < sheets.length; i++) {
+      if (size > ${MAX_READ_TEXT}) { out.push({ name: sheets[i].GetName(), range: "", cells: [], truncated: true, skipped: true }); continue; }
       var sheet = sheets[i], used = sheet.GetUsedRange(), address = String(used.GetAddress(false, false));
       var m = /^([A-Z]+)(\\d+)/.exec(address), col0 = m ? colIndex(m[1]) : 0, row0 = m ? Number(m[2]) - 1 : 0;
       var rows = used.GetRowsCount(), cols = used.GetColumnsCount(), truncated = false;
@@ -239,8 +253,10 @@ const CELL_READ = `function () {
       for (var r = 0; r < values.length; r++) for (var c = 0; c < values[r].length; c++) {
         var v = values[r][c], f = formulas[r] ? formulas[r][c] : "";
         if (v === "" && !(typeof f === "string" && f.charAt(0) === "=")) continue;
+        if (size > ${MAX_READ_TEXT}) { truncated = true; break; }
         var cell = { a: colName(col0 + c) + (row0 + r + 1), v: v };
         if (typeof f === "string" && f.charAt(0) === "=") cell.f = f;
+        size += cell.a.length + String(v).length + (cell.f ? cell.f.length : 0);
         cells.push(cell);
       }
       out.push({ name: sheet.GetName(), range: address, cells: cells, truncated: truncated });
@@ -367,6 +383,11 @@ export function pluginIndex(ds: string): string {
 export const SEAT_PAGE_JS = `(function () {
   var apis = {};
   var editors = {};
+  // Editors closed before they were made (an order to close came while api.js still loaded): never made after.
+  var closed = {};
+  // The events are numbered in the order the editors raised them: each is a request of its own, and two may arrive in
+  // either order.
+  var seq = 0;
   function load(src) {
     if (!apis[src]) apis[src] = new Promise(function (ok, no) {
       var s = document.createElement("script");
@@ -376,10 +397,12 @@ export const SEAT_PAGE_JS = `(function () {
     return apis[src];
   }
   function tell(editorId, type, data) {
-    fetch("event", { method: "POST", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify({ editorId: editorId, type: type, data: data }) }).catch(function () {});
+    seq++;
+    fetch("event", { method: "POST", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify({ editorId: editorId, type: type, data: data, seq: seq }) }).catch(function () {});
   }
   function open(order) {
     load(order.apiJs).then(function () {
+      if (closed[order.editorId]) return;
       var box = document.createElement("div");
       box.id = "editor-" + order.editorId;
       document.body.appendChild(box);
@@ -387,6 +410,10 @@ export const SEAT_PAGE_JS = `(function () {
       config.events = {
         onDocumentReady: function () { tell(order.editorId, "ready"); },
         onError: function (e) { tell(order.editorId, "error", e && e.data); },
+        // The editor's session is no longer the Document Server's (the document changed, or the Document Server
+        // restarted): the editor would ask to be reloaded. It is closed instead, and the next call opens it anew.
+        onRequestRefreshFile: function () { tell(order.editorId, "error", { errorDescription: "the editor asks to be reloaded" }); },
+        onOutdatedVersion: function () { tell(order.editorId, "error", { errorDescription: "the editor's version of the document is outdated" }); },
         // true: the editor holds changes it has not sent to the Document Server yet; false: all of them are sent.
         onDocumentStateChange: function (e) { tell(order.editorId, "state", Boolean(e && e.data === true)); }
       };
@@ -394,6 +421,7 @@ export const SEAT_PAGE_JS = `(function () {
     }, function (e) { tell(order.editorId, "error", { errorDescription: String(e && e.message || e) }); });
   }
   function close(editorId) {
+    closed[editorId] = true;
     var editor = editors[editorId];
     delete editors[editorId];
     try { if (editor) editor.destroyEditor(); } catch (e) {}

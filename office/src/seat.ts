@@ -74,7 +74,17 @@ export const LIMITS = {
   quietMs: 2_000,
 };
 
-type Job = { id: string; kind: string; args: unknown; settle: (outcome: { result?: unknown; error?: { code?: string; message?: string; op?: number } }) => void; handed: boolean; handedAt: number };
+type Outcome = { result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: boolean };
+type Job = {
+  id: string;
+  kind: string;
+  args: unknown;
+  settle: (outcome: Outcome) => void;
+  handed: boolean;
+  handedAt: number;
+  /** When it was handed, the editor had said it holds changes unsent and not yet that it sent them. */
+  unsentAtHand: boolean;
+};
 
 type Editor = {
   id: string;
@@ -103,9 +113,10 @@ type Editor = {
   stateWaiters: (() => void)[];
 };
 
-/** A coded refusal the tools pass on as `error:<code> <message>`. */
+/** A coded refusal the tools pass on as `error:<code> <message>`. `ran`: the editor's plugin had taken the job, so
+ * the command may have run, and an edit may be in the document (office_edit records it all the same). */
 export class SeatError extends Error {
-  constructor(public readonly code: string, message: string, public readonly op?: number) {
+  constructor(public readonly code: string, message: string, public readonly op?: number, public readonly ran = false) {
     super(message);
   }
 }
@@ -123,6 +134,8 @@ let sweeper: NodeJS.Timeout | undefined;
 let agentRunning = false;
 /** The browser's stop under way, if any: a start waits for it, or it would find the browser it removes. */
 let stopping: Promise<void> = Promise.resolve();
+/** Starts of the browser under way (connected): the sweep does not stop a browser that a call is starting. */
+let startingAgent = 0;
 /** Counts the editors' state events, to tell which of two came last. */
 let stateSeq = 0;
 
@@ -188,14 +201,30 @@ export async function run(home: string, docId: string, mode: SeatMode, job: Seat
   if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
   // A view-mode editor takes no edit: refused here, before its plugin is asked.
   if (mode === "view" && job.kind.endsWith(".edit")) throw new SeatError("read_only", "the agent's editor of this document is read-only");
-  const editor = await editorFor(home, docId, mode, options.signal);
+  const edit = job.kind.endsWith(".edit");
+  // A read opens the file anew where it changed outside the editor; an edit hears `behind` first.
+  const editor = await editorFor(home, docId, mode, options.signal, !edit);
   editor.busy = true;
   editor.lastUsed = Date.now();
   try {
+    // Closed between the find and now (another call made room for its document): never handed, so nothing ran.
+    if (!editors.has(editor.id)) throw new SeatError("editor_closed", "the agent's editor of this document was closed for another document as the call began; try again");
     const outcome = await handOver(editor, job, options);
-    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op);
-    if (job.kind.endsWith(".edit")) await sent(editor, outcome.handedAt ?? 0, Date.now(), options.signal);
-    return outcome.result;
+    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op, outcome.ran ?? false);
+    if (!edit) return outcome.result;
+    let changed: boolean;
+    try {
+      changed = await sent(editor, outcome.handedAt ?? 0, Date.now(), outcome.unsentAtHand ?? false, options.signal);
+    } catch (e) {
+      // An editor that does not send what it made has lost the Document Server's session (it restarted, or the editor
+      // waits for a reload): closed, so that the next call opens the document anew instead of editing a copy nobody
+      // sees.
+      if (e instanceof SeatError && e.code === "editor_not_saved") close(editor, "it did not send an edit to the Document Server");
+      throw e;
+    }
+    // Whether the editor said the edit changed anything it had to send: the save after an edit that changed nothing
+    // finds nothing to save.
+    return { ...(outcome.result && typeof outcome.result === "object" ? outcome.result : {}), changed };
   } finally {
     editor.busy = false;
     editor.lastUsed = Date.now();
@@ -212,7 +241,10 @@ function find(home: string, docId: string): Editor | undefined {
   return undefined;
 }
 
-async function editorFor(home: string, docId: string, mode: SeatMode, signal?: AbortSignal): Promise<Editor> {
+/** The open editor of (`home`, `docId`) in `mode`, or one opened. One that is found is marked in use before anything
+ * else runs, so that another call making room for its own document does not close it. `reopenBehind`: an editor whose
+ * key no longer stands is closed and the file opened as it is now, instead of `behind` (a read has nothing to lose). */
+async function editorFor(home: string, docId: string, mode: SeatMode, signal?: AbortSignal, reopenBehind = false): Promise<Editor> {
   const d = deps!;
   let editor = find(home, docId);
   if (editor && !editor.ready) {
@@ -223,10 +255,10 @@ async function editorFor(home: string, docId: string, mode: SeatMode, signal?: A
     const standing = d.standing(docId, editor.key);
     if (standing !== "current") {
       close(editor, "its document changed outside the editor");
-      if (standing === "behind") throw new SeatError("behind", "the document's file changed outside the editor while the agent's editor had it open; that editor is closed, and the next call opens the file as it is now");
-      throw new SeatError("not_found", "the document is gone");
-    }
-    if (editor.mode !== mode) {
+      if (standing !== "behind") throw new SeatError("not_found", "the document is gone");
+      if (!reopenBehind) throw new SeatError("behind", "the document's file changed outside the editor while the agent's editor had it open; that editor is closed, and the next call opens the file as it is now");
+      editor = undefined;
+    } else if (editor.mode !== mode) {
       close(editor, `it opens in ${mode} mode now`);
       editor = undefined;
     } else if (editor.ready && !editor.held && Date.now() - editor.lastPoll > limits.deadMs) {
@@ -241,7 +273,10 @@ async function editorFor(home: string, docId: string, mode: SeatMode, signal?: A
       return editor;
     }
   }
-  return editor ?? open(home, docId, mode, signal);
+  if (!editor) return open(home, docId, mode, signal);
+  editor.busy = true;
+  editor.lastUsed = Date.now();
+  return editor;
 }
 
 /** Opens an editor: the browser and its page first, room made under the limit, the config minted, the page told, and
@@ -278,30 +313,45 @@ async function open(home: string, docId: string, mode: SeatMode, signal?: AbortS
 async function connected(signal?: AbortSignal): Promise<void> {
   const d = deps!;
   if (agentRunning && (page || Date.now() - pageSeen < limits.holdMs + 5_000)) return;
-  await stopping;
-  const since = Date.now();
-  await d.ensureAgent(pageUrl());
-  agentRunning = true;
-  await waitFor((wake) => pageWaiters.push(wake), () => pageSeen >= since, limits.connectMs, signal, () => new SeatError("agent_unavailable", `the agent's editor did not start within ${limits.connectMs / 1000} s`));
+  // Counted from before the wait for a stop: the sweep could otherwise stop the browser this call starts, between its
+  // start and its page's first poll, when no editor is open yet.
+  startingAgent++;
+  try {
+    await stopping;
+    const since = Date.now();
+    await d.ensureAgent(pageUrl());
+    agentRunning = true;
+    await waitFor((wake) => pageWaiters.push(wake), () => pageSeen >= since, limits.connectMs, signal, () => new SeatError("agent_unavailable", `the agent's editor did not start within ${limits.connectMs / 1000} s`));
+  } finally {
+    startingAgent--;
+    // A browser just started runs its idle time from now, not from the last close before it stopped.
+    lastEditorClosed = Date.now();
+  }
 }
 
 /** The edit's changes sent to the Document Server: since the job was handed (`since`) the editor said it held changes
  * unsent, and said after that it sent them all; or it said nothing of changes for quietMs after the command's outcome
  * came (`at`: the edit changed nothing). The page and the plugin speak over requests of their own, so either may come
- * first. Rejects with editor_not_saved where they are not sent within sentMs: the edit is made in the editor, and
- * reaches the file with a later save. */
-async function sent(editor: Editor, since: number, at: number, signal?: AbortSignal): Promise<void> {
-  const done = () =>
-    !editors.has(editor.id) ||
-    (editor.unsentAt >= since ? editor.sentSeq > editor.unsentSeq : Date.now() - at >= limits.quietMs);
+ * first. An editor that still held changes unsent when the job was handed (`pending`) says nothing new when the edit
+ * adds to them: then only its word that it sent them counts, never the quiet. Rejects with editor_not_saved where they
+ * are not sent within sentMs: the edit is made in the editor, and reaches the file with a later save. Answers whether
+ * the editor said it had changes to send (false: the edit changed nothing). */
+async function sent(editor: Editor, since: number, at: number, pending: boolean, signal?: AbortSignal): Promise<boolean> {
+  const changed = () => pending || editor.unsentAt >= since;
+  const done = () => !editors.has(editor.id) || (changed() ? editor.sentSeq > editor.unsentSeq : Date.now() - at >= limits.quietMs);
   const quiet = setTimeout(() => {
     for (const wake of editor.stateWaiters.splice(0)) wake();
   }, limits.quietMs);
   try {
-    await waitFor((wake) => editor.stateWaiters.push(wake), done, limits.sentMs, signal, () => new SeatError("editor_not_saved", `the edit is made in the agent's editor, but the editor did not send it to the Document Server within ${limits.sentMs / 1000} s; it reaches the file with a later save`));
+    await waitFor((wake) => editor.stateWaiters.push(wake), done, limits.sentMs, signal, () => new SeatError("editor_not_saved", `the edit is made in the agent's editor, but the editor did not send it to the Document Server within ${limits.sentMs / 1000} s; it reaches the file with a later save`, undefined, true));
+  } catch (e) {
+    // An abort after the command ran: the edit is made all the same.
+    if (e instanceof SeatError && e.code === "aborted") throw new SeatError("aborted", e.message, undefined, true);
+    throw e;
   } finally {
     clearTimeout(quiet);
   }
+  return changed();
 }
 
 async function ready(editor: Editor, signal?: AbortSignal): Promise<void> {
@@ -344,7 +394,7 @@ function waitFor(listen: (wake: () => void) => void, done: () => boolean, ms: nu
 
 /** The job handed to the editor's plugin (now, where it waits, or at its next poll) and its outcome waited for. A job
  * with no outcome in time closes the editor: what it did is unknown. */
-function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<{ result?: unknown; error?: { code?: string; message?: string; op?: number }; handedAt?: number }> {
+function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<Outcome & { handedAt?: number; unsentAtHand?: boolean }> {
   const ms = options.timeoutMs ?? limits.jobMs;
   return new Promise((resolve, reject) => {
     let over = false;
@@ -354,12 +404,13 @@ function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal;
       args: job.args,
       handed: false,
       handedAt: 0,
+      unsentAtHand: false,
       settle: (outcome) => {
         if (over) return;
         over = true;
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", aborted);
-        resolve({ ...outcome, handedAt: queued.handedAt });
+        resolve({ ...outcome, handedAt: queued.handedAt, unsentAtHand: queued.unsentAtHand });
       },
     };
     const timer = setTimeout(() => {
@@ -367,7 +418,7 @@ function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal;
       over = true;
       options.signal?.removeEventListener("abort", aborted);
       close(editor, "a job of it timed out");
-      reject(new SeatError("timeout", `the agent's editor gave no result within ${ms / 1000} s; what the call did is unknown: read the document again before you go on`));
+      reject(new SeatError("timeout", `the agent's editor gave no result within ${ms / 1000} s; what the call did is unknown: read the document again before you go on`, undefined, queued.handed));
     }, ms);
     const aborted = () => {
       if (over) return;
@@ -375,7 +426,7 @@ function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal;
       clearTimeout(timer);
       // Not handed yet: it never runs. Handed: it runs to its end, and its outcome is dropped.
       if (!queued.handed) editor.queue = editor.queue.filter((j) => j !== queued);
-      reject(new SeatError("aborted", "the call was aborted"));
+      reject(new SeatError("aborted", "the call was aborted", undefined, queued.handed));
     };
     options.signal?.addEventListener("abort", aborted);
     if (options.signal?.aborted) return aborted();
@@ -392,6 +443,7 @@ function feed(editor: Editor): void {
   editor.held = null;
   job.handed = true;
   job.handedAt = Date.now();
+  job.unsentAtHand = editor.unsentSeq > editor.sentSeq;
   json(res, 200, { jobId: job.id, kind: job.kind, args: job.args });
 }
 
@@ -402,12 +454,19 @@ function feed(editor: Editor): void {
 function close(editor: Editor, why: string): void {
   if (!editors.delete(editor.id)) return;
   log(`closed the agent's editor of ${editor.docId} (${editor.home}): ${why}`);
-  // Its plugin hears 404 and stops; a job it has not taken never runs; one it took is not waited for any more.
+  // Its plugin hears 404 and stops; a job it has not taken never runs; one it took is not waited for any more, and may
+  // have run (and been sent): it is not to be made again unseen.
   if (editor.held) {
     notFound(editor.held);
     editor.held = null;
   }
-  for (const job of editor.queue) job.settle({ error: { code: "editor_closed", message: `the agent's editor of this document was closed (${why}); try again` } });
+  for (const job of editor.queue) {
+    job.settle(
+      job.handed
+        ? { error: { code: "editor_closed", message: `the agent's editor of this document was closed (${why}) while it ran the call; what the call did is unknown: read the document again before you go on` }, ran: true }
+        : { error: { code: "editor_closed", message: `the agent's editor of this document was closed (${why}); try again` } },
+    );
+  }
   editor.queue = [];
   for (const wake of editor.waiters.splice(0)) wake();
   for (const wake of editor.stateWaiters.splice(0)) wake();
@@ -426,6 +485,18 @@ export function closeSeats(): void {
   closeAll();
   agentRunning = false;
   pageSeen = 0;
+}
+
+/** Every seat closed and the browser stopped: the Document Server was (re)started, which ended the sessions the
+ * agents' editors were in. An editor left open would go on running commands on its own copy, which reach nobody. The
+ * next call starts the browser again (after this stop). */
+export function resetSeats(why: string): void {
+  if (!deps) return;
+  const d = deps;
+  const open = editors.size;
+  closeSeats();
+  if (open) log(`closed ${open} agent editor(s): ${why}`);
+  stopping = stopping.then(() => d.stopAgent()).catch((e) => log(`could not stop the agents' browser: ${(e as Error).message}`));
 }
 
 function closeAll(): void {
@@ -450,7 +521,7 @@ function order(o: Record<string, unknown>): void {
 function sweep(): void {
   const now = Date.now();
   for (const e of [...editors.values()]) if (!e.busy && now - e.lastUsed > limits.idleMs) close(e, "idle");
-  if (agentRunning && !editors.size && now - lastEditorClosed > limits.agentIdleMs && deps) {
+  if (agentRunning && !startingAgent && !editors.size && now - lastEditorClosed > limits.agentIdleMs && deps) {
     agentRunning = false;
     pageSeen = 0;
     // Its page goes with it: a poll it held is not taken for a page that still listens.
@@ -558,24 +629,33 @@ function seatRoute(req: IncomingMessage, res: ServerResponse, rest: string): boo
   }
   if (req.method === "POST" && rest === "event") {
     void readBody(req, 64 * 1024).then((body) => {
-      let event: { editorId?: unknown; type?: unknown; data?: unknown } = {};
+      let event: { editorId?: unknown; type?: unknown; data?: unknown; seq?: unknown } = {};
       try {
         event = JSON.parse(body?.toString("utf8") ?? "{}");
       } catch {
         event = {};
       }
       const editor = typeof event.editorId === "string" ? editors.get(event.editorId) : undefined;
-      if (editor && event.type === "error" && !editor.ready) {
-        editor.failed = JSON.stringify(event.data ?? null).slice(0, 300);
-        for (const wake of editor.waiters.splice(0)) wake();
+      if (editor && event.type === "error") {
+        const what = JSON.stringify(event.data ?? null).slice(0, 300);
+        log(`the agent's editor of ${editor.docId} reported an error: ${what}`);
+        if (!editor.ready) {
+          editor.failed = what;
+          for (const wake of editor.waiters.splice(0)) wake();
+        } else {
+          // An editor that went wrong after it opened (its Document Server session lost, a reload asked for) is not used
+          // again: what it ran would reach nobody. The next call opens the document anew.
+          close(editor, `it reported an error: ${what}`);
+        }
       }
-      if (editor && event.type === "error") log(`the agent's editor of ${editor.docId} reported an error: ${JSON.stringify(event.data ?? null).slice(0, 300)}`);
       if (editor && event.type === "state") {
-        stateSeq++;
+        // The page numbers its events, as two of them may arrive in either order (each is a request of its own); one
+        // without a number is counted as it comes.
+        const seq = typeof event.seq === "number" && Number.isSafeInteger(event.seq) ? event.seq : ++stateSeq;
         if (event.data === true) {
           editor.unsentAt = Date.now();
-          editor.unsentSeq = stateSeq;
-        } else editor.sentSeq = stateSeq;
+          editor.unsentSeq = Math.max(editor.unsentSeq, seq);
+        } else editor.sentSeq = Math.max(editor.sentSeq, seq);
         for (const wake of editor.stateWaiters.splice(0)) wake();
       }
       json(res, 200, {});
@@ -617,7 +697,15 @@ function pluginRoute(req: IncomingMessage, res: ServerResponse, editor: Editor, 
   if (req.method === "POST" && rest === "done") {
     editor.lastPoll = Date.now();
     void readBody(req, limits.maxDone).then((body) => {
-      if (!body) return json(res, 413, { error: "the result is too large", code: "too_large" });
+      if (!body) {
+        // Its job (the plugin runs one at a time) ends with that, and the editor stays: waiting for the job's time to
+        // run out would close it, and every retry would open and close it again.
+        for (const job of editor.queue.filter((j) => j.handed)) {
+          editor.queue = editor.queue.filter((j) => j !== job);
+          job.settle({ error: { code: "too_large", message: `the editor's result is larger than ${Math.round(limits.maxDone / 1024 / 1024)} MiB` }, ran: true });
+        }
+        return json(res, 413, { error: "the result is too large", code: "too_large" });
+      }
       let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number } } = {};
       try {
         done = JSON.parse(body.toString("utf8"));

@@ -255,6 +255,7 @@ const SEAT_ADVICE: Record<string, string> = {
   behind: "Read it again with office_read before you edit.",
   timeout: "",
   editor_closed: "",
+  too_large: "Read a spreadsheet one sheet at a time (sheet).",
   editor_not_saved: "Do not make it again: read the document if you need to see it.",
 };
 
@@ -323,22 +324,25 @@ function assertMayRead(doc: DocMeta, chatId: string): void {
 const people = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
 
 /** Word blocks as the agent reads them: `[n] text`, a style in brackets, a table as its rows. */
-type WordBlocks = { blocks: ({ p: string; style?: string } | { table: string[][] })[] };
+type WordBlocks = { blocks: ({ p: string; style?: string } | { table: string[][] })[]; truncated?: boolean };
 function wordText(read: WordBlocks): string {
   if (!read.blocks.length) return "(empty document)";
-  return read.blocks
-    .map((b, i) => ("table" in b ? `[${i + 1}] table\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}` : `[${i + 1}]${b.style ? ` (${b.style})` : ""} ${b.p}`))
-    .join("\n");
+  return (
+    read.blocks
+      .map((b, i) => ("table" in b ? `[${i + 1}] table\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}` : `[${i + 1}]${b.style ? ` (${b.style})` : ""} ${b.p}`))
+      .join("\n") + (read.truncated ? "\n\n(the document goes on: only its first 200,000 characters were read)" : "")
+  );
 }
 
 /** A spreadsheet's cells as the agent reads them: `A1: value`, a text in quotes, a formula after its value. */
-type CellSheets = { sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean }[] };
+type CellSheets = { sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean }[] };
 function cellText(read: CellSheets): string {
   const value = (v: unknown) => (typeof v === "string" ? JSON.stringify(v) : typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : String(v));
   return read.sheets
     .map((s) => {
       const cells = s.cells.map((c) => `${c.a}: ${value(c.v)}${c.f ? ` (${c.f})` : ""}`).join("\n");
-      return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(only its first 20,000 cells are shown)" : ""}`;
+      if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
+      return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}`;
     })
     .join("\n\n");
 }
@@ -486,9 +490,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? wordText(read as WordBlocks) : cellText(read as CellSheets)}`;
           live = true;
         } catch (e) {
-          // Without its editor the agent still reads the file; an edit waits for the download.
-          if ((e as { code?: string } | null)?.code !== "agent_editor_missing") throw e;
-          said = `${readHeader(doc, "missing")}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
+          // Without its editor the agent still reads the file; an edit waits for the download. Office found stopped
+          // as the editor starts (its network gone): the saved file too, as when it is stopped.
+          const code = (e as { code?: string } | null)?.code;
+          if (code !== "agent_editor_missing" && code !== "office_stopped") throw e;
+          said = `${readHeader(doc, code === "office_stopped" ? "stopped" : "missing")}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
         }
       } else said = `${readHeader(doc, state)}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_read: it exceeds 200,000 characters]";
@@ -541,16 +547,30 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       if (state === "starting") throw new Refusal("ds_starting", "Office is still starting (its Document Server sets itself up after its first start, about two minutes): try again in a moment.");
 
       return oneAtATime(doc.docId, async () => {
-        const from = doc.mtimeMs;
-        await seats().run(home, doc.docId, "edit", job, { signal });
+        // The revision as it is now: an edit queued behind another starts from that one's.
+        const from = refresh(doc.docId, rootDir())?.mtimeMs ?? doc.mtimeMs;
         const n = job.args.ops.length;
         const kinds = [...new Set(job.args.ops.map((op) => ("quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "cells")))].join(", ");
+        const what = `office_edit: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
+        let made: unknown;
+        try {
+          made = await seats().run(home, doc.docId, "edit", job, { signal });
+        } catch (e) {
+          // The editor took the edit and then gave no clear answer: it may be in the document, and reach the file with
+          // a later save. Recorded all the same, so that every change an agent may have made is in the audit log.
+          if (e instanceof seat.SeatError && e.ran) record({ subject: doc.title, reason: `${what}; ${e.code === "editor_not_saved" ? "made in the editor, not saved yet" : "outcome unknown"} (${e.code})`, chatId });
+          throw e;
+        }
+        const changed = (made as { changed?: unknown } | null)?.changed !== false;
         const watching = usersOf(doc.docId).length;
         const key = seats().keyOf(home, doc.docId);
         const outcome: SaveAfterEdit = key ? await (cfg.save ?? ((k: string) => saveNow(k)))(key) : "failed";
         const now = refresh(doc.docId, rootDir());
         const to = now?.mtimeMs ?? from;
-        record({ subject: doc.title, reason: `office_edit: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}; ${outcome === "saved" || outcome === "same" ? `saved as revision ${to}` : outcome === "copy" ? "the save was kept as a conflict copy" : `not saved yet (${outcome})`}`, chatId });
+        // Nothing to save after an edit that changed nothing (a cell given the value it holds): the file is as it was.
+        const unchanged = outcome === "nothing" && !changed;
+        record({ subject: doc.title, reason: `${what}; ${unchanged ? `no change, revision ${to}` : outcome === "saved" || outcome === "same" ? `saved as revision ${to}` : outcome === "copy" ? "the save was kept as a conflict copy" : `not saved yet (${outcome})`}`, chatId });
+        if (unchanged) return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"}): that changed nothing, so there was nothing to save; the document is at revision ${to}, as it was.`, { action: "edit", id: doc.docId, ops: n, from, to, live: watching, changed: false });
         if (outcome === "copy") {
           seats().closeDoc(doc.docId, "its save was kept as a conflict copy");
           throw new Refusal("behind", `"${doc.title}" changed on disk outside the editor while your editor had it open: your edit is in the editor, and its save was kept beside the document as "${doc.title} (conflict <date time>)" rather than written over the newer file. Read the document again with office_read and redo the edit.`);

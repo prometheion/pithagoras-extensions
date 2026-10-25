@@ -19,6 +19,10 @@ test("loadSettings: missing file -> defaults", () => {
   assert.deepEqual(loadSettings(root), DEFAULT_SETTINGS);
 });
 
+test("the default image is the full tag of the tested build, not one that moves to the next build", () => {
+  assert.equal(DEFAULT_SETTINGS.imageTag, "onlyoffice/documentserver:10.0.0.1");
+});
+
 test("loadSettings: partial file merges field by field, unknown fields ignored", () => {
   const root = tmpRoot();
   fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: true, imageTag: "some/other:9.9", nonsense: 42 }));

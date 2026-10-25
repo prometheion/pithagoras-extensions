@@ -12,8 +12,10 @@ import { dataDir } from "./host";
 
 export type OfficeSettings = { enabled: boolean; imageTag: string };
 
-/** Pinned image tag -- never :latest (the settings page warns about it). */
-export const DEFAULT_SETTINGS: OfficeSettings = { enabled: false, imageTag: "onlyoffice/documentserver:10.0" };
+/** The image by the full tag of the build it was tested with (DocService 10.0.0 build 169): `10.0` and `10.0.0` move
+ * to each new 10.0.x build under every install, which is what `:latest` is refused for. Docker for extensions takes a
+ * reference by its tag (it splits at the last colon), so not by its digest. */
+export const DEFAULT_SETTINGS: OfficeSettings = { enabled: false, imageTag: "onlyoffice/documentserver:10.0.0.1" };
 
 const FILE = "settings.json";
 

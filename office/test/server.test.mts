@@ -24,7 +24,7 @@ import { mintTicket, verifyTicket } from "../src/tickets";
 import { verifyJwt } from "../src/jwt";
 import { docIdOf, makeKey, parseKey, revHashOf } from "../src/callback";
 
-const DEFAULT_TAG = "onlyoffice/documentserver:10.0";
+const DEFAULT_TAG = "onlyoffice/documentserver:10.0.0.1";
 
 /* ------------------------------------------------------------------ */
 /* fakes                                                               */

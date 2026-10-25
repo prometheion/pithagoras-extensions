@@ -35,8 +35,6 @@ export const de: Record<string, string | Plural> = {
   "Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.": "Erstellte Dokumente liegen im eigenen Datenverzeichnis dieser Erweiterung (dem Ordner docs mit Index und Papierkorb), nie im Ordner eines Chats; Dateien aus dem Arbeitsbereich bleiben, wo sie sind – die Bibliothek erfasst sie an Ort und Stelle, und ein Download oder Export ist eine Kopie.",
   "Modified": "Geändert",
   "Name": "Name",
-  "Never pin :latest — a moved image changes the Document Server under you and breaks the co-editing keys.": "Nie :latest festlegen – ein verschobenes Image ändert den Document Server unter dir und bricht die Schlüssel der gemeinsamen Bearbeitung.",
-  "Never pin :latest — a moved image changes the Document Server under you and breaks the co-editing keys. A new tag applies at the next start.": "Nie :latest festlegen – ein verschobenes Image ändert den Document Server unter dir und bricht die Schlüssel der gemeinsamen Bearbeitung. Ein neuer Tag gilt ab dem nächsten Start.",
   "New document": "Neues Dokument",
   "New document title": "Titel des neuen Dokuments",
   "New title for {title}": "Neuer Titel für {title}",

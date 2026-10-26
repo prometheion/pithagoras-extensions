@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import net from "node:net";
@@ -114,7 +114,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const sock = "/var/run/docker.sock";
     const args = ["run", "-d", "--name", portalName, "--user", `${process.getuid!()}:${process.getgid!()}`, "--group-add", String(statSync(sock).gid), "-p", `127.0.0.1:${port}:${port}`, "-v", `${sock}:${sock}`];
     for (const dir of [PITHAGORAS, PACKAGE, root]) args.push("-v", `${dir}:${dir}`);
-    for (const [k, v] of Object.entries({ ...env, PATH: `${bin}:/usr/local/bin:/usr/bin:/bin` })) args.push("-e", `${k}=${v}`);
+    // Without a password the portal listens on its own loopback unless told otherwise: its container's, here, which
+    // the published port does not reach.
+    for (const [k, v] of Object.entries({ ...env, PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`, ALLOW_OPEN: "1" })) args.push("-e", `${k}=${v}`);
     args.push("-w", PITHAGORAS, NODE_IMAGE, "sh", "-c", `node "${model}" ${modelPort} "${log}" & exec node "${entry}"`);
     execFileSync("docker", args, { stdio: ["ignore", "ignore", "inherit"] });
     children.push(spawn("docker", ["logs", "-f", portalName], { stdio: ["ignore", portalOut, portalOut] }));
@@ -177,6 +179,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     for (const child of children) child.kill();
     if (mode === "container") execFileSync("docker", ["rm", "-f", portalName], { stdio: "ignore" });
     if (keep) return;
+    // The portal's log outlives the run where OFFICE_E2E_LOG names a file for it.
+    if (process.env.OFFICE_E2E_LOG) writeFileSync(process.env.OFFICE_E2E_LOG, readFileSync(path.join(root, "portal.log")));
     for (const name of [`${PREFIX}-agent`, `${PREFIX}-relay`, `${PREFIX}-relay-forward`, PREFIX]) execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
     for (const name of [`${PREFIX}-agents`, `${PREFIX}-net`]) {
       try {

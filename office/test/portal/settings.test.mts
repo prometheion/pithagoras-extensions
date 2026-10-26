@@ -55,11 +55,11 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-test("the agents' editor: not downloaded, the row says what that means and offers the download; downloading, its progress; there, it says so", async () => {
+test("the agents' editor: not downloaded, the row says so and offers the download; downloading, its progress; there, it says so", async () => {
   const page = await (await browser.newContext()).newPage();
   await page.goto(`${origin}/settings.html`);
   await page.getByText("The agents' editor", { exact: true }).waitFor({ timeout: 10_000 });
-  await page.getByText("Not downloaded. Until it is, agents read the saved files and cannot edit.", { exact: false }).waitFor();
+  await page.getByText("Not downloaded", { exact: true }).waitFor();
   assert.equal(await page.getByText(TAG).count(), 1, "the pinned image is named");
   await page.getByRole("button", { name: "Download", exact: true }).click();
   await page.getByText("Pulling the image · Downloading [==>   ] 50MB/540MB").waitFor({ timeout: 10_000 });
@@ -67,7 +67,7 @@ test("the agents' editor: not downloaded, the row says what that means and offer
   assert.equal(await page.getByRole("button", { name: "Downloading…" }).isDisabled(), true, "no second download while one goes");
   // Done: the next poll says it is there.
   Object.assign(agent, { present: true, pull: { active: false, line: "done" } });
-  await page.getByText("Downloaded. Agents edit documents in an editor of their own, beside you", { exact: false }).waitFor({ timeout: 10_000 });
+  await page.getByText("Downloaded", { exact: true }).waitFor({ timeout: 10_000 });
   assert.equal(await page.getByRole("button", { name: "Download", exact: true }).count(), 0);
   await page.context().close();
 });
@@ -78,5 +78,20 @@ test("a download that failed is said in the row, and can be asked again", async 
   await page.goto(`${origin}/settings.html`);
   await page.getByText("is not the build this version of Office runs", { exact: false }).waitFor({ timeout: 10_000 });
   assert.equal(await page.getByRole("button", { name: "Download", exact: true }).isEnabled(), true);
+  await page.context().close();
+});
+
+test("the page says no prose: labels, states and short hints only, none of the explanations it had", async () => {
+  Object.assign(agent, { present: true, pull: null });
+  const page = await (await browser.newContext()).newPage();
+  await page.goto(`${origin}/settings.html`);
+  await page.getByText("OnlyOffice Document Server", { exact: true }).waitFor({ timeout: 10_000 });
+  const text = await page.locator("#root").innerText();
+  for (const gone of ["Made documents keep in this extension's own data directory", "The editor loads through this portal's own proxy", "The agents' editor runs in a browser of its own"]) {
+    assert.ok(!text.includes(gone), `still says: ${gone}`);
+  }
+  // Nothing on it reads as a paragraph: every line is a label, a state or a hint.
+  const long = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 80);
+  assert.deepEqual(long, []);
   await page.context().close();
 });

@@ -252,7 +252,7 @@ export default function office(given: Portal): void {
     title: msg("Office"),
     icon: LuPresentation,
     search: [
-      { title: msg("Office"), words: "office document docx xlsx word sheet spreadsheet onlyoffice document server container image tag pull co-editing library workspace scan rescan export trash" },
+      { title: msg("Office"), words: "office docx xlsx word sheet spreadsheet onlyoffice document server container image tag pull download start stop remove agent editor chromium" },
     ],
     component: () => (
       <Suspense fallback={<SettingsFallback />}>

@@ -43,3 +43,8 @@ test("every text the browser half shows has its German, and de.ts has nothing th
   const words = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
   for (const [english, german] of Object.entries(de)) assert.deepEqual(words(String(german)), words(english), english);
 });
+
+test("the Office page in Settings says labels, states, hints and confirmations, never a paragraph of explanation", () => {
+  const long = [...texts()].filter(([text, at]) => at.startsWith(`web${path.sep}settings.tsx:`) && text.length > 120);
+  assert.deepEqual(long.map(([text, at]) => `${at}: ${text}`), []);
+});

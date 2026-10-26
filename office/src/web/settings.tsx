@@ -6,9 +6,8 @@ import { refreshOfficeState, useOfficeState } from "./state";
 
 /**
  * The Office page in Settings: a service panel for the Document Server -- where it stands (and what a first pull is
- * doing), start and stop, the pinned image tag, the agents' editor (its image, downloaded here), and where the
- * documents live. There is no co-editing switch: an agent edits in an editor of its own beside the people, and nothing
- * on this page changes that.
+ * doing), start and stop, the pinned image tag, and the agents' editor (its image, downloaded here). Labels, states,
+ * errors and the hints a field needs, nothing more: what Office does and where it keeps things is the README's to say.
  * Enabling goes through
  * POST /settings, which answers without waiting for a first pull to finish (`starting`): the pull progress keeps
  * coming in over the shared 5 s poll, and the server half's lookAfter stays quiet while the person has stopped it.
@@ -50,7 +49,7 @@ export function OfficeSettings() {
       const next = (tag ?? state.imageTag).trim();
       if (next === "") throw new Error(t("{ imageTag } must be a non-empty string like onlyoffice/documentserver:10.0.0.1"));
       // The same refusal the server makes, made here first: never a floating tag (it breaks the co-editing keys).
-      if (floatingTag(next)) throw new Error(t("Pin a full tag, never :latest or none — a moved image changes the Document Server under you and breaks the co-editing keys."));
+      if (floatingTag(next)) throw new Error(t("Pin a full tag, never :latest or none."));
       await api.saveSettings({ imageTag: next });
     });
 
@@ -70,7 +69,7 @@ export function OfficeSettings() {
   const remove = async () => {
     const ok = await portal.ui.confirm({
       title: t("Remove the Document Server?"),
-      message: t("Its container, its relay and its network are removed, and so are its volumes: its cache of open documents, with any save it could not hand over yet, its logs and its own data. Every save that reached the library stays there. The image stays; Start makes everything again."),
+      message: t("Its containers, network and volumes go, with any save it could not hand over yet. The documents and the image stay."),
       confirmLabel: t("Remove"),
       danger: true,
       deletes: true,
@@ -111,9 +110,7 @@ export function OfficeSettings() {
           {t("The agents' editor")}
         </div>
         <div className="po-service-detail">
-          {state.agent.present
-            ? t("Downloaded. Agents edit documents in an editor of their own, beside you: you see their changes as they make them.")
-            : t("Not downloaded. Until it is, agents read the saved files and cannot edit. A headless Chromium of about 540 MB; while agents work in documents it uses up to 3 GB of memory.")}
+          {state.agent.present ? t("Downloaded") : t("Not downloaded")}
         </div>
         <div className="po-pull-line font-mono">{state.agent.tag}</div>
         {state.agent.pull?.active && <div className="po-pull-line">{t("Pulling the image")} · {state.agent.pull.line}</div>}
@@ -128,22 +125,17 @@ export function OfficeSettings() {
       </div>
 
       {/* Enabling it: with the memory warning before a first start (~4 GB RAM recommended at runtime). */}
-      {!state.enabled && (
-        <portal.ui.WarnBanner>
-          {t("About 4 GB of RAM is recommended for the Document Server while it runs. Its image is pulled on the first start and takes a while; its working data keeps in a container volume, every save comes back to the library.")}
-        </portal.ui.WarnBanner>
-      )}
+      {!state.enabled && <portal.ui.WarnBanner>{t("Needs about 4 GB of RAM while it runs.")}</portal.ui.WarnBanner>}
 
       <portal.ui.SwitchRow
         title={t("Use Office")}
-        detail={t("Starts the Document Server on this machine when switched on, and stops it when switched off. The server keeps it going while it stands (and never brings back one that was stopped on purpose).")}
         on={state.enabled}
         disabled={busy !== null}
         onChange={(on) => void act("settings", () => api.saveSettings({ enabled: on }))}
       />
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" className={portal.ui.classes.button} disabled={busy !== null || running} onClick={() => void start()}>
-          {busy === "start" ? t("Starting… (first pull can take minutes)") : t("Start container")}
+          {busy === "start" ? t("Starting…") : t("Start container")}
         </button>
         <button type="button" className={portal.ui.classes.button} disabled={busy !== null || !running} onClick={() => void stop()}>
           {busy === "stop" ? t("Stopping…") : t("Stop container")}
@@ -153,7 +145,7 @@ export function OfficeSettings() {
         </button>
       </div>
 
-      <portal.ui.Field label={t("Image tag (pinned)")} hint={t("Pin a full tag, never :latest or none — a moved image changes the Document Server under you and breaks the co-editing keys. A new tag applies at the next start.")}>
+      <portal.ui.Field label={t("Image tag (pinned)")} hint={t("A full tag, never :latest. Applies at the next start.")}>
         <div className="flex flex-wrap items-center gap-2">
           <input
             className={`${portal.ui.classes.input} mt-1 font-mono text-xs`}
@@ -172,13 +164,6 @@ export function OfficeSettings() {
       {problem && (
         <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>
       )}
-
-      {/* Where the things live, and who can reach them: said once, as fact. */}
-      <div className="space-y-1">
-        <p className="po-exposure">{t("Made documents keep in this extension's own data directory (its docs folder with its index and trash), never in a chat's folder; workspace files stay where they are -- the library indexes them in place, and a download or export is a copy.")}</p>
-        <p className="po-exposure">{t("The editor loads through this portal's own proxy, behind its sign-in, so remote viewers have the live editor as well. The Document Server runs on a network of its own with no way out: it reaches nothing but the two endpoints where it fetches documents and reports saves, through a relay of this extension's.")}</p>
-        <p className="po-exposure">{t("The agents' editor runs in a browser of its own, on a network of its own with no way out either: it reaches the Document Server and this extension's seat page only through that relay, never this portal or your session.")}</p>
-      </div>
     </div>
   );
 }

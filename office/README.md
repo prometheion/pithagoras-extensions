@@ -68,7 +68,8 @@ by its digest: a tag that came to name another build is refused, not run.
   written over. An edit is one command, made whole or not at all: every quote is checked against the document as it
   stands first, and a command that fails after it changed something is taken back. After an edit the Document Server
   is asked to save the session, and the agent hears the new revision; that save holds what you typed until then too.
-  Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph.
+  Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph
+  (a document keeps one: its only paragraph removed leaves it empty).
   Excel: write values and formulas into a range (the editor computes the formulas). The agent cannot write comments
   or tracked changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor

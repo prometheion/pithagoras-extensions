@@ -157,8 +157,10 @@ by its digest: a tag that came to name another build is refused, not run.
   document's macros and the editor's plugins are switched off in the editor config the portal hands the page, as
   OnlyOffice holds macros apart only by a guard inside the page, and a document cannot switch them on. The Document
   Server 10.0 does not hold the page to the signed config (a page that changes it before it opens the editor gets
-  plugins, as measured), but a script that could change it has the person's session already. A Document Server on an
-  origin of its own would be the full answer; it is not done here.
+  plugins, as measured), so everything the proxy answers carries a content security policy that lets the editor's
+  frame fetch and frame nothing but the portal's own origin: a plugin from anywhere else, which the editor's frame
+  fetches (its `config.json`) and frames (its page), does not load. A script that could change the config has the
+  person's session already. A Document Server on an origin of its own would be the full answer; it is not done here.
 - **Changes only from the portal's pages.** Every request of the extension's that changes something (a document
   created, renamed or deleted, the Document Server started, stopped or removed, the settings) is refused unless it
   comes from the portal's own pages: the portal's cookie is SameSite=Lax, which a page on another port or another
@@ -252,6 +254,16 @@ that the agent's commands rely on); they are opt-in, as they need Docker Engine 
 
 ```sh
 ./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office
+```
+
+`real-portal.test.mts` proves the same in a real portal: the portal's own server started from that folder (built with
+`npm run build` there), Docker for extensions and Office installed into it through `POST /api/packages`, a person in
+the real Office page in Chromium, and the agent's office tools called from a chat whose model is a script
+(`scripted-model.mjs`, no model server needed). `OFFICE_PORTAL_MODE=container` runs the portal in a container of its
+own (Node's alpine image, with this machine's Docker socket), on a network of its own:
+
+```sh
+OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras [OFFICE_PORTAL_MODE=container] npm run test:real -w office
 ```
 
 `scripts/make-fixtures.mjs` makes `fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node

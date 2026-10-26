@@ -1054,6 +1054,21 @@ test("/ds proxy: the Document Server is told where the browser is, so the addres
   }
 });
 
+test("/ds proxy: what it answers lets the editor's frame fetch and frame the portal's own origin only, so a plugin a page adds to its config cannot load", async () => {
+  const b = await boot();
+  const ds = await startForwardedDs();
+  try {
+    writeDsJson(b, `http://127.0.0.1:${ds.port}`);
+    for (const at of ["/ds/web-apps/apps/documenteditor/main/index.html", "/ds/10.0.0-169/doc/k1/c/?EIO=4"]) {
+      const res = await b.router.dispatch("GET", at, undefined, { host: "portal.example" });
+      assert.equal(res.headers["content-security-policy"], "connect-src 'self' blob: data:; frame-src 'self' blob:", at);
+    }
+  } finally {
+    ds.server.close();
+    await b.cleanup();
+  }
+});
+
 test("/ds proxy: a redirect of the Document Server reaches the browser as one, never followed to the portal's public address", async () => {
   const b = await boot();
   const ds = await startForwardedDs();

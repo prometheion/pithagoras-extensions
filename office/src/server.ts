@@ -295,7 +295,8 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
       // The editor runs on the portal's own origin (the /ds proxy), where a script has the person's session for the
       // whole portal API. A document's macros and the editor's plugins would run there, held only by OnlyOffice's
       // in-page guard around eval, so neither runs, and a document cannot switch them on. (The Document Server does not
-      // hold the page to the signed config: a script that changes it there has the person's session already.)
+      // hold the page to the signed config; a plugin a page adds to it cannot load from anywhere but the portal's own
+      // origin, which the /ds proxy's DS_FRAME_POLICY holds the editor's frame to.)
       customization: { macros: false, plugins: false },
     },
   };
@@ -697,6 +698,12 @@ function registerRoutes(dd: string, secret: string): void {
       if (v !== null) res.setHeader(k, v);
     }
     // Everything else (hop-by-hop, set-cookie, server banners, ...) is dropped.
+    // The editor's frame (and every page of the Document Server's in it) fetches and frames nothing of another origin.
+    // A plugin comes from the editor config's pluginsData, which the page hands the editor as it likes (the Document
+    // Server does not hold it to the signed config): a page that changed its config before it opened the editor ran a
+    // plugin from anywhere in the person's editor, on the portal's origin. The editor's frame fetches a plugin's
+    // config.json and frames its page; this refuses both for any address but the portal's own.
+    res.setHeader("content-security-policy", DS_FRAME_POLICY);
     try {
       let buf = Buffer.from(await upstream.arrayBuffer());
       // Pin the socket.io client to polling: strip "websocket" from the engine.io handshake's upgrades list --
@@ -797,6 +804,10 @@ const MAX_DS_BODY = 128 * 1024 * 1024;
  * server half alone calls, through Office's own way in, its conversion services for integrators, and its AI proxy.
  * The rest of what its nginx serves (the editor's files, the socket.io channel, the converted files, downloadas,
  * upload, print...) is the editor's. */
+/** What the /ds proxy's answers allow the editor's frame to fetch and frame: the portal's own origin (where the /ds
+ * proxy is), and what the editor makes in the page itself (blob:, and data: for fetches of its own images). */
+export const DS_FRAME_POLICY = "connect-src 'self' blob: data:; frame-src 'self' blob:";
+
 const DS_DENIED = new Set(["info", "internal", "command", "coauthoring", "converter", "convertservice.ashx", "docbuilder", "ai-proxy"]);
 
 /** Whether the /ds proxy passes `rest` (the path after /ds/, with its query) on: as the Document Server's nginx reads a

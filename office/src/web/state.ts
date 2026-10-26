@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { api, type OfficeState } from "./api";
 
 /**
@@ -12,16 +12,28 @@ const listeners = new Set<() => void>();
 let watchers = 0;
 let timer: ReturnType<typeof setInterval> | undefined;
 let inflight: Promise<void> | null = null;
+/** How many times GET /state was asked, and which of those questions `known` answers. */
+let asked = 0;
+let answered = 0;
 
-function publish(state: OfficeState): void {
+function publish(state: OfficeState, question: number): void {
   known = state;
+  answered = question;
   for (const listener of listeners) listener();
 }
 
 /** Ask again now (after a create/rename/delete/settings change), and only once at a time. */
 export function refreshOfficeState(): Promise<void> {
-  inflight ??= api.state().then(publish, () => {}).finally(() => void (inflight = null));
+  inflight ??= (() => {
+    const question = ++asked;
+    return api.state().then((state) => publish(state, question), () => {}).finally(() => void (inflight = null));
+  })();
   return inflight;
+}
+
+/** Ask again with a question sent from now on: one under way may have been sent before what the caller knows of. */
+function askAfresh(): void {
+  void (inflight ?? Promise.resolve()).then(refreshOfficeState);
 }
 
 const subscribe = (listener: () => void): (() => void) => {
@@ -48,4 +60,24 @@ export function useOfficeState(): OfficeState | null {
     };
   }, []);
   return useSyncExternalStore(subscribe, () => known);
+}
+
+/**
+ * Whether `docId` has left the library, by an answer of GET /state asked after the document was opened: the shared
+ * answer can be up to 5 s old, older than a document an agent made a moment ago, which it would call gone. Until a
+ * newer answer comes, false (the editor asks for the document itself and says what it finds).
+ */
+export function useDocGone(docId: string | null): boolean {
+  const state = useOfficeState();
+  // The first question that counts for this document: the next one sent.
+  const [since, setSince] = useState({ docId, question: asked + 1 });
+  let first = since.question;
+  if (since.docId !== docId) {
+    first = asked + 1;
+    setSince({ docId, question: first });
+  }
+  useEffect(() => {
+    if (docId !== null) askAfresh();
+  }, [docId]);
+  return docId !== null && state !== null && answered >= first && !state.docs.some((d) => d.docId === docId);
 }

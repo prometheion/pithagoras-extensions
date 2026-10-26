@@ -60,8 +60,9 @@ export function agentHealth(a: {
 }): AgentHealth {
   if (a.pull?.active) return "downloading";
   if (!a.present) return a.pull?.error ? "failed" : "missing";
-  if (a.browser?.error) return "failed";
+  // A start under way is said over the failure of the one before: that error is kept until a start succeeds.
   if (a.browser?.starting) return "starting";
+  if (a.browser?.error) return "failed";
   if (a.browser?.running) return "running";
   return "ready";
 }
@@ -69,6 +70,28 @@ export function agentHealth(a: {
 /** The error to show beside a failed agents' editor: its download's, or its browser's last start's. */
 export function agentError(a: { present: boolean; pull: { error?: string } | null; browser?: { error?: string } }): string | undefined {
   return a.present ? a.browser?.error : a.pull?.error;
+}
+
+/**
+ * What the Office page in Settings says of Office: one thing, made of the Document Server and the agents' editor, both
+ * always needed. Downloading while either downloads; failed where either did, with `failed` naming the part and
+ * `error` why; starting while the Document Server starts; stopped (or another state of its container) while it does
+ * not run; missing while it runs without the agents' editor's image (an install from before Start downloaded it: Start
+ * gets it); running when both are there (the agents' browser idle, starting or at work).
+ */
+export type OfficeHealth = "downloading" | "failed" | "starting" | "stopped" | "other" | "missing" | "running";
+
+export function officeHealth(
+  c: Parameters<typeof dsHealth>[0],
+  a: Parameters<typeof agentHealth>[0],
+): { health: OfficeHealth; failed?: "ds" | "agent"; error?: string } {
+  const ds = dsHealth(c);
+  const agent = agentHealth(a);
+  if (ds === "downloading" || agent === "downloading") return { health: "downloading" };
+  if (ds === "failed") return { health: "failed", failed: "ds", error: c.error };
+  if (agent === "failed") return { health: "failed", failed: "agent", error: agentError(a) };
+  if (ds === "starting" || ds === "stopped" || ds === "other") return { health: ds };
+  return { health: agent === "missing" ? "missing" : "running" };
 }
 
 /**

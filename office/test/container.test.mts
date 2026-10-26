@@ -780,6 +780,35 @@ test("Start: a Document Server that cannot start fails it, and status says why u
   assert.equal((await status(m.docker)).error, "Docker is not reachable");
 });
 
+test("Start: a download of the Document Server's image that failed is over once a start succeeds with an image already there", async () => {
+  const root = tmpRoot({ enabled: true, imageTag: TAG92 });
+  const m = fresh();
+  pinnedTag(m);
+  const ensure = m.docker.images.ensure;
+  // As the portal's ensure does: the failure said as the download's last state, then thrown.
+  m.docker.images.ensure = async (image, onProgress) => {
+    if (image === TAG92) {
+      onProgress?.({ active: false, line: "", error: "manifest unknown" });
+      throw new Error("manifest unknown");
+    }
+    return ensure(image, onProgress);
+  };
+  await assert.rejects(startOffice(m.docker, undefined, root), /manifest unknown/);
+  assert.equal((await status(m.docker)).pull?.error, "manifest unknown");
+  // The tag put right, its image there already: Docker downloads nothing and says nothing of it.
+  fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: true, imageTag: DEFAULT_TAG }));
+  m.state.images.add(DEFAULT_TAG);
+  m.state.images.add(RELAY_IMAGE);
+  m.docker.images.ensure = async (image, onProgress) => {
+    if (m.state.images.has(image)) return;
+    return ensure(image, onProgress);
+  };
+  await startOffice(m.docker, undefined, root);
+  const now = await status(m.docker);
+  assert.equal(now.error, undefined);
+  assert.equal(now.pull?.error, undefined, "no old download error under a Document Server that runs");
+});
+
 test("the agents' editor's image: two downloads asked at once are one; lookAfter never downloads it", async () => {
   const m = fresh();
   let release!: () => void;

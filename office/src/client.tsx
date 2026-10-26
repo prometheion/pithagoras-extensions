@@ -5,7 +5,7 @@ import type { Chat, ChatProps, PanelProps, Portal, ToolCallView } from "@pithago
 import { LuFileText, LuPresentation, LuTable } from "react-icons/lu";
 import type { ReactNode } from "react";
 import { msg, officeUrl, portal, setPortal, t } from "./portal";
-import { refreshOfficeState, useOfficeState } from "./web/state";
+import { refreshOfficeState, useDocGone, useOfficeState } from "./web/state";
 import { api, sayError } from "./web/api";
 import { compareDocs, loadSort, saveSort, SortBar, type SortChoice } from "./web/sort";
 import { choosePanelDoc, editorsIn, panelDoc } from "./office-ui";
@@ -35,6 +35,7 @@ function OfficePanel({ chat, panel }: PanelProps) {
   portal.locale.use();
   const state = useOfficeState();
   const docId = panelDoc(panel.params, panel.state);
+  const gone = useDocGone(docId);
   const choose = (doc: string | null) => panel.setState(choosePanelDoc(panel.params, doc));
   const open = docId !== null;
   useEffect(() => {
@@ -42,8 +43,10 @@ function OfficePanel({ chat, panel }: PanelProps) {
     // `panel` is a new handle with each change of what it shows; only whether a document is open matters here.
   }, [open]);
   if (!docId) return <PanelList chat={chat} onOpen={(id) => choose(id)} />;
-  // The document left the library meanwhile: said, with the way back.
+  // The document left the library meanwhile: said, with the way back. One the last answer does not have yet (an
+  // agent's new one, opened from its card at once) waits for an answer asked since.
   if (state && !state.docs.some((d) => d.docId === docId)) {
+    if (!gone) return <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />;
     return (
       <div className="p-2">
         <portal.ui.ErrorBanner>
@@ -305,13 +308,13 @@ export default function office(given: Portal): void {
     portal.slots.register("chat.tool", { id: tool, tool, component: OfficeCall });
   }
 
-  // Its page in Settings: the Document Server's service panel.
+  // Its page in Settings: how Office stands, Start, Stop and Remove, and its image tag.
   portal.slots.register("settings.page", {
     id: "office",
     title: msg("Office"),
     icon: LuPresentation,
     search: [
-      { title: msg("Office"), words: "office docx xlsx word sheet spreadsheet onlyoffice document server container image tag pull download start stop remove agent editor chromium" },
+      { title: msg("Office"), words: "office onlyoffice document server container image tag pull download start stop remove agent editor chromium" },
     ],
     component: () => (
       <Suspense fallback={<SettingsFallback />}>

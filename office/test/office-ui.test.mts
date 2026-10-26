@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentError, agentHealth, choosePanelDoc, dsHealth, editorsIn, floatingTag, panelDoc, parseDocQuery, startingUp } from "../src/office-ui";
+import { agentError, agentHealth, choosePanelDoc, dsHealth, editorsIn, floatingTag, officeHealth, panelDoc, parseDocQuery, startingUp } from "../src/office-ui";
 
 test("parseDocQuery: ?doc=<id> is the opened document; encoded ids come back decoded", () => {
   assert.equal(parseDocQuery("?doc=my-report"), "my-report");
@@ -67,10 +67,30 @@ test("agentHealth: its download, its image missing or refused, and the browser m
   assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, starting: true } }), "starting");
   assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, running: true, editors: 2 } }), "running");
   assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, error: "did not start" } }), "failed");
+  // Started again after a failure: starting, not the old failure, while it starts.
+  assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, starting: true, error: "did not start" } }), "starting");
   // A download that failed before is over once the image is there.
   assert.equal(agentHealth({ present: true, pull: { active: false, error: "old" }, browser }), "ready");
   assert.equal(agentError({ present: false, pull: { error: "not the build" }, browser: { error: "x" } }), "not the build");
   assert.equal(agentError({ present: true, pull: { error: "old" }, browser: { error: "did not start" } }), "did not start");
+});
+
+test("officeHealth: one state for both parts; a failure says which part and why; running only with both there", () => {
+  const idle = { running: false, starting: false, editors: 0 };
+  const there = { present: true, pull: null, browser: idle };
+  const none = { present: false, pull: null, browser: idle };
+  assert.deepEqual(officeHealth({ state: "stopped", pull: { active: true } }, none), { health: "downloading" });
+  assert.deepEqual(officeHealth({ state: "running" }, { present: false, pull: { active: true }, browser: idle }), { health: "downloading" });
+  assert.deepEqual(officeHealth({ state: "stopped", error: "port is already allocated" }, none), { health: "failed", failed: "ds", error: "port is already allocated" });
+  assert.deepEqual(officeHealth({ state: "running" }, { present: false, pull: { active: false, error: "no internet" }, browser: idle }), { health: "failed", failed: "agent", error: "no internet" });
+  assert.deepEqual(officeHealth({ state: "running" }, { ...there, browser: { ...idle, error: "did not start" } }), { health: "failed", failed: "agent", error: "did not start" });
+  assert.deepEqual(officeHealth({ state: "starting" }, there), { health: "starting" });
+  assert.deepEqual(officeHealth({ state: "stopped" }, none), { health: "stopped" });
+  assert.deepEqual(officeHealth({ state: "foreign" }, there), { health: "other" });
+  assert.deepEqual(officeHealth({ state: "running" }, none), { health: "missing" });
+  assert.deepEqual(officeHealth({ state: "running" }, there), { health: "running" });
+  assert.deepEqual(officeHealth({ state: "running" }, { ...there, browser: { ...idle, starting: true, error: "old" } }), { health: "running" });
+  assert.deepEqual(officeHealth({ state: "running" }, { ...there, browser: { running: true, starting: false, editors: 2 } }), { health: "running" });
 });
 
 test("panelDoc: the panel shows what a card opened it with, until something else is chosen in that opening; the next opening shows its own", () => {

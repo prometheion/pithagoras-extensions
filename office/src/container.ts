@@ -338,7 +338,7 @@ async function pullAgentOnce(docker?: Docker): Promise<void> {
       agentPull = state;
     });
   } catch (e) {
-    // Shown on the Office page beside the button (the route answered before the download began).
+    // Shown on the Office page (Start awaits the download; the page reads this from /state meanwhile).
     agentPull = { active: false, line: "", error: (e as Error).message === "no_docker" ? "Docker is not reachable" : (e as Error).message };
     throw e;
   }
@@ -594,6 +594,9 @@ async function ensureContainerOnce(docker?: Docker, onPull?: (state: PullState) 
   const r = resolvedRoot(root);
   const tag = loadSettings(r).imageTag;
 
+  // What a download before said is over: an image already there is not downloaded again, and Docker says nothing of
+  // it, so an old failure would stay under a Document Server that runs.
+  pullState = null;
   // One pull for an image at a time, whoever asks; the progress is held for status() and handed to onPull.
   for (const image of [tag, RELAY_IMAGE]) {
     await d.images.ensure(image, (state) => {
@@ -706,6 +709,7 @@ export function forgetProbe(): void {
   settledRun = undefined;
   startError = undefined;
   agentPull = null;
+  pullState = null;
 }
 
 /**

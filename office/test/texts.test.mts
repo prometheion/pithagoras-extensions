@@ -44,7 +44,21 @@ test("every text the browser half shows has its German, and de.ts has nothing th
   for (const [english, german] of Object.entries(de)) assert.deepEqual(words(String(german)), words(english), english);
 });
 
+/** The one text of the Settings page allowed a full sentence: what Remove takes, asked before it does. */
+const REMOVE_CONFIRMATION = "Its containers, networks and volumes go, with any save not handed over yet. Documents and images stay.";
+
 test("the Office page in Settings says labels, states, hints and confirmations, never a paragraph of explanation", () => {
-  const long = [...texts()].filter(([text, at]) => at.startsWith(`web${path.sep}settings.tsx:`) && text.length > 120);
+  const all = [...texts()].filter(([, at]) => at.startsWith(`web${path.sep}settings.tsx:`));
+  assert.ok(all.some(([text]) => text === REMOVE_CONFIRMATION), "the Remove confirmation is there");
+  const long = all.filter(([text]) => text.length > 80 && text !== REMOVE_CONFIRMATION);
   assert.deepEqual(long.map(([text, at]) => `${at}: ${text}`), []);
+});
+
+test("the Office page in Settings is found by what it holds: its search words name nothing of the library's", () => {
+  const client = fs.readFileSync(path.join(SRC, "client.tsx"), "utf8");
+  const words = /registerSettings|settings\.page/.test(client) ? client.match(/words: "([^"]*)"/)?.[1]?.split(" ") : undefined;
+  assert.ok(words && words.includes("office") && words.includes("start"));
+  // The documents, their kinds and where they keep are the Office tab's; the Settings page has no word of them.
+  const library = ["docx", "xlsx", "word", "sheet", "spreadsheet", "library", "workspace", "scan", "rescan", "export", "trash"];
+  assert.deepEqual(words.filter((w) => library.includes(w)), []);
 });

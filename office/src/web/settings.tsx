@@ -1,52 +1,33 @@
 import { useState } from "react";
 import { portal, t } from "../portal";
 import { api, sayError } from "./api";
-import { agentError, agentHealth, dsHealth, floatingTag, type AgentHealth, type DsHealth } from "../office-ui";
+import { floatingTag, officeHealth, type OfficeHealth } from "../office-ui";
 import { refreshOfficeState, useOfficeState } from "./state";
 
 /**
- * The Office page in Settings: a service panel for the Document Server and the agents' editor -- how each stands (and
- * what a download is doing), start and stop, and the pinned image tag. Start downloads both images at once and starts
- * the Document Server; the agents' browser starts when an agent first needs it. Labels, states, errors and the hints
- * a field needs, nothing more: what Office does and where it keeps things is the README's to say.
- * Enabling goes through
- * POST /settings, which answers without waiting for a first pull to finish (`starting`): the pull progress keeps
- * coming in over the shared 5 s poll, and the server half's lookAfter stays quiet while the person has stopped it.
+ * The Office page in Settings: Office as one thing -- how it stands (and what its downloads are doing), start, stop and
+ * remove, and the pinned image tag. Start downloads every image at once (the Document Server's and the agents'
+ * editor's) and starts the Document Server; the agents' browser starts when an agent first needs it. The person sees
+ * one state; a failure names the part that failed. Labels, states, errors and the hints a field needs, nothing more:
+ * what Office does and where it keeps things is the README's to say. Enabling goes through POST /settings, which
+ * answers without waiting for a first pull to finish (`starting`): the pull progress keeps coming in over the shared
+ * 5 s poll, and the server half's lookAfter stays quiet while the person has stopped it.
  */
 
 function mem(bytes: number): string {
   return bytes >= 2 ** 30 ? `${(bytes / 2 ** 30).toFixed(1)} GB` : `${Math.round(bytes / 2 ** 20)} MB`;
 }
 
-/** The dot beside a service's name: green while it is up or ready, amber while it comes, red where it failed. */
-const DOT: Record<DsHealth | AgentHealth, string> = {
+/** The dot beside the state: green while it runs, amber while it comes, red where it failed. */
+const DOT: Record<OfficeHealth, string> = {
   running: "po-state-live bg-ok",
-  ready: "po-state-live bg-ok",
   starting: "po-state-pulling bg-warn",
   downloading: "po-state-pulling bg-warn",
   failed: "bg-danger",
-  missing: "bg-fg-subtle",
+  missing: "bg-warn",
   stopped: "bg-fg-subtle",
   other: "bg-fg-subtle",
 };
-
-/** One service: its name, how it stands, what its download is doing, and why it failed. */
-function Service(props: { name: string; health: DsHealth | AgentHealth; said: string; detail?: string; line?: string; error?: string; label: string }) {
-  return (
-    <div className="po-service" role="status" aria-label={props.label}>
-      <div className="po-service-head">
-        <span className={`h-2 w-2 rounded-full ${DOT[props.health]}`} />
-        {props.name}
-        <span className="po-service-state" data-health={props.health}>
-          {props.said}
-        </span>
-      </div>
-      {props.detail && <div className="po-service-detail">{props.detail}</div>}
-      {props.line && <div className="po-pull-line">{props.line}</div>}
-      {props.error && <div className="po-pull-line text-danger">{props.error}</div>}
-    </div>
-  );
-}
 
 export function OfficeSettings() {
   portal.locale.use();
@@ -60,27 +41,29 @@ export function OfficeSettings() {
 
   const c = state.container;
   const running = c.state === "running";
-  const ds = dsHealth(c);
-  const agent = agentHealth(state.agent);
+  const office = officeHealth(c, state.agent);
   // Start is there while anything of Office is not: the Document Server, or the agents' editor's image (an install
-  // from before Start downloaded it gets it here).
-  const startable = (!running || agent === "missing" || (agent === "failed" && !state.agent.present)) && ds !== "downloading" && agent !== "downloading";
-  const dsSaid: Record<DsHealth, string> = {
+  // from before Start downloaded it gets it here), and no download is under way.
+  const startable = (!running || !state.agent.present) && office.health !== "downloading";
+  const said: Record<OfficeHealth, string> = {
     downloading: t("Downloading"),
-    running: t("Running"),
-    starting: t("Starting"),
     failed: t("Failed"),
+    starting: t("Starting"),
     stopped: t("Stopped"),
     other: c.state,
+    missing: t("Agents' editor missing: Start downloads it"),
+    running: t("Running"),
   };
-  const agentSaid: Record<AgentHealth, string> = {
-    downloading: t("Downloading"),
-    failed: t("Failed"),
-    missing: t("Missing: Start downloads it"),
-    running: state.agent.browser?.editors === 1 ? t("Running · 1 document open") : t("Running · {n} documents open", { n: state.agent.browser?.editors ?? 0 }),
-    starting: t("Starting"),
-    ready: t("Ready"),
-  };
+  const editors = state.agent.browser?.editors ?? 0;
+  const detail = [
+    running ? c.version : undefined,
+    c.memBytes !== undefined ? mem(c.memBytes) : undefined,
+    office.health === "running" && editors > 0 ? (editors === 1 ? t("Agents in 1 document") : t("Agents in {n} documents", { n: editors })) : undefined,
+  ].filter(Boolean);
+  // Both downloads, as one progress: the lines of whichever are under way.
+  const pulling = [c.pull, state.agent.pull].filter((p) => p?.active).map((p) => p!.line);
+  const error =
+    office.failed === "ds" ? t("Document Server: {error}", { error: office.error ?? "" }) : office.failed === "agent" ? t("Agents' editor: {error}", { error: office.error ?? "" }) : undefined;
 
   async function act(kind: NonNullable<typeof busy>, work: () => Promise<unknown>): Promise<void> {
     setBusy(kind);
@@ -119,8 +102,8 @@ export function OfficeSettings() {
 
   const remove = async () => {
     const ok = await portal.ui.confirm({
-      title: t("Remove the Document Server?"),
-      message: t("Its containers, network and volumes go, with any save it could not hand over yet. The documents and the image stay."),
+      title: t("Remove Office?"),
+      message: t("Its containers, networks and volumes go, with any save not handed over yet. Documents and images stay."),
       confirmLabel: t("Remove"),
       danger: true,
       deletes: true,
@@ -130,28 +113,24 @@ export function OfficeSettings() {
 
   return (
     <div className="space-y-4">
-      {/* Both services: how each stands, and what a download is doing. */}
-      <Service
-        label={t("OnlyOffice Document Server")}
-        name={t("OnlyOffice Document Server")}
-        health={ds}
-        said={dsSaid[ds]}
-        detail={[running ? c.version : undefined, c.memBytes !== undefined ? mem(c.memBytes) : undefined].filter(Boolean).join(" · ") || undefined}
-        line={c.pull?.active ? c.pull.line : undefined}
-        error={ds === "failed" ? c.error : c.pull?.error}
-      />
-      <Service
-        label={t("The agents' editor")}
-        name={t("The agents' editor")}
-        health={agent}
-        said={agentSaid[agent]}
-        detail={state.agent.tag}
-        line={state.agent.pull?.active ? state.agent.pull.line : undefined}
-        error={agent === "failed" ? agentError(state.agent) : undefined}
-      />
-
-      {/* Enabling it: with the memory warning before a first start (~4 GB RAM recommended at runtime). */}
-      {!state.enabled && <portal.ui.WarnBanner>{t("Needs about 4 GB of RAM while it runs.")}</portal.ui.WarnBanner>}
+      {/* Office, as one thing: how it stands, what its downloads are doing, and which part failed. */}
+      <div className="po-service" role="status" aria-label={t("Office")}>
+        <div className="po-service-head">
+          <span className={`h-2 w-2 rounded-full ${DOT[office.health]}`} />
+          {t("Office")}
+          <span className="po-service-state" data-health={office.health}>
+            {said[office.health]}
+          </span>
+        </div>
+        {detail.length > 0 && <div className="po-service-detail">{detail.join(" · ")}</div>}
+        {pulling.map((line, i) => (
+          <div key={i} className="po-pull-line">
+            {line}
+          </div>
+        ))}
+        {error && <div className="po-pull-line text-danger">{error}</div>}
+      </div>
+      <p className="text-xs text-fg-subtle">{t("Needs about 4 GB of RAM, up to 7 GB while agents work in documents.")}</p>
 
       <portal.ui.SwitchRow
         title={t("Use Office")}

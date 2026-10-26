@@ -38,6 +38,8 @@ const FAKE_API = `window.DocsAPI = { DocEditor: function (id, config) {
 
 const DOC = (docId: string, title: string, ext: "docx" | "xlsx") => ({ docId, title, ext, createdAt: 0, updatedAt: 0, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] });
 const DOCS = [DOC("d1", "Plan", "docx"), DOC("d2", "Budget", "xlsx")];
+/** Documents the server half has made since the page last asked (an agent's new one). */
+const made: ReturnType<typeof DOC>[] = [];
 
 let pageJs = "";
 const server = http.createServer(async (req, res) => {
@@ -48,7 +50,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/client.css") return send(200, "text/css", CSS);
   if (url.pathname === "/fake-api.js") return send(200, "text/javascript", FAKE_API);
   if (url.pathname === `${BASE}/state`) {
-    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "x", container: { state: "running" }, agent: { present: true, pull: null, tag: "t" }, docs: DOCS, locks: { d1: [], d2: [] } }));
+    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "x", container: { state: "running" }, agent: { present: true, pull: null, tag: "t" }, docs: [...DOCS, ...made], locks: { d1: [], d2: [] } }));
   }
   if (url.pathname === `${BASE}/scope`) return send(200, "application/json", JSON.stringify({ docIds: DOCS.map((d) => d.docId) }));
   if (url.pathname === `${BASE}/editor-config` && req.method === "POST") {
@@ -209,5 +211,27 @@ test("the same document in the Office tab and in the panel: two editors of the o
   await panel(page).waitFor({ state: "detached" });
   assert.equal(await frames(page, "#tab").count(), 1, "the tab's editor stays");
   assert.deepEqual((await seen(page)).fake.filter(([what]) => what === "destroyed").length, 1);
+  await page.context().close();
+});
+
+test("a document an agent just made opens from its card at once, never said to be gone while the last answer is older than it", async () => {
+  made.length = 0;
+  const page = await chatPage([call("office_create", { action: "create", id: "d3", title: "Minutes", ext: "docx" }), call("office_read", { action: "read", id: "nope", title: "Old", ext: "docx" })]);
+  const cards = page.locator("#conversation").getByRole("button", { name: "Open in Office" });
+  // Whether the page ever said the document is gone, however briefly.
+  await page.evaluate(`new MutationObserver(function () {
+    if (document.body.innerText.includes("no longer in the library")) window.__saidGone = true;
+  }).observe(document.body, { childList: true, subtree: true, characterData: true })`);
+  await page.getByRole("button", { name: "Office panel button" }).click();
+  await panel(page).locator(".po-open", { hasText: "Plan" }).waitFor({ timeout: 10_000 });
+  // Made now: the page's last answer (and its next poll, 5 s on) does not have it yet.
+  made.push(DOC("d3", "Minutes", "docx"));
+  await cards.nth(0).click();
+  await frames(page, "#panel").and(page.locator('[data-key="key-d3"]')).waitFor({ timeout: 3_000 });
+  assert.equal(await page.evaluate("window.__saidGone === true"), false, "never said to be gone");
+  // One that is gone is said so, once an answer asked since says it.
+  await cards.nth(1).click();
+  await panel(page).getByText("This document is no longer in the library.", { exact: false }).waitFor({ timeout: 3_000 });
+  made.length = 0;
   await page.context().close();
 });

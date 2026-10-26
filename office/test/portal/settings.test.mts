@@ -9,8 +9,9 @@ import { SETTINGS_HTML, settingsPageJs } from "./page.mts";
 
 /**
  * The Office page in Settings (src/web/settings.tsx) in a browser, with the portal's own React, against routes that
- * answer as the server half does: how the Document Server and the agents' editor stand, and Start, which downloads
- * both images (the route holds its answer until the test lets it go, as a real first start does for minutes).
+ * answer as the server half does: how Office stands (one status, made of the Document Server and the agents' editor),
+ * and Start, which downloads both images (the route holds its answer until the test lets it go, as a real first start
+ * does for minutes).
  *
  *   ./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office
  */
@@ -73,23 +74,38 @@ beforeEach(() => {
 async function opened(): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
   await page.goto(`${origin}/settings.html`);
-  await row(page, "OnlyOffice Document Server").waitFor({ timeout: 10_000 });
+  await office(page).waitFor({ timeout: 10_000 });
   return page;
 }
 
-const row = (page: Page, name: string) => page.getByRole("status", { name });
-const said = async (page: Page, name: string, text: string) => row(page, name).getByText(text, { exact: true }).waitFor({ timeout: 10_000 });
+/** Office, as the page shows it: one status, whatever part it stands for. */
+const office = (page: Page) => page.getByRole("status", { name: "Office" });
+const said = async (page: Page, text: string) => office(page).getByText(text, { exact: true }).waitFor({ timeout: 10_000 });
 const start = (page: Page) => page.getByRole("button", { name: "Start container", exact: true });
 
-test("the Document Server running and the agents' editor missing: the page says so, has no download of its own, and Start gets the image", async () => {
+test("one Office on the page: one status, no part named while all is well, one memory figure", async () => {
+  Object.assign(now, {
+    container: { state: "running", version: "10.0.0-169" },
+    agent: { present: true, pull: null, tag: TAG, browser: { running: true, starting: false, editors: 2 } },
+  });
+  const page = await opened();
+  await said(page, "Running");
+  assert.equal(await page.getByRole("status").count(), 1, "one status");
+  const text = await page.locator("#root").innerText();
+  for (const part of ["Document Server", "agents' editor", "Agents' editor", TAG]) assert.ok(!text.includes(part), `names a part: ${part}`);
+  await office(page).getByText("10.0.0-169 · Agents in 2 documents", { exact: true }).waitFor();
+  await page.getByText("Needs about 4 GB of RAM, up to 7 GB while agents work in documents.", { exact: true }).waitFor();
+  assert.equal(await start(page).isDisabled(), true, "everything is there: nothing to start");
+  await page.context().close();
+});
+
+test("the agents' editor missing on a running Office: said, no download of its own, and Start gets the image", async () => {
   Object.assign(now, {
     container: { state: "running", version: "10.0.0-169" },
     agent: { present: false, pull: null, tag: TAG, browser: { running: false, starting: false, editors: 0 } },
   });
   const page = await opened();
-  await said(page, "OnlyOffice Document Server", "Running");
-  await said(page, "The agents' editor", "Missing: Start downloads it");
-  assert.equal(await row(page, "The agents' editor").getByText(TAG).count(), 1, "the pinned image is named");
+  await said(page, "Agents' editor missing: Start downloads it");
   assert.equal(await page.getByRole("button", { name: /^Download/ }).count(), 0, "no download of its own");
   assert.equal(await start(page).isEnabled(), true, "Start, though the Document Server runs");
   starting = {
@@ -97,26 +113,23 @@ test("the Document Server running and the agents' editor missing: the page says 
     after: () => Object.assign(now.agent, { present: true, pull: { active: false, line: "done" } }),
   };
   await start(page).click();
-  await said(page, "The agents' editor", "Downloading");
-  await row(page, "The agents' editor").getByText("Downloading [==>   ] 50MB/540MB").waitFor({ timeout: 10_000 });
+  await said(page, "Downloading");
+  await office(page).getByText("Downloading [==>   ] 50MB/540MB").waitFor({ timeout: 10_000 });
   assert.equal(await page.getByRole("button", { name: "Starting…" }).isDisabled(), true, "no second start while one goes");
   release();
-  await said(page, "The agents' editor", "Ready");
+  await said(page, "Running");
   assert.deepEqual(asked, ["/container/start"]);
   assert.equal(await start(page).isDisabled(), true, "everything is there: nothing to start");
-  // An agent at work: its browser runs, with the documents open in it.
-  now.agent.browser = { running: true, starting: false, editors: 2 };
-  await said(page, "The agents' editor", "Running · 2 documents open");
   await page.context().close();
 });
 
-test("a first Start: both downloads shown at once, then the Document Server starting and running beside a ready agents' editor", async () => {
+test("a first Start: both downloads as one progress, then starting and running", async () => {
   Object.assign(now, {
     container: { state: "stopped", pull: null },
     agent: { present: false, pull: null, tag: TAG, browser: { running: false, starting: false, editors: 0 } },
   });
   const page = await opened();
-  await said(page, "OnlyOffice Document Server", "Stopped");
+  await said(page, "Stopped");
   starting = {
     during: () => {
       now.container.pull = { active: true, line: "Pulling fs layer 3/41" };
@@ -128,38 +141,43 @@ test("a first Start: both downloads shown at once, then the Document Server star
     },
   };
   await start(page).click();
-  await row(page, "OnlyOffice Document Server").getByText("Pulling fs layer 3/41").waitFor({ timeout: 10_000 });
-  await row(page, "The agents' editor").getByText("Downloading [=>    ] 20MB/540MB").waitFor({ timeout: 10_000 });
-  await said(page, "OnlyOffice Document Server", "Downloading");
-  await said(page, "The agents' editor", "Downloading");
+  await office(page).getByText("Pulling fs layer 3/41").waitFor({ timeout: 10_000 });
+  await office(page).getByText("Downloading [=>    ] 20MB/540MB").waitFor({ timeout: 10_000 });
+  await said(page, "Downloading");
   release();
-  await said(page, "OnlyOffice Document Server", "Starting");
-  await said(page, "The agents' editor", "Ready");
+  await said(page, "Starting");
   Object.assign(now.container, { state: "running", version: "10.0.0-169" });
-  await said(page, "OnlyOffice Document Server", "Running");
-  await row(page, "OnlyOffice Document Server").getByText("10.0.0-169").waitFor({ timeout: 10_000 });
+  await said(page, "Running");
+  await office(page).getByText("10.0.0-169", { exact: true }).waitFor({ timeout: 10_000 });
   await page.context().close();
 });
 
-test("what failed is said in its row, with the error: a start of the Document Server, the image's download, the agents' browser", async () => {
+test("a failure is said with the part that failed and why: a start of the Document Server, the image's download, the agents' browser", async () => {
   Object.assign(now, {
     container: { state: "stopped", error: "port is already allocated" },
     agent: { present: false, pull: { active: false, line: "", error: `${TAG} is not the build this version of Office runs (sha256:${"0".repeat(64)})` }, tag: TAG, browser: { running: false, starting: false, editors: 0 } },
   });
   const page = await opened();
-  await said(page, "OnlyOffice Document Server", "Failed");
-  await row(page, "OnlyOffice Document Server").getByText("port is already allocated").waitFor();
-  await said(page, "The agents' editor", "Failed");
-  await row(page, "The agents' editor").getByText("is not the build this version of Office runs", { exact: false }).waitFor();
+  await said(page, "Failed");
+  await office(page).getByText("Document Server: port is already allocated", { exact: true }).waitFor();
   assert.equal(await start(page).isEnabled(), true, "Start tries both again");
+  // The Document Server started; the image's download did not.
+  Object.assign(now, { container: { state: "running" } });
+  await office(page).getByText(`Agents' editor: ${TAG} is not the build this version of Office runs`, { exact: false }).waitFor({ timeout: 10_000 });
+  await said(page, "Failed");
+  assert.equal(await start(page).isEnabled(), true, "Start downloads it again");
   // The image is there, but the browser made from it did not start.
   Object.assign(now, {
     container: { state: "running" },
     agent: { present: true, pull: null, tag: TAG, browser: { running: false, starting: false, editors: 0, error: "the agent's editor did not start within 60 s" } },
   });
-  await row(page, "The agents' editor").getByText("the agent's editor did not start within 60 s").waitFor({ timeout: 10_000 });
-  await said(page, "The agents' editor", "Failed");
+  await office(page).getByText("Agents' editor: the agent's editor did not start within 60 s", { exact: true }).waitFor({ timeout: 10_000 });
+  await said(page, "Failed");
   assert.equal(await start(page).isDisabled(), true, "Start would not help: an agent's next call starts the browser again");
+  // A download that failed before a start that succeeded is not said under a running Office.
+  Object.assign(now, { container: { state: "running", pull: { active: false, line: "", error: "manifest unknown" } }, agent: { present: true, pull: null, tag: TAG, browser: { running: false, starting: false, editors: 0 } } });
+  await said(page, "Running");
+  assert.equal(await office(page).getByText("manifest unknown", { exact: false }).count(), 0);
   await page.context().close();
 });
 

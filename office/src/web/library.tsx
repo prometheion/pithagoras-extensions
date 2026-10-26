@@ -6,7 +6,7 @@ import { api, sayError, type OfficeDoc, type OfficeState } from "./api";
 import { editorsIn } from "../office-ui";
 import { parseDocQuery } from "../office-ui";
 import { OfficeEditor } from "./office-editor";
-import { refreshOfficeState, useOfficeState } from "./state";
+import { refreshOfficeState, useDocGone, useOfficeState } from "./state";
 
 /**
  * The Office page -- the global tab's view of the library. With `?doc=<id>` in its address it is the full-bleed
@@ -344,9 +344,12 @@ export function OfficePage() {
   const { search } = portal.useLocation();
   const docId = parseDocQuery(search);
   const state = useOfficeState();
+  const gone = useDocGone(docId);
   if (docId) {
-    // The document is gone from the library meanwhile: say so, with a way back.
+    // The document is gone from the library meanwhile: say so, with a way back (once an answer asked since it was
+    // opened says so: the last one may be older than an agent's new document).
     if (state && !state.docs.some((d) => d.docId === docId)) {
+      if (!gone) return <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />;
       return (
         <div className="po-page">
           <portal.ui.ErrorBanner>

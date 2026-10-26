@@ -15,9 +15,9 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
-- About 4 GB of RAM for the Document Server container. The settings page says so before the first start, and shows
-  the container's memory use once it runs. The agents' editor (below) takes up to 3 GB more while agents work in
-  documents (about 0.9 GB for one open document), and nothing once it has stopped.
+- About 4 GB of RAM, up to 7 GB while agents work in documents (the agents' browser starts on demand, stops 10 minutes
+  after its last editor closed, is capped at 3 GB, about 0.9 GB for one open document). The settings page says so,
+  and shows the Document Server's memory use while it runs.
 - Disk for the images (`onlyoffice/documentserver`, several GB, Node's `node:22.23.4-alpine3.23`, about 50 MB, for the
   relay below, and for the agents' editor `chromedp/headless-shell:157.0.8103.15`, Chromium's headless shell, about
   540 MB), which the portal pulls on the first start, all at once, with the progress of each shown in Settings.
@@ -36,11 +36,11 @@ build: a new build can change the editor's callback and token behaviour, so it i
 same page). A new Document Server container answers within seconds but then makes its fonts for about two
 minutes and restarts its own services; until it is done, Settings says it is starting and the editor waits for it,
 as an editor opened before would lose what is typed in it. The same start downloads the agents' editor beside the
-Document Server; Settings → Office shows how both stand (the Document Server stopped, downloading, starting, running
-or failed; the agents' editor missing, downloading, ready, running or failed, each with its error). Until the agents'
-editor is there the agents read the saved files and cannot edit; an install that had the Document Server before gets
-it with the next **Start container**, and the page says it is missing until then. It is pinned by its digest: a tag
-that came to name another build is refused, not run, and said as the row's error.
+Document Server. Settings → Office shows Office as one thing: stopped, downloading (the progress of every download
+under way), starting, running, or failed, with the error naming the part that failed (the Document Server or the
+agents' editor). Until the agents' editor is there the agents read the saved files and cannot edit; an install that
+had the Document Server before gets it with the next **Start container**, and the page says it is missing until then.
+It is pinned by its digest: a tag that came to name another build is refused, not run, and said as the error.
 
 ## What you get
 

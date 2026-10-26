@@ -363,9 +363,11 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   });
 
   test("f: the chat's Office panel: the agent's tool card opens its document in the panel beside the chat, the same document in the Office tab co-edits with it, back and close destroy the editor", { timeout: 900_000 }, async () => {
-    const doc = await newDoc("Beside the chat", "word");
+    // The agent makes the document (office_create opens no editor of the agent's: the seats stay as the other cases
+    // leave them).
     const id = await chat();
-    await say(id, [{ name: "office_read", arguments: { id: doc } }]);
+    await say(id, [{ name: "office_create", arguments: { title: "Beside the chat", type: "word" } }]);
+    const doc = (await state()).docs.find((x) => x.title === "Beside the chat")!.docId;
     const page = await (await browser.newContext({ viewport: { width: 1600, height: 900 } })).newPage();
     await page.goto(`${origin}/s/${id}`);
     // The panel's body: of what Office draws on the chat's page (its card, its button, …), the one with its list or editor.
@@ -383,7 +385,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       }, 120_000, 500);
       return frame;
     };
-    // The card of the agent's office_read opens the document in the chat's Office panel, not the Office tab.
+    // The card of the agent's office_create opens the document in the chat's Office panel, not the Office tab.
     // (The portal speaks the browser's language: German on a German machine.)
     await page.getByRole("button", { name: /^(Open in Office|In Office öffnen)$/ }).first().click({ timeout: 60_000 });
     const panelFrame = await editorFrame(page, true);

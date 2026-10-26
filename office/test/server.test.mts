@@ -883,6 +883,17 @@ test("Start downloads the agents' editor's image beside the Document Server, and
   await b.cleanup();
 });
 
+test("Start switches Office on: while it is off the tools take Office as stopped, whatever runs", async () => {
+  const b = await boot();
+  b.dock.state.exec = { output: "", exitCode: 0, timedOut: false };
+  assert.equal(((await b.router.dispatch("GET", "/state")).body as { enabled: boolean }).enabled, false);
+  const res = await b.router.dispatch("POST", "/container/start");
+  assert.equal(res.statusCode, 200);
+  assert.equal(((await b.router.dispatch("GET", "/state")).body as { enabled: boolean }).enabled, true);
+  live.resetLive();
+  await b.cleanup();
+});
+
 test("switching Office on starts it as Start does: the agents' editor's image is downloaded too", async () => {
   const b = await boot();
   const res = await b.router.dispatch("POST", "/settings", { enabled: true });

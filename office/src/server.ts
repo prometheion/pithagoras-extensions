@@ -563,9 +563,14 @@ function registerRoutes(dd: string, secret: string): void {
 
   /** POST /container/start -> container.startOffice to completion: adopt or make+start the DS, ds.json written, and the
    * agents' editor's image downloaded beside it; the response carries the resulting status and whether the image is
-   * there (its failure does not fail the start: the page says it from /state). */
+   * there (its failure does not fail the start: the page says it from /state). Start is all a person does to have
+   * Office: it switches Office on as well, or the tools would say it is stopped while its Document Server runs. */
   r.post("/container/start", async (_req, res) => {
     try {
+      if (!loadSettings(dd).enabled) {
+        saveSettings({ enabled: true }, dd);
+        recordAudit({ subject: "@pithagoras/office settings", reason: "enabled=true (Start)" });
+      }
       const r2 = await container.startOffice(undefined, undefined, dd);
       auditStart(r2, "");
       res.json({ ...r2, container: await container.status() });

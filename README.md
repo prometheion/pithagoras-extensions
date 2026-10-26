@@ -56,9 +56,9 @@ In the portal, Settings → Extensions → Discover → **Install by name**: `np
 `npm:@pithagoras/godot`, `npm:@pithagoras/inline-ui` or `npm:@pithagoras/office`. For Blender and Godot, then open
 Settings → Blender (or Godot) and press **Install**: the extension picks a card, downloads its image
 (`ghcr.io/prometheion/pithagoras-blender` or `ghcr.io/prometheion/pithagoras-godot`, tagged with the package's version),
-makes a volume for the projects and starts the container. For Office, open Settings → Office, switch it on and press
-start: it pulls OnlyOffice's own Document Server image (`onlyoffice/documentserver`) and the agents' editor's
-(`chromedp/headless-shell`) at once, and starts the Document Server.
+makes a volume for the projects and starts the container. For Office, open Settings → Office and press **Start
+container**: it switches Office on, pulls OnlyOffice's own Document Server image (`onlyoffice/documentserver`) and the
+agents' editor's (`chromedp/headless-shell`) at once, and starts the Document Server.
 
 For development, build the repository (below) and install an extension's folder by its path on the portal's machine,
 for example `/path/to/pithagoras-extensions/blender`. Installed from a folder, an extension does not bring Docker for

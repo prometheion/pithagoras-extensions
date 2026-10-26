@@ -29,8 +29,8 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 
 ## Installing
 
-In Settings → Extensions → Discover → Install by name: `npm:@pithagoras/office`. Then open Settings → Office, switch it
-on and press start. The image is pulled on the first start (`onlyoffice/documentserver:10.0.0.1` by default, the full
+In Settings → Extensions → Discover → Install by name: `npm:@pithagoras/office`. Then open Settings → Office and press
+**Start container** (that switches Office on too). The image is pulled on the first start (`onlyoffice/documentserver:10.0.0.1` by default, the full
 tag of the build this version was tested with, never `:latest` or a shorter tag like `10.0`, which move to each new
 build: a new build can change the editor's callback and token behaviour, so it is yours to change on purpose, in the
 same page). A new Document Server container answers within seconds but then makes its fonts for about two

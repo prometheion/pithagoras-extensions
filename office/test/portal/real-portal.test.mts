@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Frame, type Page } from "@playwright/test";
 import JSZip from "jszip";
 import { parseDocx } from "../../src/ooxml.ts";
+import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
 
 /**
  * Office in a real portal, end to end: the portal's own server (`core/server/dist/index.js` of PITHAGORAS_DIR, built),
@@ -32,7 +33,9 @@ import { parseDocx } from "../../src/ooxml.ts";
  *
  *   OFFICE_E2E=1 PITHAGORAS_DIR=<a built Pithagoras> [OFFICE_PORTAL_MODE=container] node --import tsx --test test/portal/real-portal.test.mts
  *
- * OFFICE_E2E_SHOTS=<a folder> keeps a picture of the chat with a document open in its Office panel there.
+ * OFFICE_E2E_SHOTS=<a folder> keeps pictures there: Settings → Office after Start, the chat with a document open in
+ * its Office panel, and the panel made narrow. OFFICE_E2E_PULL_AGENT=1 removes the agents' editor's image
+ * (`chromedp/headless-shell`, about 540 MB) before Start, so the page's Start is seen downloading it.
  */
 
 const DIR = process.env.PITHAGORAS_DIR;
@@ -135,7 +138,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     }
     return { status: answer.status, body };
   };
-  const state = async () => (await json(`${at}/state`)).body as { docs: { docId: string; title: string; ext: string; mtimeMs: number }[]; locks: Record<string, { id: string; name?: string }[]>; agent: { present: boolean; pull: { error?: string } | null }; container: { state: string } };
+  const state = async () => (await json(`${at}/state`)).body as { docs: { docId: string; title: string; ext: string; mtimeMs: number }[]; locks: Record<string, { id: string; name?: string }[]>; agent: { present: boolean; pull: { error?: string } | null; browser: unknown }; container: { state: string } };
   const fileOf = async (docId: string) => {
     const doc = (await state()).docs.find((x) => x.docId === docId)!;
     return path.join(officeData, "docs", docId, `${doc.title}.${doc.ext}`);
@@ -202,13 +205,48 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       assert.equal(installed.status, 200, JSON.stringify(installed.body));
     }
     assert.ok(await until(async () => (await json(`${at}/state`)).status === 200, 60_000, 1000), "Office's server half answers");
-    const on = await json(`${at}/settings`, { method: "POST", body: JSON.stringify({ enabled: true, imageTag: IMAGE }) });
-    assert.equal(on.status, 200, JSON.stringify(on.body));
-    let seen = "";
-    assert.ok(await until(async () => (seen = (await json(`${at}/container/status`)).body.state) === "running", 600_000, 2000), `the Document Server is set up (${seen})`);
-    // Switching Office on downloads the agents' editor beside the Document Server, as Start does.
-    assert.ok(await until(async () => (await state()).agent.present || Boolean((await state()).agent.pull?.error), 900_000, 2000));
-    assert.equal((await state()).agent.present, true, "the agents' editor downloaded with the switch");
+    const tagged = await json(`${at}/settings`, { method: "POST", body: JSON.stringify({ imageTag: IMAGE }) });
+    assert.equal(tagged.status, 200, JSON.stringify(tagged.body));
+    const pullAgent = process.env.OFFICE_E2E_PULL_AGENT === "1";
+    // By its tag, then by its digest where that still names it (once the tag is gone, Docker may have taken both).
+    if (pullAgent) for (const ref of [AGENT_IMAGE_TAG, AGENT_IMAGE]) spawnSync("docker", ["image", "rm", ref], { stdio: "ignore" });
+    console.log(`setup: the agents' editor's image ${(await state()).agent.present ? "is there" : "is missing"} before Start`);
+
+    // Settings → Office in the real portal: no prose, and Start is all a person does.
+    const page = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
+    await page.goto(`${origin}/settings/x/@pithagoras/office`);
+    const own = page.locator('[data-extension="@pithagoras/office"]').filter({ has: page.getByRole("status") }).first();
+    const office = own.getByRole("status");
+    await office.waitFor({ timeout: 60_000 });
+    const lines = (await own.innerText()).split("\n").map((l) => l.trim()).filter(Boolean);
+    console.log(`setup: the page before Start: ${JSON.stringify(lines)}`);
+    for (const line of lines) assert.ok(line.length <= 80, `no prose on the page: ${JSON.stringify(line)}`);
+    for (const gone of [/Made documents keep/, /through this portal's own proxy/, /runs in a browser of its own/]) assert.doesNotMatch(lines.join("\n"), gone);
+    await own.getByRole("button", { name: /^(Start container|Container starten)$/ }).click();
+    // What the one status said on the way, and every download line it showed.
+    const healths: string[] = [];
+    const pulls = new Set<string>();
+    let health = "";
+    assert.ok(
+      await until(async () => {
+        health = (await office.locator("[data-health]").getAttribute("data-health").catch(() => null)) ?? "";
+        if (health && healths.at(-1) !== health) healths.push(health);
+        for (const line of await office.locator(".po-pull-line").allInnerTexts().catch(() => [])) pulls.add(line);
+        return health === "running" || health === "failed";
+      }, 900_000, 500),
+      `Office runs after Start (${health})`,
+    );
+    console.log(`setup: the status went ${healths.join(" → ")}; download lines seen: ${pulls.size} (${JSON.stringify([...pulls].slice(-3))})`);
+    assert.equal(health, "running", `healthy, both parts: ${await office.innerText()}`);
+    if (pullAgent) assert.ok(healths.includes("downloading"), "the page showed Start downloading the agents' editor");
+    const after = await state();
+    assert.equal(after.container.state, "running", "the Document Server runs");
+    assert.equal(after.agent.present, true, "the agents' editor's image is there");
+    assert.deepEqual(after.agent.browser, { running: false, starting: false, editors: 0 }, "the agents' browser is ready: it starts when an agent needs it");
+    assert.equal((await json(`${at}/state`)).body.enabled, true, "Start switched Office on");
+    assert.equal(await own.getByRole("switch").first().isChecked().catch(() => true), true);
+    if (process.env.OFFICE_E2E_SHOTS) await page.screenshot({ path: path.join(process.env.OFFICE_E2E_SHOTS, `settings-after-start-${mode}.png`) });
+    await page.context().close();
     if (mode === "container") {
       const portal = JSON.parse(execFileSync("docker", ["inspect", portalName], { encoding: "utf8" }))[0];
       console.log(`portal container networks: ${Object.keys(portal.NetworkSettings.Networks).join(", ")}`);
@@ -362,7 +400,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.deepEqual((await state()).locks[doc], [], "and no person is in it");
   });
 
-  test("f: the chat's Office panel: the agent's tool card opens its document in the panel beside the chat, the same document in the Office tab co-edits with it, back and close destroy the editor", { timeout: 900_000 }, async () => {
+  test("f: the chat's Office panel: the agent's tool card opens its document in the panel beside the chat, a person types there and sees the agent's edit live, the same document in the Office tab co-edits with it, it works narrow, wide and at the bottom, back and close destroy the editor", { timeout: 900_000 }, async () => {
     // The agent makes the document (office_create opens no editor of the agent's: the seats stay as the other cases
     // leave them).
     const id = await chat();
@@ -385,51 +423,113 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       }, 120_000, 500);
       return frame;
     };
+    /** The panel and its editor as drawn: the editor fills the panel under its bar, and nothing scrolls sideways. */
+    const fits = async (what: string) => {
+      const sizes = await body.evaluate((el) => {
+        const frame = el.querySelector(".po-host iframe")!.getBoundingClientRect();
+        const box = el.getBoundingClientRect();
+        const aside = el.closest("aside")!;
+        return { frame: { w: frame.width, h: frame.height }, box: { w: box.width, h: box.height }, dock: aside.getAttribute("data-dock"), sideways: el.scrollWidth - el.clientWidth };
+      });
+      console.log(`f. ${what}: the panel ${JSON.stringify(sizes.box)} docked ${sizes.dock}, its editor ${JSON.stringify(sizes.frame)}`);
+      assert.ok(Math.abs(sizes.frame.w - sizes.box.w) <= 1 && sizes.frame.h > sizes.box.h - 80, `${what}: the editor fills the panel under its bar`);
+      assert.ok(sizes.sideways <= 0, `${what}: nothing scrolls sideways`);
+      return sizes;
+    };
+    /** A line typed at the end of the document in `frame`. */
+    const typeIn = async (p: Page, frame: Frame, line: string) => {
+      await frame.locator("#editor_sdk").click({ position: { x: 120, y: 100 } });
+      await p.keyboard.press("Control+End");
+      await p.keyboard.press("Enter");
+      // (A key pressed at once after the click may go before the editor has the focus.)
+      await delay(500);
+      await p.keyboard.type(line, { delay: 25 });
+    };
+    /** Drags the edge between the conversation and the panels on the right until the panels are `width` wide. */
+    const widen = async (width: number) => {
+      const aside = page.locator('aside[data-dock="right"]');
+      const edge = page.locator(".chat-aside-edge[aria-orientation=vertical]");
+      const from = (await aside.boundingBox())!.width;
+      const at = (await edge.boundingBox())!;
+      await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(at.x + at.width / 2 + (from - width), at.y + at.height / 2, { steps: 12 });
+      await page.mouse.up();
+      assert.ok(await until(async () => Math.abs((await aside.boundingBox())!.width - width) <= 8, 5000), `the panels made ${width} px wide (${(await aside.boundingBox())!.width})`);
+      // The editor follows its window's size.
+      await delay(1500);
+    };
+
     // The card of the agent's office_create opens the document in the chat's Office panel, not the Office tab.
     // (The portal speaks the browser's language: German on a German machine.)
     await page.getByRole("button", { name: /^(Open in Office|In Office öffnen)$/ }).first().click({ timeout: 60_000 });
-    const panelFrame = await editorFrame(page, true);
+    let panelFrame = await editorFrame(page, true);
     assert.ok(panelFrame, "the editor in the chat's Office panel");
     assert.equal(new URL(page.url()).pathname, `/s/${id}`, "the page stayed on the chat");
+    assert.ok(await page.locator("textarea, [contenteditable=true]").first().isVisible(), "the chat's composer is on screen beside it");
     assert.ok(await until(async () => (await personText(panelFrame!)).includes("New document"), 30_000), "the document is loaded in the panel");
-    const sizes = await body.evaluate((el) => {
-      const frame = el.querySelector(".po-host iframe")!.getBoundingClientRect();
-      const box = el.getBoundingClientRect();
-      return { frame: { w: frame.width, h: frame.height }, box: { w: box.width, h: box.height } };
-    });
-    console.log(`f. the panel ${JSON.stringify(sizes.box)}, its editor ${JSON.stringify(sizes.frame)}`);
-    assert.ok(Math.abs(sizes.frame.w - sizes.box.w) <= 1 && sizes.frame.h > sizes.box.h - 80, "the editor fills the panel under its bar");
+    await fits("as the portal docks it");
+
+    // A person types in the panel; the agent's office_edit from the same chat shows there live, under its name.
+    await typeIn(page, panelFrame!, "Typed in the panel");
+    await delay(2000);
+    const [edited] = await say(id, [{ name: "office_edit", arguments: { id: doc, ops: [{ after: "Typed in the panel", paragraphs: ["Written by the agent beside the chat"] }] } }]);
+    console.log(`f. office_edit: ${JSON.stringify(edited)}`);
+    assert.match(edited, /1 person in the document saw it live\./);
+    let seen = "";
+    assert.ok(await until(async () => /Typed in the panel[\s\S]*Written by the agent beside the chat/.test((seen = await personText(panelFrame!))), 10_000), `the agent's edit in the panel's editor: ${JSON.stringify(seen)}`);
+    assert.equal(new URL(page.url()).pathname, `/s/${id}`, "still on the chat");
     if (process.env.OFFICE_E2E_SHOTS) await page.screenshot({ path: path.join(process.env.OFFICE_E2E_SHOTS, `panel-${mode}.png`) });
 
-    // Typed in the panel, seen in the Office tab's editor of the same document; typed there, seen in the panel.
-    await panelFrame!.locator("#editor_sdk").click({ position: { x: 200, y: 120 } });
-    await page.keyboard.press("Control+End");
-    await page.keyboard.press("Enter");
-    await delay(500);
-    await page.keyboard.type("Typed in the panel", { delay: 25 });
+    // The Office tab opens the document in its own page; typed there, seen in the panel, and the other way round.
     const { page: tab, frame: tabFrame } = await personOpens(doc, "word", true);
-    let seen = "";
-    assert.ok(await until(async () => (seen = await personText(tabFrame)).includes("Typed in the panel"), 20_000), `the tab's editor has the panel's typing: ${JSON.stringify(seen)}`);
-    await tabFrame.locator("#editor_sdk").click({ position: { x: 400, y: 120 } });
-    await tab.keyboard.press("Control+End");
-    await tab.keyboard.press("Enter");
-    await delay(500);
-    await tab.keyboard.type("Typed in the tab", { delay: 25 });
+    assert.equal(await (await tabFrame.frameElement()).evaluate((el) => Boolean((el as Element).closest(".po-editor-panel"))), false, "the tab's editor is its page's");
+    assert.ok(await until(async () => (seen = await personText(tabFrame)).includes("Written by the agent beside the chat"), 20_000), `the tab's editor has the panel's document: ${JSON.stringify(seen)}`);
+    await typeIn(tab, tabFrame, "Typed in the tab");
     assert.ok(await until(async () => (seen = await personText(panelFrame!)).includes("Typed in the tab"), 20_000), `the panel's editor has the tab's typing: ${JSON.stringify(seen)}`);
+    await typeIn(page, panelFrame!, "Typed in the panel again");
+    assert.ok(await until(async () => (seen = await personText(tabFrame)).includes("Typed in the panel again"), 20_000), `the tab's editor has the panel's typing: ${JSON.stringify(seen)}`);
     await personCloses(tab);
+
+    // Narrow, then wide: the same editor, never reloaded, fitting the panel, and typing works at both.
+    await panelFrame!.evaluate("window.__panelMark = 1");
+    await widen(380);
+    await fits("narrow");
+    await typeIn(page, panelFrame!, "Typed narrow");
+    assert.ok(await until(async () => (await personText(panelFrame!)).includes("Typed narrow"), 10_000), "typed in the narrow panel");
+    if (process.env.OFFICE_E2E_SHOTS) await page.screenshot({ path: path.join(process.env.OFFICE_E2E_SHOTS, `panel-narrow-${mode}.png`) });
+    await widen(900);
+    await fits("wide");
+    assert.equal(await panelFrame!.evaluate("window.__panelMark"), 1, "resizing the panel never reloaded its editor");
+
+    // At the bottom, where a drag of its header to the bottom edge puts it (kept per browser, as the portal keeps it).
+    await page.evaluate(() => localStorage.setItem("panelPlaces", JSON.stringify({ "x:@pithagoras/office/office": "bottom" })));
+    await page.reload();
+    if (!(await body.isVisible().catch(() => false))) await page.locator('button.panel-toggle[aria-label="Office"]').click();
+    const row = body.locator(".po-open", { hasText: "Beside the chat" });
+    if (await row.waitFor({ timeout: 10_000 }).then(() => true, () => false)) await row.click();
+    panelFrame = await editorFrame(page, true);
+    assert.ok(panelFrame, "the editor in the panel at the bottom");
+    const bottom = await fits("at the bottom");
+    assert.equal(bottom.dock, "bottom");
+    assert.ok(await until(async () => (await personText(panelFrame!)).includes("Typed narrow"), 30_000), "the document is loaded at the bottom");
+    await typeIn(page, panelFrame!, "Typed at the bottom");
+    assert.ok(await until(async () => (await personText(panelFrame!)).includes("Typed at the bottom"), 10_000), "typed in the panel at the bottom");
 
     // Back to the panel's list: the editor goes; a row opens it in the panel again; closing the panel takes it.
     await body.getByRole("button", { name: /All documents|Alle Dokumente/ }).click();
-    await body.locator(".po-open", { hasText: "Beside the chat" }).waitFor({ timeout: 10_000 });
+    await row.waitFor({ timeout: 10_000 });
     assert.equal(await body.locator("iframe").count(), 0, "no editor left in the panel");
-    await body.locator(".po-open", { hasText: "Beside the chat" }).click();
+    await row.click();
     assert.ok(await editorFrame(page, true), "opened in the panel again");
     await page.locator('button.panel-toggle[aria-label="Office"]').click();
     await body.waitFor({ state: "detached", timeout: 10_000 });
     assert.equal(page.frames().filter((f) => /documenteditor\/main\//.test(f.url())).length, 0, "no editor left on the page");
     await page.context().close();
     let file = "";
-    assert.ok(await until(async () => /Typed in the panel[\s\S]*Typed in the tab|Typed in the tab[\s\S]*Typed in the panel/.test((file = parseDocx(readFileSync(await fileOf(doc))).text)), 90_000, 1000), `both views' typing saved: ${JSON.stringify(file)}`);
+    const want = /Typed in the panel[\s\S]*Written by the agent beside the chat/;
+    const all = ["Typed in the tab", "Typed in the panel again", "Typed narrow", "Typed at the bottom"];
+    assert.ok(await until(async () => want.test((file = parseDocx(readFileSync(await fileOf(doc))).text)) && all.every((w) => file.includes(w)), 90_000, 1000), `everything typed and written is saved: ${JSON.stringify(file)}`);
     await noConflictCopy("Beside the chat");
     assert.ok(await until(async () => ((await state()).locks[doc] ?? []).length === 0, 60_000, 1000), "nobody is in it once both views left");
   });

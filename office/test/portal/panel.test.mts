@@ -40,6 +40,8 @@ const DOC = (docId: string, title: string, ext: "docx" | "xlsx") => ({ docId, ti
 const DOCS = [DOC("d1", "Plan", "docx"), DOC("d2", "Budget", "xlsx")];
 /** Documents the server half has made since the page last asked (an agent's new one). */
 const made: ReturnType<typeof DOC>[] = [];
+/** Who the server half says is in "Plan". */
+let editing: { id: string; name: string }[] = [];
 
 let pageJs = "";
 const server = http.createServer(async (req, res) => {
@@ -50,7 +52,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/client.css") return send(200, "text/css", CSS);
   if (url.pathname === "/fake-api.js") return send(200, "text/javascript", FAKE_API);
   if (url.pathname === `${BASE}/state`) {
-    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "x", container: { state: "running" }, agent: { present: true, pull: null, tag: "t" }, docs: [...DOCS, ...made], locks: { d1: [], d2: [] } }));
+    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "x", container: { state: "running" }, agent: { present: true, pull: null, tag: "t" }, docs: [...DOCS, ...made], locks: { d1: [...editing], d2: [] } }));
   }
   if (url.pathname === `${BASE}/scope`) return send(200, "application/json", JSON.stringify({ docIds: DOCS.map((d) => d.docId) }));
   if (url.pathname === `${BASE}/editor-config` && req.method === "POST") {
@@ -167,11 +169,14 @@ test("switching documents destroys the editor before the next is made, and closi
   await page.context().close();
 });
 
-test("at the panel's widths (560 px, dragged to 320 and 900, docked at the bottom) the editor fills the panel under its bar, and nothing scrolls sideways", async () => {
+test("at the panel's widths (560 px, dragged to 320 and 900, docked at the bottom) the editor fills the panel under its bar, the bar keeps one row, and nothing scrolls sideways", async () => {
+  // Two people in it: the bar shows how many, and that must not take it a second row in a narrow panel.
+  editing = [{ id: "u1", name: "Ann" }, { id: "u2", name: "Bo" }];
   const page = await chatPage();
   await page.getByRole("button", { name: "Office panel button" }).click();
   await openRow(page, "Plan");
   await editorOf(page, "key-d1");
+  const rows: number[] = [];
   for (const dock of [{ w: 560, h: 320, dock: "right" }, { w: 320, h: 320, dock: "right" }, { w: 900, h: 320, dock: "right" }, { w: 560, h: 320, dock: "bottom" }]) {
     await page.evaluate((d) => (window as unknown as { __dock(d: unknown): void }).__dock(d), dock);
     await page.waitForTimeout(100);
@@ -193,7 +198,11 @@ test("at the panel's widths (560 px, dragged to 320 and 900, docked at the botto
     assert.ok(Math.abs(box.frame.top - box.bar.bottom) <= 1, `${label}: right under the bar`);
     assert.ok(Math.abs(box.frame.bottom - box.body.bottom) <= 1, `${label}: down to the panel's foot (${box.frame.bottom} of ${box.body.bottom})`);
     if (dock.dock === "right") assert.ok(Math.abs(box.body.width - dock.w) <= 1, `${label}: the panel is the width it was given`);
+    rows.push(box.bar.height);
   }
+  assert.ok(Math.max(...rows) - Math.min(...rows) <= 1, `the bar is as high at every width, one row: ${JSON.stringify(rows)}`);
+  await page.getByRole("img", { name: /editing now/ }).waitFor({ timeout: 5000 });
+  editing = [];
   await page.context().close();
 });
 

@@ -34,9 +34,21 @@
   padding: 0.3rem 0.5rem;
 }
 
+/* One row however narrow the panel is dragged: the title gives way first, the buttons keep their words on one line.
+   Only the note that the file changed on disk takes a row of its own. */
 .po-editor-panel .po-editor-title {
-  flex: 1 1 6rem;
-  min-width: 0;
+  flex: 1 1 0;
+  min-width: 2rem;
+}
+
+.po-editor-panel .po-editor-bar > button,
+.po-editor-panel .po-editor-bar > .po-chip-lock {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.po-editor-panel .po-chip-stale {
+  flex-basis: 100%;
 }
 
 .po-editor-panel .po-editor-spacer {

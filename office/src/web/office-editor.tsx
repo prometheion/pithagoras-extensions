@@ -247,9 +247,15 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { do
         <span className="po-editor-title">{doc ? `${doc.title}.${doc.ext}` : "…"}</span>
         <span className="po-editor-spacer" />
         {users.length > 0 && (
-          <span className="po-chip po-chip-lock" title={users.map((u) => u.name ?? u.id).join(", ")}>
+          // In a panel just the number: the words would take the bar a second row at a narrow panel's width.
+          <span
+            className="po-chip po-chip-lock"
+            title={users.map((u) => u.name ?? u.id).join(", ")}
+            role={place === "panel" ? "img" : undefined}
+            aria-label={place === "panel" ? (users.length === 1 ? t("1 editing now") : t("{n} editing now", { n: users.length })) : undefined}
+          >
             <LuUsers aria-hidden />
-            {users.length === 1 ? t("1 editing now") : t("{n} editing now", { n: users.length })}
+            {place === "panel" ? users.length : users.length === 1 ? t("1 editing now") : t("{n} editing now", { n: users.length })}
           </span>
         )}
         {onFullPage && (

@@ -31,6 +31,8 @@ import { parseDocx } from "../../src/ooxml.ts";
  * `office-portal-<pid>`), and are removed at its end.
  *
  *   OFFICE_E2E=1 PITHAGORAS_DIR=<a built Pithagoras> [OFFICE_PORTAL_MODE=container] node --import tsx --test test/portal/real-portal.test.mts
+ *
+ * OFFICE_E2E_SHOTS=<a folder> keeps a picture of the chat with a document open in its Office panel there.
  */
 
 const DIR = process.env.PITHAGORAS_DIR;
@@ -216,7 +218,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   });
 
   /** A person in the real Office page, with `docId` open in its editor: the page and the editor's frame. */
-  async function personOpens(docId: string, kind: "word" | "cell") {
+  async function personOpens(docId: string, kind: "word" | "cell", alsoOpen = false) {
     const page = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
     await page.goto(`${origin}/x/@pithagoras/office/office?doc=${encodeURIComponent(docId)}`);
     let frame: Frame | undefined;
@@ -226,7 +228,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       return !!frame;
     }, 120_000, 500);
     assert.ok(frame, "the person's editor frame in the Office page");
-    assert.ok(await until(async () => ((await state()).locks[docId] ?? []).length === 1, 60_000, 500), "the person is in the document");
+    // The same person in another view of it too (alsoOpen): the Document Server may list them once or twice.
+    assert.ok(await until(async () => (alsoOpen ? ((await state()).locks[docId] ?? []).length >= 1 : ((await state()).locks[docId] ?? []).length === 1), 60_000, 500), "the person is in the document");
     // A mark in the frame's window: a reload of the editor would lose it.
     await frame.evaluate("window.__personMark = 1");
     return { page, frame };
@@ -357,6 +360,76 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.equal((await state()).docs.find((x) => x.docId === doc)!.mtimeMs, revision);
     assert.deepEqual(parseDocx(readFileSync(await fileOf(doc))).paragraphs, ["New document", "Written with nobody in it"]);
     assert.deepEqual((await state()).locks[doc], [], "and no person is in it");
+  });
+
+  test("f: the chat's Office panel: the agent's tool card opens its document in the panel beside the chat, the same document in the Office tab co-edits with it, back and close destroy the editor", { timeout: 900_000 }, async () => {
+    const doc = await newDoc("Beside the chat", "word");
+    const id = await chat();
+    await say(id, [{ name: "office_read", arguments: { id: doc } }]);
+    const page = await (await browser.newContext({ viewport: { width: 1600, height: 900 } })).newPage();
+    await page.goto(`${origin}/s/${id}`);
+    // The panel's body: of what Office draws on the chat's page (its card, its button, …), the one with its list or editor.
+    const body = page.locator('[data-extension="@pithagoras/office"]').filter({ has: page.locator(".po-editor-panel, .po-newcompact") }).first();
+    /** The Document Server's editor frame of `doc` on `p`, once its editor is up. */
+    const editorFrame = async (p: Page, inPanel: boolean) => {
+      let frame: Frame | undefined;
+      await until(async () => {
+        for (const f of p.frames().filter((f) => /documenteditor\/main\//.test(f.url()))) {
+          const owner = await f.frameElement().catch(() => null);
+          const there = owner ? await owner.evaluate((el) => Boolean((el as Element).closest(".po-editor-panel"))) : false;
+          if (there === inPanel && (await f.evaluate("Boolean(window.Asc && window.Asc.editor)").catch(() => false))) frame = f;
+        }
+        return !!frame;
+      }, 120_000, 500);
+      return frame;
+    };
+    // The card of the agent's office_read opens the document in the chat's Office panel, not the Office tab.
+    // (The portal speaks the browser's language: German on a German machine.)
+    await page.getByRole("button", { name: /^(Open in Office|In Office öffnen)$/ }).first().click({ timeout: 60_000 });
+    const panelFrame = await editorFrame(page, true);
+    assert.ok(panelFrame, "the editor in the chat's Office panel");
+    assert.equal(new URL(page.url()).pathname, `/s/${id}`, "the page stayed on the chat");
+    assert.ok(await until(async () => (await personText(panelFrame!)).includes("New document"), 30_000), "the document is loaded in the panel");
+    const sizes = await body.evaluate((el) => {
+      const frame = el.querySelector(".po-host iframe")!.getBoundingClientRect();
+      const box = el.getBoundingClientRect();
+      return { frame: { w: frame.width, h: frame.height }, box: { w: box.width, h: box.height } };
+    });
+    console.log(`f. the panel ${JSON.stringify(sizes.box)}, its editor ${JSON.stringify(sizes.frame)}`);
+    assert.ok(Math.abs(sizes.frame.w - sizes.box.w) <= 1 && sizes.frame.h > sizes.box.h - 80, "the editor fills the panel under its bar");
+    if (process.env.OFFICE_E2E_SHOTS) await page.screenshot({ path: path.join(process.env.OFFICE_E2E_SHOTS, `panel-${mode}.png`) });
+
+    // Typed in the panel, seen in the Office tab's editor of the same document; typed there, seen in the panel.
+    await panelFrame!.locator("#editor_sdk").click({ position: { x: 200, y: 120 } });
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await delay(500);
+    await page.keyboard.type("Typed in the panel", { delay: 25 });
+    const { page: tab, frame: tabFrame } = await personOpens(doc, "word", true);
+    let seen = "";
+    assert.ok(await until(async () => (seen = await personText(tabFrame)).includes("Typed in the panel"), 20_000), `the tab's editor has the panel's typing: ${JSON.stringify(seen)}`);
+    await tabFrame.locator("#editor_sdk").click({ position: { x: 400, y: 120 } });
+    await tab.keyboard.press("Control+End");
+    await tab.keyboard.press("Enter");
+    await delay(500);
+    await tab.keyboard.type("Typed in the tab", { delay: 25 });
+    assert.ok(await until(async () => (seen = await personText(panelFrame!)).includes("Typed in the tab"), 20_000), `the panel's editor has the tab's typing: ${JSON.stringify(seen)}`);
+    await personCloses(tab);
+
+    // Back to the panel's list: the editor goes; a row opens it in the panel again; closing the panel takes it.
+    await body.getByRole("button", { name: /All documents|Alle Dokumente/ }).click();
+    await body.locator(".po-open", { hasText: "Beside the chat" }).waitFor({ timeout: 10_000 });
+    assert.equal(await body.locator("iframe").count(), 0, "no editor left in the panel");
+    await body.locator(".po-open", { hasText: "Beside the chat" }).click();
+    assert.ok(await editorFrame(page, true), "opened in the panel again");
+    await page.locator('button.panel-toggle[aria-label="Office"]').click();
+    await body.waitFor({ state: "detached", timeout: 10_000 });
+    assert.equal(page.frames().filter((f) => /documenteditor\/main\//.test(f.url())).length, 0, "no editor left on the page");
+    await page.context().close();
+    let file = "";
+    assert.ok(await until(async () => /Typed in the panel[\s\S]*Typed in the tab|Typed in the tab[\s\S]*Typed in the panel/.test((file = parseDocx(readFileSync(await fileOf(doc))).text)), 90_000, 1000), `both views' typing saved: ${JSON.stringify(file)}`);
+    await noConflictCopy("Beside the chat");
+    assert.ok(await until(async () => ((await state()).locks[doc] ?? []).length === 0, 60_000, 1000), "nobody is in it once both views left");
   });
 
   test("e: a person's editor config never has plugins on, and a tampered client config loads no plugin", { timeout: 900_000 }, async () => {

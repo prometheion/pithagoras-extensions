@@ -16,13 +16,15 @@ function seatPage() {
   const events: { editorId: string; type: string; data: unknown; seq: number }[] = [];
   const scripts: { src: string; onload: () => void; onerror: () => void }[] = [];
   const editors: { box: string; config: { events: Record<string, (e?: unknown) => void> }; destroyed: boolean }[] = [];
+  // The page's timers, run when the test says.
+  const timers: { fn: () => void; ms: number }[] = [];
   const context = {
     fetch: (url: string, init?: { body?: string }) => {
       if (url === "poll") return new Promise((resolve) => polls.push((order) => resolve({ status: 200, json: async () => order })));
       if (url === "event") events.push(JSON.parse(init!.body!));
       return Promise.resolve({ status: 200, json: async () => ({}) });
     },
-    setTimeout: () => 0,
+    setTimeout: (fn: () => void, ms: number) => timers.push({ fn, ms }),
     document: {
       createElement: () => ({ remove() {} }),
       head: { appendChild: (s: (typeof scripts)[number]) => scripts.push(s) },
@@ -46,6 +48,7 @@ function seatPage() {
     events,
     scripts,
     editors,
+    timers,
     /** The page's held poll answered with `order`. */
     async order(order: unknown) {
       for (let i = 0; i < 20 && !polls.length; i++) await tick();
@@ -58,7 +61,44 @@ function seatPage() {
   };
 }
 
-const openOrder = (editorId: string) => ({ open: { editorId, apiJs: "http://office-ds/web-apps/apps/api/documents/api.js", config: { document: { key: "k" } } } });
+const openOrder = (editorId: string, appReadyMs?: number) => ({ open: { editorId, apiJs: "http://office-ds/web-apps/apps/api/documents/api.js", config: { document: { key: "k" } }, appReadyMs } });
+
+test("seat page: an editor whose app never says it started is made anew, once; one that started, or was closed, is not", async () => {
+  const page = seatPage();
+  await page.order(openOrder("e1", 10_000));
+  page.scripts[0].onload();
+  await page.settle();
+  assert.equal(page.editors.length, 1);
+  assert.deepEqual(page.timers.map((t) => t.ms), [10_000]);
+  // Its app failed while it loaded: nothing said, and at appReadyMs it is torn down and made again, with a config of
+  // its own.
+  page.timers.shift()!.fn();
+  assert.equal(page.editors[0].destroyed, true);
+  assert.equal(page.editors.length, 2);
+  assert.notEqual(page.editors[1].config, page.editors[0].config);
+  assert.deepEqual(page.editors[1].config.events && Object.keys(page.editors[1].config.events).includes("onDocumentReady"), true);
+  assert.deepEqual(page.events.map((e) => [e.editorId, e.type]), [["e1", "remade"]]);
+  // Once: the second try has no timer of its own; the listener's wait is the bound.
+  assert.equal(page.timers.length, 0);
+  page.editors[1].config.events.onDocumentReady();
+  await page.settle();
+  assert.deepEqual(page.events.map((e) => [e.editorId, e.type]), [["e1", "remade"], ["e1", "ready"]]);
+
+  // One whose app started is left to load.
+  await page.order(openOrder("e2", 10_000));
+  await page.settle();
+  page.editors[2].config.events.onAppReady();
+  page.timers.shift()!.fn();
+  assert.equal(page.editors.length, 3);
+  assert.equal(page.editors[2].destroyed, false);
+  // One closed meanwhile is not made again.
+  await page.order(openOrder("e3", 10_000));
+  await page.settle();
+  await page.order({ close: "e3" });
+  page.timers.shift()!.fn();
+  assert.equal(page.editors.length, 4);
+  assert.equal(page.editors[3].destroyed, true);
+});
 
 test("seat page: an editor whose close came while the editor's script still loaded is never made", async () => {
   const page = seatPage();

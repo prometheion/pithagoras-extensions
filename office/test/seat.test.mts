@@ -90,6 +90,8 @@ test("the flow: the browser started, the page connects, the editor opens, its pl
     assert.deepEqual(s.calls, ["ensureAgent", "mint /homes/a doc-1 edit"]);
     assert.equal(s.b.opened.length, 1);
     assert.equal(s.b.opened[0].apiJs, `${DS}/web-apps/apps/api/documents/api.js`);
+    // The page makes an editor anew where its app has not started by then (seat-page.ts).
+    assert.equal((s.b.opened[0] as { appReadyMs?: number }).appReadyMs, LIMITS.appReadyMs);
     assert.equal(keyOf("/homes/a", "doc-1"), "key-doc-1");
     // The plugin's config is fetched by the editor's frame, on the Document Server's origin.
     assert.equal(s.b.behaviour.configs[0].headers.get("access-control-allow-origin"), DS);

@@ -59,6 +59,8 @@ export const LIMITS = {
   connectMs: 60_000,
   /** An editor's plugin's first poll after the editor was opened. */
   readyMs: 30_000,
+  /** An editor whose app has not started this long after it was made is made anew, once (seat-page.ts). */
+  appReadyMs: 10_000,
   /** One job's result. */
   jobMs: 20_000,
   /** An editor with no job closes. */
@@ -312,7 +314,7 @@ async function open(home: string, docId: string, mode: SeatMode, signal?: AbortS
     const minted = await d.mint({ home, docId, mode, pluginUrl: `${d.listenerOrigin()}/plugin/${token}/` });
     editor.key = minted.key;
     if (!editors.has(editor.id)) throw new SeatError("editor_not_ready", "the agent's editor of this document was closed while it opened");
-    order({ open: { editorId: editor.id, apiJs: minted.apiJs, config: minted.config } });
+    order({ open: { editorId: editor.id, apiJs: minted.apiJs, config: minted.config, appReadyMs: limits.appReadyMs } });
     await ready(editor, signal);
   } catch (e) {
     close(editor, "it did not open");
@@ -669,6 +671,7 @@ function seatRoute(req: IncomingMessage, res: ServerResponse, rest: string): boo
           close(editor, `it reported an error: ${what}`);
         }
       }
+      if (editor && event.type === "remade") log(`the agent's editor of ${editor.docId} did not start, made anew`);
       if (editor && event.type === "state") {
         // The page numbers its events, as two of them may arrive in either order (each is a request of its own); one
         // without a number is counted as it comes.

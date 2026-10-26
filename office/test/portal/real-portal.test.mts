@@ -505,7 +505,10 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     // At the bottom, where a drag of its header to the bottom edge puts it (kept per browser, as the portal keeps it).
     await page.evaluate(() => localStorage.setItem("panelPlaces", JSON.stringify({ "x:@pithagoras/office/office": "bottom" })));
     await page.reload();
-    if (!(await body.isVisible().catch(() => false))) await page.locator('button.panel-toggle[aria-label="Office"]').click();
+    // The portal may bring the panel back open by itself; only where it does not is it opened.
+    const toggle = page.locator('button.panel-toggle[aria-label="Office"]');
+    await toggle.waitFor({ timeout: 60_000 });
+    if (!(await body.waitFor({ timeout: 5000 }).then(() => true, () => false))) await toggle.click();
     const row = body.locator(".po-open", { hasText: "Beside the chat" });
     if (await row.waitFor({ timeout: 10_000 }).then(() => true, () => false)) await row.click();
     panelFrame = await editorFrame(page, true);

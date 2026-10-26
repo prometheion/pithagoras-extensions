@@ -33,6 +33,7 @@ const FAKE_API = `window.DocsAPI = { DocEditor: function (id, config) {
   document.getElementById(id).replaceWith(frame);
   const log = (window.__fake = window.__fake || []);
   log.push(["made", config.document.key, id]);
+  setTimeout(() => config.events.onAppReady && config.events.onAppReady(), 0);
   return { destroyEditor() { log.push(["destroyed", config.document.key]); frame.remove(); } };
 } };`;
 

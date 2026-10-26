@@ -49,6 +49,12 @@ declare global {
 /** How often the open editor asks whether its file changed outside it. */
 const STANDING_POLL_MS = 1000;
 
+/** How long an editor's app may take to say it started (onAppReady) before it is made anew, once. The app now and then
+ * fails while its scripts load, most often when another editor on the page was just torn down (going back to the list
+ * and opening a document at once): an exception in its frame, nothing said to the page, and an editor that never
+ * opens. Changed by the portal-tier test. */
+export const editorTimings = { appReadyMs: 15_000 };
+
 /** Placeholders made on this page, for an id of each editor's own. */
 let placeholders = 0;
 
@@ -89,6 +95,7 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { do
   useEffect(() => {
     let alive = true;
     let watch: ReturnType<typeof setInterval> | undefined;
+    let remake: ReturnType<typeof setTimeout> | undefined;
     let again: ReturnType<typeof setTimeout> | undefined;
     let standing: ReturnType<typeof setInterval> | undefined;
     /** The document.key the editor has open now. */
@@ -123,8 +130,8 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { do
     };
     const keyOf = (config: Record<string, unknown>) => String((config.document as { key?: unknown } | undefined)?.key ?? "");
 
-    /** A new editor in the host box. */
-    const build = (config: Record<string, unknown>) => {
+    /** A new editor in the host box; made anew once where its app does not say it started (editorTimings). */
+    const build = (config: Record<string, unknown>, tries = 0) => {
       if (!window.DocsAPI) throw new Error("api.js loaded but DocsAPI is not on window -- the Document Server answered with something that is not its script");
       if (!box.current) return;
       // DocsAPI.DocEditor takes a PLACEHOLDER ID: api.js runs document.getElementById on the first argument and then
@@ -134,8 +141,25 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { do
       ph.id = holder;
       document.getElementById(holder)?.remove(); // never stack placeholders across remounts
       box.current.appendChild(ph);
-      editor.current = new window.DocsAPI.DocEditor(ph.id, config);
+      // The editor takes the config it is given as its own: a copy each time, the events kept as they are.
+      const { events, ...data } = config;
+      const copy = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
+      let started = false;
+      const made = new window.DocsAPI.DocEditor(ph.id, { ...copy, events: { ...(events as object), onAppReady: () => void (started = true) } });
+      editor.current = made;
       key = keyOf(config);
+      if (remake !== undefined) clearTimeout(remake);
+      if (tries < 1) {
+        remake = setTimeout(() => {
+          if (!alive || started || editor.current !== made) return;
+          try {
+            made.destroyEditor?.();
+          } catch {
+            // a half-built editor must not stop the new one
+          }
+          build(config, tries + 1);
+        }, editorTimings.appReadyMs);
+      }
     };
 
     /** The newest revision into the open editor: a fresh config (a new key) through the editor's refreshFile, which
@@ -223,6 +247,7 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { do
     return () => {
       alive = false;
       if (watch !== undefined) clearInterval(watch);
+      if (remake !== undefined) clearTimeout(remake);
       if (again !== undefined) clearTimeout(again);
       if (standing !== undefined) clearInterval(standing);
       reload.current = async () => {};

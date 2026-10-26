@@ -160,10 +160,12 @@ function editorPage(base: string): string {
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { setPortal } from "./src/portal";
-import { OfficeEditor } from "./src/web/office-editor";
+import { OfficeEditor, editorTimings } from "./src/web/office-editor";
 
 const BASE = ${JSON.stringify(base)};
 window.__events = [];
+// A test that makes an editor's app fail does not wait the full time before it is made anew.
+if (window.__appFailsOnce) editorTimings.appReadyMs = 300;
 setPortal({
   extension: "@pithagoras/office",
   t: (text, vars) => text.replace(/\\{(\\w+)\\}/g, (m, k) => (vars && k in vars ? String(vars[k]) : m)),

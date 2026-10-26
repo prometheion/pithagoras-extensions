@@ -406,31 +406,49 @@ export const SEAT_PAGE_JS = `(function () {
   }
   function open(order) {
     load(order.apiJs).then(function () {
-      if (closed[order.editorId]) return;
-      var box = document.createElement("div");
-      box.id = "editor-" + order.editorId;
-      document.body.appendChild(box);
-      var config = order.config;
-      config.events = {
-        onDocumentReady: function () { tell(order.editorId, "ready"); },
-        onError: function (e) { tell(order.editorId, "error", e && e.data); },
-        // The editor's session is no longer the Document Server's (the document changed, or the Document Server
-        // restarted): the editor would ask to be reloaded. It is closed instead, and the next call opens it anew.
-        onRequestRefreshFile: function () { tell(order.editorId, "error", { errorDescription: "the editor asks to be reloaded" }); },
-        onOutdatedVersion: function () { tell(order.editorId, "error", { errorDescription: "the editor's version of the document is outdated" }); },
-        // true: the editor holds changes it has not sent to the Document Server yet; false: all of them are sent.
-        onDocumentStateChange: function (e) { tell(order.editorId, "state", Boolean(e && e.data === true)); }
-      };
-      editors[order.editorId] = new window.DocsAPI.DocEditor(box.id, config);
+      if (!closed[order.editorId]) make(order, 0);
     }, function (e) { tell(order.editorId, "error", { errorDescription: String(e && e.message || e) }); });
   }
-  function close(editorId) {
-    closed[editorId] = true;
+  // The editor's own app now and then fails while its scripts load (a race inside it: an exception in its frame, and
+  // nothing said to this page), most often while another editor here is torn down. One whose app has not said it
+  // started within appReadyMs is made anew, once; the listener's own wait for the editor stays the bound.
+  function make(order, tries) {
+    var box = document.createElement("div");
+    box.id = "editor-" + order.editorId;
+    document.body.appendChild(box);
+    // A copy for each try: the editor takes the config it is given as its own.
+    var config = JSON.parse(JSON.stringify(order.config));
+    var started = false;
+    config.events = {
+      onAppReady: function () { started = true; },
+      onDocumentReady: function () { tell(order.editorId, "ready"); },
+      onError: function (e) { tell(order.editorId, "error", e && e.data); },
+      // The editor's session is no longer the Document Server's (the document changed, or the Document Server
+      // restarted): the editor would ask to be reloaded. It is closed instead, and the next call opens it anew.
+      onRequestRefreshFile: function () { tell(order.editorId, "error", { errorDescription: "the editor asks to be reloaded" }); },
+      onOutdatedVersion: function () { tell(order.editorId, "error", { errorDescription: "the editor's version of the document is outdated" }); },
+      // true: the editor holds changes it has not sent to the Document Server yet; false: all of them are sent.
+      onDocumentStateChange: function (e) { tell(order.editorId, "state", Boolean(e && e.data === true)); }
+    };
+    var editor = new window.DocsAPI.DocEditor(box.id, config);
+    editors[order.editorId] = editor;
+    if (order.appReadyMs && tries < 1) setTimeout(function () {
+      if (started || closed[order.editorId] || editors[order.editorId] !== editor) return;
+      tell(order.editorId, "remade");
+      unmake(order.editorId);
+      make(order, tries + 1);
+    }, order.appReadyMs);
+  }
+  function unmake(editorId) {
     var editor = editors[editorId];
     delete editors[editorId];
     try { if (editor) editor.destroyEditor(); } catch (e) {}
     var box = document.getElementById("editor-" + editorId);
     if (box) box.remove();
+  }
+  function close(editorId) {
+    closed[editorId] = true;
+    unmake(editorId);
   }
   function poll() {
     fetch("poll", { cache: "no-store" }).then(function (r) {

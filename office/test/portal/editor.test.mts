@@ -22,14 +22,16 @@ const DIR = process.env.PITHAGORAS_DIR;
 if (!DIR) throw new Error("PITHAGORAS_DIR is not set: run scripts/pithagoras.sh, then PITHAGORAS_DIR=.pithagoras npm run test:portal");
 const BASE = "/api/x/%40pithagoras/office";
 
-/** The stand-in's api.js: an editor that fills its frame into the placeholder, says it is ready, and keeps what it is
- * asked. Without `refreshFile` where the page says so. */
+/** The stand-in's api.js: an editor that fills its frame into the placeholder, says its app started and that it is
+ * ready, and keeps what it is asked. Without `refreshFile` where the page says so; the first one's app never starting
+ * where the page says so. */
 const FAKE_API = `window.DocsAPI = { DocEditor: function (id, config) {
   const frame = document.createElement("iframe");
   document.getElementById(id).replaceWith(frame);
   window.__fake = window.__fake || { opened: [], refreshed: [], destroyed: 0 };
   window.__fake.opened.push(config.document.key);
-  setTimeout(() => config.events.onDocumentReady && config.events.onDocumentReady(), 0);
+  const fails = window.__appFailsOnce && window.__fake.opened.length === 1;
+  if (!fails) setTimeout(() => (config.events.onAppReady && config.events.onAppReady(), config.events.onDocumentReady && config.events.onDocumentReady()), 0);
   const editor = { destroyEditor() { window.__fake.destroyed++; frame.remove(); } };
   if (!window.__noRefreshFile) editor.refreshFile = (next) => window.__fake.refreshed.push(next.document.key);
   return editor;
@@ -73,9 +75,10 @@ after(async () => {
 beforeEach(() => Object.assign(routes, { key: "k1", standing: "current", refuse: false }));
 
 /** The page with the editor open on k1. */
-async function opened(options: { noRefreshFile?: boolean } = {}): Promise<Page> {
+async function opened(options: { noRefreshFile?: boolean; appFailsOnce?: boolean } = {}): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
   if (options.noRefreshFile) await page.addInitScript(() => ((window as unknown as { __noRefreshFile: boolean }).__noRefreshFile = true));
+  if (options.appFailsOnce) await page.addInitScript(() => ((window as unknown as { __appFailsOnce: boolean }).__appFailsOnce = true));
   await page.goto(`${origin}/editor.html?doc=d1`);
   await waitFor(page, () => (window as unknown as { __events: unknown[][] }).__events.some((e) => e[0] === "ready"));
   return page;
@@ -99,6 +102,18 @@ test("nothing but a change on disk reloads the editor: an agent's edits come liv
   assert.deepEqual(made.opened, ["k1"], "not made again");
   assert.equal(await page.getByText("This document changed on disk since it opened").count(), 0);
   assert.equal(await page.locator(".po-editor-bar .po-chip").count(), 0, "no chip for an agent's edit");
+  await page.context().close();
+});
+
+test("an editor whose app never says it started (it failed while it loaded) is made anew, once, and opens", async () => {
+  const page = await opened({ appFailsOnce: true });
+  const made = await fake(page);
+  assert.deepEqual(made.opened, ["k1", "k1"], "made again");
+  assert.equal(made.destroyed, 1, "the one that did not start is destroyed");
+  assert.equal(await page.locator("iframe").count(), 1);
+  // Once: an editor that started is not made again.
+  await delay(1000);
+  assert.deepEqual((await fake(page)).opened, ["k1", "k1"]);
   await page.context().close();
 });
 

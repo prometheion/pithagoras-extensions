@@ -16,7 +16,8 @@
  *   command (one history point each).
  * - A quote is replaced by adding the new text after its range and then deleting the quote by its positions: a range
  *   grows over text added to it, and one whose run was deleted whole takes no text any more.
- * - A table goes in through its parent's `AddElement`: `InsertParagraph` takes paragraphs only.
+ * - A table goes in through its parent's `AddElement`: `InsertParagraph` takes paragraphs only. `Api.CreateTable`
+ *   takes the number of rows first.
  * - `GetText` ends a paragraph's text with "\r\n" (and a table cell's with "\t"), which is taken off.
  * - An editor sends its changes to the Document Server a moment after they were made, and a forcesave saves what the
  *   Document Server has: one asked before that misses the edit (error 4 where nothing else is unsaved, or a save of
@@ -193,7 +194,10 @@ const WORD_EDIT = `function () {
         var anchor = typeof op.after === "string" ? paragraphOf(one(op.after, i)) : null;
         var made = [];
         if (op.table) {
-          var cols = op.table[0].length, table = Api.CreateTable(cols, op.table.length);
+          // DS 10.0 takes the rows first (its own check names them so); the builder API's older documentation has the
+          // columns first. Made again the other way round where the table did not come out as asked.
+          var cols = op.table[0].length, rows = op.table.length, table = Api.CreateTable(rows, cols);
+          if (table.GetRowsCount() !== rows) table = Api.CreateTable(cols, rows);
           for (var r = 0; r < op.table.length; r++) for (var c = 0; c < cols; c++) if (op.table[r][c]) table.GetCell(r, c).GetContent().GetElement(0).AddText(op.table[r][c]);
           var grid = doc.GetStyle("Table Grid");
           if (grid) table.SetStyle(grid);

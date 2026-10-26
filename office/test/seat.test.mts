@@ -479,7 +479,8 @@ test("a browser being started is not stopped by the sweep before its page polls 
 });
 
 test("an edit the editor does not send closes the editor; the refusal says the command ran", async () => {
-  const s = await setup(() => ({ ops: 1 }));
+  // A job's own time well above the time to send, so that a slow machine does not take one for the other.
+  const s = await setup(() => ({ ops: 1 }), { jobMs: 5000 });
   try {
     s.b.behaviour.states = [[true, 10]];
     await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} }), (e: SeatError) => e.code === "editor_not_saved" && e.ran === true);
@@ -493,7 +494,7 @@ test("an edit the editor does not send closes the editor; the refusal says the c
 });
 
 test("an editor that still holds changes unsent when an edit is handed: only its word that they are sent ends the wait, never the quiet", async () => {
-  const s = await setup(() => ({ ops: 1 }));
+  const s = await setup(() => ({ ops: 1 }), { jobMs: 5000 });
   try {
     await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
     const editorId = s.b.opened[0].editorId;

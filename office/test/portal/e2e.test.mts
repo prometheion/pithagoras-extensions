@@ -26,8 +26,9 @@ import { EDITOR_HTML, editorPageJs } from "./page.mts";
  * page.mts), types into it and closes it, and the text must be in the file: what "Download failed", the refused key,
  * the refused callback token and the embed viewer each broke. Then the agent works in documents through its own editor
  * (the agents' browser, `chromedp/headless-shell`): a closed document, one a person types in, a spreadsheet, a
- * read-only seat, a file changed outside, a failed op; people's editors run no plugin, the agents' browser reaches
- * nothing but the island, and with Office stopped the agent reads the saved file and edits nothing. And once more
+ * read-only seat, a file changed outside, a failed op, each Word op in the real editor, a used range away from A1;
+ * people's editors run no plugin, the agents' browser reaches nothing but the relay, and with Office stopped the agent
+ * reads the saved file and edits nothing. And once more
  * through a reverse proxy that ends TLS and sends no forwarded headers, as a plain nginx in front does.
  *
  * Opt-in: it needs Docker Engine 28 or later, the images (about 3 GB, `onlyoffice/documentserver:10.0.0.1` unless
@@ -97,6 +98,13 @@ async function run(PITHAGORAS: string): Promise<void> {
     if (keep) return;
     // What Docker for extensions made for the way in goes with the network; anything a failed run left, by name.
     for (const name of [`${PREFIX}-agent`, `${PREFIX}-relay`, `${PREFIX}-relay-forward`, PREFIX]) execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+    for (const name of [`${PREFIX}-agents`, `${PREFIX}-net`]) {
+      try {
+        execFileSync("docker", ["network", "rm", name], { stdio: "ignore" });
+      } catch {
+        // gone with Office's own removal
+      }
+    }
     for (const end of ["data", "cache", "logs", "fonts"]) execFileSync("docker", ["volume", "rm", "-f", `${PREFIX}-${end}`], { stdio: "ignore" });
   });
 
@@ -446,7 +454,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     await tampered.context().close();
   });
 
-  test("8. the agents' browser reaches the Document Server and nothing else: not the portal, not the internet, not the seat page without its secret", { timeout: 600_000 }, async () => {
+  test("8. the agents' browser reaches the Document Server through the relay and nothing else: not its own ports, not the portal, not the internet, not the seat page without its secret", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Contained", "word");
     await tools.office_read.execute("r8", { id: doc }); // the browser runs
     // A listener on every address of this machine, standing in for the portal: the browser must not reach it.
@@ -467,9 +475,24 @@ async function run(PITHAGORAS: string): Promise<void> {
       }
     };
     try {
-      const ds = await fetched(PREFIX, 80, "/healthcheck");
-      console.log(`8. the Document Server: ${ds.split("\n")[0]}`);
-      assert.match(ds, /^true$/m, "the Document Server, by its name");
+      // On a network of its own: the agents' browser and the relay, nothing else.
+      const agent = agentContainer();
+      assert.deepEqual(Object.keys(agent.NetworkSettings.Networks), [`${PREFIX}-agents`]);
+      const members = JSON.parse(execFileSync("docker", ["network", "inspect", `${PREFIX}-agents`], { encoding: "utf8" }))[0];
+      assert.equal(members.Internal, true);
+      assert.deepEqual(Object.values(members.Containers as Record<string, { Name: string }>).map((c) => c.Name).sort(), [`${PREFIX}-agent`, `${PREFIX}-relay`]);
+      const relayIn = Number(process.env.PITHAGORAS_OFFICE_PORT);
+      const ds = await fetched(`${PREFIX}-relay`, relayIn, "/healthcheck");
+      console.log(`8. the Document Server through the relay: ${ds.split("\n")[0]}`);
+      assert.match(ds, /^true$/m, "the Document Server, through the relay's way in");
+      const info = await fetched(`${PREFIX}-relay`, relayIn, "/info/info.json");
+      console.log(`8. its statistics through the relay: ${info.split("\n")[0]}`);
+      assert.match(info, /^HTTP\/1\.1 403/, "its nginx keeps its own endpoints to itself");
+      for (const [host, at] of [[PREFIX, 80], [PREFIX, 8000]] as const) {
+        const direct = await fetched(host, at, "/info/info.json");
+        console.log(`8. the Document Server's own ${host}:${at}: ${direct.trim().split("\n")[0]}`);
+        assert.doesNotMatch(direct, /HTTP\/1/, `${host}:${at} is out of reach`);
+      }
       for (const address of [...addresses, "host.docker.internal"]) {
         const got = await fetched(address, port, "/");
         console.log(`8. ${address}:${port}: ${got.trim().split("\n")[0]}`);
@@ -515,6 +538,47 @@ async function run(PITHAGORAS: string): Promise<void> {
       await new Promise((resolve) => front.close(resolve));
       rmSync(certs, { recursive: true, force: true });
     }
+  });
+
+  test("10. each Word op in the real editor: a middle and the last paragraph removed, a quote in a table cell replaced, a table at the end", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Every op", "word");
+    const edit = async (id: string, ops: unknown[]) => (await tools.office_edit.execute(id, { id: doc, ops })).content[0].text;
+    const read = async () => (await tools.office_read.execute(`r-${Math.random()}`, { id: doc })).content[0].text.split("\n\n").slice(1).join("\n\n");
+    await edit("o1", [{ quote: "New document", replacement: "Alpha" }, { after: "Alpha", paragraphs: ["Beta", "Gamma"] }, { after: "Gamma", table: [["Cell text", "Other"]] }]);
+    console.log(`10. made: ${JSON.stringify(await read())}`);
+    await edit("o2", [{ remove: "Beta" }]);
+    assert.match(await read(), /^\[1\] Alpha\n\[2\] Gamma\n\[3\] table\n\| Cell text \| Other \|/, "the middle paragraph is gone");
+    await edit("o3", [{ quote: "Cell text", replacement: "Changed cell" }]);
+    assert.match(await read(), /\| Changed cell \| Other \|/, "the quote in the cell is replaced");
+    await edit("o4", [{ table: [["End", "Table"]] }]);
+    const withEnd = await read();
+    console.log(`10. a table at the end: ${JSON.stringify(withEnd)}`);
+    assert.match(withEnd, /\| Changed cell \| Other \|[\s\S]*table\n\| End \| Table \|/, "the table is at the end");
+    await edit("o5", [{ paragraphs: ["Last line"] }]);
+    assert.match(await read(), /\] Last line$/);
+    await edit("o6", [{ remove: "Last line" }]);
+    const without = await read();
+    console.log(`10. the last paragraph removed: ${JSON.stringify(without)}`);
+    assert.doesNotMatch(without, /Last line/, "the last paragraph is gone");
+    const xml = await partOf(doc, "word/document.xml");
+    assert.match(xml, /Changed cell[\s\S]*End/);
+    assert.doesNotMatch(xml, /Beta|Last line|Cell text/);
+    // The only paragraph of a document: removed, or refused as a whole; never a half-made edit.
+    const lone = await agentDoc("Only one", "word");
+    const removed = await tools.office_edit.execute("o7", { id: lone, ops: [{ remove: "New document" }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    const left = (await tools.office_read.execute("r7", { id: lone })).content[0].text;
+    console.log(`10. the only paragraph removed: ${removed} -> ${JSON.stringify(left.split("\n\n").slice(1).join(" "))}`);
+    assert.doesNotMatch(left, /New document/, "its text is gone");
+  });
+
+  test("11. a spreadsheet whose cells start away from A1 is read by the cells' own addresses", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Offset", "cell");
+    await tools.office_edit.execute("c1", { id: doc, ops: [{ range: "C3:D4", values: [[1, 2], [3, "=C3+D3"]] }] });
+    const text = (await tools.office_read.execute("c2", { id: doc })).content[0].text;
+    console.log(`11. ${JSON.stringify(text.split("\n\n").slice(1).join("\n\n"))}`);
+    // (The editor gives a sheet's used range from A1 on, so its cells are named from there: the arithmetic for a range
+    // that starts elsewhere is seat-page.test's.)
+    assert.match(text, /Sheet "Sheet1" \([A-D]\d:D4\):\nC3: 1\nD3: 2\nC4: 3\nD4: 3 \(=C3\+D3\)$/);
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

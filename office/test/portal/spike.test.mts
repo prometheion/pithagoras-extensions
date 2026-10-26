@@ -177,9 +177,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`the first read (browser started, editor opened) took ${Date.now() - started} ms: ${JSON.stringify(first)}`);
     assert.ok(texts(first).some((t) => t.includes("Revenue figures were revised after the audit.")), "the agent reads what the person typed and did not save");
 
-    // The browser: on the island alone, nothing published, hardened, and no debugging port.
+    // The browser: on the agents' own network alone, nothing published, hardened, and no debugging port.
     const agent = JSON.parse(execFileSync("docker", ["inspect", `${PREFIX}-agent`], { encoding: "utf8" }))[0];
-    assert.equal(agent.HostConfig.NetworkMode, `${PREFIX}-net`);
+    assert.equal(agent.HostConfig.NetworkMode, `${PREFIX}-agents`);
     assert.deepEqual(agent.HostConfig.PortBindings ?? {}, {});
     assert.equal(agent.Config.User, "1000:1000");
     assert.equal(agent.HostConfig.ReadonlyRootfs, true);

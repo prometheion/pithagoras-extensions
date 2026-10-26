@@ -322,7 +322,7 @@ export async function agentImage(docker?: Docker): Promise<{ present: boolean; p
 /** Downloads the browser's image (the Office page's button; a tool never does). Refused where the tag names another
  * build than the pinned digest now. */
 export async function pullAgentImage(docker?: Docker): Promise<void> {
-  agentPull = { active: true, line: "" };
+  agentPull = null; // what a download before said is over
   try {
     const d = await reachable(docker);
     await d.images.ensure(AGENT_IMAGE_TAG, (state) => {
@@ -330,7 +330,7 @@ export async function pullAgentImage(docker?: Docker): Promise<void> {
     });
   } catch (e) {
     // Shown on the Office page beside the button (the route answered before the download began).
-    agentPull = { active: false, line: agentPull?.line ?? "", error: (e as Error).message === "no_docker" ? "Docker is not reachable" : (e as Error).message };
+    agentPull = { active: false, line: "", error: (e as Error).message === "no_docker" ? "Docker is not reachable" : (e as Error).message };
     throw e;
   }
   const d = await reachable(docker);

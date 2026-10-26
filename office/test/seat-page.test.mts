@@ -137,3 +137,24 @@ test("cell.read: the sheets are read up to the most text a read gives; a sheet n
   assert.equal(two.skipped, undefined);
   assert.deepEqual([three.cells.length, three.skipped, four.cells.length, four.skipped], [0, true, 0, true]);
 });
+
+test("word.edit: a table of one row and two columns is made with the rows first, as the Document Server 10 takes them", () => {
+  const pushed: unknown[] = [];
+  /** Api.CreateTable as DS 10.0 has it: (rows, cols). */
+  const createTable = (rows: number, cols: number) => {
+    const cells = Array.from({ length: rows }, () => Array.from({ length: cols }, () => [] as string[]));
+    return {
+      cells,
+      GetRowsCount: () => rows,
+      GetCell: (r: number, c: number) => {
+        if (r >= rows || c >= cols) throw new Error(`Cell index ${c} is out of bounds [0, ${cols - 1}].`);
+        return { GetContent: () => ({ GetElement: () => ({ AddText: (t: string) => cells[r][c].push(t) }) }) };
+      },
+      SetStyle() {},
+    };
+  };
+  const doc = { ...contentOf([paragraph("Only")]), GetStyle: () => null, Push: (el: unknown) => pushed.push(el) };
+  const out = command("word.edit", { GetDocument: () => doc, CreateTable: createTable, Save() {} }, { ops: [{ table: [["End", "Table"]] }] });
+  assert.deepEqual(out, { result: { ops: 1 } });
+  assert.deepEqual((pushed[0] as { cells: string[][][] }).cells, [[["End"], ["Table"]]]);
+});

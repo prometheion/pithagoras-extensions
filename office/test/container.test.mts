@@ -678,6 +678,11 @@ test("the browser's image: a download that cannot begin says why on the Office p
   };
   await assert.rejects(pullAgentImage(n.docker), /no internet/);
   assert.equal((await agentImage(n.docker)).pull?.error, "pull access denied: no internet");
+  // Asked again with the image there (Docker says nothing of a download it need not make): no error, nothing under way.
+  n.state.images.add(AGENT_IMAGE);
+  n.docker.images.ensure = async () => {};
+  await pullAgentImage(n.docker);
+  assert.deepEqual(await agentImage(n.docker), { present: true, pull: null });
 });
 
 test("a start that (re)started the Document Server tells so (the agents' editors' sessions are over); one that found it running does not", async () => {

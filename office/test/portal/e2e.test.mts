@@ -255,8 +255,8 @@ async function run(PITHAGORAS: string): Promise<void> {
     return false;
   };
 
-  test("the agents' editor is downloaded through the Office page's route, and the project's agent has its tools", { timeout: 900_000 }, async () => {
-    assert.equal((await json(`${at}/agent/pull`, { method: "POST" })).status, 202);
+  test("the agents' editor is downloaded by Start (the Office page's route), and the project's agent has its tools", { timeout: 900_000 }, async () => {
+    assert.equal((await json(`${at}/container/start`, { method: "POST" })).status, 200);
     let agent = (await json(`${at}/state`)).body.agent;
     for (let i = 0; i < 900 && !agent.present && !agent.pull?.error; i++) {
       await delay(1000);

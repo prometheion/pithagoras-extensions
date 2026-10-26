@@ -9,7 +9,7 @@ import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { closeDoc, configureSeat, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
+import { closeDoc, configureSeat, health, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
 import { BRIDGE_JS, PLUGIN_GUID } from "../src/seat-page";
 import { browser, type Handler } from "./seat-browser.mts";
 
@@ -619,5 +619,40 @@ test("resetSeats (the Document Server started again): every editor closed and th
     assert.deepEqual(s.calls.filter((c) => c === "ensureAgent" || c === "stopAgent"), ["ensureAgent", "stopAgent", "ensureAgent"]);
   } finally {
     await s.done();
+  }
+});
+
+test("health, for the Office page: idle, then running with its editors; a start that failed says why until one succeeds; a missing image or Office stopped is not its failure", async () => {
+  let fail: Error | null = null;
+  const s = await setup(undefined, { connectMs: 300 }, {});
+  const real = s.d.ensureAgent;
+  s.d.ensureAgent = async (url) => {
+    if (fail) throw fail;
+    return real(url);
+  };
+  try {
+    assert.deepEqual(health(), { running: false, starting: false, editors: 0 });
+    fail = Object.assign(new Error("Docker answered 500: no space left on device"), { code: "docker" });
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} }));
+    assert.deepEqual(health(), { running: false, starting: false, editors: 0, error: "Docker answered 500: no space left on device" });
+    fail = null;
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    assert.deepEqual(health(), { running: true, starting: false, editors: 1 }, "a start that worked takes the error back");
+    resetSeats("the Document Server started again");
+    fail = new SeatError("agent_editor_missing", "the agent's editor is not downloaded");
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} }), code("agent_editor_missing"));
+    fail = new SeatError("office_stopped", "the person stopped Office");
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} }), code("office_stopped"));
+    assert.equal(health().error, undefined, "the page says those by the image and the Document Server");
+  } finally {
+    await s.done();
+  }
+  // A browser whose page never connects: that is its failure.
+  const t = await setup(undefined, { connectMs: 300 }, { ensureAgent: async () => {} });
+  try {
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} }), code("agent_unavailable"));
+    assert.match(health().error ?? "", /did not start within/);
+  } finally {
+    await t.done();
   }
 });

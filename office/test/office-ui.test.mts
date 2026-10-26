@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { editorsIn, floatingTag, parseDocQuery, startingUp } from "../src/office-ui";
+import { agentError, agentHealth, dsHealth, editorsIn, floatingTag, parseDocQuery, startingUp } from "../src/office-ui";
 
 test("parseDocQuery: ?doc=<id> is the opened document; encoded ids come back decoded", () => {
   assert.equal(parseDocQuery("?doc=my-report"), "my-report");
@@ -45,4 +45,30 @@ test("startingUp: only the server half's 503 ds_starting is waited out; any othe
   assert.equal(startingUp(refusal(404, { code: "ds_starting" })), false);
   assert.equal(startingUp(new Error("network")), false);
   assert.equal(startingUp(null), false);
+});
+
+test("dsHealth: a download under way, running, starting, a start that failed (said over the state it left), stopped", () => {
+  assert.equal(dsHealth({ state: "stopped", pull: { active: true } }), "downloading");
+  assert.equal(dsHealth({ state: "running" }), "running");
+  assert.equal(dsHealth({ state: "running", error: "an old failure" }), "running");
+  assert.equal(dsHealth({ state: "starting" }), "starting");
+  assert.equal(dsHealth({ state: "restarting" }), "starting");
+  assert.equal(dsHealth({ state: "stopped", error: "Docker is not reachable" }), "failed");
+  assert.equal(dsHealth({ state: "stopped", pull: { active: false } }), "stopped");
+  assert.equal(dsHealth({ state: "foreign" }), "other");
+});
+
+test("agentHealth: its download, its image missing or refused, and the browser made from it", () => {
+  const browser = { running: false, starting: false, editors: 0 };
+  assert.equal(agentHealth({ present: false, pull: { active: true } }), "downloading");
+  assert.equal(agentHealth({ present: false, pull: null }), "missing");
+  assert.equal(agentHealth({ present: false, pull: { active: false, error: "not the build" } }), "failed");
+  assert.equal(agentHealth({ present: true, pull: { active: false }, browser }), "ready");
+  assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, starting: true } }), "starting");
+  assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, running: true, editors: 2 } }), "running");
+  assert.equal(agentHealth({ present: true, pull: null, browser: { ...browser, error: "did not start" } }), "failed");
+  // A download that failed before is over once the image is there.
+  assert.equal(agentHealth({ present: true, pull: { active: false, error: "old" }, browser }), "ready");
+  assert.equal(agentError({ present: false, pull: { error: "not the build" }, browser: { error: "x" } }), "not the build");
+  assert.equal(agentError({ present: true, pull: { error: "old" }, browser: { error: "did not start" } }), "did not start");
 });

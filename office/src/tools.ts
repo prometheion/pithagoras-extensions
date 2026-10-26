@@ -247,9 +247,9 @@ class Refusal extends Error {
 
 /** What each refusal of the agent's editor says to do, after its own message. */
 const SEAT_ADVICE: Record<string, string> = {
-  office_stopped: "The person stopped Office: ask them to start it on the Office page. office_read still reads the saved file.",
-  agent_editor_missing: "Ask the person to download it on the Office page.",
-  agent_unavailable: "Try again in a moment; if it keeps failing, ask the person to look at Office on the Office page.",
+  office_stopped: "The person stopped Office: ask them to start it in Settings → Office. office_read still reads the saved file.",
+  agent_editor_missing: "Ask the person to start Office (Start container in Settings → Office): that downloads it.",
+  agent_unavailable: "Try again in a moment; if it keeps failing, ask the person to look at Settings → Office.",
   editor_not_ready: "Try again in a moment.",
   busy: "",
   behind: "Read it again with office_read before you edit.",
@@ -351,7 +351,7 @@ function cellText(read: CellSheets): string {
 const SAVED_BECAUSE = {
   starting: "Office is still starting",
   stopped: "Office is stopped",
-  missing: "your editor is not downloaded: the person downloads it on the Office page",
+  missing: "your editor is not downloaded: the person starts Office in Settings → Office, which downloads it",
 };
 
 /** What office_read says first: the document, and where the text comes from (`saved`: why it is the saved file). */
@@ -490,7 +490,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? wordText(read as WordBlocks) : cellText(read as CellSheets)}`;
           live = true;
         } catch (e) {
-          // Without its editor the agent still reads the file; an edit waits for the download. Office found stopped
+          // Without its editor the agent still reads the file; an edit waits until a Start downloads it. Office found stopped
           // as the editor starts (its network gone): the saved file too, as when it is stopped.
           const code = (e as { code?: string } | null)?.code;
           if (code !== "agent_editor_missing" && code !== "office_stopped") throw e;
@@ -543,7 +543,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // Written with the portal's rights (and the Document Server's save): only where the agent could have written it.
       if (doc.path && !mayWrite(doc.path, chatId)) throw new Refusal("read_only", `"${doc.title}" is not a file your agent may change: you can read it, not edit it`);
       const state = await officeState();
-      if (state === "stopped") throw new Refusal("office_stopped", `Office is stopped, so "${doc.title}" cannot be edited: ask the person to start it on the Office page. office_read reads the saved file meanwhile.`);
+      if (state === "stopped") throw new Refusal("office_stopped", `Office is stopped, so "${doc.title}" cannot be edited: ask the person to start it in Settings → Office. office_read reads the saved file meanwhile.`);
       if (state === "starting") throw new Refusal("ds_starting", "Office is still starting (its Document Server sets itself up after its first start, about two minutes): try again in a moment.");
 
       return oneAtATime(doc.docId, async () => {

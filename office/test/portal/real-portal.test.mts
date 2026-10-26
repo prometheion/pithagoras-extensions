@@ -133,7 +133,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     }
     return { status: answer.status, body };
   };
-  const state = async () => (await json(`${at}/state`)).body as { docs: { docId: string; title: string; ext: string; mtimeMs: number }[]; locks: Record<string, { id: string; name?: string }[]>; agent: { present: boolean }; container: { state: string } };
+  const state = async () => (await json(`${at}/state`)).body as { docs: { docId: string; title: string; ext: string; mtimeMs: number }[]; locks: Record<string, { id: string; name?: string }[]>; agent: { present: boolean; pull: { error?: string } | null }; container: { state: string } };
   const fileOf = async (docId: string) => {
     const doc = (await state()).docs.find((x) => x.docId === docId)!;
     return path.join(officeData, "docs", docId, `${doc.title}.${doc.ext}`);
@@ -204,10 +204,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.equal(on.status, 200, JSON.stringify(on.body));
     let seen = "";
     assert.ok(await until(async () => (seen = (await json(`${at}/container/status`)).body.state) === "running", 600_000, 2000), `the Document Server is set up (${seen})`);
-    if (!(await state()).agent.present) {
-      assert.equal((await json(`${at}/agent/pull`, { method: "POST" })).status, 202);
-      assert.ok(await until(async () => (await state()).agent.present, 900_000, 2000), "the agents' editor downloaded");
-    }
+    // Switching Office on downloads the agents' editor beside the Document Server, as Start does.
+    assert.ok(await until(async () => (await state()).agent.present || Boolean((await state()).agent.pull?.error), 900_000, 2000));
+    assert.equal((await state()).agent.present, true, "the agents' editor downloaded with the switch");
     if (mode === "container") {
       const portal = JSON.parse(execFileSync("docker", ["inspect", portalName], { encoding: "utf8" }))[0];
       console.log(`portal container networks: ${Object.keys(portal.NetworkSettings.Networks).join(", ")}`);

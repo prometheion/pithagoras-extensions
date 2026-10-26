@@ -141,6 +141,8 @@ let stopping: Promise<void> = Promise.resolve();
 let startingAgent = 0;
 /** Counts the editors' state events, to tell which of two came last. */
 let stateSeq = 0;
+/** Why the browser last failed to start, for the Office page, until it starts or the seats are reset. */
+let startFailed: string | undefined;
 
 function log(line: string): void {
   (deps?.log ?? ((l: string) => console.error(l)))(`@pithagoras/office: seat: ${line}`);
@@ -157,6 +159,7 @@ export function configureSeat(d: SeatDeps, overrides: Partial<typeof LIMITS> = {
   secret = randomBytes(32).toString("hex");
   pageSeen = 0;
   agentRunning = false;
+  startFailed = undefined;
   lastEditorClosed = Date.now();
   if (sweeper) clearInterval(sweeper);
   sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2));
@@ -183,6 +186,15 @@ export function stopSeats(): void {
 export function pageUrl(): string {
   if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
   return `${deps.listenerOrigin()}/seat/${secret}/`;
+}
+
+/**
+ * How the agents' browser stands, for the Office page: running (and how many editors are open in it), starting, or
+ * idle; and why its last start failed, where it did for another reason than the two the page says by itself (its
+ * image missing, Office stopped).
+ */
+export function health(): { running: boolean; starting: boolean; editors: number; error?: string } {
+  return { running: agentRunning, starting: startingAgent > 0, editors: editors.size, ...(startFailed ? { error: startFailed } : {}) };
 }
 
 /** The agent seats open now, for office_list and the tests: who is in which document. */
@@ -325,6 +337,11 @@ async function connected(signal?: AbortSignal): Promise<void> {
     await d.ensureAgent(pageUrl());
     agentRunning = true;
     await waitFor((wake) => pageWaiters.push(wake), () => pageSeen >= since, limits.connectMs, signal, () => new SeatError("agent_unavailable", `the agent's editor did not start within ${limits.connectMs / 1000} s`));
+    startFailed = undefined;
+  } catch (e) {
+    const code = (e as { code?: string } | null)?.code;
+    if (code !== "agent_editor_missing" && code !== "office_stopped" && !signal?.aborted) startFailed = (e as Error).message;
+    throw e;
   } finally {
     startingAgent--;
     // A browser just started runs its idle time from now, not from the last close before it stopped.
@@ -488,6 +505,7 @@ export function closeSeats(): void {
   closeAll();
   agentRunning = false;
   pageSeen = 0;
+  startFailed = undefined;
 }
 
 /** Every seat closed and the browser stopped: the Document Server was (re)started, which ended the sessions the

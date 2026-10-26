@@ -15,13 +15,12 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
-- About 4 GB of RAM for the Document Server container. The settings page warns before the first start, and shows the
-  container's memory use once it runs. The agents' editor (below) takes up to 3 GB more while agents work in
+- About 4 GB of RAM for the Document Server container. The settings page says so before the first start, and shows
+  the container's memory use once it runs. The agents' editor (below) takes up to 3 GB more while agents work in
   documents (about 0.9 GB for one open document), and nothing once it has stopped.
-- Disk for the images (`onlyoffice/documentserver`, several GB, and Node's `node:22.23.4-alpine3.23`, about 50 MB,
-  for the relay below), which the portal pulls on the first start, with the progress shown in Settings; and for the
-  agents' editor, `chromedp/headless-shell:157.0.8103.15` (Chromium's headless shell, about 540 MB), which the Office
-  page downloads when you ask it to.
+- Disk for the images (`onlyoffice/documentserver`, several GB, Node's `node:22.23.4-alpine3.23`, about 50 MB, for the
+  relay below, and for the agents' editor `chromedp/headless-shell:157.0.8103.15`, Chromium's headless shell, about
+  540 MB), which the portal pulls on the first start, all at once, with the progress of each shown in Settings.
 - Behind a reverse proxy (one that ends TLS, say), a browser that says which page a request comes from, as every
   current one does (`Sec-Fetch-Site`), or a proxy that passes `X-Forwarded-Host` and `X-Forwarded-Proto` (or keeps
   `Host`): the Document Server names the addresses it hands the editor (the opened document among them) by the
@@ -36,9 +35,12 @@ tag of the build this version was tested with, never `:latest` or a shorter tag 
 build: a new build can change the editor's callback and token behaviour, so it is yours to change on purpose, in the
 same page). A new Document Server container answers within seconds but then makes its fonts for about two
 minutes and restarts its own services; until it is done, Settings says it is starting and the editor waits for it,
-as an editor opened before would lose what is typed in it. For the agents to edit, download the agents' editor in the
-same page (**Download** in its row): until it is there, the agents read the saved files and cannot edit. It is pinned
-by its digest: a tag that came to name another build is refused, not run.
+as an editor opened before would lose what is typed in it. The same start downloads the agents' editor beside the
+Document Server; Settings → Office shows how both stand (the Document Server stopped, downloading, starting, running
+or failed; the agents' editor missing, downloading, ready, running or failed, each with its error). Until the agents'
+editor is there the agents read the saved files and cannot edit; an install that had the Document Server before gets
+it with the next **Start container**, and the page says it is missing until then. It is pinned by its digest: a tag
+that came to name another build is refused, not run, and said as the row's error.
 
 ## What you get
 
@@ -231,7 +233,7 @@ THIRD-PARTY-LICENSES has the licence texts of what is bundled. The
 Document Server image is OnlyOffice's own (AGPL-3.0 for the community edition) and is pulled from Docker Hub by the
 portal, not shipped by this package; so is the agents' editor, `chromedp/headless-shell`, the chromedp project's
 image of Chromium's headless shell (BSD-3-Clause, with the licences of the components Chromium includes), downloaded
-from the Office page.
+by Start in Settings → Office.
 
 ## Building and testing
 

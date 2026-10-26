@@ -311,6 +311,13 @@
   color: rgb(var(--fg));
 }
 
+.po-service-state {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: rgb(var(--fg-muted));
+}
+
 .po-state-idle { color: rgb(var(--fg-subtle)); }
 .po-state-live { color: rgb(var(--ok)); }
 .po-state-pulling { color: rgb(var(--warn)); }

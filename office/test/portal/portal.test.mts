@@ -163,26 +163,27 @@ test("the tools are in a project's chats, read the project's own document throug
   const createdDoc = await tool("office_create").execute("c3", { title: "Minutes", type: "word" });
   const doc = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === createdDoc.details.id);
   assert.equal(doc.owner, project, "owned by the project's folder");
-  await assert.rejects(tool("office_edit").execute("c4", { id: plan.id, ops: [{ quote: "New document", replacement: "Planned by the agent" }] }), (e: Error) => /^error:agent_editor_missing .*Office page/.test(e.message));
+  await assert.rejects(tool("office_edit").execute("c4", { id: plan.id, ops: [{ quote: "New document", replacement: "Planned by the agent" }] }), (e: Error) => /^error:agent_editor_missing .*Start container in Settings → Office/.test(e.message));
   assert.equal(made("pithagoras-office-ds-agent"), undefined, "a tool never downloads the agents' editor, nor makes it without");
 });
 
-test("the Office page's row for the agents' editor: not there, downloaded through Docker's API by its tag on request, and refused where the tag names another build", async () => {
+test("the agents' editor: missing while the Document Server runs, then downloaded through Docker's API by its tag with Start, and refused where the tag names another build", async () => {
   const before = (await json(`${at}/state`)).body.agent;
   assert.equal(before.present, false);
+  assert.equal(daemon.pulls.includes(before.tag), false, "the half's own start (lookAfter) never downloads it");
   assert.match(before.tag, /^chromedp\/headless-shell:\d+\.\d+\.\d+\.\d+$/);
-  const asked = await json(`${at}/agent/pull`, { method: "POST" });
-  assert.equal(asked.status, 202);
-  let agent = before;
-  for (let i = 0; i < 300 && !agent.pull?.error; i++) {
-    await delay(20);
-    agent = (await json(`${at}/state`)).body.agent;
-  }
+  assert.deepEqual(before.browser, { running: false, starting: false, editors: 0 });
+  const started = await json(`${at}/container/start`, { method: "POST" });
+  assert.equal(started.status, 200, "the Document Server runs: the image's failure does not fail the start");
+  assert.equal(started.body.started, false);
+  assert.equal(started.body.agent.present, false);
   assert.ok(daemon.pulls.includes(before.tag), "pulled by its tag");
   // This daemon names no image by its digest, as one would where the tag moved on to another build.
+  const agent = (await json(`${at}/state`)).body.agent;
   assert.equal(agent.present, false);
   assert.match(agent.pull.error, /is not the build this version of Office runs \(sha256:[0-9a-f]{64}\)/);
-  assert.equal((await fetch(`${at}/agent/pull`, { method: "POST", headers: { origin: "http://elsewhere.example" } })).status, 403, "only from the portal's own pages");
+  assert.equal((await fetch(`${at}/agent/pull`, { method: "POST", headers: { origin } })).status, 404, "no download of its own any more");
+  assert.equal((await fetch(`${at}/container/start`, { method: "POST", headers: { origin: "http://elsewhere.example" } })).status, 403, "only from the portal's own pages");
 });
 
 test("a change asked from another page than the portal's own is refused", async () => {

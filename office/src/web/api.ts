@@ -40,13 +40,17 @@ export interface OfficeContainer {
   version?: string;
   memBytes?: number;
   pull?: OfficePull | null;
+  /** Why the last start failed, until one succeeds. */
+  error?: string;
 }
 
-/** The image of the agents' editor (headless Chromium): whether it is there, and how its download goes. */
+/** The agents' editor (headless Chromium): whether its image is there, how its download goes (Start downloads it), and
+ * how the browser made from it stands (seat.health). */
 export interface OfficeAgentImage {
   present: boolean;
   pull: OfficePull | null;
   tag: string;
+  browser?: { running: boolean; starting: boolean; editors: number; error?: string };
 }
 
 /** GET /state -- the payload of the 5 s poll : settings, container, the agents' editor, every doc, who is in what. */
@@ -94,10 +98,8 @@ export const api = {
   editorState: (docId: string, key: string) =>
     call<{ standing: "current" | "behind" }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
   saveSettings: (patch: SettingsPatch) => call<SettingsAnswer>("/settings", { method: "POST", body: JSON.stringify(patch) }),
-  /** Starts the download of the agents' editor image; its progress comes over /state. */
-  pullAgent: () => call<{ started: true }>("/agent/pull", { method: "POST" }),
-  /** Awaits the whole first pull to completion -- the page shows its progress from /state meanwhile. */
-  startContainer: () => call<{ started: boolean; container: OfficeContainer }>("/container/start", { method: "POST" }),
+  /** Awaits the whole start, both images' downloads included -- the page shows their progress from /state meanwhile. */
+  startContainer: () => call<{ started: boolean; container: OfficeContainer; agent: { present: boolean; error?: string } }>("/container/start", { method: "POST" }),
   stopContainer: () => call<{ container: OfficeContainer }>("/container/stop", { method: "POST" }),
   /** The Document Server, its relay and its network removed; with `data` also its volumes. */
   removeContainer: (data: boolean) => call<{ container: OfficeContainer }>("/container/remove", { method: "POST", body: JSON.stringify({ data }) }),

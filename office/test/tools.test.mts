@@ -481,9 +481,9 @@ test("office_read without the agent's editor downloaded reads the saved file and
   // container.ensureAgent's refusal, as it comes through the seat.
   s.seat.answer = () => Promise.reject(Object.assign(new Error("the agent's editor (chromedp/headless-shell:1) is not downloaded"), { code: "agent_editor_missing" }));
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
-  assert.match(t, /\nSaved copy \(your editor is not downloaded: the person downloads it on the Office page\): what the file holds\./);
+  assert.match(t, /\nSaved copy \(your editor is not downloaded: the person starts Office in Settings → Office, which downloads it\): what the file holds\./);
   assert.match(t, /\[1\] New document/);
-  assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] })), /^error:agent_editor_missing .*download it on the Office page/);
+  assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] })), /^error:agent_editor_missing .*start Office \(Start container in Settings → Office\): that downloads it/);
   // Anything else the editor says is no reason to read the saved file: it is said.
   s.seat.answer = () => Promise.reject(new SeatError("agent_unavailable", "the agent's editor did not start within 60 s"));
   assert.match(await refused(tool(s, "office_read").execute("r", { id: doc.docId })), /^error:agent_unavailable /);
@@ -571,7 +571,7 @@ test("office_edit with Office stopped is error:office_stopped, while it starts e
   const s = setup();
   const doc = await createDoc({ title: "Doc", type: "word", owner: "/f/atlas" }, s.root);
   s.office.state = "stopped";
-  assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] }), "stopped"), /^error:office_stopped .*start it on the Office page/);
+  assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] }), "stopped"), /^error:office_stopped .*start it in Settings → Office/);
   s.office.state = "starting";
   assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] }), "starting"), /^error:ds_starting /);
   assert.deepEqual(s.seat.runs, []);
@@ -585,7 +585,7 @@ test("office_edit: the editor's refusals reach the agent coded, with what to do"
   fail(new SeatError("quote_not_found", "op 2: the quote \"x\" is not in the document", 1));
   assert.match(await refused(t.execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "a" }, { quote: "x", replacement: "b" }] })), /^error:quote_not_found op 2: .* Nothing was changed: read the document again/);
   fail(new SeatError("agent_editor_missing", "the agent's editor (chromedp/headless-shell:1) is not downloaded"));
-  assert.match(await refused(t.execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "a" }] })), /^error:agent_editor_missing .*download it on the Office page/);
+  assert.match(await refused(t.execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "a" }] })), /^error:agent_editor_missing .*start Office \(Start container in Settings → Office\): that downloads it/);
   fail(new SeatError("timeout", "the agent's editor gave no result within 20 s; what the call did is unknown: read the document again before you go on"));
   assert.match(await refused(t.execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "a" }] })), /^error:timeout /);
   fail(new SeatError("busy", "the agents have 3 documents open in the editor and all of them are busy; try again in a moment"));

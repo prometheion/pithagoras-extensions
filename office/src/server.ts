@@ -100,6 +100,13 @@ function recordAudit(entry: { subject: string; reason?: string; chatId?: string 
   logLine(line);
 }
 
+/** A Start in the audit: the Document Server, and the agents' editor's image beside it. */
+function auditStart(r: Awaited<ReturnType<typeof container.startOffice>>, how: string): void {
+  recordAudit({ subject: container.DS_NAME, reason: `${r.started ? "document server started" : "document server already running"}${how}` });
+  if (r.agent.present) recordAudit({ subject: container.AGENT_IMAGE_TAG, reason: "the agents' editor image is there" });
+  else logLine(`@pithagoras/office: the agents' editor image could not be downloaded: ${r.agent.error ?? "unknown"}`);
+}
+
 /* ------------------------------------------------------------------ */
 /* the shared secret                                                   */
 /* ------------------------------------------------------------------ */
@@ -331,8 +338,8 @@ function registerRoutes(dd: string, secret: string): void {
   // the Document Server and change its image.
   r.use(writesFromHere);
 
-  /** GET /state -> settings + container status + the agents' editor image + the document list + who has what open. The
-   * poller's payload. */
+  /** GET /state -> settings + container status + the agents' editor (its image, its download, its browser) + the document
+   * list + who has what open. The poller's payload. */
   r.get("/state", async (_req, res) => {
     const s = loadSettings(dd);
     let c: Awaited<ReturnType<typeof container.status>>;
@@ -348,18 +355,8 @@ function registerRoutes(dd: string, secret: string): void {
       // every doc gets an entry -- the client badge code reads locks[docId] without a null check
       locks[d.docId] = live.usersOf(d.docId).map((u) => ({ id: u.id, name: u.name }));
     }
-    const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG };
+    const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG, browser: seat.health() };
     res.json({ enabled: s.enabled, imageTag: s.imageTag, container: c, agent, docs, locks });
-  });
-
-  /** POST /agent/pull -> { started: true }: downloads the agents' editor image (the Office page's button; a tool never
-   * does). Its progress comes over GET /state (`agent.pull`), as the Document Server's does. */
-  r.post("/agent/pull", async (_req, res) => {
-    void container.pullAgentImage().then(
-      () => recordAudit({ subject: container.AGENT_IMAGE_TAG, reason: "the agents' editor image downloaded" }),
-      (e) => logLine(`could not download the agents' editor image: ${(e as Error).message}`),
-    );
-    res.status(202).json({ started: true });
   });
 
   /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat's folder sees (store.docsForHome, the
@@ -538,7 +535,7 @@ function registerRoutes(dd: string, secret: string): void {
     if (patch.enabled === true && !before.enabled) {
       // fire-and-forget on purpose: a first pull takes minutes and must not hold the response open
       starting = true;
-      void container.ensureContainer(undefined, undefined, dd).then((r2) => recordAudit({ subject: container.DS_NAME, reason: r2.started ? "document server started (settings)" : "document server already running" })).catch((e) => logLine(`could not start the document server: ${(e as Error).message}`));
+      void container.startOffice(undefined, undefined, dd).then((r2) => auditStart(r2, " (settings)")).catch((e) => logLine(`could not start the document server: ${(e as Error).message}`));
     }
     if (patch.enabled === false && before.enabled) {
       try {
@@ -564,12 +561,13 @@ function registerRoutes(dd: string, secret: string): void {
     }
   });
 
-  /** POST /container/start -> ensureContainer to completion: adopt or make+start the DS, ds.json written, and the
-   * response carries the resulting status. */
+  /** POST /container/start -> container.startOffice to completion: adopt or make+start the DS, ds.json written, and the
+   * agents' editor's image downloaded beside it; the response carries the resulting status and whether the image is
+   * there (its failure does not fail the start: the page says it from /state). */
   r.post("/container/start", async (_req, res) => {
     try {
-      const r2 = await container.ensureContainer(undefined, undefined, dd);
-      recordAudit({ subject: container.DS_NAME, reason: r2.started ? "document server started" : "document server already running" });
+      const r2 = await container.startOffice(undefined, undefined, dd);
+      auditStart(r2, "");
       res.json({ ...r2, container: await container.status() });
     } catch (e) {
       codedResponse(res, e);

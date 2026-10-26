@@ -256,8 +256,8 @@ export function relaySpec(island: string, key: string, agents: string, names: Of
 /**
  * The agents' browser: Chromium's headless shell, pinned by its digest, on a network of its own beside the island.
  * The tag names it for a download (Docker for extensions takes an image by its tag), the digest is what a container
- * is made from: a tag that came to name another build since is not run, and the Office page offers the download
- * again. About 540 MB on disk.
+ * is made from: a tag that came to name another build since is not run, and the next Start downloads it again. About
+ * 540 MB on disk. Start (startOffice) downloads it beside the Document Server's image; a tool and lookAfter never do.
  */
 export const AGENT_IMAGE_TAG = "chromedp/headless-shell:157.0.8103.15";
 export const AGENT_IMAGE_DIGEST = "sha256:f76fce2964611eb1e25b90d906727884db12a8918a6d85a0df2619a9ef845c7c";
@@ -307,6 +307,8 @@ function coded(code: string, message: string): Error {
 
 /** The last download of the browser's image, in memory, for the Office page. */
 let agentPull: PullState | null = null;
+/** The download under way: a second Start (or the switch and the button at once) waits for it instead of another. */
+let agentPulling: Promise<void> | null = null;
 
 /** Whether the browser's image is there (by its digest), and how its download goes. */
 export async function agentImage(docker?: Docker): Promise<{ present: boolean; pull: PullState | null }> {
@@ -319,9 +321,16 @@ export async function agentImage(docker?: Docker): Promise<{ present: boolean; p
   return { present, pull: agentPull ? { ...agentPull } : null };
 }
 
-/** Downloads the browser's image (the Office page's button; a tool never does). Refused where the tag names another
- * build than the pinned digest now. */
-export async function pullAgentImage(docker?: Docker): Promise<void> {
+/** Downloads the browser's image (a Start of Office's; a tool never does), one download at a time. Refused where the
+ * tag names another build than the pinned digest now. */
+export function pullAgentImage(docker?: Docker): Promise<void> {
+  agentPulling ??= pullAgentOnce(docker).finally(() => {
+    agentPulling = null;
+  });
+  return agentPulling;
+}
+
+async function pullAgentOnce(docker?: Docker): Promise<void> {
   agentPull = null; // what a download before said is over
   try {
     const d = await reachable(docker);
@@ -542,11 +551,42 @@ export function starting(): boolean {
   return ensuring !== null;
 }
 
+/** Why the last start of the Document Server failed, until one succeeds (or the person stops or removes it). */
+let startError: string | undefined;
+
 export function ensureContainer(docker?: Docker, onPull?: (state: PullState) => void, root?: string): Promise<{ started: boolean }> {
-  ensuring ??= ensureContainerOnce(docker, onPull, root).finally(() => {
+  ensuring ??= ensureContainerOnce(docker, onPull, root).then(
+    (done) => {
+      startError = undefined;
+      return done;
+    },
+    (e) => {
+      // Said on the Office page until a start succeeds: a start the switch asked for answers nobody else.
+      startError = (e as Error).message === "no_docker" ? "Docker is not reachable" : (e as Error).message;
+      throw e;
+    },
+  ).finally(() => {
     ensuring = null;
   });
   return ensuring;
+}
+
+/**
+ * Start, as the person asks for it (the Office page's Start, the switch): the Document Server as ensureContainer makes
+ * it, and the agents' editor's image downloaded beside it, both at once, so the page shows both downloads. A Document
+ * Server that fails fails the start; an image that cannot be downloaded does not: the Document Server runs without
+ * it, the page says why (`agentImage().pull.error`), and the next Start tries again. An install whose Document Server
+ * runs already gets only the image.
+ */
+export async function startOffice(docker?: Docker, onPull?: (state: PullState) => void, root?: string): Promise<{ started: boolean; agent: { present: boolean; error?: string } }> {
+  const agent = pullAgentImage(docker).then(
+    () => ({ present: true }),
+    (e) => ({ present: false, error: agentPull?.error ?? (e as Error).message }),
+  );
+  const ds = ensureContainer(docker, onPull, root);
+  const [made, image] = await Promise.allSettled([ds, agent]);
+  if (made.status === "rejected") throw made.reason;
+  return { started: made.value.started, agent: image.status === "fulfilled" ? image.value : { present: false } };
 }
 
 async function ensureContainerOnce(docker?: Docker, onPull?: (state: PullState) => void, root?: string): Promise<{ started: boolean }> {
@@ -596,6 +636,7 @@ export async function stopContainer(docker?: Docker, root?: string): Promise<voi
   const r = resolvedRoot(root);
   fs.mkdirSync(r, { recursive: true });
   writeAtomic(path.join(r, USER_STOPPED_FILE), Buffer.from("user stopped the document server\n"));
+  startError = undefined;
   const existing = await d.containers.get(NAMES.container);
   if (existing && existing.owner === ownName() && existing.state !== "exited") await d.containers.stop(NAMES.container);
   // The agents' editors are in the Document Server's sessions: they go with it.
@@ -614,6 +655,7 @@ export async function removeContainers(removeData: boolean, docker?: Docker, roo
   const r = resolvedRoot(root);
   fs.mkdirSync(r, { recursive: true });
   writeAtomic(path.join(r, USER_STOPPED_FILE), Buffer.from("user removed the document server\n"));
+  startError = undefined;
   for (const name of [NAMES.agent, NAMES.relay, NAMES.container]) {
     const found = await d.containers.get(name);
     if (found && found.owner === ownName()) await d.containers.remove(name);
@@ -658,10 +700,12 @@ async function probe(d: Docker, id: string): Promise<{ version?: string; memByte
   return out;
 }
 
-/** Drops what the probe kept, for tests. */
+/** Drops what the probe kept, and what the last start and download said, for tests. */
 export function forgetProbe(): void {
   probed = undefined;
   settledRun = undefined;
+  startError = undefined;
+  agentPull = null;
 }
 
 /**
@@ -701,10 +745,12 @@ export async function settled(docker?: Docker): Promise<boolean> {
 /**
  * The Document Server for the status block: absent or exited/created -> "stopped", another extension's -> "foreign";
  * otherwise Docker's own inspect word (with `State.Starting` folded in as "starting"), and while it runs its version
- * and memory use. Pull progress comes from the in-memory last state of an ensure.
+ * and memory use. Pull progress comes from the in-memory last state of an ensure, and `error` says why the last start
+ * failed, until one succeeds or the person stops or removes it.
  */
-export async function status(docker?: Docker): Promise<{ state: string; version?: string; memBytes?: number; pull?: PullState | null }> {
-  const out: { state: string; version?: string; memBytes?: number; pull?: PullState | null } = { state: "stopped", pull: pullState ? { ...pullState } : null };
+export async function status(docker?: Docker): Promise<{ state: string; version?: string; memBytes?: number; pull?: PullState | null; error?: string }> {
+  const out: { state: string; version?: string; memBytes?: number; pull?: PullState | null; error?: string } = { state: "stopped", pull: pullState ? { ...pullState } : null };
+  if (startError !== undefined) out.error = startError;
   let d: Docker;
   try {
     d = await reachable(docker);

@@ -134,6 +134,7 @@ interface Booted {
 
 async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<string, string> = {}): Promise<Booted> {
   container.forgetReach();
+  container.forgetProbe(); // and what a start or a download of a test before said
   const rootDir = root ?? fs.mkdtempSync(path.join(os.tmpdir(), "office-server-"));
   const logs: string[] = [];
   const audits: Array<Record<string, unknown>> = [];
@@ -588,7 +589,11 @@ test("/state: settings + container status + docs list + locks for EVERY doc", as
   assert.equal(res.statusCode, 200);
   const body = res.body as Record<string, unknown>;
   assert.deepEqual(Object.keys(body).sort(), ["agent", "container", "docs", "enabled", "imageTag", "locks"]);
-  assert.deepEqual(body.agent, { present: false, pull: null, tag: container.AGENT_IMAGE_TAG }, "the agents' editor is not downloaded yet");
+  assert.deepEqual(
+    body.agent,
+    { present: false, pull: null, tag: container.AGENT_IMAGE_TAG, browser: { running: false, starting: false, editors: 0 } },
+    "the agents' editor is not downloaded yet, and its browser not running",
+  );
   assert.equal(body.enabled, false); // defaults from a fresh dataDir
   assert.equal(body.imageTag, DEFAULT_TAG);
   const c = body.container as Record<string, unknown>;
@@ -824,6 +829,7 @@ test("/settings: enable fires ensureContainer exactly once with the settings tag
 test("/container/status + /container/start + /container/stop + /container/remove drive the same lifecycle", async () => {
   const b = await boot();
   const m = b.dock;
+  m.state.exec = { output: "", exitCode: 0, timedOut: false }; // set up as soon as it runs (see container.settled)
 
   let res = await b.router.dispatch("GET", "/container/status");
   assert.equal(res.statusCode, 200);
@@ -850,6 +856,45 @@ test("/container/status + /container/start + /container/stop + /container/remove
   assert.deepEqual([...m.volumes.keys()], [], "with data: both volumes");
   assert.ok(b.audits.some((a) => /removed, with its volume/.test(String(a.reason))));
 
+  live.resetLive();
+  await b.cleanup();
+});
+
+test("Start downloads the agents' editor's image beside the Document Server, and /state says how both stand; there is no download of its own", async () => {
+  const b = await boot();
+  const m = b.dock;
+  m.state.exec = { output: "", exitCode: 0, timedOut: false };
+  const ensure = m.docker.images.ensure;
+  m.docker.images.ensure = async (image, onProgress) => {
+    await ensure(image, onProgress);
+    if (image === container.AGENT_IMAGE_TAG) m.state.images.add(container.AGENT_IMAGE);
+  };
+  const res = await b.router.dispatch("POST", "/container/start");
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual((res.body as { agent: unknown }).agent, { present: true });
+  assert.ok(m.calls.includes(`pull ${container.AGENT_IMAGE_TAG}`));
+  const state = (await b.router.dispatch("GET", "/state")).body as { container: { state: string }; agent: Record<string, unknown> };
+  assert.equal(state.container.state, "running");
+  assert.equal(state.agent.present, true);
+  assert.deepEqual(state.agent.browser, { running: false, starting: false, editors: 0 });
+  assert.ok(b.audits.some((e) => e.subject === container.AGENT_IMAGE_TAG));
+  await assert.rejects(b.router.dispatch("POST", "/agent/pull"), /no registered POST route/);
+  live.resetLive();
+  await b.cleanup();
+});
+
+test("switching Office on starts it as Start does: the agents' editor's image is downloaded too", async () => {
+  const b = await boot();
+  const res = await b.router.dispatch("POST", "/settings", { enabled: true });
+  assert.equal((res.body as { starting?: boolean }).starting, true);
+  await until(() => b.dock.calls.includes(`pull ${container.AGENT_IMAGE_TAG}`) && b.dock.calls.includes("start pithagoras-office-ds"));
+  // This Docker names no image by the pinned digest: said on the page, the Document Server runs all the same.
+  let agent = ((await b.router.dispatch("GET", "/state")).body as { agent: { pull: { error?: string } | null } }).agent;
+  for (let i = 0; i < 100 && !agent.pull?.error; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    agent = ((await b.router.dispatch("GET", "/state")).body as { agent: { pull: { error?: string } | null } }).agent;
+  }
+  assert.match(agent.pull?.error ?? "", /is not the build this version of Office runs/);
   live.resetLive();
   await b.cleanup();
 });

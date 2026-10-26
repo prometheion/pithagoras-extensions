@@ -43,6 +43,7 @@ import {
   readDsRecord,
   removeContainers,
   settled,
+  startOffice,
   status,
   stopContainer,
   userStopped,
@@ -701,4 +702,101 @@ test("a start that (re)started the Document Server tells so (the agents' editors
   } finally {
     whenDsStarted(undefined);
   }
+});
+
+/* ---------------- Start: everything Office runs on ---------------- */
+
+/** A Docker that has the pinned build of the agents' editor under its tag, as one would after downloading it. */
+function pinnedTag(m: ReturnType<typeof fakeDocker>) {
+  const ensure = m.docker.images.ensure;
+  m.docker.images.ensure = async (image, onProgress) => {
+    await ensure(image, onProgress);
+    if (image === AGENT_IMAGE_TAG) m.state.images.add(AGENT_IMAGE);
+  };
+}
+
+test("Start: the Document Server's images and the agents' editor's are downloaded at once, the Document Server started, and the image there by its digest", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  pinnedTag(m);
+  const seen: string[] = [];
+  const res = await startOffice(m.docker, (s) => seen.push(s.line), root);
+  assert.deepEqual(res, { started: true, agent: { present: true } });
+  // Both begin before either ends: the page shows both downloads.
+  assert.deepEqual(m.calls.slice(0, 2).sort(), [`pull ${AGENT_IMAGE_TAG}`, `pull ${DEFAULT_TAG}`]);
+  assert.ok(m.calls.includes(`pull ${RELAY_IMAGE}`) && m.calls.includes(`start ${DS_NAME}`));
+  assert.equal(m.containers.get(AGENT), undefined, "the browser itself starts when an agent needs it");
+  assert.deepEqual(await agentImage(m.docker), { present: true, pull: { active: false, line: "done" } });
+  m.state.exec = { output: "", exitCode: 0, timedOut: false };
+  assert.equal((await status(m.docker)).state, "running");
+});
+
+test("Start: an image of the agents' editor that cannot be downloaded leaves the Document Server running and says why; the next Start gets only the image", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  const ensure = m.docker.images.ensure;
+  m.docker.images.ensure = async (image, onProgress) => {
+    if (image === AGENT_IMAGE_TAG) throw new Error("pull access denied: no internet");
+    return ensure(image, onProgress);
+  };
+  const res = await startOffice(m.docker, undefined, root);
+  assert.deepEqual(res, { started: true, agent: { present: false, error: "pull access denied: no internet" } });
+  assert.ok(m.containers.get(DS_NAME) && m.containers.get(RELAY));
+  assert.equal((await agentImage(m.docker)).pull?.error, "pull access denied: no internet");
+  // An install whose Document Server runs and whose image is missing (as one from before Start downloaded it).
+  m.docker.images.ensure = ensure;
+  pinnedTag(m);
+  m.calls.length = 0;
+  assert.deepEqual(await startOffice(m.docker, undefined, root), { started: false, agent: { present: true } });
+  assert.deepEqual(m.calls.filter((c) => !c.startsWith("pull ") || c === `pull ${AGENT_IMAGE_TAG}`).filter((c) => /^(pull|create|start|remove|stop) /.test(c)), [`pull ${AGENT_IMAGE_TAG}`], "nothing made or started again");
+  assert.deepEqual((await agentImage(m.docker)).present, true);
+});
+
+test("Start: a Document Server that cannot start fails it, and status says why until a start succeeds; a stop takes it back", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  pinnedTag(m);
+  const start = m.docker.containers.start;
+  m.docker.containers.start = async (name) => {
+    if (name === DS_NAME) throw new Error("port is already allocated");
+    return start(name);
+  };
+  await assert.rejects(startOffice(m.docker, undefined, root), /port is already allocated/);
+  assert.equal((await status(m.docker)).error, "port is already allocated");
+  assert.equal((await agentImage(m.docker)).present, true, "the image came all the same");
+  m.docker.containers.start = start;
+  await startOffice(m.docker, undefined, root);
+  assert.equal((await status(m.docker)).error, undefined);
+  m.containers.get(DS_NAME)!.inspect.State = { Status: "exited", Running: false }; // it crashed
+  m.docker.containers.start = async () => {
+    throw new Error("again");
+  };
+  await assert.rejects(ensureContainer(m.docker, undefined, root));
+  assert.equal((await status(m.docker)).error, "again", "a start of lookAfter's says so too");
+  await stopContainer(m.docker, root);
+  assert.equal((await status(m.docker)).error, undefined);
+  const gone = fresh({ available: false });
+  await assert.rejects(startOffice(gone.docker, undefined, root), (e: Error & { code?: string }) => e.code === "no_docker");
+  assert.equal((await status(m.docker)).error, "Docker is not reachable");
+});
+
+test("the agents' editor's image: two downloads asked at once are one; lookAfter never downloads it", async () => {
+  const m = fresh();
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const ensure = m.docker.images.ensure;
+  m.docker.images.ensure = async (image, onProgress) => {
+    await held;
+    await ensure(image, onProgress);
+    if (image === AGENT_IMAGE_TAG) m.state.images.add(AGENT_IMAGE);
+  };
+  const one = pullAgentImage(m.docker);
+  const two = pullAgentImage(m.docker);
+  release();
+  await Promise.all([one, two]);
+  assert.equal(m.calls.filter((c) => c === `pull ${AGENT_IMAGE_TAG}`).length, 1);
+  const n = fresh();
+  await lookAfter(n.docker, tmpRoot({ enabled: true }));
+  assert.ok(n.containers.get(DS_NAME));
+  assert.ok(!n.calls.includes(`pull ${AGENT_IMAGE_TAG}`), n.calls.join(", "));
 });

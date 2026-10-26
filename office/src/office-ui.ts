@@ -36,3 +36,37 @@ export function startingUp(e: unknown): boolean {
   const refused = e as { status?: unknown; body?: { code?: unknown } } | null;
   return refused?.status === 503 && refused.body?.code === "ds_starting";
 }
+
+/** What the Office page in Settings says of the Document Server: how it stands, out of /state's `container`. */
+export type DsHealth = "downloading" | "running" | "starting" | "failed" | "stopped" | "other";
+
+export function dsHealth(c: { state: string; pull?: { active: boolean } | null; error?: string }): DsHealth {
+  if (c.pull?.active) return "downloading";
+  if (c.state === "running") return "running";
+  if (c.state === "starting" || c.state === "restarting") return "starting";
+  // A start that failed is said until one succeeds, over the state it left behind (stopped, or nothing there).
+  if (c.error) return "failed";
+  if (c.state === "stopped") return "stopped";
+  return "other";
+}
+
+/** What it says of the agents' editor: its image (downloaded by Start), and the browser made from it. */
+export type AgentHealth = "downloading" | "failed" | "missing" | "running" | "starting" | "ready";
+
+export function agentHealth(a: {
+  present: boolean;
+  pull: { active: boolean; error?: string } | null;
+  browser?: { running: boolean; starting: boolean; editors?: number; error?: string };
+}): AgentHealth {
+  if (a.pull?.active) return "downloading";
+  if (!a.present) return a.pull?.error ? "failed" : "missing";
+  if (a.browser?.error) return "failed";
+  if (a.browser?.starting) return "starting";
+  if (a.browser?.running) return "running";
+  return "ready";
+}
+
+/** The error to show beside a failed agents' editor: its download's, or its browser's last start's. */
+export function agentError(a: { present: boolean; pull: { error?: string } | null; browser?: { error?: string } }): string | undefined {
+  return a.present ? a.browser?.error : a.pull?.error;
+}

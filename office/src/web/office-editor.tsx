@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LuUsers } from "react-icons/lu";
+import { LuExternalLink, LuUsers } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, sayError } from "./api";
 import { useOfficeState } from "./state";
@@ -22,6 +22,11 @@ import { startingUp } from "../office-ui";
  * The editor sends what is typed to the Document Server only once the person pauses, and a reload drops what it has
  * not sent yet: that is in no session, and no copy can keep it. So a reload waits until the editor says everything is
  * sent (onDocumentStateChange false); then the old session holds it, and its close keeps it as a copy.
+ *
+ * The same component is the Office tab's full page (`place` "page") and the editor in a chat's Office panel ("panel"),
+ * beside the conversation and as narrow as the panel is dragged: there its bar also has a way to the full page
+ * (`onFullPage`). Each editor has a placeholder of its own, so two on one page never take each other's, and a new
+ * document or the panel's close destroys the editor before anything else is built.
  */
 
 /** What DocsAPI leaves on window once api.js has loaded: only what is used, typed as it behaves. */
@@ -44,6 +49,9 @@ declare global {
 /** How often the open editor asks whether its file changed outside it. */
 const STANDING_POLL_MS = 1000;
 
+/** Placeholders made on this page, for an id of each editor's own. */
+let placeholders = 0;
+
 /** api.js per address, loaded once per page: the promise is cached, and a failure stays said until the page reloads. */
 const scripts = new Map<string, Promise<void>>();
 function loadScript(src: string): Promise<void> {
@@ -60,8 +68,10 @@ function loadScript(src: string): Promise<void> {
   return load;
 }
 
-export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void }) {
+export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { docId: string; onBack(): void; onFullPage?: () => void; place?: "page" | "panel" }) {
   portal.locale.use();
+  /** This editor's own placeholder id: DocsAPI finds its place by id, on the whole page. */
+  const [holder] = useState(() => `po-doceditor-${++placeholders}`);
   const state = useOfficeState();
   const doc = state?.docs.find((d) => d.docId === docId);
   const [problem, setProblem] = useState<string | null>(null);
@@ -121,8 +131,8 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
       // replaces that element with its iframe. Pass the host box itself and getElementById stringifies it to
       // "[object HTMLDivElement]", finds nothing, and silently builds no editor (reproduced live against DS 10.0).
       const ph = document.createElement("div");
-      ph.id = "po-doceditor";
-      box.current.querySelector("#po-doceditor")?.remove(); // never stack placeholders across remounts
+      ph.id = holder;
+      document.getElementById(holder)?.remove(); // never stack placeholders across remounts
       box.current.appendChild(ph);
       editor.current = new window.DocsAPI.DocEditor(ph.id, config);
       key = keyOf(config);
@@ -221,15 +231,15 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
       } catch {
         // a destroyed or half-built editor must not take the page down with it
       }
-      document.getElementById("po-doceditor")?.remove(); // sweep a placeholder DS never replaced; ours to clean, not React's
+      document.getElementById(holder)?.remove(); // sweep a placeholder DS never replaced; ours to clean, not React's
       editor.current = null;
     };
-  }, [docId]);
+  }, [docId, holder]);
 
   const users = state?.locks[docId] ?? [];
 
   return (
-    <div className="po-page po-editor po-editor-page">
+    <div className={place === "page" ? "po-page po-editor po-editor-page" : "po-editor po-editor-panel"} data-doc={docId}>
       <div className="po-editor-bar">
         <button type="button" className={portal.ui.classes.ghost} onClick={onBack}>
           ← {t("All documents")}
@@ -241,6 +251,11 @@ export function OfficeEditor({ docId, onBack }: { docId: string; onBack(): void 
             <LuUsers aria-hidden />
             {users.length === 1 ? t("1 editing now") : t("{n} editing now", { n: users.length })}
           </span>
+        )}
+        {onFullPage && (
+          <button type="button" className={portal.ui.classes.iconButton} onClick={onFullPage} title={t("Open in the Office tab")} aria-label={t("Open in the Office tab")}>
+            <LuExternalLink aria-hidden />
+          </button>
         )}
         {behind && (
           <span className="po-chip po-chip-stale">

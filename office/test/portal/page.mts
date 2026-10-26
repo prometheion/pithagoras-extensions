@@ -56,6 +56,104 @@ createRoot(document.getElementById("root")).render(h(OfficeSettings));
 `);
 }
 
+/**
+ * A chat as the portal draws it, for the Office panel and the tool cards: the extension loaded as the portal loads it
+ * (client.tsx's default export, given a portal of a few lines), its chat.panel entry drawn beside a "conversation"
+ * that holds its chat.tool cards for the calls in `window.__calls`, with a panel host that does what Chat.tsx does
+ * (open with params, a state the panel keeps while it is open, close, which takes both). The panel's size and where
+ * it is docked are the page's to change (`window.__dock({ w, h, dock })`). With `?tab=<id>` the Office tab's page (its
+ * nav.page entry) is drawn beside it too, at `?doc=<id>`, as the person may have it open as well. Kept on the page:
+ * `__navigated` (where the extension sent the page), `__opens` (each panels.open), `__kept` (panel.keep).
+ */
+export async function panelPageJs(pithagoras: string, base: string): Promise<string> {
+  return bundle(pithagoras, `
+import { createElement as h, lazy, useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
+import office from "./src/client";
+
+const BASE = ${JSON.stringify(base)};
+const query = new URLSearchParams(location.search);
+const registered = {};
+window.__navigated = [];
+window.__opens = [];
+window.__calls = window.__calls || [];
+office({
+  extension: "@pithagoras/office",
+  t: (text, vars) => text.replace(/\{(\w+)\}/g, (m, k) => (vars && k in vars ? String(vars[k]) : m)),
+  locale: { use: () => {}, add: () => {} },
+  api: {
+    url: (p) => BASE + p,
+    json: async (url, init) => {
+      const r = await fetch(url, { ...init, headers: { "content-type": "application/json", ...(init && init.headers) } });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw Object.assign(new Error(body.error || "HTTP " + r.status), { status: r.status, body });
+      return body;
+    },
+  },
+  ui: {
+    classes: { ghost: "ghost", button: "button", input: "input", primarySmall: "primary", iconButton: "icon" },
+    lazy: (load, name) => lazy(() => load().then((m) => ({ default: m[name] }))),
+    RowsSkeleton: ({ label }) => h("div", null, label),
+    Empty: ({ children }) => h("div", { role: "note" }, children),
+    ErrorBanner: ({ children }) => h("div", { role: "alert" }, children),
+    Select: ({ value, options, onChange, ...rest }) => h("select", { value, "aria-label": rest["aria-label"], onChange: (e) => onChange(e.target.value) }, options.map((o) => h("option", { key: o.value, value: o.value }, o.label))),
+    confirm: async () => false,
+  },
+  format: { dateTime: (ms) => new Date(ms).toISOString() },
+  navigate: (to) => window.__navigated.push(to),
+  useLocation: () => ({ search: "?doc=" + encodeURIComponent(query.get("tab") || "") }),
+  slots: { register: (slot, entry) => (registered[slot] = registered[slot] || []).push(entry) },
+});
+
+const chat = { id: "chat-1", title: "A chat", workspace: "/work/acme" };
+const channel = { send: async () => {}, on: () => () => {} };
+
+function Host() {
+  const [open, setOpen] = useState(false);
+  const [params, setParams] = useState(undefined);
+  const [state, setState] = useState(undefined);
+  const [dock, setDock] = useState({ w: 560, h: 320, dock: "right" });
+  window.__dock = setDock;
+  // As Chat.tsx: an opening sets what it was opened with; a close takes that and the panel's state with it.
+  const panels = useMemo(() => ({
+    isOpen: () => open,
+    open: (id, p) => {
+      window.__opens.push([id, p === undefined ? null : p]);
+      setOpen(true);
+      setParams(p);
+    },
+    close: () => {
+      setOpen(false);
+      setParams(undefined);
+      setState(undefined);
+    },
+  }), [open]);
+  const handle = useMemo(() => ({ params, state, setState, keep: (k) => (window.__kept = k), guardClose: () => {}, open: () => {}, fullscreen: () => {} }), [params, state]);
+  const Panel = registered["chat.panel"][0].component;
+  const tools = Object.fromEntries(registered["chat.tool"].map((e) => [e.tool, e.component]));
+  const Tab = registered["nav.page"][0].component;
+  const bottom = dock.dock === "bottom";
+  return h("div", { style: { display: "flex", height: "100vh" } },
+    query.get("tab") ? h("div", { id: "tab", style: { width: "640px", display: "flex", flexDirection: "column" } }, h(Tab)) : null,
+    h("div", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: bottom ? "column" : "row" } },
+      h("div", { id: "conversation", style: { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto" } },
+        h("button", { type: "button", onClick: () => panels.open("office") }, "Office panel button"),
+        window.__calls.map((call, i) => h(tools[call.name], { key: i, chat, channel, panels, call, card: h("div", null, "the portal's card") })),
+      ),
+      open
+        ? h("aside", { id: "panel", style: bottom ? { height: dock.h + "px", display: "flex", flexDirection: "column" } : { width: dock.w + "px", display: "flex", flexDirection: "column" } },
+            h("button", { type: "button", onClick: () => panels.close("office") }, "Close the panel"),
+            // The panel's body, as Chat.tsx draws it for a panel that is not "bleed".
+            h("div", { style: { display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "auto" } },
+              h(Panel, { chat, channel, panels, close: () => panels.close("office"), panel: handle })))
+        : null,
+    ),
+  );
+}
+createRoot(document.getElementById("root")).render(h(Host));
+`);
+}
+
 /** The editor page's own source: the editor of the page's `?doc=`, its events kept on the page. */
 function editorPage(base: string): string {
   return `
@@ -140,6 +238,8 @@ async function bundle(pithagoras: string, contents: string): Promise<string> {
     jsx: "automatic",
     define: { "process.env.NODE_ENV": '"production"' },
     logLevel: "error",
+    // client.tsx imports its stylesheet; the pages serve src/client.css themselves.
+    loader: { ".css": "empty" },
     plugins: [
       {
         name: "the-portals-react",
@@ -151,6 +251,9 @@ async function bundle(pithagoras: string, contents: string): Promise<string> {
   });
   return result.outputFiles[0].text;
 }
+
+/** A chat with its Office panel (panelPageJs), and Office's own stylesheet, which lays the editor out. */
+export const PANEL_HTML = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/client.css"><style>body{margin:0}</style></head><body><div id="root"></div><script src="/panel-page.js"></script></body></html>`;
 
 /** A page for the Office page in Settings. */
 export const SETTINGS_HTML = `<!doctype html><html><head><meta charset="utf-8"></head><body><div id="root"></div><script src="/settings-page.js"></script></body></html>`;

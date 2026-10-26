@@ -1,27 +1,74 @@
 import "./client.css";
 import { Suspense, useEffect, useState } from "react";
-import type { ChatProps, PanelProps, Portal, ToolCallView } from "@pithagoras/extension-api";
+import type { ComponentType } from "react";
+import type { Chat, ChatProps, PanelProps, Portal, ToolCallView } from "@pithagoras/extension-api";
 import { LuFileText, LuPresentation, LuTable } from "react-icons/lu";
 import type { ReactNode } from "react";
 import { msg, officeUrl, portal, setPortal, t } from "./portal";
 import { refreshOfficeState, useOfficeState } from "./web/state";
 import { api, sayError } from "./web/api";
 import { compareDocs, loadSort, saveSort, SortBar, type SortChoice } from "./web/sort";
-import { editorsIn } from "./office-ui";
+import { choosePanelDoc, editorsIn, panelDoc } from "./office-ui";
 import { de } from "./de";
 
 /**
  * @pithagoras/office: its browser half. The Office tab -- the full library with its own workbench chrome (client.css),
- * opened documents in a full-bleed OnlyOffice editor; the office panel beside an agent/project's home chat, the tool
- * cards of its office_* calls, and its page in Settings where the Document Server is run. It registers
- * nav.page + chat.panel + chat.tool entries + settings.page. Its heavy parts
- * load as chunks, the way Understory's do (ui.lazy + Suspense).
+ * opened documents in a full-bleed OnlyOffice editor; the office panel beside a chat, which lists the documents the
+ * chat sees and opens one in the same editor right there, beside the conversation; the tool cards of its office_*
+ * calls, which open their document in that panel; and its page in Settings where the Document Server is run. It
+ * registers nav.page + chat.panel + chat.tool entries + settings.page. Its heavy parts load as chunks, the way
+ * Understory's do (ui.lazy + Suspense).
  */
+
+/** The editor (web/office-editor.tsx), loaded as the panel first opens a document. Set as the extension is loaded. */
+let PanelEditor: ComponentType<{ docId: string; onBack(): void; onFullPage?: () => void; place?: "page" | "panel" }>;
+
+/**
+ * The Office panel beside a chat: its list of documents, or one of them open in the editor, beside the conversation
+ * and never in the Office tab (working with the agent means seeing both). What it shows comes from how it was opened
+ * (a tool card opens it with `{ doc }`) and what was chosen in it since (panelDoc). While a document is open the panel
+ * asks not to be the one closed to make room for a third. Switching documents, going back or closing the panel unmounts
+ * the editor, which destroys it (office-editor.tsx); the same document open in the Office tab too is two views of the
+ * one session.
+ */
+function OfficePanel({ chat, panel }: PanelProps) {
+  portal.locale.use();
+  const state = useOfficeState();
+  const docId = panelDoc(panel.params, panel.state);
+  const choose = (doc: string | null) => panel.setState(choosePanelDoc(panel.params, doc));
+  const open = docId !== null;
+  useEffect(() => {
+    panel.keep(open);
+    // `panel` is a new handle with each change of what it shows; only whether a document is open matters here.
+  }, [open]);
+  if (!docId) return <PanelList chat={chat} onOpen={(id) => choose(id)} />;
+  // The document left the library meanwhile: said, with the way back.
+  if (state && !state.docs.some((d) => d.docId === docId)) {
+    return (
+      <div className="p-2">
+        <portal.ui.ErrorBanner>
+          {t("This document is no longer in the library.")}{" "}
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => choose(null)}>
+            ← {t("All documents")}
+          </button>
+        </portal.ui.ErrorBanner>
+      </div>
+    );
+  }
+  return (
+    <div className="po-panel">
+      <Suspense fallback={<portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />}>
+        <PanelEditor key={docId} docId={docId} place="panel" onBack={() => choose(null)} onFullPage={() => portal.navigate(officeUrl(docId))} />
+      </Suspense>
+    </div>
+  );
+}
 
 /** The documents beside a chat: what its agent or project sees (GET /scope, the tools' own rule): the ones in its
  * folder, the ones it made or was granted, and the person's library documents. The sort choice is the one of
- * web/sort.tsx, persisted under "po-sort" so this panel and the full Office page share it. */
-function OfficePanel({ chat }: PanelProps) {
+ * web/sort.tsx, persisted under "po-sort" so this panel and the full Office page share it. A row opens its document
+ * here, in the panel. */
+function PanelList({ chat, onOpen }: { chat: Chat; onOpen(docId: string): void }) {
   portal.locale.use();
   const state = useOfficeState();
   const [sort, setSort] = useState<SortChoice>(loadSort);
@@ -52,7 +99,7 @@ function OfficePanel({ chat }: PanelProps) {
             const n = editorsIn(state.locks, doc.docId);
             return (
               <div key={doc.docId} className="po-row">
-                <button type="button" className="po-open" onClick={() => portal.navigate(officeUrl(doc.docId))}>
+                <button type="button" className="po-open" onClick={() => onOpen(doc.docId)}>
                   {doc.ext === "docx" ? (
                     <LuFileText className="po-ext po-ext-word" aria-hidden />
                   ) : (
@@ -178,8 +225,18 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
     } else if (typeof d.mtimeMs === "number") facts.push(t("Revision {n}", { n: d.mtimeMs }));
   }
 
-  const open = d.action === "list" ? officeUrl() : typeof d.id === "string" && d.id !== "" ? officeUrl(d.id) : null;
-  if (!open) return card; // nothing with an address to open: the portal's card already said enough
+  const doc = d.action === "list" ? null : typeof d.id === "string" && d.id !== "" ? d.id : undefined;
+  if (doc === undefined) return card; // nothing to open: the portal's card already said enough
+  // In the chat's Office panel, beside the conversation: the document, or (for a list) the panel's list. A new object
+  // each time, so a card opens its own document again after another was chosen in the panel. Where there is no
+  // panel to open (a card drawn outside a chat), the Office tab.
+  const show = () => {
+    try {
+      props.panels.open("office", doc === null ? {} : { doc });
+    } catch {
+      portal.navigate(officeUrl(doc ?? undefined));
+    }
+  };
 
   return (
     <div className="flex items-center gap-2 rounded-lg border border-line bg-raised/40 p-2">
@@ -189,7 +246,7 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
         {name && <p className="truncate text-sm text-fg">{name}</p>}
         {facts.filter(Boolean).length > 0 && <p className="text-[11px] text-fg-subtle">{facts.filter(Boolean).join(" · ")}</p>}
       </div>
-      <button type="button" className={portal.ui.classes.ghost} onClick={() => portal.navigate(open)}>
+      <button type="button" className={portal.ui.classes.ghost} onClick={show}>
         {t("Open in Office")}
       </button>
     </div>
@@ -212,6 +269,7 @@ export default function office(given: Portal): void {
   // Its heavy parts, fetched only when they are opened (the Understory idiom).
   const Page = portal.ui.lazy(() => import("./web/library"), "OfficePage");
   const Settings = portal.ui.lazy(() => import("./web/settings"), "OfficeSettings");
+  PanelEditor = portal.ui.lazy(() => import("./web/office-editor"), "OfficeEditor");
   const fallback = <PageFallback />;
 
   // The Office tab: the full library at /x/@pithagoras/office/office, its chrome its own (client.css), a document
@@ -228,7 +286,8 @@ export default function office(given: Portal): void {
   });
 
   // Beside every chat -- shown for all: every unowned (workspace-scanned / human-made) doc
-  // is shared by every chat, plus what this one owns or was granted; where there is nothing at all, it says so.
+  // is shared by every chat, plus what this one owns or was granted; where there is nothing at all, it says so. A
+  // document opens in it, beside the conversation (`portal.panels.open("office", { doc })` reaches it from anywhere).
   portal.slots.register("chat.panel", {
     id: "office",
     name: "office",

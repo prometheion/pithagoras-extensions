@@ -70,3 +70,26 @@ export function agentHealth(a: {
 export function agentError(a: { present: boolean; pull: { error?: string } | null; browser?: { error?: string } }): string | undefined {
   return a.present ? a.browser?.error : a.pull?.error;
 }
+
+/**
+ * Which document a chat's Office panel shows, out of what it was opened with (`panels.open("office", { doc })`, from a
+ * tool card) and what was chosen in it since (`panel.setState`: a row opened, or back to the list). A choice holds
+ * only for the opening it was made in (`for`, that opening's params): the next opening, from a card, shows its own
+ * document again. Null: the list.
+ */
+export interface PanelChoice {
+  doc: string | null;
+  for: unknown;
+}
+
+export function panelDoc(params: unknown, state: unknown): string | null {
+  const chose = state as PanelChoice | null | undefined;
+  if (chose && typeof chose === "object" && "for" in chose && Object.is(chose.for, params)) return typeof chose.doc === "string" && chose.doc !== "" ? chose.doc : null;
+  const asked = params as { doc?: unknown } | null | undefined;
+  return asked && typeof asked === "object" && typeof asked.doc === "string" && asked.doc !== "" ? asked.doc : null;
+}
+
+/** The choice of `doc` (or the list, for null) in the panel as it was opened with `params`. */
+export function choosePanelDoc(params: unknown, doc: string | null): PanelChoice {
+  return { doc, for: params };
+}

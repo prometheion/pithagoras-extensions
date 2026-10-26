@@ -35,6 +35,7 @@ export const de: Record<string, string | Plural> = {
   "Loading the editor — the first start of a Document Server can take a while…": "Der Editor wird geladen – der erste Start eines Document Servers kann eine Weile dauern…",
   "Missing: Start downloads it": "Fehlt: „Container starten“ lädt ihn herunter",
   "Needs about 4 GB of RAM while it runs.": "Braucht etwa 4 GB RAM, solange er läuft.",
+  "Open in the Office tab": "Im Office-Tab öffnen",
   "Pin a full tag, never :latest or none.": "Einen vollständigen Tag festlegen, nie :latest oder keinen.",
   "Ready": "Bereit",
   "Running": "Läuft",

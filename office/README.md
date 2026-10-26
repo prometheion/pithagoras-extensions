@@ -53,8 +53,13 @@ that came to name another build is refused, not run, and said as the row's error
   (`.trash/<time>-<id>/` in the data folder), with `document.json`, which says where it was, and what was kept for
   it; the entry is kept for 7 days and then removed. There is no button to restore it, but the file can be moved back
   by hand.
-- **A panel beside each chat** with the documents that chat's agent or project sees (below), and a card in the chat
-  for each call of the agent's tools that names its document.
+- **A panel beside each chat** with the documents that chat's agent or project sees (below). A document opened there
+  opens in the editor right in the panel, beside the conversation, so you watch the agent's edits while you talk to
+  it: **← All documents** goes back to the list, and a small button opens it in the Office tab instead. The panel can
+  be docked left, right or at the bottom and dragged as narrow or wide as you like; the editor fills it. A card in the
+  chat for each call of the agent's tools that names its document opens that document in the same panel (a call that
+  lists the documents opens the list). The same document open in the panel and in the Office tab (or in two browser
+  tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects: `office_list`, `office_create`, `office_read`,
   `office_edit` and `office_comments`. An agent sees the documents in its own folder, the ones it made and the ones it
   was granted by a mention, and the ones you made in the library; another agent's, and the files in another agent's or
@@ -243,7 +248,7 @@ tailwindcss, postcss, the extension API, react-icons and jszip).
 ```sh
 npm run build -w office    # web/ and server.js, then the type check of src/ and the tests
 npm test -w office         # the unit and integration tests, with Docker, the portal and the Document Server faked
-./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office   # under the portal's own extension host; the editor page in Chromium
+./scripts/pithagoras.sh && PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal -w office   # under the portal's own extension host; the editor page, the chat's panel and Settings in Chromium
 ```
 
 The integration tests start nothing in Docker: they run the extension's real loopback listener in the test process,

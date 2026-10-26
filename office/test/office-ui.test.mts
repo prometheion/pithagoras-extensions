@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentError, agentHealth, dsHealth, editorsIn, floatingTag, parseDocQuery, startingUp } from "../src/office-ui";
+import { agentError, agentHealth, choosePanelDoc, dsHealth, editorsIn, floatingTag, panelDoc, parseDocQuery, startingUp } from "../src/office-ui";
 
 test("parseDocQuery: ?doc=<id> is the opened document; encoded ids come back decoded", () => {
   assert.equal(parseDocQuery("?doc=my-report"), "my-report");
@@ -71,4 +71,24 @@ test("agentHealth: its download, its image missing or refused, and the browser m
   assert.equal(agentHealth({ present: true, pull: { active: false, error: "old" }, browser }), "ready");
   assert.equal(agentError({ present: false, pull: { error: "not the build" }, browser: { error: "x" } }), "not the build");
   assert.equal(agentError({ present: true, pull: { error: "old" }, browser: { error: "did not start" } }), "did not start");
+});
+
+test("panelDoc: the panel shows what a card opened it with, until something else is chosen in that opening; the next opening shows its own", () => {
+  // Opened by its button: the list.
+  assert.equal(panelDoc(undefined, undefined), null);
+  // A row chosen, then back to the list, in that opening.
+  assert.equal(panelDoc(undefined, choosePanelDoc(undefined, "d1")), "d1");
+  assert.equal(panelDoc(undefined, choosePanelDoc(undefined, null)), null);
+  // A card opens it with its document, over what was chosen before.
+  const fromCard = { doc: "d2" };
+  assert.equal(panelDoc(fromCard, choosePanelDoc(undefined, "d1")), "d2");
+  assert.equal(panelDoc(fromCard, choosePanelDoc(fromCard, null)), null, "back to the list from the card's document");
+  assert.equal(panelDoc(fromCard, choosePanelDoc(fromCard, "d1")), "d1");
+  // The same card again: a new opening, its document again.
+  assert.equal(panelDoc({ doc: "d2" }, choosePanelDoc(fromCard, null)), "d2");
+  // A list's card, or anything that names no document: the list.
+  assert.equal(panelDoc({}, choosePanelDoc(fromCard, "d1")), null);
+  assert.equal(panelDoc({ doc: "" }, undefined), null);
+  assert.equal(panelDoc({ doc: 7 }, undefined), null);
+  assert.equal(panelDoc("d1", undefined), null);
 });

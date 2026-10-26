@@ -23,6 +23,34 @@
 
 /* ---- the editor -------------------------------------------------------- */
 
+/* In a chat's Office panel: the panel's whole body, however narrow or low it is dragged. */
+.po-editor-panel {
+  height: 100%;
+  min-height: 12rem;
+}
+
+.po-editor-panel .po-editor-bar {
+  gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.po-editor-panel .po-editor-title {
+  flex: 1 1 6rem;
+  min-width: 0;
+}
+
+.po-editor-panel .po-editor-spacer {
+  display: none;
+}
+
+/* The panel's own body: its list scrolls, its editor fills it. */
+.po-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .po-editor {
   display: flex;
   flex-direction: column;

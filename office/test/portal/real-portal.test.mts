@@ -272,7 +272,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     console.log(`a. office_edit (${Date.now() - t0} ms): ${JSON.stringify(edited)}`);
     assert.match(edited, /Edited "Shared notes" \(4 ops\), saved as revision \d+(\.\d+)?\. 1 person in the document saw it live\./);
     let seen = "";
+    const t1 = Date.now();
     assert.ok(await until(async () => /Meeting notes[\s\S]*Agenda[\s\S]*Budget[\s\S]*Ann[\s\S]*Temporary line/.test((seen = await personText(frame))), 5000), `the agent's edit in the person's editor: ${JSON.stringify(seen)}`);
+    console.log(`a. in the person's editor ${Date.now() - t1} ms after the tool answered: ${JSON.stringify(seen)}`);
     const names = await personSees(frame);
     console.log(`a. the person's editor shows in the document: ${JSON.stringify(names)}`);
     const agentName = (await json(`${origin}/api/agent/avatar?session=${id}`)).body.agent.name as string;
@@ -319,6 +321,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     console.log(`b. office_edit (${Date.now() - t0} ms): ${JSON.stringify(edited)}`);
     assert.match(edited, /Edited "Budget" \(1 op\), saved as revision .* 1 person in the document saw it live\./);
     let max = "";
+    const t1 = Date.now();
     assert.ok(
       await until(async () => {
         await frame.evaluate(`window.Asc.editor.asc_findCell("A1:A3")`);
@@ -327,6 +330,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       }, 5000),
       `the person sees the formula computed: ${max}`,
     );
+    console.log(`b. the person's sheet shows the largest of A1:A3 as "${max}" ${Date.now() - t1} ms after the tool answered`);
     await notReloaded(page, frame);
     // The person types on, and leaves.
     await frame.evaluate(`window.Asc.editor.asc_findCell("D1")`);

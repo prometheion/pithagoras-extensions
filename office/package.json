@@ -1,7 +1,7 @@
 {
   "name": "@pithagoras/office",
   "version": "0.1.0",
-  "description": "Office for Pithagoras: Word and Excel documents edited in a real OnlyOffice Document Server that the portal runs in a container, an Office tab for the library, and tools so the agent reads and edits the same files",
+  "description": "Word and Excel documents in OnlyOffice, edited by you and your agents together",
   "type": "module",
   "keywords": ["pi-package", "pithagoras", "office", "docx", "xlsx", "onlyoffice"],
   "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/office#readme",

@@ -493,7 +493,8 @@ export function xlsxThreads(buf: Buffer): CommentThread[] {
         const ca = parseAttributes(c[1]);
         const person = persons.get(ca["personId"] ?? "");
         // `<text xml:space="preserve">`, as the editor writes a text with spaces at its ends.
-        const text = decodeEntities(/<(?:\w+:)?text\b[^>]*>([\s\S]*?)<\/(?:\w+:)?text>/.exec(c[2])?.[1] ?? "");
+        // The editor ends a saved reply's text with a line break: not part of what was written.
+        const text = decodeEntities(/<(?:\w+:)?text\b[^>]*>([\s\S]*?)<\/(?:\w+:)?text>/.exec(c[2])?.[1] ?? "").replace(/\r?\n$/, "");
         const who = { author: person?.name ?? "", ...(person?.userId ? { userId: person.userId } : {}), ...(ca["dT"] ? { date: ca["dT"] } : {}) };
         if (ca["parentId"]) {
           const thread = byId.get(ca["parentId"]);

@@ -439,7 +439,17 @@ window.__configHook = function (config) {
     assert.equal(listed.comments.length, 1);
     const c = listed.comments[0];
     const match = { userId: c.userId, author: (c as { author?: string }).author, text: c.text, time: c.time };
-    await seat.run(home, docId, "edit", { kind: "cell.reply", args: { sessionId: "no-such-id", match, text: "Geprüft.", author: "Acme (agent)", userId: "agent:acme" } });
+    // A reply on a cell comment the person had just made, from an editor of the agent's that opened at that moment, was
+    // now and then lost for good (in the agent's editor too). docchat waits until a cell comment is 5 s old, and posts
+    // a lost reply again from an editor opened anew: so does this.
+    await delay(5000);
+    const reply = { kind: "cell.reply", args: { sessionId: "no-such-id", match, text: "Geprüft.", author: "Acme (agent)", userId: "agent:acme" } };
+    await seat.run(home, docId, "edit", reply);
+    if (!(await waitFor(async () => (await repliesOf(person.frame))[0].replies.length === 1, 10_000))) {
+      console.log("the reply on the fresh cell comment was lost: posted again from an editor opened anew");
+      seat.closeEditor(home, docId, "a lost reply");
+      await seat.run(home, docId, "edit", reply);
+    }
     // Each change rewrites the thread from the changing editor's view: the next waits until the first is everywhere.
     assert.ok(await waitFor(async () => (await repliesOf(person.frame))[0].replies.length === 1, 20_000), JSON.stringify(await repliesOf(person.frame)));
     await delay(1000);

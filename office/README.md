@@ -269,6 +269,8 @@ agents' editor.
   nothing; reply to it again.
 - In Word, an agent that may only comment changes the comment through the editor's comment methods, which give it a
   new id: its thread follows. Every person in the editor is "Portal".
+- A cell comment's answer is posted once the comment is five seconds old: a reply on a cell comment made a moment ago
+  was now and then lost. A reply that does not reach the thread is posted again, a few times.
 - The agents' browser opens for an answer as it does for the tools (about 0.3-0.45 GB while it runs), and an editor
   opened only to post closes after a minute.
 - A file above 512 MiB is not indexed.

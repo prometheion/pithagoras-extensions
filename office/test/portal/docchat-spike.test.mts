@@ -201,20 +201,30 @@ window.__configHook = function (config) {
   /** A comment made in the popover, as a person makes one: the selection's Comment, typed with a pick from the list
    * after each "@…" of `parts` ([text, search, name to pick, text …]), then Add. */
   async function commentThroughPopover(page: Page, frame: Frame, parts: string[]): Promise<string> {
-    await frame.evaluate(`${controller(frame)}.addDummyComment()`);
-    await delay(800);
-    await frame.locator("textarea.msg-reply").first().click();
-    for (let i = 0; i < parts.length; i += 3) {
-      await page.keyboard.type(parts[i], { delay: 30 });
-      if (parts[i + 1] === undefined) break;
-      await page.keyboard.type(`@${parts[i + 1]}`, { delay: 60 });
-      await delay(1000);
-      await frame.locator("li", { hasText: parts[i + 2] }).first().click();
-      await delay(300);
+    // Driving the popover is the test's, not the editor's: where it closed under the typing (a run in five), it is
+    // opened and typed into again, once.
+    for (let attempt = 1; ; attempt++) {
+      await frame.evaluate(`${controller(frame)}.addDummyComment()`);
+      await delay(800);
+      await frame.locator("textarea.msg-reply").first().click();
+      for (let i = 0; i < parts.length; i += 3) {
+        await page.keyboard.type(parts[i], { delay: 30 });
+        if (parts[i + 1] === undefined) break;
+        await page.keyboard.type(`@${parts[i + 1]}`, { delay: 60 });
+        await delay(1000);
+        await frame.locator("li", { hasText: parts[i + 2] }).first().click();
+        await delay(300);
+      }
+      const typed = (await frame.evaluate(`Array.from(document.querySelectorAll("textarea.msg-reply")).filter(function (t) { return t.offsetParent; }).map(function (t) { return t.value; })[0]`)) as string;
+      const add = frame.locator("button", { hasText: /^Add$/ }).first();
+      if (attempt > 1 || (await add.isVisible().catch(() => false))) {
+        await add.click();
+        return typed;
+      }
+      console.log("the comment popover closed while the test typed: opened again");
+      await page.keyboard.press("Escape");
+      await delay(500);
     }
-    const typed = (await frame.evaluate(`Array.from(document.querySelectorAll("textarea.msg-reply")).filter(function (t) { return t.offsetParent; }).map(function (t) { return t.value; })[0]`)) as string;
-    await frame.locator("button", { hasText: /^Add$/ }).first().click();
-    return typed;
   }
 
   test("Word: the UI's calls go through the page's wrappers in the author's page only, a picked mention reads +Name, and the GUID is the durableId in the saved file", { timeout: 600_000 }, async () => {

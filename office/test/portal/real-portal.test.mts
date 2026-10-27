@@ -678,6 +678,54 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await noConflictCopy("Quarter");
   });
 
+  test("h: a comment that mentions the agent starts a chat of its own, which nobody sees and which has no question tool: the agent's ask_question is refused there at once, and its answer comes as the agent's reply in the thread", { timeout: 900_000 }, async () => {
+    const parent = await chat();
+    const made = await say(parent, [{ name: "office_create", arguments: { title: "Asked in a comment", type: "word" } }]);
+    const docId = /id ([\w-]+),/.exec(made[0])![1];
+    const users = (await json(`${at}/mentionables`)).body.users as { name: string; email: string }[];
+    const agent = users.find((u) => !u.email.startsWith("project:"))!;
+    assert.ok(agent, JSON.stringify(users));
+    const { page, frame } = await personOpens(docId, "word");
+    await frame.locator("#editor_sdk").click({ position: { x: 300, y: 200 } });
+    await page.keyboard.type("A sentence to comment on.", { delay: 10 });
+    await page.keyboard.press("Control+a");
+    await frame.evaluate(`DE.getController("Common.Controllers.Comments").addDummyComment()`);
+    await delay(800);
+    await frame.locator("textarea.msg-reply").first().click();
+    const id = `h-${process.pid}`;
+    const calls = [{ name: "ask_question", arguments: { questions: [{ question: "Which one?", options: ["A", "B"] }] } }];
+    await page.keyboard.type(`Bitte entscheide. SCRIPT#${id} <<<${JSON.stringify(calls)}>>> `, { delay: 5 });
+    await page.keyboard.type(`@${agent.name.slice(0, 2)}`, { delay: 60 });
+    await delay(1500);
+    await frame.locator("li", { hasText: agent.name }).first().click();
+    await delay(300);
+    await frame.locator("button", { hasText: /^(Add|Hinzufügen)$/ }).first().click();
+
+    // The child ran the script: its model was never offered ask_question, and the call was refused at once.
+    let lines: { id: string | null; results: string[]; final: boolean; tools: string[] }[] = [];
+    assert.ok(
+      await until(() => {
+        lines = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === id);
+        return lines.some((l) => l.final);
+      }, 180_000),
+      `the comment's chat ran the script (portal log: ${path.join(root, "portal.log")})`,
+    );
+    console.log(`the comment's chat: ${JSON.stringify(lines.map((l) => ({ tools: l.tools.filter((t) => /ask|question/.test(t)), results: l.results.map((r) => r.slice(0, 160)) })))}`);
+    // A chat of the person's has it (the parent's office_create above): the comment's chat had it taken away.
+    const parentLines = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => typeof l.id === "string" && l.id.startsWith("s"));
+    assert.ok(parentLines.some((l) => l.tools.includes("ask_question")), "the person's own chat is offered ask_question");
+    assert.ok(lines.every((l) => !l.tools.includes("ask_question")), "the question tool is not offered in the comment's chat");
+    // pi refuses a tool that is not active before it runs (docchat's own tool_call refusal is the second layer).
+    assert.match(lines.find((l) => l.final)!.results[0] ?? "", /ask_question not found|not available in this chat/);
+    // Its answer is the agent's reply in the thread, in the person's editor.
+    const replies = () => frame.evaluate(`JSON.stringify(DE.getController("Common.Controllers.Comments").collection.map(function (c) { return (c.get("replys") || []).map(function (r) { return [r.get("username"), r.get("reply")]; }); }))`).then((x) => JSON.parse(x as string) as string[][][]);
+    assert.ok(await until(async () => (await replies()).flat().some(([who, text]) => /\(agent\)$/.test(who) && text === `Done ${id}.`), 60_000), JSON.stringify(await replies()));
+    // Shown nowhere: no chat of the comment in the chat lists.
+    const listed = (await json(`${origin}/api/sessions`)).body as unknown;
+    assert.ok(!JSON.stringify(listed).includes("Comment: Bitte entscheide"), "the comment's chat is not listed");
+    await personCloses(page);
+  });
+
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {
     const doc = await newDoc("Stopped", "word");
     const id = await chat();

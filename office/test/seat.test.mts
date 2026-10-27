@@ -670,3 +670,33 @@ test("health, for the Office page: idle, then running with its editors; a start 
     await t.done();
   }
 });
+
+test("a comment-only editor is handed a reply and never an edit; a view-mode editor neither; a reply waits for its changes to be sent, as an edit does", async () => {
+  const handed: string[] = [];
+  const s = await setup((job) => (handed.push(job.kind), { replies: 1 }));
+  try {
+    s.b.behaviour.states = [[true, 0], [false, 300]];
+    const started = Date.now();
+    assert.deepEqual(await run("/homes/a", "doc-1", "comment", { kind: "word.reply", args: {} }), { replies: 1, changed: true });
+    assert.ok(Date.now() - started >= 290, "waited for the sent reply");
+    assert.ok(s.calls.includes("mint /homes/a doc-1 comment"), "minted for comments only");
+    await assert.rejects(run("/homes/a", "doc-1", "comment", { kind: "word.edit", args: {} }), code("read_only"));
+    await assert.rejects(run("/homes/a", "doc-2", "view", { kind: "cell.reply", args: {} }), code("read_only"));
+    assert.deepEqual(handed, ["word.reply"]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("an editor opened only to post an answer closes after the short post idle; one the agent's tools used keeps the full idle time", async () => {
+  const s = await setup(undefined, { idleMs: 60_000, postIdleMs: 300, toolWindowMs: 60_000 });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "chat.send", args: {} }, { post: true });
+    await run("/homes/b", "doc-1", "edit", { kind: "word.read", args: {} });
+    await run("/homes/b", "doc-1", "edit", { kind: "chat.send", args: {} }, { post: true });
+    for (let i = 0; i < 40 && seats().length > 1; i++) await delay(50);
+    assert.deepEqual(seats().map((x) => x.home), ["/homes/b"], "the post-only editor went, the agent's own stays");
+  } finally {
+    await s.done();
+  }
+});

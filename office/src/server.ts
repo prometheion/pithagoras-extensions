@@ -260,7 +260,7 @@ function makeLoopbackHandler(dd: string, tickets: string): (req: http.IncomingMe
 /** Whose editor a config is for: a person's, from the Office page (the one route that hands configs out), or an
  * agent's, for its seat in the agents' browser (seat.ts, the only caller of that variant: its configs leave the half
  * only through the seat page's secret route). */
-export type EditorAs = { kind: "person" } | { kind: "agent"; home: string; label: string; mode: "edit" | "view"; pluginUrl: string };
+export type EditorAs = { kind: "person" } | { kind: "agent"; home: string; label: string; mode: "edit" | "view" | "comment"; pluginUrl: string };
 
 /** Build (or refuse) the new DocsAPI.DocEditor config for `docId`. The plain object is signed WHOLE -- per the DS
  * signing rule ("the payload must have the same structure as the config"; since 7.1 sign exactly what you send) --
@@ -309,7 +309,10 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
   };
   if (as.kind === "agent") {
     const editorConfig = config.editorConfig as Record<string, unknown>;
-    editorConfig.mode = as.mode;
+    // Comment-only: an editor in edit mode whose document may not be edited, only commented (the agent answers in
+    // a comment thread of a document it may only read).
+    editorConfig.mode = as.mode === "view" ? "view" : "edit";
+    if (as.mode === "comment") (config.document as Record<string, unknown>).permissions = { edit: false, comment: true };
     editorConfig.user = { id: `agent:${callback.keyIdOf(as.home)}`, name: `${as.label} (agent)`, group: "agents" };
     // Its presence comes from the Document Server's callbacks, as anyone's; its mint is no person opening the document.
     live.nameAgent(`agent:${callback.keyIdOf(as.home)}`, `${as.label} (agent)`);

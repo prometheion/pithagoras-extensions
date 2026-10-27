@@ -570,3 +570,194 @@ test("a copied sheet gets the old one's values, formulas, texts, number formats 
   assert.deepEqual(copy.formats, { B1: "0%" }, "the text written as text, then its own format back");
   assert.equal(copy.widths[0], 20);
 });
+
+/* ---------------- comments and the editor's chat ---------------- */
+
+/** A comment of the builder API, as `GetAllComments` and `GetCommentById` give it. */
+function apiComment(id: number, d: { author: string; userId: string; time: number; text: string; solved?: boolean; quote?: string; replies?: { author: string; userId: string; time: number; text: string }[] }) {
+  const replies = [...(d.replies ?? [])];
+  return {
+    added: [] as unknown[][],
+    GetId: () => id,
+    GetAuthorName: () => d.author,
+    GetUserId: () => d.userId,
+    GetTimeUTC: () => d.time,
+    IsSolved: () => d.solved ?? false,
+    GetQuoteText: () => d.quote ?? "",
+    GetText: () => d.text,
+    GetRepliesCount: () => replies.length,
+    GetReply: (i: number) => ({ GetAuthorName: () => replies[i].author, GetUserId: () => replies[i].userId, GetTimeUTC: () => replies[i].time, GetText: () => replies[i].text, SetTimeUTC: (t: number) => (replies[i].time = t) }),
+    AddReply(text: string, author: string, userId: string) {
+      this.added.push([text, author, userId]);
+      replies.push({ text, author, userId, time: 0 });
+    },
+  };
+}
+
+test("word.comments: every comment with its author, user id, time, state, quote, text and replies, and its thread's GUID: the durableId the builder gives as its id, in hex", () => {
+  const c = apiComment(0x626360df, { author: "Portal", userId: "portal-user", time: 1793108364144, text: "Bitte übersetzen +Aegis", solved: true, quote: "was revised\r\n", replies: [{ author: "Aegis (agent)", userId: "agent:a", time: 1793108365000, text: "Done." }] });
+  const small = apiComment(0x1f, { author: "Portal", userId: "portal-user", time: 1, text: "x" });
+  const out = command("word.comments", { GetDocument: () => ({ GetAllComments: () => [c, small] }) });
+  assert.deepEqual(out.result.comments[0], { author: "Portal", userId: "portal-user", time: 1793108364144, solved: true, quote: "was revised\r\n", text: "Bitte übersetzen +Aegis", replies: [{ author: "Aegis (agent)", userId: "agent:a", time: 1793108365000, text: "Done." }], guid: "626360df" });
+  assert.equal(out.result.comments[1].guid, "0000001f", "8 hex digits, as the editor names it");
+});
+
+test("word.reply: the reply goes on the comment found by its durableId in decimal, as the agent; a comment that is gone is said to be", () => {
+  const c = apiComment(0x626360df, { author: "Portal", userId: "portal-user", time: 1, text: "Bitte" });
+  const asked: string[] = [];
+  let saved = 0;
+  const Api = { GetDocument: () => ({ GetCommentById: (id: string) => (asked.push(id), id === String(0x626360df) ? c : null) }), Save: () => saved++ };
+  const out = command("word.reply", Api, { guid: "626360df", text: "Erledigt.", author: "Aegis (agent)", userId: "agent:a" });
+  assert.deepEqual(out, { result: { replies: 1 } });
+  assert.deepEqual(asked, [String(0x626360df)]);
+  assert.deepEqual(c.added, [["Erledigt.", "Aegis (agent)", "agent:a"]]);
+  assert.equal(saved, 1, "sent at once, as an edit is");
+  assert.equal(command("word.reply", Api, { guid: "0badf00d", text: "x", author: "a", userId: "u" }).error.code, "comment_gone");
+});
+
+test("cell.reply: on the comment of its session id while that is still the comment the pages named, else the one of that author, text and time (within a second); none or two are said to be", () => {
+  const right = apiComment(7, { author: "Portal", userId: "portal-user", time: 1793108364140, text: "Bitte prüfen" });
+  const other = apiComment(8, { author: "Portal", userId: "portal-user", time: 1793108999999, text: "Etwas anderes" });
+  const Api = { GetAllComments: () => [other, right], GetCommentById: (id: string) => ({ "7": right, "8": other })[id] ?? null, Save() {} };
+  const match = { userId: "portal-user", text: "Bitte prüfen", time: 1793108364144 };
+  // The session id now names another comment (a session after a reopen numbers them anew): found by the match.
+  const out = command("cell.reply", Api, { sessionId: "8", match, text: "Geprüft.", author: "Aegis (agent)", userId: "agent:a" });
+  assert.deepEqual(out, { result: { replies: 1, sessionId: "7" } });
+  assert.deepEqual(right.added, [["Geprüft.", "Aegis (agent)", "agent:a"]]);
+  assert.deepEqual(other.added, []);
+  assert.equal(command("cell.reply", Api, { match: { ...match, time: match.time + 5000 }, text: "x", author: "a", userId: "u" }).error.code, "comment_gone");
+  const twin = apiComment(9, { author: "Portal", userId: "portal-user", time: 1793108364100, text: "Bitte prüfen" });
+  assert.equal(command("cell.reply", { ...Api, GetAllComments: () => [right, twin] }, { match, text: "x", author: "a", userId: "u" }).error.code, "comment_ambiguous");
+});
+
+/**
+ * A Word document of one paragraph for word.edit, with positions: a range is [start, end) of its text, `AddText` after
+ * a range puts the text there and the range grows over it, `Delete` takes the text away and every comment whose range
+ * lies in it (as the editor does to a comment inside a larger deleted text), and `AddComment` on a range makes a new
+ * comment with an id of its own.
+ */
+function wordWithComments(text: string, comments: { id: number; from: number; to: number; d: Parameters<typeof apiComment>[1] }[]) {
+  const state = { text, comments: comments.map((c) => ({ ...c, api: apiComment(c.id, c.d) })), next: 0x7164b85f, made: [] as { at: [number, number]; api: ReturnType<typeof apiComment>; solved?: boolean; time?: number }[] };
+  const range = (from: number, to: number): any => {
+    const r = {
+      from,
+      to,
+      GetStartPos: () => r.from,
+      GetEndPos: () => r.to,
+      AddText(t: string) {
+        state.text = state.text.slice(0, r.to) + t + state.text.slice(r.to);
+        r.to += t.length;
+      },
+      Delete() {
+        state.text = state.text.slice(0, r.from) + state.text.slice(r.to);
+        state.comments = state.comments.filter((c) => !(c.from >= r.from && c.to <= r.to && c.to - c.from < r.to - r.from));
+      },
+      GetAllParagraphs: () => [para],
+      AddComment(t: string, author: string, userId: string) {
+        const api = apiComment(state.next++, { author, userId, time: 0, text: t });
+        const made = { at: [r.from, r.to] as [number, number], api, solved: undefined as boolean | undefined, time: undefined as number | undefined };
+        Object.assign(api, { SetTimeUTC: (n: number) => (made.time = n), SetSolved: (b: boolean) => (made.solved = b) });
+        state.made.push(made);
+        return api;
+      },
+    };
+    return r;
+  };
+  const para: any = { GetClassType: () => "paragraph", GetText: () => `${state.text}\r\n`, GetParaPr: () => ({ GetStyle: () => null }), GetRange: () => range(0, state.text.length), GetNext: () => null, GetPrevious: () => null, Delete() {} };
+  const doc = {
+    ...contentOf([para]),
+    GetStyle: () => null,
+    Search: (q: string) => (state.text.includes(q) ? [range(state.text.indexOf(q), state.text.indexOf(q) + q.length)] : []),
+    GetRange: (a: number, b: number) => range(a, b),
+    GetAllComments: () => [...state.comments.map((c) => c.api), ...state.made.map((m) => m.api)],
+  };
+  return { state, Api: { GetDocument: () => doc, Save() {} } };
+}
+
+test("word.edit: a comment the replace would take away is made again on the replacement, with its author, time, state and replies, and the move is answered; one on exactly the quote stays as it is", () => {
+  const word = wordWithComments("Revenue figures were revised after the audit.", [
+    { id: 0x626360df, from: 21, to: 28, d: { author: "Portal", userId: "portal-user", time: 1793108364144, text: "Bitte übersetzen +Aegis", solved: true, replies: [{ author: "Portal", userId: "portal-user", time: 1793108365000, text: "Danke" }] } },
+  ]);
+  const out = command("word.edit", word.Api, { ops: [{ quote: "were revised after", replacement: "wurden nach" }] });
+  assert.deepEqual(out, { result: { ops: 1, moved: [["626360df", "7164b85f"]] } });
+  assert.equal(word.state.text, "Revenue figures wurden nach the audit.");
+  const made = word.state.made[0];
+  assert.deepEqual(made.at, [16, 27], "on the replacement's own range");
+  assert.deepEqual([made.api.GetText(), made.api.GetAuthorName(), made.api.GetUserId(), made.time, made.solved], ["Bitte übersetzen +Aegis", "Portal", "portal-user", 1793108364144, true]);
+  assert.deepEqual(made.api.added, [["Danke", "Portal", "portal-user"]]);
+
+  const exact = wordWithComments("Revenue figures were revised after the audit.", [{ id: 5, from: 16, to: 34, d: { author: "Portal", userId: "portal-user", time: 1, text: "Hier" } }]);
+  assert.deepEqual(command("word.edit", exact.Api, { ops: [{ quote: "were revised after", replacement: "wurden nach" }] }), { result: { ops: 1 } });
+  assert.equal(exact.state.made.length, 0);
+});
+
+/** The plugin running in its frame, handed `job`: its commands run by `callCommand(source, args)`, its editor's methods
+ * by `method(name, args)`; resolves with what it posts. */
+async function bridge(job: { kind: string; args: unknown }, callCommand: (source: string, args: unknown) => unknown, method: (name: string, args: unknown[]) => unknown): Promise<any> {
+  let handed = false;
+  let posted: (outcome: unknown) => void = () => {};
+  const outcome = new Promise<any>((resolve) => (posted = resolve));
+  const window = {
+    Asc: {
+      scope: {} as { args?: unknown },
+      plugin: {
+        init: () => {},
+        button: () => {},
+        callCommand(fn: { toString(): string }, _close: boolean, _calc: boolean, then: (out: unknown) => void) {
+          const out = JSON.parse(JSON.stringify(callCommand(fn.toString(), window.Asc.scope.args) ?? null));
+          setImmediate(() => then(out));
+        },
+        executeMethod(name: string, args: unknown[], then: (out: unknown) => void) {
+          const out = method(name, JSON.parse(JSON.stringify(args)));
+          setImmediate(() => then?.(out));
+        },
+      },
+    },
+  };
+  const context = {
+    window,
+    location: { pathname: "/plugin/token/index.html" },
+    setTimeout: (fn: () => void) => setImmediate(fn),
+    fetch: (url: string, init?: { body?: string }) => {
+      if (url.endsWith("next")) {
+        if (handed) return new Promise(() => {});
+        handed = true;
+        return Promise.resolve({ status: 200, json: async () => ({ jobId: "j1", ...job }) });
+      }
+      posted(JSON.parse(init!.body!));
+      return new Promise(() => {});
+    },
+  };
+  vm.runInNewContext(BRIDGE_JS, context);
+  window.Asc.plugin.init();
+  return outcome;
+}
+
+test("chat.send: the message goes out through the editor's own chat method, no command", async () => {
+  const sent: unknown[][] = [];
+  const out = await bridge({ kind: "chat.send", args: { text: "Zusammenfassung: …" } }, () => assert.fail("no command"), (name, args) => (sent.push([name, ...args]), true));
+  assert.deepEqual(out.result, { sent: true });
+  assert.deepEqual(sent, [["CoAuthoringChatSendMessage", "Zusammenfassung: …"]]);
+});
+
+test("a reply through the editor's comment methods (an editor that may only comment): the Word comment found by its GUID, then by author, text and time in the methods' local time; the reply added to its thread", async () => {
+  const c = apiComment(0x626360df, { author: "Portal", userId: "portal-user", time: 1793131668923, text: "Bitte +Beta" });
+  const calls: unknown[][] = [];
+  const out = await bridge(
+    { kind: "word.reply", args: { how: "method", guid: "626360df", text: "From a commenter.", author: "Beta (agent)", userId: "agent:b" } },
+    (source, args) => vm.runInNewContext(`(${source})()`, { Api: { GetDocument: () => ({ GetAllComments: () => [c] }) }, Asc: { scope: { args } } }),
+    (name, args) => {
+      calls.push([name, ...args]);
+      // Its time is the editor's local time: an hour off UTC here.
+      if (name === "GetAllComments") return [{ Id: "1_2", Data: { Text: "Anders", UserId: "portal-user", Time: "1793135268923", Replies: [] } }, { Id: "1_1", Data: { Text: "Bitte +Beta", UserId: "portal-user", UserName: "Portal", Time: "1793135268923", Replies: [] } }];
+      return undefined;
+    },
+  );
+  assert.deepEqual(out.result, { replies: 1 });
+  const change = calls.find((c) => c[0] === "ChangeComment")!;
+  assert.equal(change[1], "1_1");
+  assert.deepEqual((change[2] as { Replies: { UserName: string; UserId: string; Text: string }[] }).Replies.map((r) => [r.UserName, r.UserId, r.Text]), [["Beta (agent)", "agent:b", "From a commenter."]]);
+
+  const gone = await bridge({ kind: "cell.reply", args: { how: "method", match: { userId: "portal-user", text: "Nicht da", time: 1 }, text: "x", author: "a", userId: "u" } }, () => null, (name) => (name === "GetAllComments" ? [] : undefined));
+  assert.equal(gone.error.code, "comment_gone");
+});

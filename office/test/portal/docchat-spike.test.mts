@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, type Frame, type Page } from "@playwright/test";
 import JSZip from "jszip";
 import { EDITOR_HTML, editorPageJs } from "./page.mts";
+import { docxThreads, xlsxThreads } from "../../src/ooxml.ts";
 
 /**
  * The gate of comments and the editor's chat as the way to talk to agents (step 1 of office-docchat-plan.md): in the
@@ -84,6 +85,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   const callback = await import("../../src/callback.ts");
   const container = await import("../../src/container.ts");
   const { canonical } = await import("../../src/store.ts");
+  const live = await import("../../src/live.ts");
   assert.equal(container.NAMES.container, PREFIX);
 
   const data = path.join(process.env.DATA_DIR!, "extension-data", "%40pithagoras%2Foffice");
@@ -349,5 +351,126 @@ window.__configHook = function (config) {
     assert.ok(!removed.some((e) => e.call), "no wrapped call for a deleted row");
     await author.page.context().close();
     await other.page.context().close();
+  });
+
+  /** A forcesave of the session `key`, waited for. */
+  /** A forcesave of the session `key`, waited for; with `maybeSaved`, one that has nothing new to save (4) is fine. */
+  async function forcesave(key: string, maybeSaved = false): Promise<void> {
+    const userdata = `office-${randomUUID()}`;
+    const waiting = callback.awaitForcesave(userdata);
+    const asked = (await callback.command({ c: "forcesave", key, userdata })).error;
+    if (maybeSaved && asked === 4) return waiting.forget();
+    assert.equal(asked, 0);
+    assert.equal(await Promise.race([waiting.done, delay(30_000).then(() => "timeout")]), "saved");
+  }
+  const repliesOf = (frame: Frame) => frame.evaluate(`JSON.stringify(${controller(frame)}.collection.map(function (c) { return { guid: c.get("guid"), text: c.get("comment"), replies: (c.get("replys") || []).map(function (r) { return [r.get("username"), r.get("reply"), r.get("userid")]; }) }; }))`).then((s) => JSON.parse(s as string) as { guid: string; text: string; replies: string[][] }[]);
+  const commenter = () => canonical(path.join(process.env.WORKSPACE_ROOT!, "beta"));
+
+  test("the agents' side in Word: the comments with their GUIDs, a reply by GUID in both people's editors, a reply from an editor that may only comment, a chat message as the agent, an edit of a larger text that keeps the comment on the new text, and the saved file read as threads", { timeout: 600_000 }, async () => {
+    const docId = String((await tools.office_create.execute("a", { title: "Agent replies", type: "word" })).details.id);
+    const author = await personOpens(docId);
+    const other = await personOpens(docId);
+    await author.frame.locator("#editor_sdk").click({ position: { x: 300, y: 200 } });
+    await author.page.keyboard.type("Revenue figures were revised after the audit.", { delay: 10 });
+    await delay(500);
+    // A comment on one word of the sentence: a replace of the larger text would take it away.
+    await author.page.keyboard.press("Control+Home");
+    for (let i = 0; i < 21; i++) await author.page.keyboard.press("ArrowRight");
+    for (let i = 0; i < 7; i++) await author.page.keyboard.press("Shift+ArrowRight");
+    await commentThroughPopover(author.page, author.frame, ["Bitte übersetzen ", "Ae", "Aegis"]);
+    assert.ok(await waitFor(async () => (await repliesOf(other.frame)).length === 1, 5000));
+    const guid = (await repliesOf(author.frame))[0].guid;
+
+    const listed = (await seat.run(home, docId, "edit", { kind: "word.comments", args: {} })) as { comments: { guid: string; text: string; userId: string; quote: string }[] };
+    assert.deepEqual(listed.comments.map((c) => [c.guid, c.text.trim(), c.userId]), [[guid, "Bitte übersetzen +Aegis", "portal-user"]]);
+    assert.match(listed.comments[0].quote, /^revised/);
+
+    await seat.run(home, docId, "edit", { kind: "word.reply", args: { guid, text: "Übersetzt.", author: "Acme (agent)", userId: "agent:acme" } });
+    for (const page of [author, other]) {
+      assert.ok(await waitFor(async () => (await repliesOf(page.frame))[0].replies.some((r) => r[1] === "Übersetzt." && r[0] === "Acme (agent)" && r[2] === "agent:acme"), 5000), "the reply shows as the agent's");
+    }
+    // An agent that may only view the document comments through an editor that may only comment: Word makes the
+    // comment anew for it, under a GUID of its own, which the answer names and the people's editors hear.
+    await other.frame.evaluate(`window.__log.length = 0`);
+    const methodReply = (await seat.run(commenter(), docId, "comment", { kind: "word.reply", args: { how: "method", guid, text: "Gelesen.", author: "Beta (agent)", userId: "agent:beta" } })) as { guid?: string };
+    assert.ok(await waitFor(async () => (await repliesOf(other.frame))[0].replies.some((r) => r[1] === "Gelesen." && r[0] === "Beta (agent)"), 5000), "the comment-only editor's reply shows");
+    const nowGuid = ((await seat.run(home, docId, "edit", { kind: "word.comments", args: {} })) as { comments: { guid: string }[] }).comments[0].guid;
+    assert.equal(methodReply.guid ?? guid, nowGuid, "the answer names the thread's GUID as it is now");
+    const heard = (await logOf(other.frame)).filter((e) => e.event === "asc_onChangeCommentData" || e.event === "asc_onAddComment").map((e) => (e.args![1] as { guid: string }).guid);
+    console.log(`after the comment-only reply: the builder's GUID ${nowGuid}, the people's editor heard ${JSON.stringify(heard)}`);
+    assert.ok(heard.includes(nowGuid), "the people's editor hears the comment under that GUID");
+    await assert.rejects(seat.run(commenter(), docId, "comment", { kind: "word.edit", args: { ops: [{ paragraphs: ["x"] }] } }), (e: { code?: string }) => e.code === "read_only");
+
+    // A chat message as the agent, from an editor that may only view as well.
+    await other.frame.evaluate(`window.__log.length = 0`);
+    await seat.run(commenter(), docId, "view", { kind: "chat.send", args: { text: "Hallo von Beta" } });
+    assert.ok(await waitFor(async () => (await logOf(other.frame)).some((e) => e.event === "asc_onCoAuthoringChatReceiveMessage" && JSON.stringify(e.args).includes("Hallo von Beta") && JSON.stringify(e.args).includes("agent:")), 5000), "the chat message comes from the agent's editor");
+
+    // The agent replaces the whole sentence's middle: the comment on "revised" would go; it is made again on the new
+    // text, with its replies, and the move is answered.
+    const edited = (await seat.run(home, docId, "edit", { kind: "word.edit", args: { ops: [{ quote: "were revised after", replacement: "wurden nach" }] } })) as { moved?: string[][] };
+    assert.equal(edited.moved?.length, 1, JSON.stringify(edited));
+    assert.equal(edited.moved![0][0], nowGuid);
+    const moved = edited.moved![0][1];
+    let now: { guid: string; text: string; replies: string[][] }[] = [];
+    assert.ok(await waitFor(async () => (now = await repliesOf(other.frame)).length === 1 && now[0].text.includes("Bitte übersetzen") && now[0].replies.length === 2, 5000), JSON.stringify(now));
+    const after = (await seat.run(home, docId, "edit", { kind: "word.comments", args: {} })) as { comments: { guid: string; quote: string; replies: unknown[] }[] };
+    assert.equal(after.comments[0].guid, moved);
+    assert.match(after.comments[0].quote, /^wurden nach/, "on the replacement");
+
+    // Saved: the moved comment's GUID is its durableId, and the file reads as one thread with both replies.
+    await forcesave(seat.keyOf(home, docId)!);
+    const threads = docxThreads(await docFile(docId, "docx"));
+    assert.equal(threads.length, 1, JSON.stringify(threads));
+    assert.equal(threads[0].guid, moved);
+    assert.equal(threads[0].userId, "portal-user");
+    assert.deepEqual(threads[0].replies.map((r) => [r.author, r.text, r.userId]), [["Acme (agent)", "Übersetzt.", "agent:acme"], ["Beta (agent)", "Gelesen.", "agent:beta"]]);
+    await author.page.context().close();
+    await other.page.context().close();
+  });
+
+  test("the agents' side in a spreadsheet: the comments by session id, a reply found by author, text and time, from an editor that may only comment too, and the saved file read as threads", { timeout: 600_000 }, async () => {
+    const docId = String((await tools.office_create.execute("b", { title: "Agent sheet replies", type: "cell" })).details.id);
+    const person = await personOpens(docId);
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("C3")`);
+    await commentThroughPopover(person.page, person.frame, ["Bitte prüfen ", "Ae", "Aegis"]);
+    assert.ok(await waitFor(async () => (await repliesOf(person.frame)).length === 1, 5000));
+    const listed = (await seat.run(home, docId, "edit", { kind: "cell.comments", args: {} })) as { comments: { sessionId: string; text: string; userId: string; time: number }[] };
+    assert.equal(listed.comments.length, 1);
+    const c = listed.comments[0];
+    const match = { userId: c.userId, author: (c as { author?: string }).author, text: c.text, time: c.time };
+    await seat.run(home, docId, "edit", { kind: "cell.reply", args: { sessionId: "no-such-id", match, text: "Geprüft.", author: "Acme (agent)", userId: "agent:acme" } });
+    // Each change rewrites the thread from the changing editor's view: the next waits until the first is everywhere.
+    assert.ok(await waitFor(async () => (await repliesOf(person.frame))[0].replies.length === 1, 20_000), JSON.stringify(await repliesOf(person.frame)));
+    await delay(1000);
+    // The spreadsheet editor takes the builder's reply in an editor that may only comment (Word's rolls it back).
+    await seat.run(commenter(), docId, "comment", { kind: "cell.reply", args: { match, text: "Gesehen.", author: "Beta (agent)", userId: "agent:beta" } });
+    assert.ok(await waitFor(async () => (await repliesOf(person.frame))[0].replies.length === 2, 8000), JSON.stringify(await repliesOf(person.frame)));
+    await forcesave(seat.keyOf(home, docId)!);
+    const threads = xlsxThreads(await docFile(docId, "xlsx"));
+    assert.equal(threads.length, 1, JSON.stringify(threads));
+    assert.equal(threads[0].guid, (await repliesOf(person.frame))[0].guid);
+    assert.equal(threads[0].cell, "C3");
+    assert.deepEqual(threads[0].replies.map((r) => [r.author, r.text]), [["Acme (agent)", "Geprüft."], ["Beta (agent)", "Gesehen."]]);
+    await person.page.context().close();
+  });
+
+  test("a later session with nobody in the document: the agent's editor replies by the GUID the file keeps", { timeout: 600_000 }, async () => {
+    const docId = String((await tools.office_create.execute("l", { title: "Later reply", type: "word" })).details.id);
+    const person = await personOpens(docId);
+    await person.frame.locator("#editor_sdk").click({ position: { x: 300, y: 200 } });
+    await person.page.keyboard.type("Later.", { delay: 10 });
+    await person.page.keyboard.press("Control+a");
+    await commentThroughPopover(person.page, person.frame, ["Später bitte"]);
+    assert.ok(await waitFor(async () => (await repliesOf(person.frame)).length === 1, 5000));
+    const guid = (await repliesOf(person.frame))[0].guid;
+    await delay(3000); // the editor sends the comment a moment after it was made
+    await person.page.context().close();
+    // The session ends (the person left), and its close saves the comment; the next editor opens a new session.
+    assert.ok(await waitFor(async () => live.sessionKeys(docId).length === 0, 60_000), "the session ended");
+    assert.ok(await waitFor(async () => docxThreads(await docFile(docId, "docx")).some((t) => t.guid === guid), 30_000), JSON.stringify(docxThreads(await docFile(docId, "docx"))));
+    await seat.run(home, docId, "edit", { kind: "word.reply", args: { guid, text: "Jetzt.", author: "Acme (agent)", userId: "agent:acme" } });
+    await forcesave(seat.keyOf(home, docId)!, true);
+    assert.ok(await waitFor(async () => docxThreads(await docFile(docId, "docx")).find((t) => t.guid === guid)?.replies.some((r) => r.text === "Jetzt.") ?? false, 30_000), JSON.stringify(docxThreads(await docFile(docId, "docx"))));
   });
 }

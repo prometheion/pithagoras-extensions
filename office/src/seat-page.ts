@@ -173,12 +173,53 @@ const WORD_READ = `function () {
   }
 }`;
 
+/** A comment as the comment commands give it: author, user id, time (ms, UTC), solved, the text it is on, its text and
+ * its replies. `COMMENT_SRC` runs inside a command. */
+const COMMENT_SRC = `
+// A getter the builder API of this Document Server may not have (a reply has no GetTimeUTC in 10.0): nothing then.
+function ask(o, name) { try { return o && typeof o[name] === "function" ? o[name]() : undefined; } catch (e) { return undefined; } }
+function clip(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n) : s; }
+function described(c) {
+  var replies = [], n = 0;
+  try { n = c.GetRepliesCount(); } catch (e) { n = 0; }
+  for (var r = 0; r < n; r++) {
+    var reply = c.GetReply(r);
+    if (reply) replies.push({ author: String(ask(reply, "GetAuthorName") || ""), userId: String(ask(reply, "GetUserId") || ""), time: Number(ask(reply, "GetTimeUTC") || ask(reply, "GetTime")) || 0, text: clip(ask(reply, "GetText"), 20000) });
+  }
+  var quote = "";
+  try { quote = typeof c.GetQuoteText === "function" ? String(c.GetQuoteText() || "") : ""; } catch (e) { quote = ""; }
+  return { author: String(c.GetAuthorName() || ""), userId: String(c.GetUserId() || ""), time: Number(c.GetTimeUTC()) || 0, solved: Boolean(c.IsSolved()), quote: clip(quote, 2000), text: clip(c.GetText(), 20000), replies: replies };
+}
+function hexId(c) { var id = Number(c.GetId()); return isFinite(id) && id >= 0 ? ("00000000" + id.toString(16)).slice(-8) : String(c.GetId()); }
+`;
+
 /** word.edit: every op checked on the text first (WORD_MODEL_SRC), then made, each found again in the document as it
  * stands then; anything that does not hold throws, and what was changed by then is taken back by the plugin. */
 const WORD_EDIT = `function () {
   ${WORD_COLLECT_SRC}
   ${WORD_MODEL_SRC}
-  var touched = false;
+  ${COMMENT_SRC}
+  var touched = false, moved = [];
+  // The comments of the document by id, before an op that deletes text: a comment whose text the op takes away goes
+  // with it, which would end its thread and the chat that belongs to it. Each is made again where the op leaves text
+  // (keep), with its author, time, state and replies, and the move is said in the answer: its thread's old GUID and new.
+  var comments = function () { var out = {}; (doc.GetAllComments() || []).forEach(function (c) { out[String(c.GetId())] = c; }); return out; };
+  var keep = function (before, target) {
+    var now = comments();
+    for (var id in before) {
+      if (now[id] || !target) continue;
+      var d = described(before[id]), old = hexId(before[id]);
+      var made = target.AddComment(d.text, d.author, d.userId);
+      if (!made) continue;
+      try { made.SetTimeUTC(d.time); } catch (e) {}
+      try { made.SetSolved(d.solved); } catch (e) {}
+      for (var r = 0; r < d.replies.length; r++) {
+        try { made.AddReply(d.replies[r].text, d.replies[r].author, d.replies[r].userId); } catch (e) {}
+        try { var reply = made.GetReply(r); if (reply && d.replies[r].time) reply.SetTimeUTC(d.replies[r].time); } catch (e) {}
+      }
+      moved.push([old, hexId(made)]);
+    }
+  };
   try {
     var doc = Api.GetDocument(), ops = Asc.scope.args.ops;
     var failed = simulateWord(collect(doc, []).map(function (x) { return x.text; }), ops);
@@ -195,14 +236,19 @@ const WORD_EDIT = `function () {
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i];
       if (typeof op.quote === "string") {
-        var range = one(op.quote, i), start = range.GetStartPos(), end = range.GetEndPos();
+        var range = one(op.quote, i), start = range.GetStartPos(), end = range.GetEndPos(), held = comments(), home = paragraphOf(range);
         touched = true;
         if (op.replacement) range.AddText(op.replacement, "after");
         doc.GetRange(start, end).Delete();
+        // The replacement, found by the editor's own search where it is in the document once (a range made from the
+        // quote's positions came out a character short in DS 10.0), else from those positions.
+        var placed = op.replacement ? doc.Search(op.replacement, true) || [] : [];
+        keep(held, op.replacement ? (placed.length === 1 ? placed[0] : doc.GetRange(start, start + op.replacement.length)) : home && home.GetRange());
       } else if (typeof op.remove === "string") {
-        var gone = paragraphOf(one(op.remove, i));
+        var gone = paragraphOf(one(op.remove, i)), before = comments(), next = gone.GetNext() || gone.GetPrevious();
         touched = true;
         gone.Delete();
+        keep(before, next && next.GetRange());
       } else {
         var anchor = typeof op.after === "string" ? paragraphOf(one(op.after, i)) : null;
         var made = [];
@@ -233,7 +279,7 @@ const WORD_EDIT = `function () {
     }
     // Sent to the Document Server now, not at the editor's next pause: the forcesave after the edit saves it.
     Api.Save();
-    return { result: { ops: ops.length } };
+    return { result: moved.length ? { ops: ops.length, moved: moved } : { ops: ops.length } };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };
     return { error: code, touched: touched };
@@ -551,12 +597,78 @@ export const CELL_EDIT_COMMANDS = { check: CELL_CHECK, step: CELL_STEP, sheets: 
 /** How often, and how far apart in ms, the plugin looks whether a change to the sheets is made: up to 10 s per change. */
 export const SHEET_WAIT = { tries: 100, ms: 100 };
 
+/** word.comments: every comment of the document, its thread's GUID (the comment's durableId, which the builder gives as
+ * its id in decimal) with it. */
+const WORD_COMMENTS = `function () {
+  ${COMMENT_SRC}
+  try {
+    var all = Api.GetDocument().GetAllComments() || [];
+    return { result: { comments: all.map(function (c) { var d = described(c); d.guid = hexId(c); return d; }) } };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
+/** word.reply: a reply on the comment whose thread GUID is `guid` (its durableId: the builder finds it by the decimal),
+ * as the agent (`author`, `userId`). */
+const WORD_REPLY = `function () {
+  try {
+    var a = Asc.scope.args, doc = Api.GetDocument(), id = parseInt(a.guid, 16);
+    var comment = isFinite(id) ? doc.GetCommentById(String(id)) : null;
+    if (!comment) return { error: { code: "comment_gone", message: "the comment is not in the document any more" }, touched: false };
+    comment.AddReply(a.text, a.author, a.userId);
+    Api.Save();
+    return { result: { replies: comment.GetRepliesCount() } };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) }, touched: false };
+  }
+}`;
+
+/** cell.comments: every comment of the workbook, by its id in this editor's session (the builder names no thread GUID
+ * in a spreadsheet: the half matches them to the pages' by author, time and text). */
+const CELL_COMMENTS = `function () {
+  ${COMMENT_SRC}
+  try {
+    var all = Api.GetAllComments() || [];
+    return { result: { comments: all.map(function (c) { var d = described(c); d.sessionId = String(c.GetId()); return d; }) } };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
+/** cell.reply: a reply on a cell comment as the agent. The comment is the one with `sessionId` in this editor's session
+ * where that one is still the comment the pages reported (its author's user id and its text), else the one comment of
+ * that author, text and time (within a second, which a save and reopen can move by a few ms). */
+const CELL_REPLY = `function () {
+  try {
+    var a = Asc.scope.args, comment = null, all = Api.GetAllComments() || [];
+    var plain = function (text) { return String(text == null ? "" : text).replace(/\\s+/g, " ").trim(); };
+    var same = function (c) { return String(c.GetUserId() || "") === a.match.userId && plain(c.GetText()) === plain(a.match.text); };
+    if (a.sessionId) { var byId = Api.GetCommentById(a.sessionId); if (byId && same(byId)) comment = byId; }
+    if (!comment) {
+      var found = all.filter(function (c) { return same(c) && (!a.match.time || Math.abs((Number(c.GetTimeUTC()) || 0) - a.match.time) <= 1000); });
+      if (found.length > 1) return { error: { code: "comment_ambiguous", message: "more than one comment has that author, time and text" } };
+      comment = found[0] || null;
+    }
+    if (!comment) return { error: { code: "comment_gone", message: "the comment is not in the workbook any more" } };
+    comment.AddReply(a.text, a.author, a.userId);
+    Api.Save();
+    return { result: { replies: comment.GetRepliesCount(), sessionId: String(comment.GetId()) } };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
 /** The job kinds and the command each runs; edits recalculate the document after them, reads do not. (cell.edit is
  * the plugin's own run of CELL_EDIT_COMMANDS.) */
 export const COMMANDS: Record<string, { source: string; edit: boolean }> = {
   "word.read": { source: WORD_READ, edit: false },
   "word.edit": { source: WORD_EDIT, edit: true },
   "cell.read": { source: CELL_READ, edit: false },
+  "word.comments": { source: WORD_COMMENTS, edit: false },
+  "word.reply": { source: WORD_REPLY, edit: true },
+  "cell.comments": { source: CELL_COMMENTS, edit: false },
+  "cell.reply": { source: CELL_REPLY, edit: true },
 };
 
 /**
@@ -681,8 +793,62 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       })();
     }
   }
+  // A message in the editor's chat, as the agent: the plugin's own method, not a command (it changes no document).
+  function chatSend(job) {
+    window.Asc.plugin.executeMethod("CoAuthoringChatSendMessage", [String(job.args.text)], function (sent) {
+      done(job, sent === false ? { error: { code: "failed", message: "the editor did not send the message" } } : { result: { sent: true } });
+    });
+  }
+  // A reply on a comment through the editor's own comment methods, as its comment panel makes one: what an editor that
+  // may only comment can do (a builder command's change is rolled back there). The comment is found by its author's
+  // user id, its text and its time (a Word thread's from its GUID, through word.comments), as the methods name no GUID.
+  function methodReply(job) {
+    var a = job.args;
+    function find(then) {
+      if (!a.guid) return then(a.match);
+      call(commands["word.comments"].run, {}, false, function (out) {
+        var c = out.result && (out.result.comments || []).filter(function (c) { return c.guid === a.guid; })[0];
+        then(c ? { userId: c.userId, author: c.author, text: c.text, time: c.time } : null);
+      });
+    }
+    // The methods give a comment's time in the editor's local time, the builder in UTC: the same moment is off by the
+    // time zone's offset, a whole number of quarter hours of at most 14 hours.
+    // The texts as the methods and the builder give them, which differ in the spaces at their ends.
+    function plain(text) { return String(text == null ? "" : text).replace(/\\s+/g, " ").trim(); }
+    function sameTime(local, utc) {
+      if (!utc || !local) return true;
+      var off = local - utc, q = Math.round(off / 900000);
+      return Math.abs(q) <= 56 && Math.abs(off - q * 900000) <= 1000;
+    }
+    find(function (match) {
+      if (!match) return done(job, { error: { code: "comment_gone", message: "the comment is not in the document any more" } });
+      window.Asc.plugin.executeMethod("GetAllComments", [], function (all) {
+        var hits = (all || []).filter(function (c) {
+          var d = c && c.Data || {};
+          // The spreadsheet editor's methods give no user id: the author's name there.
+          var who = d.UserId ? String(d.UserId) === match.userId : !match.author || String(d.UserName || "") === match.author;
+          return who && plain(d.Text) === plain(match.text) && sameTime(Number(d.Time), match.time);
+        });
+        if (hits.length !== 1) return done(job, { error: { code: hits.length ? "comment_ambiguous" : "comment_gone", message: (hits.length ? "more than one comment has that author, time and text" : "the comment is not in the document any more") } });
+        var data = hits[0].Data, replies = (data.Replies || []).slice();
+        replies.push({ UserName: a.author, UserId: a.userId, Text: a.text, Time: String(Date.now()), Solved: false });
+        data.Replies = replies;
+        window.Asc.plugin.executeMethod("ChangeComment", [hits[0].Id, data], function () {
+          if (!a.guid) return done(job, { result: { replies: replies.length } });
+          // A Word comment changed through the methods is made anew, with a GUID of its own: its thread goes on under
+          // that one, which the answer names.
+          call(commands["word.comments"].run, {}, false, function (out) {
+            var now = (out.result && out.result.comments || []).filter(function (c) { return c.userId === match.userId && plain(c.text) === plain(match.text); });
+            done(job, { result: now.length === 1 && now[0].guid !== a.guid ? { replies: replies.length, guid: now[0].guid } : { replies: replies.length } });
+          });
+        });
+      });
+    });
+  }
   function run(job) {
     if (job.kind === "cell.edit") return cellEdit(job);
+    if ((job.kind === "word.reply" || job.kind === "cell.reply") && job.args && job.args.how === "method") return methodReply(job);
+    if (job.kind === "chat.send") return chatSend(job);
     var command = commands[job.kind];
     if (!command) return done(job, { error: { code: "bad_op", message: "no command " + job.kind } });
     window.Asc.scope.args = job.args;

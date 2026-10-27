@@ -30,7 +30,9 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BRIDGE_JS, HOLD_MS, pluginConfig, pluginIndex, SEAT_PAGE_HTML, SEAT_PAGE_JS } from "./seat-page";
 
-export type SeatMode = "edit" | "view";
+/** How an agent's editor opens: to edit, to read only, or to read and comment only (an agent that may not change the
+ * document still answers in its comment threads). */
+export type SeatMode = "edit" | "view" | "comment";
 export type SeatJob = { kind: string; args: unknown };
 
 /** What the seats need from the rest of the half (server.ts gives the real ones, tests their own). */
@@ -77,6 +79,9 @@ export const LIMITS = {
   sentMs: 10_000,
   /** An edit after which the editor says nothing of its changes this long changed nothing to send. */
   quietMs: 2_000,
+  /** An editor opened only to post an answer (its agent made no tool call in it for `toolWindowMs`) closes this soon. */
+  postIdleMs: 60_000,
+  toolWindowMs: 5 * 60_000,
 };
 
 type Outcome = { result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: boolean };
@@ -106,6 +111,8 @@ type Editor = {
   lastUsed: number;
   lastPoll: number;
   busy: boolean;
+  /** When a call other than a post last used it (0: none since it opened): an editor only posts keep closes sooner. */
+  lastTool: number;
   reopened: boolean;
   queue: Job[];
   held: ServerResponse | null;
@@ -164,7 +171,7 @@ export function configureSeat(d: SeatDeps, overrides: Partial<typeof LIMITS> = {
   startFailed = undefined;
   lastEditorClosed = Date.now();
   if (sweeper) clearInterval(sweeper);
-  sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2));
+  sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2, limits.postIdleMs / 2));
   sweeper.unref();
 }
 
@@ -172,7 +179,7 @@ export function configureSeat(d: SeatDeps, overrides: Partial<typeof LIMITS> = {
 export function tuneSeats(overrides: Partial<typeof LIMITS>): void {
   limits = { ...limits, ...overrides };
   if (sweeper) clearInterval(sweeper);
-  sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2));
+  sweeper = setInterval(sweep, Math.min(30_000, limits.idleMs / 2, limits.postIdleMs / 2));
   sweeper.unref();
 }
 
@@ -214,15 +221,17 @@ export function seats(): { home: string; docId: string; mode: SeatMode; key: str
  * `editor_not_ready`, `timeout`, `busy`, `behind`, and the command's own, such as `quote_not_found`), or the coded
  * errors of `ensureAgent` and `mint`. An abort (`signal`) only stops the wait: a job the plugin took runs to its end.
  */
-export async function run(home: string, docId: string, mode: SeatMode, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<unknown> {
+export async function run(home: string, docId: string, mode: SeatMode, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number; post?: boolean } = {}): Promise<unknown> {
   if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
-  // A view-mode editor takes no edit: refused here, before its plugin is asked.
-  if (mode === "view" && job.kind.endsWith(".edit")) throw new SeatError("read_only", "the agent's editor of this document is read-only");
-  const edit = job.kind.endsWith(".edit");
+  // A view-mode editor takes no edit and no reply, a comment-only one no edit: refused here, before its plugin is asked.
+  if ((mode === "view" && changes(job.kind)) || (mode === "comment" && job.kind.endsWith(".edit"))) throw new SeatError("read_only", "the agent's editor of this document is read-only");
+  const edit = changes(job.kind);
   // A read opens the file anew where it changed outside the editor; an edit hears `behind` first.
   const editor = await editorFor(home, docId, mode, options.signal, !edit);
   editor.busy = true;
   editor.lastUsed = Date.now();
+  // A post (an answer the extension writes for the agent) is no use of the agent's own: see LIMITS.postIdleMs.
+  if (!options.post) editor.lastTool = Date.now();
   try {
     // Closed between the find and now (another call made room for its document): never handed, so nothing ran.
     if (!editors.has(editor.id)) throw new SeatError("editor_closed", "the agent's editor of this document was closed for another document as the call began; try again");
@@ -246,6 +255,12 @@ export async function run(home: string, docId: string, mode: SeatMode, job: Seat
     editor.busy = false;
     editor.lastUsed = Date.now();
   }
+}
+
+/** Whether a job changes the document (an edit, or a reply on a comment): it is waited for until the editor sent it, and
+ * a view-mode editor is never handed it. */
+export function changes(kind: string): boolean {
+  return kind.endsWith(".edit") || kind.endsWith(".reply");
 }
 
 /** The key the editor of (`home`, `docId`) has open, where one is open: the session an edit's save is asked of. */
@@ -308,7 +323,7 @@ async function open(home: string, docId: string, mode: SeatMode, signal?: AbortS
     close(idle, "room for another document");
   }
   const token = randomBytes(16).toString("hex");
-  const editor: Editor = { id: randomUUID(), home, docId, key: "", mode, token, ready: false, waiters: [], lastUsed: Date.now(), lastPoll: Date.now(), busy: true, reopened: false, queue: [], held: null, unsentAt: 0, unsentSeq: 0, sentSeq: 0, stateWaiters: [] };
+  const editor: Editor = { id: randomUUID(), home, docId, key: "", mode, token, ready: false, waiters: [], lastUsed: Date.now(), lastPoll: Date.now(), busy: true, lastTool: 0, reopened: false, queue: [], held: null, unsentAt: 0, unsentSeq: 0, sentSeq: 0, stateWaiters: [] };
   editors.set(editor.id, editor);
   try {
     const minted = await d.mint({ home, docId, mode, pluginUrl: `${d.listenerOrigin()}/plugin/${token}/` });
@@ -543,7 +558,11 @@ function order(o: Record<string, unknown>): void {
  * while. */
 function sweep(): void {
   const now = Date.now();
-  for (const e of [...editors.values()]) if (!e.busy && now - e.lastUsed > limits.idleMs) close(e, "idle");
+  for (const e of [...editors.values()]) {
+    if (e.busy) continue;
+    const posting = now - e.lastTool > limits.toolWindowMs;
+    if (now - e.lastUsed > (posting ? limits.postIdleMs : limits.idleMs)) close(e, posting ? "idle after posting" : "idle");
+  }
   if (agentRunning && !startingAgent && !editors.size && now - lastEditorClosed > limits.agentIdleMs && deps) {
     agentRunning = false;
     pageSeen = 0;

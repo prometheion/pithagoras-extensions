@@ -22,10 +22,8 @@
  * in edit mode only where it could change it (portal.files.identity); otherwise its editor opens in view mode and
  * office_edit is refused (`read_only`).
  *
- * Wakes (the drain side): ping.ts only QUEUES wakes server-side and rings the bell with chats.tell(chatId,
- * {type:"ping"}). The office pi extension registered from THIS factory listens on the UI_RECEIVE bus event
- * ("pithagoras:v1:ui:receive", the portal's UI event for a chat's extension) and drains the queue per entry via
- * pi.sendMessage({customType:"office-comment-ping", ...}, {deliverAs:"followUp", triggerTurn:true}).
+ * Comments that mention an agent, and the editor's chat, are no wake of these tools: each gets an internal chat of
+ * its own (docchat.ts), which this factory gives the tools as any chat of the folder, without the question tool.
  *
  * Injection seams (unit tests must never reach portal()): registerTools(opts) takes the portal bits -- chats.extend
  * registrar, chat->folder lookup, folders list, the file reader, store root, audit record fn, log fn, the seats, the
@@ -41,11 +39,7 @@ import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
 import { editJob, OpError, type EditJob } from "./ops";
 import * as seat from "./seat";
-import { drainWakeQueue } from "./ping";
 import * as docchat from "./docchat";
-
-/** The UI_RECEIVE bus event chats.tell rings (the portal's own document tools listen on the same name). */
-const UI_RECEIVE = "pithagoras:v1:ui:receive";
 
 /** Marks a text to be translated where it is shown: a label kept in a table (de.ts has its German). */
 const msg = <T extends string>(text: T): T => text;
@@ -212,7 +206,7 @@ function oneAtATime<T>(docId: string, work: () => Promise<T>): Promise<T> {
 /**
  * server.ts calls ONCE at boot. Later calls (unit tests) update the seams and register again through
  * whatever registrar is configured -- production registers exactly once, tests each get their own fake
- * `extend`, so no once-guard here (unlike wirePing's onPersisted hook, which truly can only attach once).
+ * `extend`, so no once-guard here.
  */
 export function registerTools(opts?: ToolsDeps): void {
   if (opts) cfg = { ...cfg, ...opts };
@@ -234,7 +228,6 @@ function installForChat(pi: unknown, chat: { id: string }): void {
   // A chat of a comment thread or of the editor's chat: nobody is there to answer a question.
   if (docchat.isInternal(chat.id)) docchat.hush(pi);
   installTools(pi, canonical(folder.path), chat.id);
-  hearOfficePings(pi, chat.id); // the same factory owns the drain side of the wake queue
 }
 
 /* ------------------------------------------------------------------ */
@@ -687,27 +680,4 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     const buf = readBytes(doc, chatId);
     return { from: "file", threads: doc.ext === "docx" ? docxThreads(buf) : xlsxThreads(buf) };
   }
-}
-
-/**
- * The drain side of the wake queue: on the UI_RECEIVE bell with data.type "ping"
- * -- which ping.ts rings per woken home via chats.tell(chatId, {type:"ping"}) -- take this chat's queued
- * wake entries off ping.ts' server-side queue and hand each to pi: shown to the person, delivered as a
- * follow-up that triggers a turn, carrying {docId, commentId} in details. A reloaded pi keeps the bus:
- * the handler of the one that went is removed on session shutdown.
- */
-function hearOfficePings(pi: unknown, chatId: string): void {
-  const p = pi as any;
-  if (typeof p?.events?.on !== "function") return; // no event bus in this pi build: the tools still work, wakes just wait for a drain by another means
-  const off = p.events.on(UI_RECEIVE, (message: { data?: unknown }) => {
-    if ((message as { data?: { type?: string } })?.data?.type !== "ping") return; // ours is data.type "ping" (ping.ts sets it)
-    for (const entry of drainWakeQueue(chatId)) {
-      try {
-        p.sendMessage({ customType: "office-comment-ping", content: entry.text, display: true, details: entry.details }, { deliverAs: "followUp", triggerTurn: true });
-      } catch (e) {
-        logLine(`could not deliver a queued office wake to chat ${chatId}: ${(e as Error)?.message ?? e}`);
-      }
-    }
-  });
-  p.on?.("session_shutdown", () => off?.());
 }

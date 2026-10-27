@@ -909,28 +909,6 @@ test("every refusal the agent reads starts with \"error:<code> \"", async () => 
   assert.match(await refused(tool(s, "office_comments").execute("x5", { id: sheet.docId, thread: 5 }), "thread"), /^error:bad_op /);
 });
 
-/* ------------------------------------------------------------------ */
-/* the wake drain side                                */
-/* ------------------------------------------------------------------ */
-
-test("the factory also registers the UI_RECEIVE ping drain for office chats only", () => {
-  const s = setup();
-  (setup as any).__run();
-  assert.equal(s.pi.uiHandlers.length, 1);
-  // a non-ping bell is ignored without draining anything or throwing
-  s.pi.uiHandlers[0]({ data: { type: "other" } });
-  assert.equal(s.pi.sent.length, 0);
-
-  const notes = makePi();
-  registerTools({
-    extend: (f) => f(notes, { id: "chat-notes" }),
-    chatFolder: () => "/f/notes",
-    folders: () => FOLDERS,
-    root: s.root,
-    log: (l) => s.seen.logs.push(l),
-  });
-  assert.equal(notes.uiHandlers.length, 0); // no tools in a plain chat -> no drain either
-});
 
 /* ------------------------------------------------------------------ */
 /* comments and the editor's chat                                      */
@@ -972,4 +950,11 @@ test("a chat of a comment thread or of the editor's chat gets no question tool: 
   (setup as any).__run();
   assert.ok(!seen.includes("tool_call"));
   docchat.__resetDocchatForTests();
+});
+
+test("no wake on a saved comment any more: the factory hears no bell, and a saved mention starts nothing (comments go through docchat)", () => {
+  const s = setup();
+  (setup as any).__run();
+  assert.equal(s.pi.uiHandlers.length, 0);
+  assert.equal(s.pi.sent.length, 0);
 });

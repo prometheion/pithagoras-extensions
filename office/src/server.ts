@@ -5,7 +5,8 @@
  *   1. setPortal(portal) + the shared HS256 secret file dataDir()/jwt-secret (0600; created ONCE with
  *      crypto.randomBytes(32).toString("hex"), reused on every later boot), which the Document Server is given: editor
  *      configs are signed and callbacks verified with it.
- *   2. registerTools({record}), wirePing({root, record}) -- both audit sinks land in portal().audit AND a log line.
+ *   2. registerTools({record}) -- its audit sink lands in portal().audit AND a log line -- and docchat (comments and
+ *      the editor's chat as the way to talk to agents: wireDocchat).
  *   3. callback.configure(...) once, with the Document Server's origin (container.dsOrigin) and the boot secret;
  *      live.setMetaResolver(docId -> store.refresh(docId, root)?.mtimeMs ?? null).
  *   4. The UI routes on portal.router (mounted by the portal at /api/x/@pithagoras/office, session-gated there); every
@@ -43,7 +44,6 @@ import { mintTicket, verifyTicket } from "./tickets";
 import * as store from "./store";
 import * as live from "./live";
 import * as callback from "./callback";
-import { wirePing } from "./ping";
 import * as docchat from "./docchat";
 import { saveNow } from "./editing";
 import { holdWayBack } from "./back";
@@ -1010,7 +1010,6 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   } catch (e) {
     logLine(`@pithagoras/office: owners could not be moved to folders: ${(e as Error).message}`);
   }
-  wirePing({ root: dd, record: recordAudit });
   wireDocchat(dd);
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd, record: recordAudit });
   live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);

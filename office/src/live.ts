@@ -1,6 +1,6 @@
 /**
  * In-memory co-editing registry, shared by src/callback.ts (DS status-1 presence + the lock commands of the
- * callback state machine), src/server.ts (the /state poller and editor-config minting) and later src/ping.ts.
+ * callback state machine), src/server.ts (the /state poller and editor-config minting) and docchat.ts (who is in a session).
  *
  * Deliberately dependency-free -- no fs, no node:fs, no portal(), no store import: pure process memory keyed by
  * docId, so every module (and every unit test) can import it anywhere without a started server half or a data

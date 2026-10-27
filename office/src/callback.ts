@@ -21,7 +21,7 @@
  * Persistence (statuses 2/6 + the status-1 forcesave action): fetch body.url with retries (the DS can lag after
  * a save) from the Document Server itself (`onDocumentServer`: the envelope names the browser's address), run
  * store.persistBytes through its mtime gate (a save it refuses is kept as a conflict copy), fire
- * every onPersisted(docId, buffer) hook (src/ping.ts registers its comment-mention wake through wirePing later),
+ * every onPersisted(docId, buffer) hook (docchat.ts registers there: a save that lacks a comment thread an earlier save had),
  * then apply the status's lock rule: 2 unlocks AFTER persist, 6 STAYS locked. Everything happens BEFORE the
  * {"error":0} answer -- DS acts on the JSON error field, and any non-zero makes the editor show a save error /
  * retry.
@@ -141,8 +141,8 @@ export function docIdOf(keyId: string, root: string): string | null {
 
 const persistedHooks: Array<(docId: string, buffer: Buffer) => void> = [];
 
-/** Register a hook fired with (docId, EXACT saved bytes) after every successful persist -- src/ping.ts's
- * comment-mention wake registers here through wirePing; the document save never waits on or dies with a hook. */
+/** Register a hook fired with (docId, EXACT saved bytes) after every successful persist -- docchat.ts's reconcile of
+ * comment threads registers here; the document save never waits on or dies with a hook. */
 export function onPersisted(fn: (docId: string, buffer: Buffer) => void): void {
   persistedHooks.push(fn);
 }

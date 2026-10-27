@@ -29,7 +29,8 @@ import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
  * Opt-in, as e2e.test.mts: Docker Engine 28 or later, the images (`onlyoffice/documentserver:10.0.0.1` unless
  * OFFICE_E2E_IMAGE names another, `chromedp/headless-shell:157.0.8103.15`, `node:22.23.4-alpine3.23`), Chromium for
  * Playwright, and a few minutes. Its containers, networks and volumes go by names of their own (`office-portal-ds…`,
- * `office-portal-<pid>`), and are removed at its end.
+ * `office-portal-<pid>`; OFFICE_E2E_CONTAINER and OFFICE_E2E_PORT name others, as in e2e.test.mts), and are removed at
+ * its end.
  *
  *   OFFICE_E2E=1 PITHAGORAS_DIR=<a built Pithagoras> [OFFICE_PORTAL_MODE=container] node --import tsx --test test/portal/real-portal.test.mts
  *
@@ -66,7 +67,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   const HERE = path.dirname(fileURLToPath(import.meta.url));
   const PACKAGE = path.resolve(HERE, "../..");
   const IMAGE = process.env.OFFICE_E2E_IMAGE ?? "onlyoffice/documentserver:10.0.0.1";
-  const PREFIX = "office-portal-ds";
+  const PREFIX = process.env.OFFICE_E2E_CONTAINER ?? "office-portal-ds";
   const NODE_IMAGE = "node:22.23.4-alpine3.23";
   const portalName = `office-portal-${process.pid}`;
 
@@ -599,6 +600,82 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     } finally {
       rogue.close();
     }
+  });
+
+  test("g: from a chat, the agent makes a spreadsheet of three sheets (one renamed, one with a formula across sheets, one hidden) while a person has it open; office_read names them all, the person sees them live, and the file holds what office_read showed", { timeout: 900_000 }, async () => {
+    const id = await chat();
+    await say(id, [{ name: "office_create", arguments: { title: "Quarter", type: "cell" } }]);
+    const doc = (await state()).docs.find((x) => x.title === "Quarter")!.docId;
+    const { page, frame } = await personOpens(doc, "cell");
+
+    const t0 = Date.now();
+    const [edited, ...reads] = await say(id, [
+      {
+        name: "office_edit",
+        arguments: {
+          id: doc,
+          ops: [
+            { renameSheet: "Sheet1", to: "Sales Q1" },
+            { range: "A1:B3", values: [["Month", "Sales"], ["Jan", 120], ["Feb", 80]] },
+            { addSheet: "Summary" },
+            { sheet: "Summary", range: "A1:B1", values: [["Total", "='Sales Q1'!B2+'Sales Q1'!B3"]] },
+            { addSheet: "Notes" },
+            { sheet: "notes", range: "A1", values: [["Checked by the agent"]] },
+            { hideSheet: "Notes" },
+          ],
+        },
+      },
+      { name: "office_read", arguments: { id: doc } },
+      { name: "office_read", arguments: { id: doc, sheet: "Notes" } },
+    ]);
+    // The portal wraps what a tool read in markers of its own (outside content): the read is what is inside them.
+    const [read, notes] = reads.map((r) => r.replace(/^<<<untrusted:\w+>>>[^\n]*\n/, "").replace(/\n<<<\/untrusted:\w+>>>$/, ""));
+    console.log(`g. office_edit (${Date.now() - t0} ms with the reads): ${JSON.stringify(edited)}\ng. office_read: ${JSON.stringify(read)}\ng. office_read of Notes: ${JSON.stringify(notes)}`);
+    assert.match(edited, /Edited "Quarter" \(7 ops\), saved as revision .* 1 person in the document saw it live\./);
+    assert.match(read, /\nSheets: 1 "Sales Q1", 2 "Summary", 3 "Notes" \(hidden\)\n/);
+    assert.match(read, /\n\nSheet "Sales Q1" \(A1:B3\):\nA1: "Month"\nB1: "Sales"\nA2: "Jan"\nB2: 120\nA3: "Feb"\nB3: 80\n/);
+    assert.match(read, /\n\nSheet "Summary" \(A1:B1\):\nA1: "Total"\nB1: 200 \(='Sales Q1'!B2\+'Sales Q1'!B3\)\n/);
+    assert.match(read, /\n\nSheet "Notes" \(A1\):\nA1: "Checked by the agent"$/);
+    assert.match(notes, /\nSheets: 1 "Sales Q1", 2 "Summary", 3 "Notes" \(hidden\)\n\nSheet "Notes" \(A1\):\nA1: "Checked by the agent"$/, "one sheet read alone, and every sheet named");
+
+    // The person's editor: the three sheets as the agent made them, and the formula computed there (the largest of
+    // Summary!A1:B1 in its status bar, as the person sees it with that sheet's cells selected).
+    const personSheets = () => frame.evaluate(`(function () { var e = window.Asc.editor, out = []; for (var i = 0; i < e.asc_getWorksheetsCount(); i++) out.push(e.asc_getWorksheetName(i) + (e.asc_isWorksheetHidden(i) ? " (hidden)" : "")); return out.join(", "); })()`) as Promise<string>;
+    let seen = "";
+    const t1 = Date.now();
+    assert.ok(await until(async () => (seen = await personSheets()) === "Sales Q1, Summary, Notes (hidden)", 5000), `the person sees the agent's sheets: ${seen}`);
+    console.log(`g. the person's sheets ${Date.now() - t1} ms after the tool answered: ${seen}`);
+    let max = "";
+    assert.ok(
+      await until(async () => {
+        await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_showWorksheet(1); e.asc_findCell("A1:B1"); })()`);
+        max = String(await frame.evaluate(`(document.getElementById("status-math-max") || {}).textContent || ""`)).trim();
+        return /\b200\b/.test(max);
+      }, 10_000),
+      `the person sees Summary's formula computed: ${max}`,
+    );
+    await notReloaded(page, frame);
+    await personCloses(page);
+
+    // The file afterwards: the sheets in order, the hidden one hidden, every cell as office_read showed it.
+    const { parseXlsx } = await import("../../src/ooxml.ts");
+    const shown = new Map<string, Map<string, string>>();
+    for (const part of read.split("\n\n").filter((p) => p.startsWith("Sheet "))) {
+      const [head, ...cells] = part.split("\n");
+      shown.set(/^Sheet "(.*)" \(/.exec(head)![1], new Map(cells.map((c) => /^([A-Z]+\d+): (.*?)(?: \(=.*\))?$/.exec(c)!).map((m) => [m[1], m[2].startsWith('"') ? JSON.parse(m[2]) : m[2]])));
+    }
+    const col = (n: number) => String.fromCharCode(65 + n);
+    let book: ReturnType<typeof parseXlsx> | undefined;
+    const cellsOf = (rows: string[][]) => new Map(rows.flatMap((row, r) => row.map((v, c) => [`${col(c)}${r + 1}`, v] as [string, string]).filter(([, v]) => v !== "")));
+    const inFile = () => new Map(book!.sheetNames.map((name) => [name, cellsOf(book!.sheets[name] ?? [])]));
+    assert.ok(await until(async () => (book = parseXlsx(readFileSync(await fileOf(doc)))).sheetNames.length === 3, 90_000, 1000), `the file has the three sheets: ${JSON.stringify(book?.sheetNames)}`);
+    assert.deepEqual(book!.sheetNames, ["Sales Q1", "Summary", "Notes"]);
+    assert.deepEqual(book!.hiddenSheets, ["Notes"]);
+    assert.deepEqual(inFile(), shown, "the file holds what office_read showed");
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    const parts = await Promise.all(Object.keys(zip.files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).map((n) => zip.file(n)!.async("string")));
+    assert.ok(parts.some((x) => /<f>(&apos;|')Sales Q1(&apos;|')!B2\+(&apos;|')Sales Q1(&apos;|')!B3<\/f><v>200<\/v>/.test(x)), "the formula across sheets is in the file with its value");
+    await noConflictCopy("Quarter");
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

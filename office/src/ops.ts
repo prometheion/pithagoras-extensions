@@ -36,7 +36,7 @@ export type SheetOp =
   | { deleteSheet: string };
 export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: (CellOp | SheetOp)[] } };
 
-/** The sheet ops' own keys, each with the keys that may go with it (the first one names the op). */
+/** The sheet ops, by the key that names each: the other keys it may have (`with`), and those of them it must (`needs`). */
 export const SHEET_OPS: Record<string, { with: string[]; needs: string[] }> = {
   addSheet: { with: ["position"], needs: [] },
   renameSheet: { with: ["to"], needs: ["to"] },

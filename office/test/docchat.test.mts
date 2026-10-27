@@ -82,6 +82,7 @@ function configure(): void {
 
 beforeEach(() => {
   docchat.__resetDocchatForTests();
+  Object.assign(docchat.postTimings, { freshMs: 0 });
   root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), "office-docchat-test-"));
   chats = [
     { id: "aegis-main", folder: "/f/aegis" },
@@ -254,12 +255,15 @@ test("an answer after a suspected injection is not posted; a failed run says so 
   assert.equal(posts.filter((p) => p.job.kind === "word.reply").length, 1);
 });
 
-test("a spreadsheet's answer is found by the comment's author, text and time the pages reported", async () => {
+test("a spreadsheet's answer is found by the comment's author, text and time the pages reported, once the comment is a few seconds old", async () => {
+  Object.assign(docchat.postTimings, { freshMs: 300 });
   const docId = (await createDoc({ title: "Sheet", type: "cell", owner: "/f/aegis" }, root)).docId;
   docchat.report(docId, "k", [{ type: "comment", guid: "{A}", sessionId: "sheet5_x", userId: "portal-user", text: "Bitte prüfen +Aegis", time: 1793108364144 }, ui("u1", "comment", "{A}", "Bitte prüfen +Aegis")]);
   await settle();
   prompts[0].resolve({ status: "done", answer: "Geprüft." });
   await settle();
+  assert.equal(posts.length, 0, "not while the comment is fresh");
+  await delay(400);
   const reply = posts.find((p) => p.job.kind === "cell.reply")!;
   assert.deepEqual(reply.job.args, { sessionId: "sheet5_x", match: { userId: "portal-user", author: "", text: "Bitte prüfen +Aegis", time: 1793108364144 }, text: "Geprüft.", author: "Aegis (agent)", userId: reply.job.args.userId });
 });
@@ -471,7 +475,9 @@ test("a post that fails is tried again a little later; a reply a person's change
     // A reply the read back does not find is posted again, until it is there.
     let lost = 2;
     configure();
+    const closed: string[] = [];
     docchat.configureDocchat({
+      closeEditor: (home, d) => void closed.push(`${home} ${d}`),
       seatRun: async (home, d, mode, job) => {
         posts.push({ home, docId: d, mode, job: job as never });
         if (job.kind === "word.comments") return { comments: [{ guid: "00000001", userId: "portal-user", text: "+Aegis eins", replies: lost-- > 0 ? [] : [{ text: "Nochmal." }] }] };
@@ -484,6 +490,7 @@ test("a post that fails is tried again a little later; a reply a person's change
     prompts[1].resolve({ status: "done", answer: "Nochmal." });
     await delay(500);
     assert.equal(posts.filter((p) => p.job.kind === "word.reply").length, 3, "posted again twice");
+    assert.deepEqual(closed, [`/f/aegis ${docId}`, `/f/aegis ${docId}`], "each from an editor opened anew");
     assert.notEqual(docchat.statesOf(docId)[0].state, "failed");
   } finally {
     Object.assign(docchat.postTimings, { repostMs: 5_000, retryMs: 10_000 });

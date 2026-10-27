@@ -887,6 +887,7 @@ function wireDocchat(dd: string): void {
     root: dd,
     seatRun: (home, docId, mode, job, options) => seat.run(home, docId, mode, job, options),
     keyOf: seat.keyOf,
+    closeEditor: (home, docId, why) => seat.closeEditor(home, docId, why),
     save: (key) => saveNow(key),
     command: (body) => callback.command(body),
     officeState: () => officeState(dd),

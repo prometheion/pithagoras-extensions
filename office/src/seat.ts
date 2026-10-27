@@ -516,6 +516,13 @@ export function closeDoc(docId: string, why = "its document was deleted"): void 
   for (const e of [...editors.values()]) if (e.docId === docId) close(e, why);
 }
 
+/** The editor of (`home`, `docId`) closed, where it is open and not busy: the next call opens the document anew (a
+ * reply it made that never reached anybody may have left it with a stale view of a comment's lock). */
+export function closeEditor(home: string, docId: string, why: string): void {
+  const e = find(home, docId);
+  if (e && !e.busy) close(e, why);
+}
+
 /** Every seat closed: the person stopped Office, or removed its Document Server, and the browser went with it
  * (container.stopContainer). The next call starts it again, where Office runs again. */
 export function closeSeats(): void {

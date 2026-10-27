@@ -9,7 +9,7 @@ import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { closeDoc, configureSeat, health, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
+import { closeDoc, closeEditor, configureSeat, health, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
 import { BRIDGE_JS, PLUGIN_GUID } from "../src/seat-page";
 import { browser, type Handler } from "./seat-browser.mts";
 
@@ -696,6 +696,20 @@ test("an editor opened only to post an answer closes after the short post idle; 
     await run("/homes/b", "doc-1", "edit", { kind: "chat.send", args: {} }, { post: true });
     for (let i = 0; i < 40 && seats().length > 1; i++) await delay(50);
     assert.deepEqual(seats().map((x) => x.home), ["/homes/b"], "the post-only editor went, the agent's own stays");
+  } finally {
+    await s.done();
+  }
+});
+
+test("closeEditor closes the one editor of a home and a document, and the next call opens it anew", async () => {
+  const s = await setup();
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "cell.comments", args: {} });
+    await run("/homes/b", "doc-1", "edit", { kind: "cell.comments", args: {} });
+    closeEditor("/homes/a", "doc-1", "a test");
+    assert.deepEqual(seats().map((x) => x.home), ["/homes/b"]);
+    await run("/homes/a", "doc-1", "edit", { kind: "cell.comments", args: {} });
+    assert.equal(s.b.opened.length, 3);
   } finally {
     await s.done();
   }

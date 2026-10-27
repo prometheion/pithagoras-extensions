@@ -135,6 +135,8 @@ export type DocchatDeps = {
   seatRun?: (home: string, docId: string, mode: "edit" | "view" | "comment", job: { kind: string; args: unknown }, options?: { post?: boolean }) => Promise<unknown>;
   /** The key the agent's editor of the document has open (seat.keyOf). */
   keyOf?: (home: string, docId: string) => string | undefined;
+  /** Closes the agent's editor of the document (seat.closeEditor): the next post opens it anew. */
+  closeEditor?: (home: string, docId: string, why: string) => void;
   /** A save of the session of `key` (editing.saveNow). */
   save?: (key: string) => Promise<unknown>;
   /** One command to the Document Server's command service (callback.command). */
@@ -173,7 +175,7 @@ const SAVE_EVERY_MS = 3_000;
 /** A reply lost to a person's change at the same moment is posted again this often, this far apart; a post that
  * failed (the agents' browser starting, Docker slow) is tried again this often, further apart each time. Tests make
  * them shorter. */
-export const postTimings = { reposts: 3, repostMs: 5_000, retries: 6, retryMs: 10_000 };
+export const postTimings = { reposts: 3, repostMs: 5_000, retries: 6, retryMs: 10_000, freshMs: 5_000 };
 
 export const DEFAULT_LIMITS: DocchatLimits = {
   runs: DEFAULT_SETTINGS.docchatRuns,
@@ -722,6 +724,12 @@ async function postNow(t: Target): Promise<void> {
         return;
       }
       const mode = modeFor(doc, folder, true, entry.chatId);
+      // A cell comment just made is held by its author's editor a moment longer (its lock comes back with its save):
+      // a reply in that moment is turned back.
+      if (doc.ext === "xlsx") {
+        const age = now() - thread.createdAt;
+        if (age < postTimings.freshMs) await new Promise((resolve) => setTimeout(resolve, postTimings.freshMs - age));
+      }
       const max = limits().replyChars;
       const reply = text.length > max ? `${text.slice(0, max)} (…)` : text;
       // An editor that may only comment: Word rolls a builder command's reply back there, and takes it through its
@@ -744,6 +752,8 @@ async function postNow(t: Target): Promise<void> {
       for (let again = 1; !(await replyThere(folder, docId, mode, t.guid, thread, reply)); again++) {
         if (again > postTimings.reposts) throw Object.assign(new Error("the comment was busy each time the answer was posted"), { code: "comment_busy" });
         log(`the answer in thread ${t.guid} of ${docId} was lost to a change at the same time: posted again (${again})`);
+        // From an editor opened anew: one whose reply was turned back can keep a stale view of the comment's lock.
+        cfg.closeEditor?.(folder, docId, "its reply on a comment did not reach the document");
         await new Promise((resolve) => setTimeout(resolve, postTimings.repostMs));
         await run(folder, docId, mode, job, { post: true });
         await saveSoon(folder, docId);

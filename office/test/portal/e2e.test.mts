@@ -27,10 +27,11 @@ import { EDITOR_HTML, editorPageJs } from "./page.mts";
  * the refused callback token and the embed viewer each broke. Then the agent works in documents through its own editor
  * (the agents' browser, `chromedp/headless-shell`): a closed document, one a person types in, a spreadsheet, a
  * read-only seat, a file changed outside, a failed op, each Word op in the real editor, a used range away from A1, the
- * sheets of a workbook (made, written, renamed, moved, copied, hidden, shown, deleted) while a person has it open;
- * people's editors run no plugin, the agents' browser reaches nothing but the relay, and with Office stopped the agent
- * reads the saved file and edits nothing. And once more
- * through a reverse proxy that ends TLS and sends no forwarded headers, as a plain nginx in front does.
+ * sheets of a workbook (made, written, renamed, moved, copied, hidden, shown, deleted) while a person has it open,
+ * hidden ones kept hidden, an op the editor does not take with every op before it taken back, and how long large
+ * edits take; people's editors run no plugin, the agents' browser reaches nothing but the relay, and with Office
+ * stopped the agent reads the saved file and edits nothing. And once more through a reverse proxy that ends TLS and
+ * sends no forwarded headers, as a plain nginx in front does.
  *
  * Opt-in: it needs Docker Engine 28 or later, the images (about 3 GB, `onlyoffice/documentserver:10.0.0.1` unless
  * OFFICE_E2E_IMAGE names another, and the agents' editor, which the test downloads through the Office page's route
@@ -280,6 +281,18 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.ok(frame, "the person's editor frame");
     return { page, frame };
   }
+  /** The sheets the person's spreadsheet editor shows, in order, as "Name" or "Name (hidden)". */
+  const sheetsOf = (frame: import("@playwright/test").Frame) => frame.evaluate(`(function () { var e = window.Asc.editor, out = []; for (var i = 0; i < e.asc_getWorksheetsCount(); i++) out.push(e.asc_getWorksheetName(i) + (e.asc_isWorksheetHidden(i) ? " (hidden)" : "")); return out.join(", "); })()`) as Promise<string>;
+  /** office_edit of `doc`, and how soon the person's editor (`frame`) shows `want`, logged under `label`. */
+  const sheetEdit = (label: string, doc: string, frame: import("@playwright/test").Frame) => async (step: string, ops: unknown[], want: string) => {
+    const t0 = Date.now();
+    const edited = await tools.office_edit.execute(`s-${step}`, { id: doc, ops });
+    const took = Date.now() - t0;
+    let seen = "";
+    const live = await until(async () => (seen = await sheetsOf(frame)) === want, 5000);
+    console.log(`${label}. ${step}: ${edited.content[0].text} (${took} ms); the person's sheets ${JSON.stringify(seen)} ${Date.now() - t0} ms after the call`);
+    assert.ok(live, `${step}: the person sees ${want} (they see ${seen})`);
+  };
   /** What the person's Word editor holds, as its own select-all reads it. */
   const personText = (frame: import("@playwright/test").Frame) => frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); return e.pluginMethod_GetSelectedText(); })()`) as Promise<string>;
   const until = async (what: () => Promise<boolean>, ms: number) => {
@@ -624,17 +637,8 @@ async function run(PITHAGORAS: string): Promise<void> {
   test("12. sheets while a person has the workbook open: made, written into and read by a formula on the first sheet, renamed and moved, copied, hidden and shown, deleted; each shows in the person's editor, and the file holds them in order", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Sheets", "cell");
     const { page, frame } = await personOpens(doc);
-    const personSheets = () => frame.evaluate(`(function () { var e = window.Asc.editor, out = []; for (var i = 0; i < e.asc_getWorksheetsCount(); i++) out.push(e.asc_getWorksheetName(i) + (e.asc_isWorksheetHidden(i) ? " (hidden)" : "")); return out.join(", "); })()`) as Promise<string>;
-    /** office_edit, and how soon the person's editor shows `want`. */
-    const edit = async (label: string, ops: unknown[], want: string) => {
-      const t0 = Date.now();
-      const edited = await tools.office_edit.execute(`s-${label}`, { id: doc, ops });
-      const took = Date.now() - t0;
-      let seen = "";
-      const live = await until(async () => (seen = await personSheets()) === want, 5000);
-      console.log(`12. ${label}: ${edited.content[0].text} (${took} ms); the person's sheets ${JSON.stringify(seen)} ${Date.now() - t0} ms after the call`);
-      assert.ok(live, `${label}: the person sees ${want} (they see ${seen})`);
-    };
+    const personSheets = () => sheetsOf(frame);
+    const edit = sheetEdit("12", doc, frame);
     const read = async () => (await tools.office_read.execute("s-read", { id: doc })).content[0].text.split("\n\n").slice(1).join("\n\n");
 
     await edit("made and written", [{ addSheet: "Data" }, { sheet: "Data", range: "A1:B1", values: [[2, 3]] }, { range: "A1", values: [["=Data!A1+Data!B1"]] }], "Sheet1, Data");
@@ -671,6 +675,104 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.deepEqual(book.sheets["My data"][0], ["2", "3"]);
     assert.deepEqual(book.sheets["Sheet1"][0], ["5", "6"]);
     assert.match(await partOf(doc, "xl/workbook.xml"), /<sheet name="My data"[^>]*\/><sheet name="Sheet1"[^>]*\/><sheet name="Empty"/);
+    await page.context().close();
+  });
+
+  test("13. hidden sheets stay hidden: the first sheet hidden, then a sheet added and copied; a hidden sheet's move refused, and shown, moved and hidden again in one call; the first sheet deleted and one added in one call", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Hidden sheets", "cell");
+    const { page, frame } = await personOpens(doc);
+    const edit = sheetEdit("13", doc, frame);
+    const refused = async (ops: unknown[]) => tools.office_edit.execute("h-refused", { id: doc, ops }).then(() => "", (e: Error) => e.message);
+    await edit("made", [{ addSheet: "Data" }, { sheet: "Data", range: "A1:B1", values: [[1, "=A1*2"]] }], "Sheet1, Data");
+    // The agent's editor is on its first sheet: hidden, the next one is its active sheet, after which a sheet is added.
+    await edit("first hidden, then added and copied", [{ hideSheet: "Sheet1" }, { addSheet: "Added" }, { copySheet: "Data", to: "Data copy" }], "Sheet1 (hidden), Data, Data copy, Added");
+    // The copied sheet computes on, and so does its copy, each from its own cells.
+    await edit("written after the copy", [{ sheet: "Data", range: "A1", values: [[5]] }, { sheet: "Data copy", range: "A1", values: [[7]] }], "Sheet1 (hidden), Data, Data copy, Added");
+    const copied = (await tools.office_read.execute("h-copied", { id: doc })).content[0].text;
+    assert.match(copied, /Sheet "Data" \(A1:B1\):\nA1: 5\nB1: 10 \(=A1\*2\)/);
+    assert.match(copied, /Sheet "Data copy" \(A1:B1\):\nA1: 7\nB1: 14 \(=A1\*2\)/);
+    await edit("added in a later call", [{ addSheet: "Later" }], "Sheet1 (hidden), Data, Data copy, Added, Later");
+    assert.match(await refused([{ addSheet: "Not made" }, { moveSheet: "Sheet1", position: 3 }]), /^error:sheet_hidden op 2: "Sheet1" is hidden/);
+    await delay(1500);
+    assert.equal(await sheetsOf(frame), "Sheet1 (hidden), Data, Data copy, Added, Later", "the refused call changed nothing");
+    await edit("shown, moved and hidden again", [{ showSheet: "Sheet1" }, { moveSheet: "Sheet1", position: 3 }, { hideSheet: "Sheet1" }], "Data, Data copy, Sheet1 (hidden), Added, Later");
+    await edit("added after the move", [{ addSheet: "After" }, { copySheet: "Added", to: "Added copy", position: 1 }], "Added copy, Data, Data copy, Sheet1 (hidden), Added, Later, After");
+    await edit("first deleted and one added in one call", [{ deleteSheet: "Added copy" }, { addSheet: "Fresh" }, { sheet: "Fresh", range: "A1", values: [["=Data!A1+1"]] }], "Data, Data copy, Sheet1 (hidden), Added, Later, After, Fresh");
+    const text = (await tools.office_read.execute("h-read", { id: doc })).content[0].text;
+    assert.match(text, /\nSheets: 1 "Data", 2 "Data copy", 3 "Sheet1" \(hidden\), 4 "Added", 5 "Later", 6 "After", 7 "Fresh"\n/);
+    assert.match(text, /Sheet "Fresh" \(A1\):\nA1: 6 \(=Data!A1\+1\)/);
+    const { parseXlsx } = await import("../../src/ooxml.ts");
+    const book = parseXlsx(readFileSync(await fileOf(doc)));
+    assert.deepEqual(book.sheetNames, ["Data", "Data copy", "Sheet1", "Added", "Later", "After", "Fresh"]);
+    assert.deepEqual(book.hiddenSheets, ["Sheet1"]);
+    await page.context().close();
+  });
+
+  test("14. an op the editor does not take, after a write, a rename, a move, a hide, a delete, an add and a copy: every one of them taken back in the real editor, the cells with their formats and texts", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Taken back", "cell");
+    const { page, frame } = await personOpens(doc);
+    const edit = sheetEdit("14", doc, frame);
+    // "'00123" is the text 00123, as typed into Excel.
+    await edit("made", [{ range: "B2:D2", values: [[3, "'00123", "=B2*2"]] }, { addSheet: "Keep" }, { addSheet: "Other" }, { sheet: "Other", range: "A1", values: [["other"]] }], "Sheet1, Keep, Other");
+    const read = async () => (await tools.office_read.execute("t-read", { id: doc })).content[0].text.split("\n\n").slice(1).join("\n\n");
+    const before = await read();
+    console.log(`14. before: ${JSON.stringify(before)}`);
+    assert.match(before, /B2: 3\nC2: "00123"\nD2: 6 \(=B2\*2\)/);
+    const t0 = Date.now();
+    const failed = await tools.office_edit.execute("t-fail", {
+      id: doc,
+      ops: [
+        { range: "B2:C2", values: [["10%", "7"]] },
+        { renameSheet: "Keep", to: "Kept" },
+        { moveSheet: "Other", position: 1 },
+        { hideSheet: "Kept" },
+        { deleteSheet: "Other" },
+        { addSheet: "Temp" },
+        { copySheet: "Sheet1", to: "Copy" },
+        { range: "E1", values: [["=SUM("]] },
+      ],
+    }).then(() => "", (e: Error) => e.message);
+    console.log(`14. the failing call (${Date.now() - t0} ms): ${failed}`);
+    assert.match(failed, /^error:bad_value op 8: the editor did not take the values for E1 of "Sheet1": a formula it cannot read/);
+    let seen = "";
+    assert.ok(await until(async () => (seen = await sheetsOf(frame)) === "Sheet1, Keep, Other", 5000), `the person's sheets are as they were (they see ${seen})`);
+    await delay(1500);
+    assert.equal(await sheetsOf(frame), "Sheet1, Keep, Other", "and stay so");
+    assert.equal(await read(), before, "every cell and sheet as it was");
+    // A later write into B2 is computed into D2 as before.
+    await edit("written after", [{ range: "B2", values: [[4]] }], "Sheet1, Keep, Other");
+    assert.match(await read(), /B2: 4\nC2: "00123"\nD2: 8 \(=B2\*2\)/);
+    // Saved with that edit: B2 has its own format again (not a percent one), C2 is still text.
+    const { parseXlsx } = await import("../../src/ooxml.ts");
+    const book = parseXlsx(readFileSync(await fileOf(doc)));
+    assert.deepEqual(book.sheetNames, ["Sheet1", "Keep", "Other"]);
+    assert.deepEqual(book.sheets["Sheet1"][1].slice(1, 4), ["4", "00123", "8"]);
+    const sheetXml = await partOf(doc, "xl/worksheets/sheet1.xml");
+    const styles = await partOf(doc, "xl/styles.xml");
+    const cell = (ref: string) => new RegExp(`<c r="${ref}"([^>]*)>`).exec(sheetXml)?.[1] ?? "";
+    const numFmt = (ref: string) => {
+      const s = /\bs="(\d+)"/.exec(cell(ref));
+      const xfs = /<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(styles)![1].match(/<xf\b[^>]*>/g)!;
+      return s ? Number(/numFmtId="(\d+)"/.exec(xfs[Number(s[1])])?.[1] ?? 0) : 0;
+    };
+    console.log(`14. B2 <c${cell("B2")}> numFmt ${numFmt("B2")}; C2 <c${cell("C2")}> numFmt ${numFmt("C2")}`);
+    assert.equal(numFmt("B2"), 0, "B2 is General again");
+    assert.match(cell("C2"), /\bt="(s|str|inlineStr)"/, "C2 holds text");
+    await page.context().close();
+  });
+
+  test("15. how long the edits take in the real editor: 200 cell ops in one call, and 20 sheet ops in one call", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Timings", "cell");
+    const { page, frame } = await personOpens(doc);
+    let t0 = Date.now();
+    await tools.office_edit.execute("m-cells", { id: doc, ops: Array.from({ length: 200 }, (_, n) => ({ range: `A${n + 1}`, values: [[n]] })) });
+    const cells = Date.now() - t0;
+    t0 = Date.now();
+    await tools.office_edit.execute("m-sheets", { id: doc, ops: [...Array.from({ length: 10 }, (_, n) => ({ addSheet: `S${n}` })), ...Array.from({ length: 10 }, (_, n) => ({ copySheet: "Sheet1", to: `C${n}` }))] });
+    const sheets = Date.now() - t0;
+    console.log(`15. 200 cell ops: ${cells} ms; 10 adds and 10 copies: ${sheets} ms`);
+    assert.match((await tools.office_read.execute("m-read", { id: doc, sheet: "C9" })).content[0].text, /A200: 199/);
+    assert.equal((await sheetsOf(frame)).split(", ").length, 21);
     await page.context().close();
   });
 

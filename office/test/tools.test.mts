@@ -608,7 +608,7 @@ test("office_edit and office_read say what the agent can do with sheets", () => 
   }
   assert.match(edit.description, /='My data'!A1/);
   // What a copy and a delete do not keep, and how names are matched.
-  assert.match(edit.description, /no charts or pictures/);
+  assert.match(edit.description, /values, formulas, number formats and column widths only/);
   assert.match(edit.description, /formulas naming it turn #REF!/);
   assert.match(edit.description, /names match in any case/);
   assert.match(edit.description, /error:partial/);

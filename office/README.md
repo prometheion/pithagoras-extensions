@@ -236,9 +236,9 @@ agents' editor.
   stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
   not written.
 - The agent edits text, paragraphs, tables, cells and sheets; it cannot change formatting beyond a paragraph's style,
-  write comments or make tracked changes. A sheet the agent copies takes the cells (values, formulas, their formats)
-  and column widths of the old one, not its charts, pictures, row heights or settings. An edit made while a person
-  types in the same paragraph merges as the editor merges two people's typing.
+  write comments or make tracked changes. A sheet the agent copies takes the values, formulas, number formats and
+  column widths of the old one, not its other formatting (fonts, colours, borders), charts, pictures, row heights or
+  settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
 

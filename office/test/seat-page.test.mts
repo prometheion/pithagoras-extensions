@@ -239,7 +239,7 @@ function cellsOf(range: string): string[][] {
 function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; never?: boolean | ((what: string) => boolean) } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? { name: s, hidden: false, cells: {}, formats: {}, widths: {} } : { ...s, cells: {}, formats: {}, widths: {} }));
   const later: { due: number; fn: () => void }[] = [];
-  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false };
+  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[] };
   const ask = (what: string, fn: () => void) => {
     state.asked.push(what);
     const never = typeof options.never === "function" ? options.never(what) : options.never;
@@ -291,13 +291,20 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         const all = new Set(grid.flat().map((a) => sh.formats[a] ?? "General"));
         return all.size === 1 ? [...all][0] : null;
       },
-      SetNumberFormat: (f: string) => grid.flat().forEach((a) => (f === "General" ? delete sh.formats[a] : (sh.formats[a] = f))),
+      SetNumberFormat: (f: string) =>
+        grid.flat().forEach((a) => {
+          state.formatted.push(a);
+          if (f === "General") delete sh.formats[a];
+          else sh.formats[a] = f;
+        }),
       GetAddress: () => {
         const used = Object.keys(sh.cells).sort();
         return used.length ? `${used[0]}:${used.at(-1)}` : "A1";
       },
-      Copy: (dest: { into: (cells: Record<string, unknown>) => void }) => dest.into(Object.fromEntries(grid.flat().filter((a) => a in sh.cells).map((a) => [a, sh.cells[a]]))),
-      into: (cells: Record<string, unknown>) => Object.assign(sh.cells, cells),
+      // In DS 10.0 a Copy or Paste into another sheet leaves the old sheet's formulas computing no more.
+      Copy: () => {
+        throw new Error("ApiRange.Copy into another sheet breaks the old sheet's formulas");
+      },
       GetColumnWidth: () => sh.widths[cellsOf(address)[0][0].charCodeAt(0) - 65] ?? 9,
       SetColumnWidth: (w: number) => (sh.widths[cellsOf(address)[0][0].charCodeAt(0) - 65] = w),
     };
@@ -504,7 +511,7 @@ test("a cell op the editor does not take (a formula it cannot read) fails the ed
     { range: "B2:E2", values: [["10%", "7", "", "8"]] },
     { renameSheet: "Other", to: "Renamed" },
     { range: "A1", values: [["x"]] },
-    { range: "D1:E1", values: [[1, "=SUM(A1"]] },
+    { range: "D1:E1", values: [[1, "=SUM("]] },
   ];
   const out = await plugin(book, { kind: "cell.edit", args: { ops } });
   assert.equal(out.error?.code, "bad_value", JSON.stringify(out));
@@ -527,6 +534,15 @@ test("cells written back in a rollback after a later op failed keep their own fo
   assert.equal(JSON.stringify(book.state.sheets), before);
 });
 
+test("cells put back get a format only where theirs differs: empty cells around them stay out of the used range", async () => {
+  const book = workbook(["Sheet1"]);
+  book.state.sheets[0].cells.A1 = 1;
+  const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ range: "A1:C1", values: [[2, "", ""]] }, { range: "D1:E1", values: [["x", "=SUM("]] }] } });
+  assert.equal(out.error?.code, "bad_value");
+  assert.deepEqual(book.state.sheets[0].cells, { A1: 1 });
+  assert.deepEqual(book.state.formatted, [], "no cell given a format: none of them changed theirs");
+});
+
 test("a hidden sheet is not moved (the editor would show it, or lose the move), and shown, moved and hidden again in one call it stays hidden through a later add", async () => {
   const book = workbook(["A", { name: "Secret", hidden: true }, "C"]);
   const refused = await plugin(book, { kind: "cell.edit", args: { ops: [{ range: "A1", values: [[1]] }, { moveSheet: "Secret", position: 1 }] } });
@@ -538,4 +554,19 @@ test("a hidden sheet is not moved (the editor would show it, or lose the move), 
   const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ showSheet: "Secret" }, { moveSheet: "Secret", position: 1 }, { hideSheet: "Secret" }, { addSheet: "Notes" }, { copySheet: "A", to: "A2" }] } });
   assert.deepEqual(out.result, { ops: 5, cells: 0 }, JSON.stringify(out));
   assert.deepEqual(book.view(), ["Secret (hidden)", "A", "A2", "C", "Notes"]);
+});
+
+test("a copied sheet gets the old one's values, formulas, texts, number formats and column widths, without ApiRange.Copy (which stops the old sheet's formulas)", async () => {
+  const book = workbook(["Sheet1"]);
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { A1: "00123", B1: 0.1, C1: "=B1*2" });
+  sheet1.formats.B1 = "0%";
+  sheet1.widths[0] = 20;
+  const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ copySheet: "Sheet1", to: "Copy" }] } });
+  assert.deepEqual(out.result, { ops: 1, cells: 0 }, JSON.stringify(out));
+  const copy = book.state.sheets[1];
+  assert.equal(copy.name, "Copy");
+  assert.deepEqual(copy.cells, { A1: "00123", B1: 0.1, C1: "=B1*2" });
+  assert.deepEqual(copy.formats, { B1: "0%" }, "the text written as text, then its own format back");
+  assert.equal(copy.widths[0], 20);
 });

@@ -26,9 +26,10 @@
  * - In the spreadsheet editor, `Api.AddSheet`, `ApiWorksheet.Move` and `Delete` only ask for the change (the workbook
  *   is locked through the Document Server first): the sheet changes after the command returned, for the person too.
  *   `SetName` and `SetVisible` change it at once, and a rename carries the formulas that name the sheet along. A
- *   command cannot reach the editor's own API (`Asc.editor`), so a sheet is copied as a new sheet that takes the
- *   cells (`ApiRange.Copy`) and column widths of the old one. The editor's Undo takes back nothing of a spreadsheet
- *   command, and `Api.GetSheet` finds a name only in its own case.
+ *   command cannot reach the editor's own API (`Asc.editor`), so a sheet is copied as a new sheet given the values,
+ *   formulas, number formats and column widths of the old one. `ApiRange.Copy` and `Paste` into another sheet are
+ *   not used: the old sheet's formulas computed no more after them. The editor's Undo takes back nothing of a
+ *   spreadsheet command, and `Api.GetSheet` finds a name only in its own case.
  * - A moved sheet becomes the editor's active sheet, and a hidden sheet made active is shown again; a hidden sheet's
  *   move never reached the person's editor, and the agent's editor lost the sheet changes after it. So only visible
  *   sheets are moved. Hiding the active sheet makes the next visible one active.
@@ -389,8 +390,8 @@ const CELL_SAVE = `function () {
 /**
  * One op of a spreadsheet edit (`Asc.scope.args`: `op`, its `index`, and `pending`, the names the sheets this edit
  * deletes have until it ends, which the op does not see). Besides the sheet ops of ops.ts, the steps the plugin makes
- * of them: `writes` (a run of cell ops one after the other, each with its own `index`), `fillSheet` (a copy's cells and
- * column widths from `from`), `restoreSheet` (a deleted sheet back, as `to`), `dropSheet` (a sheet deleted for good),
+ * of them: `writes` (a run of cell ops one after the other, each with its own `index`), `fillSheet` (a copy's values,
+ * formulas, number formats and column widths from `from`), `restoreSheet` (a deleted sheet back, as `to`), `dropSheet` (a sheet deleted for good),
  * `restoreCells` (cells put back as they were). `real` names a sheet by its name exactly, pending ones included.
  * Answers what the plugin goes on with: `inverse` (the step that takes this one back), `expect` (what the sheets show
  * once the editor made it: a name there, `has`, gone, `gone`, or their `order`), `then` (the next step of the same
@@ -435,8 +436,11 @@ const CELL_STEP = `function () {
       // so that it stays text; the cell's own format comes back after.
       saved.values.forEach(function (row, r) { row.forEach(function (v, c) { if (typeof v === "string" && v !== "" && v.charAt(0) !== "=") sheet.GetRange(cells[r][c]).SetNumberFormat("@"); }); });
       range.SetValue(saved.values.length === 1 && saved.values[0].length === 1 ? saved.values[0][0] : saved.values);
-      if (saved.format !== null) range.SetNumberFormat(saved.format);
-      else saved.formats.forEach(function (row, r) { row.forEach(function (f, c) { sheet.GetRange(cells[r][c]).SetNumberFormat(f); }); });
+      // Only where it differs: a format set on an empty cell would make it part of the sheet's used range.
+      cells.forEach(function (row, r) { row.forEach(function (a, c) {
+        var f = saved.format !== null ? saved.format : saved.formats[r][c], cell = sheet.GetRange(a);
+        if (cell.GetNumberFormat() !== f) cell.SetNumberFormat(f);
+      }); });
     };
     if (op.writes !== undefined) {
       var written = [], cells = 0;
@@ -478,8 +482,12 @@ const CELL_STEP = `function () {
       return { result: { inverse: { dropSheet: op.to, real: true }, expect: { has: op.to }, then: { fillSheet: op.to, from: source, position: op.position } } };
     }
     if (op.fillSheet !== undefined) {
-      var from = Api.GetSheet(op.from), to = Api.GetSheet(op.fillSheet), used = from.GetUsedRange(), address = String(used.GetAddress(false, false));
-      used.Copy(to.GetRange(address));
+      var from = Api.GetSheet(op.from), to = Api.GetSheet(op.fillSheet), address = String(from.GetUsedRange().GetAddress(false, false));
+      // Written as a write is put back, not with ApiRange.Copy: in DS 10.0 a Copy or Paste into another sheet left the
+      // old sheet's formulas computing no more (they kept their values when the cells they read changed).
+      var copied = capture(from, address);
+      copied.sheet = to.GetName();
+      restore(copied);
       var m = /^([A-Z]+)\\d+(?::([A-Z]+)\\d+)?$/.exec(address), first = m ? colIndex(m[1]) : 0, last = m && m[2] ? colIndex(m[2]) : first;
       for (var c = first; c <= Math.min(last, first + 1023); c++) to.GetRange(colName(c) + "1").SetColumnWidth(from.GetRange(colName(c) + "1").GetColumnWidth());
       // By default right after the sheet it copies.

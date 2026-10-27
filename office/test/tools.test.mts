@@ -577,6 +577,28 @@ test("office_edit (spreadsheet): sheet ops go in the same job, with time for the
   assert.equal(s.seat.runs.length, 2);
 });
 
+test("office_edit (spreadsheet): many sheet ops get two minutes at most; one cut off that deletes a sheet says what may be left of it", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", owner: "/f/atlas" }, s.root);
+  const t = tool(s, "office_edit");
+  await t.execute("e1", { id: sheet.docId, ops: Array.from({ length: 20 }, (_, k) => ({ addSheet: `S${k}` })) });
+  assert.equal(s.seat.runs[0].timeoutMs, 120_000);
+  for (const code of ["timeout", "editor_closed"]) {
+    s.seat.answer = () => Promise.reject(new SeatError(code, "the agent's editor gave no result within 120 s; what the call did is unknown: read the document again before you go on", undefined, true));
+    assert.match(await refused(t.execute("e2", { id: sheet.docId, ops: [{ deleteSheet: "Old" }] })), new RegExp(`^error:${code} .*before you go on; a sheet the call deletes may be left as a hidden sheet named "~deleted …", which you can delete\\.$`));
+    assert.doesNotMatch(await refused(t.execute("e3", { id: sheet.docId, ops: [{ addSheet: "New" }] })), /~deleted/);
+  }
+});
+
+test("office_edit (spreadsheet): an edit the editor could not take back whole is error:partial, says to read the document first, and is in the audit log", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", owner: "/f/atlas" }, s.root);
+  s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: the editor did not delete the sheet "B" within 10 s. Not all of the call could be taken back (the sheet "A" is deleted already).', 1, true));
+  const said = await refused(tool(s, "office_edit").execute("e1", { id: sheet.docId, ops: [{ deleteSheet: "A" }, { deleteSheet: "B" }] }));
+  assert.match(said, /^error:partial op 2: .*deleted already\)\. Part of this call may be in the document: read it with office_read before you go on, and do not repeat the call as it was\.$/);
+  assert.match(s.seen.records.at(-1)!.reason, /office_edit: 2 op\(s\) \(sheets\) on .*; failed, and not taken back whole \(partial\)$/);
+});
+
 test("office_edit and office_read say what the agent can do with sheets", () => {
   const s = setup();
   const edit = tool(s, "office_edit");
@@ -585,6 +607,11 @@ test("office_edit and office_read say what the agent can do with sheets", () => 
     assert.ok(key in edit.parameters.properties.ops.items.properties, key);
   }
   assert.match(edit.description, /='My data'!A1/);
+  // What a copy and a delete do not keep, and how names are matched.
+  assert.match(edit.description, /no charts or pictures/);
+  assert.match(edit.description, /formulas naming it turn #REF!/);
+  assert.match(edit.description, /names match in any case/);
+  assert.match(edit.description, /error:partial/);
   assert.match(tool(s, "office_read").description, /the list of its sheets \(position, name, hidden or not\)/);
 });
 

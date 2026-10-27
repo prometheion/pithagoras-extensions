@@ -204,6 +204,18 @@ test("the command's own error comes back coded, with the op it names", async () 
   }
 });
 
+test("a failed job the plugin says may have changed the document all the same (ran) is a refusal that says the command ran; no other field makes it one", async () => {
+  const s = await setup((job) => {
+    throw { outcome: { error: { code: "partial", op: 2, message: "op 3: not all of it could be taken back" }, ran: (job.args as { ran: unknown }).ran } };
+  });
+  try {
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "cell.edit", args: { ran: true } }), (e: SeatError) => e.code === "partial" && e.op === 2 && e.ran === true);
+    await assert.rejects(run("/homes/a", "doc-1", "edit", { kind: "cell.edit", args: { ran: "yes" } }), (e: SeatError) => e.code === "partial" && e.ran === false);
+  } finally {
+    await s.done();
+  }
+});
+
 test("idle editors close after the idle time, and the browser stops a while after the last one", async () => {
   const s = await setup(undefined, { idleMs: 300, agentIdleMs: 300 });
   try {

@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editJob, MAX_ARGS_BYTES, MAX_OPS, OpError, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
+import { editJob, MAX_ARGS_BYTES, MAX_OPS, MAX_SHEET_OPS, OpError, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
 import { SHEET_MODEL_SRC, WORD_MODEL_SRC } from "../src/seat-page";
 
 /** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
@@ -241,4 +241,19 @@ test("the sheets check: the last visible sheet is never hidden or deleted", () =
   assert.equal(simulateSheets([{ name: "A" }, { name: "B" }], [{ hideSheet: "A" }, { deleteSheet: "B" }])?.op, 1);
   // A copy is visible.
   assert.equal(simulateSheets([{ name: "A" }], [{ copySheet: "A", to: "B" }, { deleteSheet: "A" }]), null);
+});
+
+test("the sheets check: a hidden sheet is not moved; shown, moved and hidden again in one call it is", () => {
+  const book = [{ name: "A" }, { name: "Secret", hidden: true }];
+  const hidden = simulateSheets(book, [{ range: "A1", values: [[1]] }, { moveSheet: "secret", position: 1 }]);
+  assert.deepEqual([hidden?.code, hidden?.op], ["sheet_hidden", 1]);
+  assert.match(hidden!.message, /^op 2: "Secret" is hidden, and the editor moves visible sheets only: show it, move it and hide it again/);
+  assert.equal(simulateSheets(book, [{ showSheet: "Secret" }, { moveSheet: "Secret", position: 1 }, { hideSheet: "Secret" }]), null);
+  assert.equal(simulateSheets([{ name: "A" }, { name: "B" }], [{ hideSheet: "B" }, { moveSheet: "B", position: 1 }])?.code, "sheet_hidden", "hidden by an op before it");
+});
+
+test("sheet ops: at most MAX_SHEET_OPS of them in one call, cell ops beside them not counted", () => {
+  const adds = (n: number) => Array.from({ length: n }, (_, k) => ({ addSheet: `S${k}` }));
+  assert.doesNotThrow(() => editJob("xlsx", [...adds(MAX_SHEET_OPS), { range: "A1", values: [[1]] }]));
+  assert.throws(() => editJob("xlsx", adds(MAX_SHEET_OPS + 1)), (e: unknown) => e instanceof OpError && e.code === "bad_op" && /at most 20 sheet ops \(got 21\)/.test(e.message));
 });

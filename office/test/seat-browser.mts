@@ -37,7 +37,8 @@ export function browser(_origin: string, handler: Handler, rewrite: (url: string
       try {
         outcome = { result: await handler(job) };
       } catch (e) {
-        outcome = { error: e };
+        // A thrown `{outcome}` is posted as it is (an error with what else the plugin says of it, such as `ran`).
+        outcome = e && typeof e === "object" && "outcome" in e ? (e as { outcome: Record<string, unknown> }).outcome : { error: e };
       }
       const states = job.kind.endsWith(".edit") ? behaviour.states : [];
       await fetch(`${base}done`, { method: "POST", body: JSON.stringify({ jobId: job.jobId, ...outcome }), signal: sig }).catch(() => {});

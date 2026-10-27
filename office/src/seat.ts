@@ -730,7 +730,7 @@ function pluginRoute(req: IncomingMessage, res: ServerResponse, editor: Editor, 
         }
         return json(res, 413, { error: "the result is too large", code: "too_large" });
       }
-      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number } } = {};
+      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: unknown } = {};
       try {
         done = JSON.parse(body.toString("utf8"));
       } catch {
@@ -739,7 +739,9 @@ function pluginRoute(req: IncomingMessage, res: ServerResponse, editor: Editor, 
       const job = editor.queue.find((j) => j.handed && j.id === done.jobId);
       if (job) {
         editor.queue = editor.queue.filter((j) => j !== job);
-        job.settle(done.error ? { error: done.error } : { result: done.result });
+        // `ran`: the plugin says its failed job may have changed the document all the same (a spreadsheet edit it could
+        // not take back whole).
+        job.settle(done.error ? { error: done.error, ...(done.ran === true ? { ran: true } : {}) } : { result: done.result });
       }
       json(res, 200, {});
     });

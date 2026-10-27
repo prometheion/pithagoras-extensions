@@ -12,8 +12,8 @@
  * named), one row of values per row of the range; a string that starts with "=" is a formula, "" clears the cell.
  * And the sheets themselves (SheetOp), a sheet named case-insensitively as Excel does, a position counted from 1:
  * - `{addSheet, position?}`: a new empty sheet of that name, at the position or after the last sheet;
- * - `{renameSheet, to}`, `{moveSheet, position}`, `{copySheet, to, position?}` (the copy right after its sheet where
- *   no position is given), `{hideSheet}`, `{showSheet}`, `{deleteSheet}`.
+ * - `{renameSheet, to}`, `{moveSheet, position}` (a visible sheet), `{copySheet, to, position?}` (the copy right after
+ *   its sheet where no position is given), `{hideSheet}`, `{showSheet}`, `{deleteSheet}`; MAX_SHEET_OPS of them a call.
  * A new name must be one Excel takes (sheetNameProblem); whether the sheets named are there, a new name is free, a
  * position is inside the workbook and a visible sheet is left is checked by the command (seat-page.ts,
  * SHEET_MODEL_SRC), on the sheets as they stand when it runs.
@@ -54,6 +54,9 @@ const SHEET_NAME_BANNED = /[[\]:*?/\\]/;
 export const STYLES = ["Normal", "Heading 1", "Heading 2", "Heading 3", "Title", "List Paragraph"] as const;
 /** The most ops one call carries, and the most their arguments may take as JSON. */
 export const MAX_OPS = 200;
+/** The most sheet ops one call carries: each waits for the Document Server's answer (seat-page.ts, cellEdit), and an
+ * edit has two minutes (tools.ts, MAX_EDIT_MS). */
+export const MAX_SHEET_OPS = 20;
 export const MAX_ARGS_BYTES = 1024 * 1024;
 /** The largest sheet address: XFD1048576. */
 const MAX_COLS = 16_384;
@@ -75,7 +78,10 @@ export function editJob(ext: "docx" | "xlsx", ops: unknown): EditJob {
   if (ops.length > MAX_OPS) throw new OpError("bad_op", `one call takes at most ${MAX_OPS} ops (got ${ops.length}); split the edit into several calls`);
   if (Buffer.byteLength(JSON.stringify(ops)) > MAX_ARGS_BYTES) throw new OpError("bad_op", `the ops take more than ${MAX_ARGS_BYTES / 1024} KB; split the edit into several calls`);
   if (ext === "docx") return { kind: "word.edit", args: { ops: ops.map(wordOp) } };
-  return { kind: "cell.edit", args: { ops: ops.map(cellOp) } };
+  const cells = ops.map(cellOp);
+  const sheetOps = cells.filter((op) => !("range" in op)).length;
+  if (sheetOps > MAX_SHEET_OPS) throw new OpError("bad_op", `one call takes at most ${MAX_SHEET_OPS} sheet ops (got ${sheetOps}); split the edit into several calls`);
+  return { kind: "cell.edit", args: { ops: cells } };
 }
 
 function wordOp(op: unknown, i: number): WordOp {

@@ -216,42 +216,82 @@ test("cell.read: every sheet of the workbook, hidden ones and empty ones among t
 /* the plugin's spreadsheet edit                                         */
 /* ------------------------------------------------------------------ */
 
-type FakeSheet = { name: string; hidden: boolean; cells: Record<string, unknown>; widths: Record<number, number> };
+type FakeSheet = { name: string; hidden: boolean; cells: Record<string, unknown>; formats: Record<string, string>; widths: Record<number, number> };
 
 /** A1 addresses of a range, row by row. */
 function cellsOf(range: string): string[][] {
-  const m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(range)!;
+  const m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(range.replace(/\$/g, ""))!;
   const col = (l: string) => [...l].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
   const name = (n: number) => { let out = ""; for (n++; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(65 + ((n - 1) % 26)) + out; return out; };
   const [c1, r1, c2, r2] = [col(m[1]), Number(m[2]), col(m[3] ?? m[1]), Number(m[4] ?? m[2])];
-  return Array.from({ length: r2 - r1 + 1 }, (_, r) => Array.from({ length: c2 - c1 + 1 }, (_, c) => `${name(c1 + c)}${r1 + r}`));
+  return Array.from({ length: Math.abs(r2 - r1) + 1 }, (_, r) => Array.from({ length: Math.abs(c2 - c1) + 1 }, (_, c) => `${name(Math.min(c1, c2) + c)}${Math.min(r1, r2) + r}`));
 }
 
 /**
- * A workbook as the spreadsheet editor's builder API shows it to a command: a sheet is made, moved or deleted two
- * commands after it was asked for (the Document Server's lock), a name or visibility changes at once. `poison` makes
- * a write into that address throw.
+ * A workbook as the spreadsheet editor's builder API shows it to a command (as the end-to-end test and the probes of
+ * DS 10.0 found it): a sheet is made, moved or deleted two commands after it was asked for (the Document Server's
+ * lock), a name or visibility changes at once. A value written is read as Excel's input reads it ("10%" is 0.1 in a
+ * percent format, "00123" is 123, unless the cell is formatted as text), a formula it cannot read ("=SUM(") is not
+ * taken and SetValue answers false. A moved or made sheet becomes the active one, hiding the active one makes the
+ * next visible one active, and a hidden sheet made active is shown again. `poison` makes the first write into that
+ * address throw; `never` keeps the Document Server from making what was asked (all of it, or what it names).
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; never?: boolean } = {}) {
-  const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? { name: s, hidden: false, cells: {}, widths: {} } : { ...s, cells: {}, widths: {} }));
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; never?: boolean | ((what: string) => boolean) } = {}) {
+  const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? { name: s, hidden: false, cells: {}, formats: {}, widths: {} } : { ...s, cells: {}, formats: {}, widths: {} }));
   const later: { due: number; fn: () => void }[] = [];
-  const state = { sheets, commands: 0, saves: 0, active: 0, asked: [] as string[] };
+  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false };
   const ask = (what: string, fn: () => void) => {
     state.asked.push(what);
-    if (!options.never) later.push({ due: state.commands + 2, fn });
+    const never = typeof options.never === "function" ? options.never(what) : options.never;
+    if (!never) later.push({ due: state.commands + 2, fn });
+  };
+  const activate = (sh: FakeSheet) => {
+    state.active = sh;
+    sh.hidden = false;
   };
   const of = new WeakMap<object, FakeSheet>();
+  const read = (sh: FakeSheet, a: string, s: string): unknown => {
+    if (s.startsWith("=") || sh.formats[a] === "@") return s;
+    if (/^-?\d+(\.\d+)?%$/.test(s)) {
+      if ((sh.formats[a] ?? "General") === "General") sh.formats[a] = "0%";
+      return Number(s.slice(0, -1)) / 100;
+    }
+    if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+    if (/^(true|false)$/i.test(s)) return s.toLowerCase() === "true";
+    return s;
+  };
   const rangeOf = (sh: FakeSheet, address: string) => {
     const grid = cellsOf(address);
-    const flat = (v: unknown) => (grid.length === 1 && grid[0].length === 1 ? v : v);
+    const one = grid.length === 1 && grid[0].length === 1;
+    const formula = (v: unknown) => typeof v === "string" && v.startsWith("=");
     return {
-      GetValue: () => flat(grid.map((row) => row.map((a) => (typeof sh.cells[a] === "string" && (sh.cells[a] as string).startsWith("=") ? 0 : sh.cells[a] ?? "")))),
+      GetValue: () => {
+        const rows = grid.map((row) => row.map((a) => (formula(sh.cells[a]) ? 0 : sh.cells[a] ?? "")));
+        return one ? rows[0][0] : rows;
+      },
       GetFormula: () => grid.map((row) => row.map((a) => (sh.cells[a] === undefined ? "" : String(sh.cells[a])))),
       SetValue: (v: unknown) => {
-        if (options.poison && grid.flat().includes(options.poison)) throw new Error("the editor refused the write");
+        if (options.poison && !state.poisoned && grid.flat().includes(options.poison)) {
+          state.poisoned = true;
+          throw new Error("the editor refused the write");
+        }
         const rows = Array.isArray(v) ? (v as unknown[][]) : [[v]];
-        grid.forEach((row, r) => row.forEach((a, c) => (rows[r][c] === "" ? delete sh.cells[a] : (sh.cells[a] = rows[r][c]))));
+        let took = true;
+        grid.forEach((row, r) =>
+          row.forEach((a, c) => {
+            const s = String(rows[r][c]);
+            if (s === "") delete sh.cells[a];
+            else if (s.startsWith("=") && s.split("(").length !== s.split(")").length) took = false;
+            else sh.cells[a] = read(sh, a, s);
+          }),
+        );
+        return took;
       },
+      GetNumberFormat: () => {
+        const all = new Set(grid.flat().map((a) => sh.formats[a] ?? "General"));
+        return all.size === 1 ? [...all][0] : null;
+      },
+      SetNumberFormat: (f: string) => grid.flat().forEach((a) => (f === "General" ? delete sh.formats[a] : (sh.formats[a] = f))),
       GetAddress: () => {
         const used = Object.keys(sh.cells).sort();
         return used.length ? `${used[0]}:${used.at(-1)}` : "A1";
@@ -266,8 +306,12 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     const w = {
       GetName: () => sh.name,
       GetVisible: () => !sh.hidden,
-      SetVisible: (v: boolean) => void (sh.hidden = !v),
+      SetVisible: (v: boolean) => {
+        sh.hidden = !v;
+        if (!v && state.active === sh) state.active = sheets.slice(sheets.indexOf(sh)).concat(sheets).find((s) => !s.hidden) ?? sh;
+      },
       SetName: (n: string) => void (sh.name = n),
+      SetActive: () => activate(sh),
       GetRange: (a: string) => rangeOf(sh, a),
       GetUsedRange: () => {
         const r = rangeOf(sh, "A1");
@@ -279,6 +323,7 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
           sheets.splice(sheets.indexOf(sh), 1);
           const at = before ? sheets.indexOf(of.get(before)!) : sheets.indexOf(of.get(after!)!) + 1;
           sheets.splice(at, 0, sh);
+          activate(sh);
         }),
     };
     of.set(w, sh);
@@ -290,7 +335,13 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       const sh = typeof n === "number" ? sheets[n] : sheets.find((s) => s.name === n);
       return sh ? wrap(sh) : null;
     },
-    AddSheet: (n: string) => ask(`add ${n}`, () => sheets.splice(Math.min(state.active + 1, sheets.length), 0, { name: n, hidden: false, cells: {}, widths: {} })),
+    GetActiveSheet: () => wrap(state.active),
+    AddSheet: (n: string) =>
+      ask(`add ${n}`, () => {
+        const made = { name: n, hidden: false, cells: {}, formats: {}, widths: {} };
+        sheets.splice(sheets.indexOf(state.active) + 1, 0, made);
+        activate(made);
+      }),
     Save: () => void state.saves++,
   };
   /** A command run as the editor runs it: what was asked two commands ago is made first. */
@@ -306,7 +357,7 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
 }
 
 /** The plugin running in its frame with `book` as its editor: it is handed `job`, and resolves with what it posts. */
-async function plugin(book: ReturnType<typeof workbook>, job: { kind: string; args: unknown }): Promise<{ result?: any; error?: any; undone?: boolean }> {
+async function plugin(book: ReturnType<typeof workbook>, job: { kind: string; args: unknown }): Promise<{ result?: any; error?: any; undone?: boolean; ran?: boolean }> {
   let handed = false;
   let posted: (outcome: unknown) => void = () => {};
   const outcome = new Promise<any>((resolve) => (posted = resolve));
@@ -405,10 +456,86 @@ test("a spreadsheet edit the check refuses touches nothing", async () => {
   assert.deepEqual(book.state.sheets[0].cells, {});
 });
 
-test("a spreadsheet edit whose sheet the editor never makes fails after the wait, and what came before is taken back", async () => {
+test("a spreadsheet edit whose sheet the editor never makes fails after the wait, says why it may, and that the sheet may still come", async () => {
   const book = workbook(["Sheet1"], { never: true });
   const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ range: "A1", values: [[1]] }, { addSheet: "Never" }] } });
-  assert.equal(out.error?.code, "failed");
-  assert.match(out.error.message, /^op 2: the editor did not show the change to the sheets within 10 s/);
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.equal(out.ran, true, "asked of the editor: it may still make it");
+  assert.match(out.error.message, /^op 2: the editor did not show the change to the sheet "Never" within 10 s: a person may be working in that sheet, or the workbook's structure is protected; try again later\. The ops before it are taken back, but the change the editor was asked for may still be made\.$/);
   assert.deepEqual(book.state.sheets[0].cells, {}, "the write before it is taken back");
+});
+
+test("a spreadsheet edit whose deleted sheets cannot all be deleted at the end says it is partly made, naming the delete op and its sheet", async () => {
+  // The first delete lands; the second never does (a person in that sheet holds it).
+  let deletes = 0;
+  const book = workbook(["A", "B", "C"], { never: (what) => what.startsWith("delete") && ++deletes === 2 });
+  const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ deleteSheet: "A" }, { deleteSheet: "B" }, { sheet: "C", range: "A1", values: [[1]] }] } });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.equal(out.ran, true);
+  assert.equal(out.error.op, 1);
+  assert.match(out.error.message, /^op 2: the editor did not delete the sheet "B" within 10 s: .* Not all of the call could be taken back \(the sheet "A" is deleted already\)\.$/);
+  assert.equal(out.undone, undefined);
+  // A is gone for good; B and C's cell are back as they were.
+  assert.deepEqual(book.view(), ["B", "C"]);
+  assert.deepEqual(book.state.sheets[1].cells, {});
+});
+
+test("a spreadsheet edit of cell ops alone is one command for all of them, besides the check and the save", async () => {
+  const book = workbook(["Sheet1"]);
+  const ops = Array.from({ length: 200 }, (_, n) => ({ range: `A${n + 1}`, values: [[n]] }));
+  const out = await plugin(book, { kind: "cell.edit", args: { ops } });
+  assert.deepEqual(out.result, { ops: 200, cells: 200 });
+  assert.equal(book.state.commands, 3, "check, the writes, save");
+  assert.equal(book.state.sheets[0].cells.A200, 199);
+  // Runs of cell ops between sheet ops are one command each.
+  const mixed = workbook(["Sheet1"]);
+  await plugin(mixed, { kind: "cell.edit", args: { ops: [{ range: "A1", values: [[1]] }, { range: "A2", values: [[2]] }, { renameSheet: "Sheet1", to: "S" }, { range: "A3", values: [[3]] }, { range: "A4", values: [[4]] }] } });
+  assert.equal(mixed.state.commands, 5, "check, two writes, the rename, two writes, save");
+  assert.deepEqual(mixed.state.sheets[0].cells, { A1: 1, A2: 2, A3: 3, A4: 4 });
+});
+
+test("a cell op the editor does not take (a formula it cannot read) fails the edit, and the cells written before it are as they were, with their formats and texts", async () => {
+  const book = workbook(["Sheet1", "Other"]);
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { B2: 3, C2: "00123", D2: "=B2*2" });
+  sheet1.formats.E2 = "0.00";
+  const before = JSON.stringify(book.state.sheets);
+  const ops = [
+    { range: "B2:E2", values: [["10%", "7", "", "8"]] },
+    { renameSheet: "Other", to: "Renamed" },
+    { range: "A1", values: [["x"]] },
+    { range: "D1:E1", values: [[1, "=SUM(A1"]] },
+  ];
+  const out = await plugin(book, { kind: "cell.edit", args: { ops } });
+  assert.equal(out.error?.code, "bad_value", JSON.stringify(out));
+  assert.equal(out.error.op, 3);
+  assert.match(out.error.message, /^op 4: the editor did not take the values for D1:E1 of "Sheet1": a formula it cannot read/);
+  assert.equal(out.undone, true);
+  // B2 is 3 in its own format again (not 300 %), C2 the text "00123" (not 123), D2 its formula, D1 empty.
+  assert.equal(JSON.stringify(book.state.sheets), before);
+});
+
+test("cells written back in a rollback after a later op failed keep their own formats and texts", async () => {
+  const book = workbook(["Sheet1"], { poison: "Z9" });
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { B2: 3, C2: "TRUE" });
+  sheet1.formats.C2 = "@";
+  const before = JSON.stringify(book.state.sheets);
+  const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ range: "B2:C2", values: [["10%", "2026"]] }, { addSheet: "New" }, { range: "Z9", values: [[1]] }] } });
+  assert.equal(out.error?.code, "failed", JSON.stringify(out));
+  assert.equal(out.undone, true);
+  assert.equal(JSON.stringify(book.state.sheets), before);
+});
+
+test("a hidden sheet is not moved (the editor would show it, or lose the move), and shown, moved and hidden again in one call it stays hidden through a later add", async () => {
+  const book = workbook(["A", { name: "Secret", hidden: true }, "C"]);
+  const refused = await plugin(book, { kind: "cell.edit", args: { ops: [{ range: "A1", values: [[1]] }, { moveSheet: "Secret", position: 1 }] } });
+  assert.equal(refused.error?.code, "sheet_hidden", JSON.stringify(refused));
+  assert.equal(refused.error.op, 1);
+  assert.deepEqual(book.state.asked, [], "nothing asked of the editor");
+  assert.deepEqual(book.state.sheets[0].cells, {});
+
+  const out = await plugin(book, { kind: "cell.edit", args: { ops: [{ showSheet: "Secret" }, { moveSheet: "Secret", position: 1 }, { hideSheet: "Secret" }, { addSheet: "Notes" }, { copySheet: "A", to: "A2" }] } });
+  assert.deepEqual(out.result, { ops: 5, cells: 0 }, JSON.stringify(out));
+  assert.deepEqual(book.view(), ["Secret (hidden)", "A", "A2", "C", "Notes"]);
 });

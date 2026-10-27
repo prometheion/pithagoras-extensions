@@ -257,6 +257,7 @@ const SEAT_ADVICE: Record<string, string> = {
   editor_closed: "",
   too_large: "Read a spreadsheet one sheet at a time (sheet).",
   editor_not_saved: "Do not make it again: read the document if you need to see it.",
+  partial: "Part of this call may be in the document: read it with office_read before you go on, and do not repeat the call as it was.",
 };
 
 /** What a tool may throw out to the agent: refusals as-is, the seat's and the ops' coded errors by their code, coded
@@ -280,8 +281,10 @@ function failed(e: unknown): unknown {
 }
 
 /** What one sheet op may add to the time an edit takes in the agent's editor: up to two waits for the Document Server
- * (a copy is made, then moved), each bounded by the plugin's own wait (SHEET_WAIT, 10 s). */
+ * (a copy is made, then moved), each bounded by the plugin's own wait (SHEET_WAIT, 10 s). An edit has MAX_EDIT_MS at
+ * most: the editor answers a sheet change in about half a second, and one that answers none in 10 s fails the call. */
 const SHEET_OP_MS = 20_000;
+const MAX_EDIT_MS = 120_000;
 
 /** `text` with a details side-channel (the same shape as the portal's document tools). */
 const text = (content: string, details?: unknown) => ({ content: [{ type: "text", text: content }], ...(details !== undefined ? { details } : {}) });
@@ -516,7 +519,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_edit",
     label: LABELS.office_edit,
     guard: GUARDS.office_edit,
-    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all; every quote is checked first against the document as it stands then. Word ops: {quote, replacement} replaces text (the quote exactly once in the document, inside one paragraph, as office_read shows it; an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: "Normal", "Heading 1", "Heading 2", "Heading 3", "Title" or "List Paragraph"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?} (right after it by default), {hideSheet}, {showSheet}, {deleteSheet}; positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more.`,
+    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops: {quote, replacement} replaces text (the quote exactly once in the document, inside one paragraph, as office_read shows it; an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: "Normal", "Heading 1", "Heading 2", "Heading 3", "Title" or "List Paragraph"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; cells and column widths, no charts or pictures), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more.`,
     promptSnippet: "Edit a Word or spreadsheet document live, through your own editor",
     executionMode: "sequential",
     parameters: {
@@ -576,11 +579,15 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const what = `office_edit: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
         let made: unknown;
         try {
-          made = await seats().run(home, doc.docId, "edit", job, { signal, ...(sheetOps ? { timeoutMs: seat.LIMITS.jobMs + SHEET_OP_MS * sheetOps } : {}) });
+          made = await seats().run(home, doc.docId, "edit", job, { signal, ...(sheetOps ? { timeoutMs: Math.min(seat.LIMITS.jobMs + SHEET_OP_MS * sheetOps, MAX_EDIT_MS) } : {}) });
         } catch (e) {
+          // Cut off: a sheet the call deletes waits hidden under another name until the end (seat-page.ts, cellEdit).
+          if (e instanceof seat.SeatError && (e.code === "timeout" || e.code === "editor_closed") && job.kind === "cell.edit" && job.args.ops.some((op) => "deleteSheet" in op)) {
+            e = new seat.SeatError(e.code, `${e.message}; a sheet the call deletes may be left as a hidden sheet named "~deleted …", which you can delete`, e.op, e.ran);
+          }
           // The editor took the edit and then gave no clear answer: it may be in the document, and reach the file with
           // a later save. Recorded all the same, so that every change an agent may have made is in the audit log.
-          if (e instanceof seat.SeatError && e.ran) record({ subject: doc.title, reason: `${what}; ${e.code === "editor_not_saved" ? "made in the editor, not saved yet" : "outcome unknown"} (${e.code})`, chatId });
+          if (e instanceof seat.SeatError && e.ran) record({ subject: doc.title, reason: `${what}; ${e.code === "editor_not_saved" ? "made in the editor, not saved yet" : e.code === "partial" ? "failed, and not taken back whole" : "outcome unknown"} (${e.code})`, chatId });
           throw e;
         }
         const changed = (made as { changed?: unknown } | null)?.changed !== false;

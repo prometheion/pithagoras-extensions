@@ -102,9 +102,37 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   log says so; the agent is told, and its editor of that document closes. A save the Document Server could not hand
   over while the portal was away (it keeps such a save as "forgotten") is taken back once the portal runs again. An
   open editor says within a second or two when the file changed on disk; its button loads the new revision in place.
-- **Wake on mention**: when you comment in a Word document and write `@agent` (the agent that owns the document, or
-  in whose folder it is), or `@<name>` or `@project:<name>` for an agent or project by name, and save, a chat of that
-  agent is woken, told which document mentions it, and gets access to that document; it reads the comment itself.
+- **Talk to agents in comments**: type `@` in a comment (the comment box that opens on the text, or a cell's) and pick
+  an agent or a project from the list; it inserts `+Aegis` or `+project:Report` (OnlyOffice puts a `+` before what it
+  inserts), and typing `@Aegis` or `@project:Report` by hand does the same (in the Comments panel on the left, which has
+  no list, too; a name with spaces is matched as a whole, `@My Agent`). Each comment that mentions an agent or project
+  starts a chat of its own with it, which shows nowhere in the chat lists, given only that comment: the document's id,
+  the thread, and what you wrote. The agent reads the comment's text and the document with its tools, does what you
+  asked (`office_edit` changes the document), and its answer appears as its reply in the comment's thread. A reply you
+  write in the thread goes to the same chat (only to the ones it mentions, where a thread has several); a reply or an
+  edit that mentions another agent adds that one. Resolving and reopening keep the chat; deleting the comment removes
+  it, two minutes later by default (an undo in that time keeps it). The agent gets access to the document with the
+  mention. Word and spreadsheets alike.
+  An agent that may only read the document (a file in a folder it cannot write) still answers in the thread, through an
+  editor that may only comment.
+  When the agent's edit replaces a larger text that a comment is on, the comment is made again on the new text, with
+  its author, time and replies, and its thread and chat go on there.
+- **Talk to the document's agent in the editor's chat**: what you write in the editor's own chat (the speech bubble on
+  the left) goes to the agent or project that owns the document (that made it, or in whose folder it is), in one chat
+  for the editing session; its answers come in the editor's chat as the agent's. Messages written while it is still
+  answering reach it together as its next message. The chat goes a minute after the last person left the document
+  (a reload in that time keeps it), and when the Document Server starts again. A document nobody owns has nobody to
+  answer in its chat; the editor's bar says so.
+- **Nobody is asked from these chats**: they have no question tool, and a confirmation the agent's tools or the guard
+  would ask for stops that step at once; the agent is told that nobody can answer there and goes on without it (a
+  second time, its answer says it could not finish). The editor's bar shows how the agents stand in the document:
+  answering, waiting for their turn, or why one could not answer.
+- **What counts as your words**: only what you did through the editor's own comment box, reply box and chat, on your
+  page. A comment pasted in, brought back by undo, made by someone else, or already in the file starts nothing.
+- **Limits, on the Office page in Settings**: comment chats running at once per agent or project (2; more wait their
+  turn), comment chats per document (50), the longest answer in a comment (4,000 characters), messages per answer in
+  the editor's chat (4 of 2,048 characters), the seconds before a deleted comment's chat goes (120), and the seconds
+  the editor's chat stays after the last person left (60).
 
 ## Security
 
@@ -184,8 +212,15 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   comes from the portal's own pages: the portal's cookie is SameSite=Lax, which a page on another port or another
   name of the same site is still sent.
 - **What the tools return is outside content to the guard**: the text, comments and file names of documents anybody
-  may have written. A wake on a mention names the document and nothing of the comment; the agent reads the comment
-  with `office_comments`, whose result the guard holds as outside content.
+  may have written. A comment's chat is given the words of the comment it was made for as yours (your page saw you
+  write it); the text it is on, the thread's other replies and the document are read with `office_comments` and
+  `office_read`, as outside content. A comment that reads like an order and is read that way can mark the chat, and
+  with it the task chat it hangs under; an answer of a marked chat is not posted in the document.
+- **Who can make an agent act through a comment**: anyone signed in to the portal (every login is the portal's
+  person), on any document they can open, and the mention gives that agent the document. Before the portal has logins
+  with fewer rights, the routes of comments and the editor's chat need a check per login, which the extension API
+  does not offer yet.
+- **Every answer posted in a document is in the audit log**, with its document, thread and chat.
 - **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
   document-changing call is recorded in the portal's audit log with the chat that made it, its ops and the revision
   it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
@@ -196,7 +231,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 Everything is in the extension's own data folder, beside the portal's other data: `settings.json` (what you set; a
 default you never changed is not written down, so a later version's default applies), `jwt-secret`, `ticket-secret`,
 `relay-secret`, `ds.json` (the container and image of the last start), `index.json` and `docs/<id>/<title>.<ext>`
-(the library), `.trash/`, and `state/<id>.json` (the comments last seen, so that a comment wakes an agent once). A
+(the library), `.trash/`, `state/threads/<id>.json` (each comment thread's agents, their chats and what waits to be
+posted) and `state/sessions.json` (the chats of the editor's chat, by editing session). A
 scanned document stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds`, its
 relay `-relay` and the agents' editor `-agent`), the networks (`pithagoras-office-ds-net`, and `-agents` for the
 agents' editor) and the Document Server's volumes are Docker's, shown in Settings → Docker under this extension. The
@@ -225,8 +261,16 @@ agents' editor.
 
 ## Limits
 
-- Only `.docx` and `.xlsx`. Comments are read and wake an agent in Word documents; spreadsheet comments are not read.
-  `.pptx` is not supported.
+- Only `.docx` and `.xlsx`. `.pptx` is not supported.
+- The chats of comments and the editor's chat hang under one of the agent's own task chats (the one whose Office
+  panel the editor is in, else the one the document's other comment chats use, else its first in the sidebar): the
+  extension API makes chats only as children of a chat. An agent with no task chat answers no comment until you start
+  one with it. A comment made while the page could not report it (the tab closed at once, the server half away) starts
+  nothing; reply to it again.
+- In Word, an agent that may only comment changes the comment through the editor's comment methods, which give it a
+  new id: its thread follows. Every person in the editor is "Portal".
+- The agents' browser opens for an answer as it does for the tools (about 0.3-0.45 GB while it runs), and an editor
+  opened only to post closes after a minute.
 - A file above 512 MiB is not indexed.
 - One Document Server for the portal, run by this extension. A container of that name that nobody owns (one from
   before Docker for extensions) is taken over and made again; one of another extension's is refused.
@@ -236,7 +280,7 @@ agents' editor.
   stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
   not written.
 - The agent edits text, paragraphs, tables, cells and sheets; it cannot change formatting beyond a paragraph's style,
-  write comments or make tracked changes. A sheet the agent copies takes the values, formulas, number formats and
+  write comments of its own or make tracked changes (it answers in the threads it was asked in). A sheet the agent copies takes the values, formulas, number formats and
   column widths of the old one, not its other formatting (fonts, colours, borders), charts, pictures, row heights or
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three

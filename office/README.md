@@ -74,12 +74,17 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   session as the people in the document. People see it there as "<folder name> (agent)", with its
   cursor. `office_read` gives the document as it stands in that editor, with what people typed and have not saved
   yet; `office_edit` makes its edits there, so they show in your editor at once, and nothing you typed is lost or
-  written over. An edit is one command, made whole or not at all: every quote is checked against the document as it
-  stands first, and a command that fails after it changed something is taken back. After an edit the Document Server
+  written over. An edit is made whole or not at all: every quote, sheet name and position is checked against the
+  document as it stands first, and an edit that fails after it changed something is taken back. After an edit the Document Server
   is asked to save the session, and the agent hears the new revision; that save holds what you typed until then too.
   Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph
   (a document keeps one: its only paragraph removed leaves it empty).
-  Excel: write values and formulas into a range (the editor computes the formulas). The agent cannot write comments
+  Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
+  `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets (Excel's rules for
+  names: at most 31 characters, none of `[]:*?/\`, no two alike in any case; one sheet always stays visible).
+  `office_read` lists every sheet with its position and whether it is hidden, and reads one sheet or all of them. A
+  change to the sheets shows in your editor once the Document Server has let it through, a moment after the call
+  makes it; a sheet the edit deletes goes when the edit's other ops are made. The agent cannot write comments
   or tracked changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
   is in a document its session stays open after the people left it, so it is saved as the last person leaves: what
@@ -226,8 +231,9 @@ agents' editor.
 - What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. An editor that
   stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
   not written.
-- The agent edits text, paragraphs, tables and cells; it cannot change formatting beyond a paragraph's style, write
-  comments or make tracked changes. An edit made while a person types in the same paragraph merges as the editor
+- The agent edits text, paragraphs, tables, cells and sheets; it cannot change formatting beyond a paragraph's style,
+  write comments or make tracked changes. A sheet the agent copies takes the cells (values, formulas, their formats)
+  and column widths of the old one, not its charts, pictures, row heights or settings. An edit made while a person types in the same paragraph merges as the editor
   merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).

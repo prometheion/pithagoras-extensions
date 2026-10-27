@@ -113,6 +113,17 @@ test("parseXlsx resolves shared strings and inlineStr across both sheets, dense 
   ]);
 });
 
+test("parseXlsx names the hidden sheets (state hidden or veryHidden), in the workbook's order", async () => {
+  assert.deepEqual(parseXlsx(await buildXlsxZip()).hiddenSheets, []);
+  const zip = await JSZip.loadAsync(await buildXlsxZip());
+  zip.file("xl/workbook.xml", WORKBOOK_XML.replace('name="Sales"', 'name="Sales" state="visible"').replace('name="Notes"', 'name="Notes" state="hidden"'));
+  const book = parseXlsx(await zip.generateAsync({ type: "nodebuffer" }));
+  assert.deepEqual(book.sheetNames, ["Sales", "Notes"]);
+  assert.deepEqual(book.hiddenSheets, ["Notes"]);
+  zip.file("xl/workbook.xml", WORKBOOK_XML.replace('name="Sales"', 'name="Sales" state="veryHidden"'));
+  assert.deepEqual(parseXlsx(await zip.generateAsync({ type: "nodebuffer" })).hiddenSheets, ["Sales"]);
+});
+
 test("parseXlsx bounds the dense grid of sparse far-out cells (memory/CPU cap, honest truncation)", async () => {
   // The review's attack shape: a ~1.7 KB xlsx with few cells referencing huge coordinates used to densify to
   // row x col PER SHEET and allocate hundreds of MB (+~18 s CPU). Each sheet here holds exactly two cells --

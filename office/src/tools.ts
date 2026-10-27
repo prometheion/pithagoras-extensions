@@ -85,7 +85,7 @@ export type OfficeState = "running" | "starting" | "stopped";
 
 /** The seats as the tools use them (seat.ts by default). */
 export type ToolsSeat = {
-  run(home: string, docId: string, mode: seat.SeatMode, job: seat.SeatJob, options?: { signal?: AbortSignal }): Promise<unknown>;
+  run(home: string, docId: string, mode: seat.SeatMode, job: seat.SeatJob, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<unknown>;
   keyOf(home: string, docId: string): string | undefined;
   closeDoc(docId: string, why?: string): void;
 };
@@ -279,6 +279,10 @@ function failed(e: unknown): unknown {
   return new Refusal("failed", String(e));
 }
 
+/** What one sheet op may add to the time an edit takes in the agent's editor: up to two waits for the Document Server
+ * (a copy is made, then moved), each bounded by the plugin's own wait (SHEET_WAIT, 10 s). */
+const SHEET_OP_MS = 20_000;
+
 /** `text` with a details side-channel (the same shape as the portal's document tools). */
 const text = (content: string, details?: unknown) => ({ content: [{ type: "text", text: content }], ...(details !== undefined ? { details } : {}) });
 
@@ -334,17 +338,20 @@ function wordText(read: WordBlocks): string {
   );
 }
 
-/** A spreadsheet's cells as the agent reads them: `A1: value`, a text in quotes, a formula after its value. */
-type CellSheets = { sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean }[] };
+/** A spreadsheet's cells as the agent reads them: every sheet of the workbook first, by its position (from 1) and
+ * whether it is hidden, then the cells of each sheet read, `A1: value`, a text in quotes, a formula after its value. */
+type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean }[] };
+function sheetList(book: CellSheets["book"]): string {
+  return `Sheets: ${book.map((s, i) => `${i + 1} ${JSON.stringify(s.name)}${s.hidden ? " (hidden)" : ""}`).join(", ")}`;
+}
 function cellText(read: CellSheets): string {
   const value = (v: unknown) => (typeof v === "string" ? JSON.stringify(v) : typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : String(v));
-  return read.sheets
-    .map((s) => {
-      const cells = s.cells.map((c) => `${c.a}: ${value(c.v)}${c.f ? ` (${c.f})` : ""}`).join("\n");
-      if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
-      return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}`;
-    })
-    .join("\n\n");
+  const sheets = read.sheets.map((s) => {
+    const cells = s.cells.map((c) => `${c.a}: ${value(c.v)}${c.f ? ` (${c.f})` : ""}`).join("\n");
+    if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
+    return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}`;
+  });
+  return [sheetList(read.book), ...sheets].join("\n\n");
 }
 
 /** Why office_read reads the saved file: Office does not run, or the agent's editor is not downloaded. */
@@ -367,19 +374,22 @@ function savedText(doc: DocMeta, chatId: string, sheet?: string): string {
   const buf = readBytes(doc, chatId);
   if (doc.ext === "xlsx") {
     const parsed = parseXlsx(buf); // throws {code:"invalid_zip"} -> corrupt
-    if (sheet !== undefined && !parsed.sheetNames.includes(sheet)) throw new Refusal("not_found", `there is no sheet named ${JSON.stringify(sheet)} (the sheets: ${parsed.sheetNames.join(", ")})`);
+    // A sheet is named case-insensitively, as Excel and the live read do.
+    const asked = sheet === undefined ? undefined : parsed.sheetNames.find((name) => name.toLowerCase() === sheet.toLowerCase());
+    if (sheet !== undefined && asked === undefined) throw new Refusal("not_found", `there is no sheet named ${JSON.stringify(sheet)} (the sheets: ${parsed.sheetNames.map((name) => JSON.stringify(name)).join(", ")})`);
     const col = (n: number) => {
       let s = "";
       for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
       return s;
     };
-    return parsed.sheetNames
-      .filter((name) => sheet === undefined || name === sheet)
+    const book = parsed.sheetNames.map((name) => ({ name, hidden: parsed.hiddenSheets.includes(name) }));
+    const sheets = parsed.sheetNames
+      .filter((name) => asked === undefined || name === asked)
       .map((name) => {
         const cells = (parsed.sheets[name] ?? []).flatMap((row, r) => row.map((v, c) => (v === "" ? "" : `${col(c)}${r + 1}: ${v}`)).filter(Boolean));
         return `Sheet "${name}":\n${cells.join("\n") || "(empty)"}${parsed.truncatedSheets[name] ? "\n(cells far out were not read)" : ""}`;
-      })
-      .join("\n\n");
+      });
+    return [sheetList(book), ...sheets].join("\n\n");
   }
   const parsed = parseDocx(buf); // throws {code:"invalid_zip"|"missing_part"} -> corrupt
   return parsed.paragraphs.length ? parsed.paragraphs.map((p, i) => `[${i + 1}] ${p}`).join("\n") : "(empty document)";
@@ -465,7 +475,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_read",
     label: LABELS.office_read,
     guard: GUARDS.office_read,
-    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style in brackets (\"[2] (Heading 1) Findings\"), a table as \"[4] table\" and its rows \"| a | b |\". A spreadsheet comes per sheet as its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
+    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style in brackets (\"[2] (Heading 1) Findings\"), a table as \"[4] table\" and its rows \"| a | b |\". A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
     promptSnippet: "Read an office document as it stands in the editor",
     parameters: {
       type: "object",
@@ -506,7 +516,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_edit",
     label: LABELS.office_edit,
     guard: GUARDS.office_edit,
-    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all; every quote is checked first against the document as it stands then. Word ops: {quote, replacement} replaces text (the quote exactly once in the document, inside one paragraph, as office_read shows it; an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: "Normal", "Heading 1", "Heading 2", "Heading 3", "Title" or "List Paragraph"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula, "" clears the cell. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more.`,
+    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all; every quote is checked first against the document as it stands then. Word ops: {quote, replacement} replaces text (the quote exactly once in the document, inside one paragraph, as office_read shows it; an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: "Normal", "Heading 1", "Heading 2", "Heading 3", "Title" or "List Paragraph"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?} (right after it by default), {hideSheet}, {showSheet}, {deleteSheet}; positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more.`,
     promptSnippet: "Edit a Word or spreadsheet document live, through your own editor",
     executionMode: "sequential",
     parameters: {
@@ -516,7 +526,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         ops: {
           type: "array",
           minItems: 1,
-          description: "The edits, made in order: Word {quote, replacement} | {after?, paragraphs, style?} | {after?, table} | {remove}; spreadsheet {sheet?, range, values}.",
+          description: "The edits, made in order: Word {quote, replacement} | {after?, paragraphs, style?} | {after?, table} | {remove}; spreadsheet {sheet?, range, values} and the sheet ops.",
           items: {
             type: "object",
             properties: {
@@ -530,6 +540,16 @@ function installTools(pi: unknown, home: string, chatId: string): void {
               sheet: { type: "string", description: "Spreadsheet: the sheet's name (the first sheet where none is given)." },
               range: { type: "string", description: "Spreadsheet: the cells, A1 or A1:C3." },
               values: { type: "array", items: { type: "array", items: { type: ["string", "number", "boolean"] } }, description: "Spreadsheet: one list of values per row of the range." },
+              // The sheet ops' fields: what each takes is in the tool's description.
+              addSheet: { type: "string" },
+              renameSheet: { type: "string" },
+              moveSheet: { type: "string" },
+              copySheet: { type: "string" },
+              hideSheet: { type: "string" },
+              showSheet: { type: "string" },
+              deleteSheet: { type: "string" },
+              to: { type: "string", description: "Spreadsheet: the new name." },
+              position: { type: "integer", minimum: 1, description: "Spreadsheet: the sheet's place, 1 = first." },
             },
           },
         },
@@ -550,11 +570,13 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         // The revision as it is now: an edit queued behind another starts from that one's.
         const from = refresh(doc.docId, rootDir())?.mtimeMs ?? doc.mtimeMs;
         const n = job.args.ops.length;
-        const kinds = [...new Set(job.args.ops.map((op) => ("quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "cells")))].join(", ");
+        const kinds = [...new Set(job.args.ops.map((op) => ("quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : "sheets")))].join(", ");
+        // An op that makes, moves or deletes a sheet waits for the Document Server's answer (seat-page.ts, cellEdit).
+        const sheetOps = job.kind === "cell.edit" ? job.args.ops.filter((op) => !("range" in op)).length : 0;
         const what = `office_edit: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
         let made: unknown;
         try {
-          made = await seats().run(home, doc.docId, "edit", job, { signal });
+          made = await seats().run(home, doc.docId, "edit", job, { signal, ...(sheetOps ? { timeoutMs: seat.LIMITS.jobMs + SHEET_OP_MS * sheetOps } : {}) });
         } catch (e) {
           // The editor took the edit and then gave no clear answer: it may be in the document, and reach the file with
           // a later save. Recorded all the same, so that every change an agent may have made is in the audit log.

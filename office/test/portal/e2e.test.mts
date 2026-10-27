@@ -26,7 +26,8 @@ import { EDITOR_HTML, editorPageJs } from "./page.mts";
  * page.mts), types into it and closes it, and the text must be in the file: what "Download failed", the refused key,
  * the refused callback token and the embed viewer each broke. Then the agent works in documents through its own editor
  * (the agents' browser, `chromedp/headless-shell`): a closed document, one a person types in, a spreadsheet, a
- * read-only seat, a file changed outside, a failed op, each Word op in the real editor, a used range away from A1;
+ * read-only seat, a file changed outside, a failed op, each Word op in the real editor, a used range away from A1, the
+ * sheets of a workbook (made, written, renamed, moved, copied, hidden, shown, deleted) while a person has it open;
  * people's editors run no plugin, the agents' browser reaches nothing but the relay, and with Office stopped the agent
  * reads the saved file and edits nothing. And once more
  * through a reverse proxy that ends TLS and sends no forwarded headers, as a plain nginx in front does.
@@ -34,7 +35,7 @@ import { EDITOR_HTML, editorPageJs } from "./page.mts";
  * Opt-in: it needs Docker Engine 28 or later, the images (about 3 GB, `onlyoffice/documentserver:10.0.0.1` unless
  * OFFICE_E2E_IMAGE names another, and the agents' editor, which the test downloads through the Office page's route
  * where it is not there), Chromium for Playwright, and a few minutes. Its containers, network and volumes go by names
- * of their own (`office-e2e-ds…`), and are removed at its end.
+ * of their own (`office-e2e-ds…`, or OFFICE_E2E_CONTAINER's), and are removed at its end.
  *
  *   ./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office
  */
@@ -50,7 +51,8 @@ async function run(PITHAGORAS: string): Promise<void> {
   const from = (file: string) => pathToFileURL(path.join(PITHAGORAS, file)).href;
   const PACKAGE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const IMAGE = process.env.OFFICE_E2E_IMAGE ?? "onlyoffice/documentserver:10.0.0.1";
-  const PREFIX = "office-e2e-ds";
+  // Names of its own where another run on the machine has the default ones (OFFICE_E2E_CONTAINER, OFFICE_E2E_PORT).
+  const PREFIX = process.env.OFFICE_E2E_CONTAINER ?? "office-e2e-ds";
 
   const { inProcessHome } = await import(from("tests/helpers.mts"));
   inProcessHome("office-e2e-");
@@ -617,6 +619,59 @@ async function run(PITHAGORAS: string): Promise<void> {
     // (The editor gives a sheet's used range from A1 on, so its cells are named from there: the arithmetic for a range
     // that starts elsewhere is seat-page.test's.)
     assert.match(text, /Sheet "Sheet1" \([A-D]\d:D4\):\nC3: 1\nD3: 2\nC4: 3\nD4: 3 \(=C3\+D3\)$/);
+  });
+
+  test("12. sheets while a person has the workbook open: made, written into and read by a formula on the first sheet, renamed and moved, copied, hidden and shown, deleted; each shows in the person's editor, and the file holds them in order", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Sheets", "cell");
+    const { page, frame } = await personOpens(doc);
+    const personSheets = () => frame.evaluate(`(function () { var e = window.Asc.editor, out = []; for (var i = 0; i < e.asc_getWorksheetsCount(); i++) out.push(e.asc_getWorksheetName(i) + (e.asc_isWorksheetHidden(i) ? " (hidden)" : "")); return out.join(", "); })()`) as Promise<string>;
+    /** office_edit, and how soon the person's editor shows `want`. */
+    const edit = async (label: string, ops: unknown[], want: string) => {
+      const t0 = Date.now();
+      const edited = await tools.office_edit.execute(`s-${label}`, { id: doc, ops });
+      const took = Date.now() - t0;
+      let seen = "";
+      const live = await until(async () => (seen = await personSheets()) === want, 5000);
+      console.log(`12. ${label}: ${edited.content[0].text} (${took} ms); the person's sheets ${JSON.stringify(seen)} ${Date.now() - t0} ms after the call`);
+      assert.ok(live, `${label}: the person sees ${want} (they see ${seen})`);
+    };
+    const read = async () => (await tools.office_read.execute("s-read", { id: doc })).content[0].text.split("\n\n").slice(1).join("\n\n");
+
+    await edit("made and written", [{ addSheet: "Data" }, { sheet: "Data", range: "A1:B1", values: [[2, 3]] }, { range: "A1", values: [["=Data!A1+Data!B1"]] }], "Sheet1, Data");
+    assert.match(await read(), /^Sheets: 1 "Sheet1", 2 "Data"\n\nSheet "Sheet1" \(A1\):\nA1: 5 \(=Data!A1\+Data!B1\)\n\nSheet "Data" \(A1:B1\):\nA1: 2\nB1: 3$/);
+
+    await edit("renamed and moved", [{ renameSheet: "data", to: "My data" }, { moveSheet: "My data", position: 1 }, { sheet: "Sheet1", range: "B1", values: [["='My data'!B1*2"]] }], "My data, Sheet1");
+    let text = await read();
+    assert.match(text, /^Sheets: 1 "My data", 2 "Sheet1"\n/);
+    assert.match(text, /A1: 5 \(='My data'!A1\+'My data'!B1\)\nB1: 6 \(='My data'!B1\*2\)/, "the formula follows the rename, and one written with the quoted name reads it");
+
+    await edit("copied", [{ copySheet: "My data", to: "Copy" }], "My data, Copy, Sheet1");
+    assert.match(await read(), /\n\nSheet "Copy" \(A1:B1\):\nA1: 2\nB1: 3\n/);
+    await edit("hidden", [{ hideSheet: "Copy" }], "My data, Copy (hidden), Sheet1");
+    assert.match(await read(), /^Sheets: 1 "My data", 2 "Copy" \(hidden\), 3 "Sheet1"\n/);
+    await edit("shown", [{ showSheet: "Copy" }], "My data, Copy, Sheet1");
+    await edit("deleted", [{ deleteSheet: "Copy" }, { addSheet: "Empty" }], "My data, Sheet1, Empty");
+    text = await read();
+    assert.match(text, /^Sheets: 1 "My data", 2 "Sheet1", 3 "Empty"\n/);
+    assert.match(text, /\n\nSheet "Empty" \(A1\):\n\(empty\)$/, "an empty sheet is read too");
+
+    // Refused whole, before anything is made: the person's sheets stay as they are.
+    const refused = async (ops: unknown[]) => tools.office_edit.execute("s-refused", { id: doc, ops }).then(() => "", (e: Error) => e.message);
+    assert.match(await refused([{ addSheet: "Temp" }, { renameSheet: "Nope", to: "x" }]), /^error:not_found op 2: there is no sheet named "Nope"/);
+    assert.match(await refused([{ hideSheet: "Sheet1" }, { hideSheet: "Empty" }, { deleteSheet: "My data" }]), /^error:last_visible_sheet op 3: /);
+    assert.match(await refused([{ addSheet: "SHEET1" }]), /^error:sheet_exists op 1: /);
+    await delay(1500);
+    assert.equal(await personSheets(), "My data, Sheet1, Empty");
+
+    // The file: the sheets in order, with their values.
+    const { parseXlsx } = await import("../../src/ooxml.ts");
+    const book = parseXlsx(readFileSync(await fileOf(doc)));
+    assert.deepEqual(book.sheetNames, ["My data", "Sheet1", "Empty"]);
+    assert.deepEqual(book.hiddenSheets, []);
+    assert.deepEqual(book.sheets["My data"][0], ["2", "3"]);
+    assert.deepEqual(book.sheets["Sheet1"][0], ["5", "6"]);
+    assert.match(await partOf(doc, "xl/workbook.xml"), /<sheet name="My data"[^>]*\/><sheet name="Sheet1"[^>]*\/><sheet name="Empty"/);
+    await page.context().close();
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

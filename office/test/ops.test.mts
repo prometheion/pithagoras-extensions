@@ -5,12 +5,15 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editJob, MAX_ARGS_BYTES, MAX_OPS, OpError, parseRange, type WordOp } from "../src/ops";
-import { WORD_MODEL_SRC } from "../src/seat-page";
+import { editJob, MAX_ARGS_BYTES, MAX_OPS, OpError, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
+import { SHEET_MODEL_SRC, WORD_MODEL_SRC } from "../src/seat-page";
 
 /** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
  * holds in turn, or the first failure (`quote_not_found` / `quote_ambiguous`, the op's index, a message). */
 const simulateWord: (paras: string[], ops: WordOp[]) => { code: string; op: number; message: string } | null = new Function(`${WORD_MODEL_SRC}\nreturn simulateWord;`)();
+
+/** The spreadsheet command's own check (SHEET_MODEL_SRC), run here on the workbook's sheets in order. */
+const simulateSheets: (sheets: { name: string; hidden?: boolean }[], ops: (CellOp | SheetOp)[]) => { code: string; op: number; message: string } | null = new Function(`${SHEET_MODEL_SRC}\nreturn simulateSheets;`)();
 
 const refused = (code: string, op?: number) => (e: unknown) => {
   assert.ok(e instanceof OpError, String(e));
@@ -139,4 +142,103 @@ test("the check names the nearest text where a quote is not found", () => {
   assert.match(miss!.message, /nearest: "Revenue figures were revised after the audit\."/);
   const head = simulateWord(["the quarterly revenue report, final"], [{ quote: "quarterly revenue reports", replacement: "x" }]);
   assert.match(head!.message, /nearest: ".*quarterly revenue report/);
+});
+
+test("sheet ops: each shape is taken as it is, beside cell writes", () => {
+  const ops = [
+    { addSheet: "Data" },
+    { addSheet: "Front", position: 1 },
+    { renameSheet: "Sheet1", to: "Q1 2026" },
+    { moveSheet: "Data", position: 2 },
+    { copySheet: "Data", to: "Data (2)" },
+    { copySheet: "Data", to: "Data (3)", position: 4 },
+    { hideSheet: "Data (2)" },
+    { showSheet: "Data (2)" },
+    { deleteSheet: "Data (3)" },
+    { sheet: "Data", range: "A1", values: [[1]] },
+  ];
+  assert.deepEqual(editJob("xlsx", ops), { kind: "cell.edit", args: { ops } });
+});
+
+test("sheet ops: missing or extra fields, two shapes in one op, names Excel refuses and bad positions are bad_op, naming the op", () => {
+  const bad = (op: unknown) => assert.throws(() => editJob("xlsx", [{ range: "A1", values: [[1]] }, op]), refused("bad_op", 1), JSON.stringify(op));
+  bad({ addSheet: "" });
+  bad({ addSheet: 7 });
+  bad({ addSheet: "x".repeat(32) });
+  for (const ch of ["[", "]", ":", "*", "?", "/", "\\"]) bad({ addSheet: `a${ch}b` });
+  bad({ addSheet: "'quoted" });
+  bad({ addSheet: "quoted'" });
+  bad({ addSheet: "two\nlines" });
+  bad({ addSheet: "history" });
+  bad({ addSheet: "Data", position: 0 });
+  bad({ addSheet: "Data", position: 1.5 });
+  bad({ addSheet: "Data", position: "2" });
+  bad({ addSheet: "Data", to: "Other" });
+  bad({ renameSheet: "Sheet1" });
+  bad({ renameSheet: "Sheet1", to: "a/b" });
+  bad({ moveSheet: "Sheet1" });
+  bad({ copySheet: "Sheet1" });
+  bad({ copySheet: "Sheet1", to: "x".repeat(40) });
+  bad({ hideSheet: "Sheet1", position: 2 });
+  bad({ deleteSheet: "" });
+  bad({ deleteSheet: "Sheet1", hideSheet: "Sheet2" });
+  bad({ addSheet: "Data", range: "A1", values: [[1]] });
+  bad({ deleteSheet: "Data", sheet: "Data" });
+  // A name of 31 characters, spaces, an apostrophe inside and other scripts are Excel's own.
+  assert.doesNotThrow(() => editJob("xlsx", [{ addSheet: "x".repeat(31) }, { addSheet: "Bob's sheet" }, { addSheet: "Übersicht 2026" }]));
+  assert.equal(sheetNameProblem("History 2"), null);
+});
+
+test("the sheets check: names in the workbook are found case-insensitively, and a name taken (in any case) is refused", () => {
+  const book = [{ name: "Sheet1" }, { name: "Data" }];
+  assert.equal(simulateSheets(book, [{ sheet: "data", range: "A1", values: [[1]] }, { renameSheet: "SHEET1", to: "Front" }]), null);
+  const taken = simulateSheets(book, [{ addSheet: "DATA" }]);
+  assert.deepEqual([taken?.code, taken?.op], ["sheet_exists", 0]);
+  assert.match(taken!.message, /"Data" already/);
+  assert.equal(simulateSheets(book, [{ copySheet: "Data", to: "sheet1" }])?.code, "sheet_exists");
+  assert.equal(simulateSheets(book, [{ renameSheet: "Data", to: "Sheet1" }])?.code, "sheet_exists");
+  // A sheet renamed to another case of its own name is fine.
+  assert.equal(simulateSheets(book, [{ renameSheet: "Data", to: "DATA" }]), null);
+  const missing = simulateSheets(book, [{ addSheet: "New" }, { deleteSheet: "Gone" }]);
+  assert.deepEqual([missing?.code, missing?.op], ["not_found", 1]);
+  assert.match(missing!.message, /the sheets: "Sheet1", "Data", "New"/);
+});
+
+test("the sheets check: an earlier op's sheets are taken into account", () => {
+  const book = [{ name: "Sheet1" }];
+  // Made, then written into, renamed, copied and moved.
+  assert.equal(simulateSheets(book, [{ addSheet: "Data" }, { sheet: "Data", range: "A1", values: [[1]] }, { renameSheet: "Data", to: "Q1" }, { copySheet: "Q1", to: "Q2" }, { moveSheet: "Q2", position: 1 }]), null);
+  // Renamed: the old name is gone for the ops after it, and free again.
+  assert.deepEqual(simulateSheets(book, [{ renameSheet: "Sheet1", to: "Front" }, { sheet: "Sheet1", range: "A1", values: [[1]] }])?.op, 1);
+  assert.equal(simulateSheets(book, [{ renameSheet: "Sheet1", to: "Front" }, { addSheet: "Sheet1" }]), null);
+  // Deleted: gone for the ops after it.
+  assert.equal(simulateSheets([{ name: "A" }, { name: "B" }], [{ deleteSheet: "B" }, { showSheet: "B" }])?.code, "not_found");
+  // Two made with one name in one call.
+  assert.equal(simulateSheets(book, [{ addSheet: "X" }, { copySheet: "Sheet1", to: "x" }])?.code, "sheet_exists");
+});
+
+test("the sheets check: positions inside the workbook as it stands at the op's turn", () => {
+  const book = [{ name: "A" }, { name: "B" }];
+  assert.equal(simulateSheets(book, [{ addSheet: "C", position: 3 }]), null, "after the last");
+  assert.equal(simulateSheets(book, [{ addSheet: "C", position: 4 }])?.code, "bad_op");
+  assert.equal(simulateSheets(book, [{ moveSheet: "A", position: 2 }]), null);
+  assert.equal(simulateSheets(book, [{ moveSheet: "A", position: 3 }])?.code, "bad_op", "a move stays inside");
+  assert.equal(simulateSheets(book, [{ copySheet: "A", to: "A2", position: 3 }]), null);
+  assert.equal(simulateSheets(book, [{ addSheet: "C" }, { moveSheet: "A", position: 3 }]), null, "the sheet made before counts");
+});
+
+test("the sheets check: the last visible sheet is never hidden or deleted", () => {
+  const one = simulateSheets([{ name: "Only" }], [{ deleteSheet: "Only" }]);
+  assert.deepEqual([one?.code, one?.op], ["last_visible_sheet", 0]);
+  assert.match(one!.message, /only sheet/);
+  assert.equal(simulateSheets([{ name: "Only" }], [{ hideSheet: "Only" }])?.code, "last_visible_sheet");
+  const book = [{ name: "A" }, { name: "B", hidden: true }];
+  assert.equal(simulateSheets(book, [{ deleteSheet: "A" }])?.code, "last_visible_sheet", "a hidden sheet does not count");
+  assert.equal(simulateSheets(book, [{ hideSheet: "A" }])?.code, "last_visible_sheet");
+  assert.equal(simulateSheets(book, [{ deleteSheet: "B" }]), null, "a hidden sheet may go");
+  assert.equal(simulateSheets(book, [{ showSheet: "B" }, { hideSheet: "A" }, { deleteSheet: "A" }]), null, "shown first, the other may go");
+  assert.equal(simulateSheets(book, [{ hideSheet: "B" }]), null, "hiding a hidden sheet changes nothing");
+  assert.equal(simulateSheets([{ name: "A" }, { name: "B" }], [{ hideSheet: "A" }, { deleteSheet: "B" }])?.op, 1);
+  // A copy is visible.
+  assert.equal(simulateSheets([{ name: "A" }], [{ copySheet: "A", to: "B" }, { deleteSheet: "A" }]), null);
 });

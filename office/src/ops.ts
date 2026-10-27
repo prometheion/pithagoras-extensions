@@ -10,6 +10,13 @@
  * - `{remove}`: the paragraph that holds the quote goes.
  * Excel ops: `{sheet?, range, values}`: the values into the range (A1 or A1:B2, on the first sheet where none is
  * named), one row of values per row of the range; a string that starts with "=" is a formula, "" clears the cell.
+ * And the sheets themselves (SheetOp), a sheet named case-insensitively as Excel does, a position counted from 1:
+ * - `{addSheet, position?}`: a new empty sheet of that name, at the position or after the last sheet;
+ * - `{renameSheet, to}`, `{moveSheet, position}`, `{copySheet, to, position?}` (the copy right after its sheet where
+ *   no position is given), `{hideSheet}`, `{showSheet}`, `{deleteSheet}`.
+ * A new name must be one Excel takes (sheetNameProblem); whether the sheets named are there, a new name is free, a
+ * position is inside the workbook and a visible sheet is left is checked by the command (seat-page.ts,
+ * SHEET_MODEL_SRC), on the sheets as they stand when it runs.
  */
 export type WordStyle = (typeof STYLES)[number];
 export type WordOp =
@@ -19,7 +26,29 @@ export type WordOp =
   | { remove: string };
 export type CellValue = string | number | boolean;
 export type CellOp = { sheet?: string; range: string; values: CellValue[][] };
-export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: CellOp[] } };
+export type SheetOp =
+  | { addSheet: string; position?: number }
+  | { renameSheet: string; to: string }
+  | { moveSheet: string; position: number }
+  | { copySheet: string; to: string; position?: number }
+  | { hideSheet: string }
+  | { showSheet: string }
+  | { deleteSheet: string };
+export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: (CellOp | SheetOp)[] } };
+
+/** The sheet ops' own keys, each with the keys that may go with it (the first one names the op). */
+export const SHEET_OPS: Record<string, { with: string[]; needs: string[] }> = {
+  addSheet: { with: ["position"], needs: [] },
+  renameSheet: { with: ["to"], needs: ["to"] },
+  moveSheet: { with: ["position"], needs: ["position"] },
+  copySheet: { with: ["to", "position"], needs: ["to"] },
+  hideSheet: { with: [], needs: [] },
+  showSheet: { with: [], needs: [] },
+  deleteSheet: { with: [], needs: [] },
+};
+/** The longest name Excel takes for a sheet, and the characters it refuses in one. */
+export const MAX_SHEET_NAME = 31;
+const SHEET_NAME_BANNED = /[[\]:*?/\\]/;
 
 /** The paragraph styles an insert may name: the built-in ones every document the editor opens has. */
 export const STYLES = ["Normal", "Heading 1", "Heading 2", "Heading 3", "Title", "List Paragraph"] as const;
@@ -103,12 +132,51 @@ export function parseRange(range: string): { col: number; row: number; cols: num
   return { col: Math.min(c1, c2), row: Math.min(r1, r2), cols: Math.abs(c2 - c1) + 1, rows: Math.abs(r2 - r1) + 1 };
 }
 
-function cellOp(op: unknown, i: number): CellOp {
+/** Why Excel would not take `name` for a sheet, or null where it would: 1 to 31 characters, none of []:*?/\, no
+ * apostrophe first or last, no line break or other control character, and not "History" (Excel keeps that one). */
+export function sheetNameProblem(name: string): string | null {
+  if (name.length === 0) return "a sheet's name is not empty";
+  if (name.length > MAX_SHEET_NAME) return `a sheet's name has at most ${MAX_SHEET_NAME} characters (${JSON.stringify(name)} has ${name.length})`;
+  if (SHEET_NAME_BANNED.test(name)) return `a sheet's name may not hold any of [ ] : * ? / \\ (got ${JSON.stringify(name)})`;
+  if (/[\u0000-\u001f\u007f]/.test(name)) return `a sheet's name may not hold a line break or another control character (got ${JSON.stringify(name)})`;
+  if (name.startsWith("'") || name.endsWith("'")) return `a sheet's name may not start or end with an apostrophe (got ${JSON.stringify(name)})`;
+  if (name.toLowerCase() === "history") return `"History" is a name Excel keeps for itself`;
+  return null;
+}
+
+const SHEET_SHAPES = "{sheet?, range, values}, {addSheet, position?}, {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?}, {hideSheet}, {showSheet} and {deleteSheet}";
+
+function sheetOp(op: Record<string, unknown>, key: string, i: number): SheetOp {
+  const n = i + 1;
+  const shape = SHEET_OPS[key];
+  const extra = Object.keys(op).filter((k) => k !== key && !shape.with.includes(k));
+  if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of {${[key, ...shape.with.map((k) => (shape.needs.includes(k) ? k : `${k}?`))].join(", ")}}`, i);
+  const name = (k: string, made: boolean) => {
+    const v = op[k];
+    if (typeof v !== "string" || v === "") throw new OpError("bad_op", `op ${n}: ${k} is ${made ? "the new sheet's name" : "a sheet's name"}`, i);
+    const problem = made ? sheetNameProblem(v) : null;
+    if (problem) throw new OpError("bad_op", `op ${n}: ${problem}`, i);
+    return v;
+  };
+  const out: Record<string, unknown> = { [key]: name(key, key === "addSheet") };
+  if (shape.with.includes("to")) out.to = name("to", true);
+  if (shape.with.includes("position") && (op.position !== undefined || shape.needs.includes("position"))) {
+    const at = op.position;
+    if (typeof at !== "number" || !Number.isInteger(at) || at < 1) throw new OpError("bad_op", `op ${n}: position is a whole number from 1 (1 is the first sheet)`, i);
+    out.position = at;
+  }
+  return out as SheetOp;
+}
+
+function cellOp(op: unknown, i: number): CellOp | SheetOp {
   const n = i + 1;
   if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
-  if (["quote", "paragraphs", "table", "remove"].some((k) => k in op)) throw new OpError("unsupported_format", `op ${n} is a Word edit, and this is a spreadsheet: its ops are {sheet?, range, values}`, i);
+  if (["quote", "paragraphs", "table", "remove"].some((k) => k in op)) throw new OpError("unsupported_format", `op ${n} is a Word edit, and this is a spreadsheet: its ops are ${SHEET_SHAPES}`, i);
+  const sheetKeys = Object.keys(SHEET_OPS).filter((k) => k in op);
+  if (sheetKeys.length > 1 || (sheetKeys.length && ("range" in op || "values" in op || "sheet" in op))) throw new OpError("bad_op", `op ${n} must be exactly one of ${SHEET_SHAPES} (it has ${[...sheetKeys, ...["sheet", "range", "values"].filter((k) => k in op)].join(" and ")})`, i);
+  if (sheetKeys.length) return sheetOp(op, sheetKeys[0], i);
   const extra = Object.keys(op).filter((k) => !["sheet", "range", "values"].includes(k));
-  if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of a spreadsheet op ({sheet?, range, values})`, i);
+  if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of a spreadsheet op (they are ${SHEET_SHAPES})`, i);
   if ("sheet" in op && op.sheet !== undefined && (typeof op.sheet !== "string" || op.sheet === "")) throw new OpError("bad_op", `op ${n}: sheet is a sheet's name`, i);
   const range = typeof op.range === "string" ? parseRange(op.range) : null;
   if (!range) throw new OpError("bad_op", `op ${n}: range is an A1 address or range like "B2" or "A1:C3" (got ${JSON.stringify(op.range)})`, i);

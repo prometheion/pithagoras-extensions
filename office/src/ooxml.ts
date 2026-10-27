@@ -372,7 +372,7 @@ function columnOf(ref: string): number { // "AB12" -> 27 (zero-based), -1 when t
  * booleans ("keep stored text"). Cells without an r= reference are skipped. A missing workbook or referenced
  * sheet part throws {code:"missing_part"}.
  */
-export function parseXlsx(buf: Buffer): { sheetNames: string[]; sheets: Record<string, string[][]>; truncatedSheets: Record<string, boolean> } {
+export function parseXlsx(buf: Buffer): { sheetNames: string[]; hiddenSheets: string[]; sheets: Record<string, string[][]>; truncatedSheets: Record<string, boolean> } {
   const parts = readZipParts(buf);
   const workbook = parts["xl/workbook.xml"];
   if (!workbook) throw ooxmlError("xlsx has no xl/workbook.xml", "missing_part");
@@ -393,6 +393,8 @@ export function parseXlsx(buf: Buffer): { sheetNames: string[]; sheets: Record<s
     }
   }
   const sheetNames: string[] = [];
+  // A sheet's `state` is "hidden" or "veryHidden" where it does not show; "visible", or none, where it does.
+  const hiddenSheets: string[] = [];
   const sheets: Record<string, string[][]> = {};
   const truncatedSheets: Record<string, boolean> = {};
   const gridBudget: { left: number } = { left: MAX_TOTAL_GRID_CELLS }; // decremented as each sheet densifies
@@ -401,6 +403,7 @@ export function parseXlsx(buf: Buffer): { sheetNames: string[]; sheets: Record<s
     const attrs = parseAttributes(m[1]);
     const name = attrs["name"] ?? "";
     sheetNames.push(name);
+    if (attrs["state"] === "hidden" || attrs["state"] === "veryHidden") hiddenSheets.push(name);
     sheets[name] = [];
     const target = attrs["id"] !== undefined ? targets[attrs["id"]] : undefined;
     if (target === undefined) continue; // unresolvable sheet: listed by name, no grid
@@ -412,7 +415,7 @@ export function parseXlsx(buf: Buffer): { sheetNames: string[]; sheets: Record<s
     sheets[name] = parseSheet(sheetPart.toString("utf8"), sharedStrings, gridBudget, flags);
     if (flags.truncated) truncatedSheets[name] = true;
   }
-  return { sheetNames, sheets, truncatedSheets };
+  return { sheetNames, hiddenSheets, sheets, truncatedSheets };
 }
 
 // Dense-grid caps: a hostile worksheet can reference absurdly distant cells (1M-row x 16K-col class); without

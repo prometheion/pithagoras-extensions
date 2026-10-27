@@ -23,6 +23,12 @@
  *   Document Server has: one asked before that misses the edit (error 4 where nothing else is unsaved, or a save of
  *   the people's typing alone). `Api.Save()` at the end of an edit sends them sooner, and the seat waits until the
  *   editor says they are sent (onDocumentStateChange false) before the save is asked for.
+ * - In the spreadsheet editor, `Api.AddSheet`, `ApiWorksheet.Move` and `Delete` only ask for the change (the workbook
+ *   is locked through the Document Server first): the sheet changes after the command returned, for the person too.
+ *   `SetName` and `SetVisible` change it at once, and a rename carries the formulas that name the sheet along. A
+ *   command cannot reach the editor's own API (`Asc.editor`), so a sheet is copied as a new sheet that takes the
+ *   cells (`ApiRange.Copy`) and column widths of the old one. The editor's Undo takes back nothing of a spreadsheet
+ *   command, and `Api.GetSheet` finds a name only in its own case.
  */
 
 /** The plugin's GUID, which only the agents' editor configs name (server.ts): people's editors run no plugin. */
@@ -227,6 +233,64 @@ const WORD_EDIT = `function () {
   }
 }`;
 
+/**
+ * The simulation of a spreadsheet edit, in plain JavaScript, inside the `cell.edit` command, as WORD_MODEL_SRC is the
+ * Word edit's: every op checked in order on the workbook's sheets before anything is changed, an earlier op's sheets
+ * taken into account (a sheet the call makes can be written into, one it renamed is found by its new name only).
+ * `sheets` is the workbook's sheets in order, `{name, hidden}`, `ops` the ops as ops.ts checked them. A sheet is named
+ * case-insensitively, as Excel does. Answers null where all of them hold, or the first failure: its code, the op's
+ * index (from 0) and a message.
+ */
+export const SHEET_MODEL_SRC = `
+function sheetAt(sheets, name) {
+  var key = String(name).toLowerCase();
+  for (var i = 0; i < sheets.length; i++) if (sheets[i].name.toLowerCase() === key) return i;
+  return -1;
+}
+function simulateSheets(sheets, ops) {
+  sheets = sheets.map(function (s) { return { name: s.name, hidden: Boolean(s.hidden) }; });
+  for (var i = 0; i < ops.length; i++) {
+    var op = ops[i], n = "op " + (i + 1) + ": ", j = -1, at;
+    var names = function () { return sheets.map(function (s) { return JSON.stringify(s.name); }).join(", "); };
+    var fail = function (code, message) { return { code: code, op: i, message: n + message }; };
+    var named = op.sheet !== undefined ? op.sheet : op.renameSheet !== undefined ? op.renameSheet : op.moveSheet !== undefined ? op.moveSheet : op.copySheet !== undefined ? op.copySheet : op.hideSheet !== undefined ? op.hideSheet : op.showSheet !== undefined ? op.showSheet : op.deleteSheet;
+    if (named !== undefined) {
+      j = sheetAt(sheets, named);
+      if (j === -1) return fail("not_found", "there is no sheet named " + JSON.stringify(named) + " (the sheets: " + names() + ")");
+    }
+    var made = op.addSheet !== undefined ? op.addSheet : op.to;
+    if (made !== undefined) {
+      var k = sheetAt(sheets, made);
+      if (k !== -1 && !(op.renameSheet !== undefined && k === j)) return fail("sheet_exists", "there is a sheet named " + JSON.stringify(sheets[k].name) + " already (names are told apart without case)");
+    }
+    var most = sheets.length + (op.addSheet !== undefined || op.copySheet !== undefined ? 1 : 0);
+    if (op.position !== undefined && op.position > most) return fail("bad_op", "position " + op.position + " is past the end: the sheets go up to " + most + " here");
+    var visibleBesides = sheets.filter(function (s, x) { return x !== j && !s.hidden; }).length;
+    if (typeof op.range === "string") continue;
+    if (op.addSheet !== undefined) {
+      at = op.position !== undefined ? op.position : sheets.length + 1;
+      sheets.splice(at - 1, 0, { name: op.addSheet, hidden: false });
+    } else if (op.renameSheet !== undefined) {
+      sheets[j].name = op.to;
+    } else if (op.moveSheet !== undefined) {
+      sheets.splice(op.position - 1, 0, sheets.splice(j, 1)[0]);
+    } else if (op.copySheet !== undefined) {
+      at = op.position !== undefined ? op.position : j + 2;
+      sheets.splice(at - 1, 0, { name: op.to, hidden: false });
+    } else if (op.hideSheet !== undefined) {
+      if (!sheets[j].hidden && visibleBesides === 0) return fail("last_visible_sheet", JSON.stringify(sheets[j].name) + " is the only visible sheet, and a workbook shows one at least: show another first");
+      sheets[j].hidden = true;
+    } else if (op.showSheet !== undefined) {
+      sheets[j].hidden = false;
+    } else if (op.deleteSheet !== undefined) {
+      if (!sheets[j].hidden && visibleBesides === 0) return fail("last_visible_sheet", JSON.stringify(sheets[j].name) + " is the " + (sheets.length === 1 ? "only sheet" : "only visible sheet") + ", and a workbook keeps one visible sheet at least");
+      sheets.splice(j, 1);
+    }
+  }
+  return null;
+}
+`;
+
 /** A1 addresses inside the cell commands. */
 const CELL_ADDRESS_SRC = `
 function colName(n) { var s = ""; for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + (n - 1) % 26) + s; return s; }
@@ -237,14 +301,17 @@ function grid(v) { return Array.isArray(v) ? (v.length && !Array.isArray(v[0]) ?
 /** The most cells of one sheet cell.read gives. */
 export const MAX_READ_CELLS = 20_000;
 
-/** cell.read: each sheet (or the one asked for): the cells of its used range that hold anything, by address, with the
- * value and, where the cell has one, the formula; up to MAX_READ_CELLS cells of a sheet, and MAX_READ_TEXT characters
- * of all of them (a sheet cut short is `truncated`, one not read at all for that `skipped` too). */
+/** cell.read: every sheet of the workbook in order, by name and whether it is hidden (`book`, also the empty ones), and
+ * each sheet (or the one asked for, named case-insensitively): the cells of its used range that hold anything, by
+ * address, with the value and, where the cell has one, the formula; up to MAX_READ_CELLS cells of a sheet, and
+ * MAX_READ_TEXT characters of all of them (a sheet cut short is `truncated`, one not read at all for that `skipped` too). */
 const CELL_READ = `function () {
   ${CELL_ADDRESS_SRC}
+  ${SHEET_MODEL_SRC}
   try {
-    var want = Asc.scope.args.sheet, sheets = want ? [Api.GetSheet(want)] : Api.GetSheets();
-    if (want && !sheets[0]) return { error: { code: "not_found", message: "there is no sheet named " + JSON.stringify(want) + " (the sheets: " + Api.GetSheets().map(function (s) { return s.GetName(); }).join(", ") + ")" } };
+    var all = Api.GetSheets(), book = all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; });
+    var want = Asc.scope.args.sheet, at = want ? sheetAt(book, want) : -1, sheets = want ? [all[at]] : all;
+    if (want && at === -1) return { error: { code: "not_found", message: "there is no sheet named " + JSON.stringify(want) + " (the sheets: " + book.map(function (s) { return JSON.stringify(s.name); }).join(", ") + ")" } };
     var out = [], size = 0;
     for (var i = 0; i < sheets.length; i++) {
       if (size > ${MAX_READ_TEXT}) { out.push({ name: sheets[i].GetName(), range: "", cells: [], truncated: true, skipped: true }); continue; }
@@ -265,53 +332,180 @@ const CELL_READ = `function () {
       }
       out.push({ name: sheet.GetName(), range: address, cells: cells, truncated: truncated });
     }
-    return { result: { sheets: out } };
+    return { result: { book: book, sheets: out } };
   } catch (e) {
     return { error: { code: "failed", message: String(e && e.message || e) } };
   }
 }`;
 
-/** cell.edit: each op's values written into its range; every sheet named checked first. */
-const CELL_EDIT = `function () {
-  var touched = false;
+/**
+ * cell.edit is not one command but a few, in turn, which the plugin runs (BRIDGE_JS, `cellEdit`): in the spreadsheet
+ * editor of DS 10.0 a command that makes, moves or deletes a sheet only asks for it (the workbook is locked through
+ * the Document Server first, and the sheet changes when the answer comes, after the command returned), and the
+ * editor's Undo does not take back what a spreadsheet command did. So the plugin checks the whole edit first
+ * (`check`, SHEET_MODEL_SRC), then makes one op at a time (`step`), waits where an op changes the sheets until the
+ * editor shows the change (`sheets`), and where an op fails takes back the ops before it, in reverse, with what each
+ * step said would undo it; a sheet the edit deletes is only renamed out of the way and hidden until every op is made,
+ * and deleted then. Every step finds its sheets by name again, on the workbook as it stands at its turn.
+ */
+const CELL_CHECK = `function () {
+  ${SHEET_MODEL_SRC}
   try {
-    var ops = Asc.scope.args.ops, first = Api.GetSheets()[0];
-    for (var s = 0; s < ops.length; s++) {
-      if (ops[s].sheet && !Api.GetSheet(ops[s].sheet)) return { error: { code: "not_found", op: s, message: "op " + (s + 1) + ": there is no sheet named " + JSON.stringify(ops[s].sheet) + " (the sheets: " + Api.GetSheets().map(function (x) { return x.GetName(); }).join(", ") + ")" }, touched: false };
-    }
-    var cells = 0;
-    for (var i = 0; i < ops.length; i++) {
-      var sheet = ops[i].sheet ? Api.GetSheet(ops[i].sheet) : first;
-      var values = ops[i].values;
-      touched = true;
-      // One cell takes its value, a range its rows of values.
-      sheet.GetRange(ops[i].range).SetValue(values.length === 1 && values[0].length === 1 ? values[0][0] : values);
-      cells += ops[i].values.length * ops[i].values[0].length;
-    }
-    Api.Save();
-    return { result: { cells: cells } };
+    var failed = simulateSheets(Api.GetSheets().map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }), Asc.scope.args.ops);
+    return failed ? { error: failed } : { result: {} };
   } catch (e) {
-    return { error: { code: "failed", message: String(e && e.message || e) }, touched: touched };
+    return { error: { code: "failed", message: String(e && e.message || e) } };
   }
 }`;
 
-/** The job kinds and the command each runs; edits recalculate the document after them, reads do not. */
+/** The workbook's sheets in order, by name and whether each is hidden: what the plugin waits on. */
+const CELL_SHEETS = `function () {
+  try {
+    return { result: Api.GetSheets().map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }) };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
+/** The edit's changes sent to the Document Server now, not at the editor's next pause: the forcesave after the edit
+ * saves them. */
+const CELL_SAVE = `function () {
+  try {
+    Api.Save();
+    return { result: {} };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
+/**
+ * One op of a spreadsheet edit (`Asc.scope.args`: `op`, its `index`, and `pending`, the names the sheets this edit
+ * deletes have until it ends, which the op does not see). Besides the ops of ops.ts, the steps the plugin makes of
+ * them: `fillSheet` (a copy's cells and column widths from `from`), `restoreSheet` (a deleted sheet back, as `to`),
+ * `dropSheet` (a sheet deleted for good). `real` names a sheet by its name exactly, pending ones included. Answers what
+ * the plugin goes on with: `inverse` (the step that takes this one back), `expect` (what the sheets show once the
+ * editor made it: a name there, `has`, gone, `gone`, or their `order`), `then` (the next step of the same op),
+ * `pending` (a sheet now waiting to be deleted), `cells` (how many cells it wrote).
+ */
+const CELL_STEP = `function () {
+  ${CELL_ADDRESS_SRC}
+  ${SHEET_MODEL_SRC}
+  var args = Asc.scope.args, op = args.op, i = args.index, pending = args.pending || [];
+  try {
+    var all = Api.GetSheets(), realNames = all.map(function (s) { return s.GetName(); });
+    var shown = all.filter(function (s) { return pending.indexOf(s.GetName()) === -1; }), shownNames = shown.map(function (s) { return s.GetName(); });
+    var named = function (name) {
+      var list = op.real ? all : shown, at = sheetAt(list.map(function (s) { return { name: s.GetName() }; }), name);
+      if (at === -1) throw { code: "not_found", op: i, message: "op " + (i + 1) + ": there is no sheet named " + JSON.stringify(name) + " (the sheets: " + shownNames.map(function (n) { return JSON.stringify(n); }).join(", ") + ")" };
+      return list[at];
+    };
+    var visible = function () { return all.filter(function (s) { return s.GetVisible(); }).length; };
+    var lastVisible = function (name) { return { code: "last_visible_sheet", op: i, message: "op " + (i + 1) + ": " + JSON.stringify(name) + " is the only visible sheet, and a workbook keeps one visible sheet at least" }; };
+    if (typeof op.range === "string") {
+      var sheet = op.sheet !== undefined ? named(op.sheet) : shown[0], range = sheet.GetRange(op.range);
+      var was = grid(range.GetValue()), formulas = grid(range.GetFormula());
+      // What the cells held, a formula as its formula: written back, it is what they were.
+      var old = was.map(function (row, r) { return row.map(function (v, c) { var f = formulas[r] ? formulas[r][c] : ""; return typeof f === "string" && f.charAt(0) === "=" ? f : v; }); });
+      var values = op.values;
+      // One cell takes its value, a range its rows of values.
+      range.SetValue(values.length === 1 && values[0].length === 1 ? values[0][0] : values);
+      return { result: { inverse: { sheet: sheet.GetName(), range: op.range, values: old, real: true }, cells: values.length * values[0].length } };
+    }
+    if (op.addSheet !== undefined) {
+      // Made after the editor's active sheet, then moved to its place (by default after the last).
+      Api.AddSheet(op.addSheet);
+      return { result: { inverse: { dropSheet: op.addSheet, real: true }, expect: { has: op.addSheet }, then: { moveSheet: op.addSheet, position: op.position !== undefined ? op.position : shown.length + 1, fresh: true } } };
+    }
+    if (op.copySheet !== undefined) {
+      var source = named(op.copySheet).GetName();
+      Api.AddSheet(op.to);
+      return { result: { inverse: { dropSheet: op.to, real: true }, expect: { has: op.to }, then: { fillSheet: op.to, from: source, position: op.position } } };
+    }
+    if (op.fillSheet !== undefined) {
+      var from = Api.GetSheet(op.from), to = Api.GetSheet(op.fillSheet), used = from.GetUsedRange(), address = String(used.GetAddress(false, false));
+      used.Copy(to.GetRange(address));
+      var m = /^([A-Z]+)\\d+(?::([A-Z]+)\\d+)?$/.exec(address), first = m ? colIndex(m[1]) : 0, last = m && m[2] ? colIndex(m[2]) : first;
+      for (var c = first; c <= Math.min(last, first + 1023); c++) to.GetRange(colName(c) + "1").SetColumnWidth(from.GetRange(colName(c) + "1").GetColumnWidth());
+      // By default right after the sheet it copies.
+      var rest = shownNames.filter(function (n) { return n !== op.fillSheet; });
+      return { result: { then: { moveSheet: op.fillSheet, position: op.position !== undefined ? op.position : rest.indexOf(op.from) + 2, fresh: true, real: true } } };
+    }
+    if (op.moveSheet !== undefined) {
+      var moved = named(op.moveSheet), name = moved.GetName(), others = shownNames.filter(function (n) { return n !== name; });
+      var order = realNames.filter(function (n) { return n !== name; }), before = op.position - 1 < others.length;
+      var inverse = op.fresh ? undefined : { moveSheet: name, position: shownNames.indexOf(name) + 1, real: true };
+      if (!others.length) return { result: { inverse: inverse } };
+      var target = before ? others[op.position - 1] : others[others.length - 1];
+      order.splice(order.indexOf(target) + (before ? 0 : 1), 0, name);
+      if (order.join("\\n") === realNames.join("\\n")) return { result: { inverse: inverse } };
+      if (before) moved.Move(Api.GetSheet(target)); else moved.Move(undefined, Api.GetSheet(target));
+      return { result: { inverse: inverse, expect: { order: order } } };
+    }
+    if (op.renameSheet !== undefined) {
+      var renamed = named(op.renameSheet), was = renamed.GetName();
+      renamed.SetName(op.to);
+      return { result: { inverse: { renameSheet: op.to, to: was, real: true } } };
+    }
+    if (op.hideSheet !== undefined || op.showSheet !== undefined) {
+      var show = op.showSheet !== undefined, one = named(show ? op.showSheet : op.hideSheet);
+      if (one.GetVisible() === show) return { result: {} };
+      if (!show && visible() < 2) return { error: lastVisible(one.GetName()) };
+      one.SetVisible(show);
+      return { result: { inverse: show ? { hideSheet: one.GetName(), real: true } : { showSheet: one.GetName(), real: true } } };
+    }
+    if (op.deleteSheet !== undefined) {
+      var gone = named(op.deleteSheet), goneName = gone.GetName(), hidden = !gone.GetVisible(), book = all.map(function (s) { return { name: s.GetName() }; }), temp;
+      if (!hidden && visible() < 2) return { error: lastVisible(goneName) };
+      do temp = "~deleted " + Math.random().toString(36).slice(2, 10); while (sheetAt(book, temp) !== -1);
+      if (!hidden) gone.SetVisible(false);
+      gone.SetName(temp);
+      return { result: { inverse: { restoreSheet: temp, to: goneName, hidden: hidden }, pending: temp } };
+    }
+    if (op.restoreSheet !== undefined) {
+      var back = Api.GetSheet(op.restoreSheet);
+      back.SetName(op.to);
+      if (!op.hidden) back.SetVisible(true);
+      return { result: {} };
+    }
+    if (op.dropSheet !== undefined) {
+      var drop = sheetAt(all.map(function (s) { return { name: s.GetName() }; }), op.dropSheet);
+      if (drop === -1) return { result: {} };
+      all[drop].Delete();
+      return { result: { expect: { gone: realNames[drop] } } };
+    }
+    return { error: { code: "bad_op", op: i, message: "op " + (i + 1) + " is no spreadsheet op" } };
+  } catch (e) {
+    return { error: e && e.code ? e : { code: "failed", op: i, message: "op " + (i + 1) + ": " + String(e && e.message || e) } };
+  }
+}`;
+
+/** The commands of a spreadsheet edit, which the plugin runs in turn (cellEdit). */
+export const CELL_EDIT_COMMANDS = { check: CELL_CHECK, step: CELL_STEP, sheets: CELL_SHEETS, save: CELL_SAVE };
+
+/** How often, and how far apart in ms, the plugin looks whether a change to the sheets is made: up to 10 s per change. */
+export const SHEET_WAIT = { tries: 100, ms: 100 };
+
+/** The job kinds and the command each runs; edits recalculate the document after them, reads do not. (cell.edit is
+ * the plugin's own run of CELL_EDIT_COMMANDS.) */
 export const COMMANDS: Record<string, { source: string; edit: boolean }> = {
   "word.read": { source: WORD_READ, edit: false },
   "word.edit": { source: WORD_EDIT, edit: true },
   "cell.read": { source: CELL_READ, edit: false },
-  "cell.edit": { source: CELL_EDIT, edit: true },
 };
 
 /**
  * The plugin: it long-polls its editor's jobs from the listener (`next`, at the address it was loaded from, which
- * carries its editor's token), runs each job's command, takes back a command that failed after it changed something
- * (Undo), and posts the outcome (`done`). It knows nothing but its token, and runs nothing but the commands above.
+ * carries its editor's token), runs each job's command, takes back a Word command that failed after it changed
+ * something (Undo) and a spreadsheet edit's ops before the one that failed (cellEdit), and posts the outcome (`done`).
+ * It knows nothing but its token, and runs nothing but the commands above.
  */
 export const BRIDGE_JS = `(function () {
   var base = location.pathname.replace(/[^/]*$/, "");
   var commands = {
 ${Object.entries(COMMANDS).map(([kind, c]) => `    ${JSON.stringify(kind)}: { run: ${c.source}, edit: ${c.edit} }`).join(",\n")}
+  };
+  var cell = {
+${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${source}`).join(",\n")}
   };
   var stopped = false;
   function poll() {
@@ -327,7 +521,68 @@ ${Object.entries(COMMANDS).map(([kind, c]) => `    ${JSON.stringify(kind)}: { ru
     outcome.jobId = job.jobId;
     fetch(base + "done", { method: "POST", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(outcome) }).then(poll, function () { setTimeout(poll, 1000); });
   }
+  function call(source, args, edit, then) {
+    window.Asc.scope.args = args;
+    window.Asc.plugin.callCommand(source, false, edit, function (outcome) {
+      then(outcome && typeof outcome === "object" ? outcome : { error: { code: "failed", message: "the editor ran the command but gave nothing back" } });
+    });
+  }
+  // A spreadsheet edit, an op at a time (see CELL_EDIT_COMMANDS): checked whole, each op made and, where it changes
+  // the sheets, waited for; on a failure the ops made are taken back in reverse, and the deleted sheets go at the end.
+  function cellEdit(job) {
+    var ops = job.args.ops, undo = [], pending = [], cells = 0;
+    call(cell.check, { ops: ops }, false, function (out) {
+      if (out.error) return done(job, { error: out.error });
+      next(0);
+    });
+    function next(i) {
+      if (i < ops.length) return step(ops[i], i, function () { next(i + 1); });
+      drop(0);
+    }
+    function drop(k) {
+      if (k < pending.length) return step({ dropSheet: pending[k], real: true }, ops.length - 1, function () { drop(k + 1); });
+      call(cell.save, {}, true, function () { done(job, { result: { ops: ops.length, cells: cells } }); });
+    }
+    function step(op, i, then) {
+      call(cell.step, { op: op, index: i, pending: pending }, true, function (out) {
+        if (out.error) return back(out.error);
+        var r = out.result || {};
+        if (r.inverse) undo.push(r.inverse);
+        if (r.pending) pending.push(r.pending);
+        if (r.cells) cells += r.cells;
+        var go = function () { if (r.then) step(r.then, i, then); else then(); };
+        if (!r.expect) return go();
+        wait(r.expect, function (made) {
+          if (made) return go();
+          back({ code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not show the change to the sheets within " + (${SHEET_WAIT.tries * SHEET_WAIT.ms} / 1000) + " s" });
+        });
+      });
+    }
+    function wait(expect, then, tries) {
+      call(cell.sheets, {}, false, function (out) {
+        var names = (out.result || []).map(function (s) { return s.name; });
+        var made = !out.error && (expect.has !== undefined ? names.indexOf(expect.has) !== -1 : expect.gone !== undefined ? names.indexOf(expect.gone) === -1 : names.join("\\n") === expect.order.join("\\n"));
+        if (made || (tries || 0) >= ${SHEET_WAIT.tries}) return then(made);
+        setTimeout(function () { wait(expect, then, (tries || 0) + 1); }, ${SHEET_WAIT.ms});
+      });
+    }
+    function back(error) {
+      var whole = true;
+      (function one() {
+        var inverse = undo.pop();
+        if (!inverse) return call(cell.save, {}, true, function () { done(job, whole && error.op !== undefined ? { error: error, undone: true } : { error: error }); });
+        if (inverse.restoreSheet !== undefined && pending.indexOf(inverse.restoreSheet) !== -1) pending.splice(pending.indexOf(inverse.restoreSheet), 1);
+        call(cell.step, { op: inverse, index: -1, pending: pending }, true, function (out) {
+          if (out.error) whole = false;
+          var r = out.result || {};
+          if (!r.expect) return one();
+          wait(r.expect, function (made) { if (!made) whole = false; one(); });
+        });
+      })();
+    }
+  }
   function run(job) {
+    if (job.kind === "cell.edit") return cellEdit(job);
     var command = commands[job.kind];
     if (!command) return done(job, { error: { code: "bad_op", message: "no command " + job.kind } });
     window.Asc.scope.args = job.args;

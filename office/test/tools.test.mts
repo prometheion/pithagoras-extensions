@@ -70,7 +70,7 @@ function makePi(): PiFake {
 
 type Seen = { records: { subject: string; reason: string; chatId: string }[]; logs: string[] };
 
-type Run = { home: string; docId: string; mode: string; kind: string; args: any };
+type Run = { home: string; docId: string; mode: string; kind: string; args: any; timeoutMs?: number };
 
 /**
  * The agent's editor, faked: every job it is handed (`runs`), answered by `answer` (by default: a Word read of the
@@ -86,12 +86,12 @@ function fakeSeat(root: () => string) {
     answer: undefined as ((run: Run) => unknown) | undefined,
   };
   const seat = {
-    run: async (home: string, docId: string, mode: string, job: { kind: string; args: any }) => {
-      const run = { home, docId, mode, kind: job.kind, args: job.args };
+    run: async (home: string, docId: string, mode: string, job: { kind: string; args: any }, options?: { timeoutMs?: number }) => {
+      const run: Run = { home, docId, mode, kind: job.kind, args: job.args, ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}) };
       state.runs.push(run);
       if (state.answer) return state.answer(run);
       if (job.kind === "word.read") return { blocks: parseDocx(readDoc(getDoc(docId, root())!, root())).paragraphs.map((p) => ({ p })) };
-      if (job.kind === "cell.read") return { sheets: [{ name: "Sheet1", range: "A1", cells: [], truncated: false }] };
+      if (job.kind === "cell.read") return { book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [], truncated: false }] };
       return { ops: (job.args.ops ?? []).length };
     },
     keyOf: (_home: string, docId: string) => `key-of-${docId}`,
@@ -449,12 +449,12 @@ test("office_read (Word): the editor's blocks, numbered, with styles and tables;
   assert.match(await refused(tool(s, "office_read").execute("r2", { id: doc.docId, sheet: "Sheet1" }), "sheet of a docx"), /^error:bad_op /);
 });
 
-test("office_read (spreadsheet): cells by address, texts quoted, formulas after their values; one sheet by name", async () => {
+test("office_read (spreadsheet): every sheet by its position and whether it is hidden, then cells by address, texts quoted, formulas after their values; one sheet by name", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Budget", type: "cell", owner: "/f/atlas" }, s.root);
-  s.seat.answer = () => ({ sheets: [{ name: "Sheet1", range: "A1:C3", cells: [{ a: "A1", v: 2 }, { a: "A3", v: 6, f: "=A1*A2" }, { a: "C1", v: "person" }, { a: "B2", v: true }], truncated: false }, { name: "Empty", range: "A1", cells: [], truncated: true }, { name: "Later", range: "", cells: [], truncated: true, skipped: true }] });
+  s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }, { name: "Empty", hidden: true }, { name: "Later", hidden: false }, { name: "Not read", hidden: false }], sheets: [{ name: "Sheet1", range: "A1:C3", cells: [{ a: "A1", v: 2 }, { a: "A3", v: 6, f: "=A1*A2" }, { a: "C1", v: "person" }, { a: "B2", v: true }], truncated: false }, { name: "Empty", range: "A1", cells: [], truncated: true }, { name: "Later", range: "", cells: [], truncated: true, skipped: true }] });
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
-  assert.match(t, /Sheet "Sheet1" \(A1:C3\):\nA1: 2\nA3: 6 \(=A1\*A2\)\nC1: "person"\nB2: TRUE\n\nSheet "Empty" \(A1\):\n\(empty\)\n\(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most\)\n\nSheet "Later": not read \(the sheets before it filled the read; read it with sheet\)$/);
+  assert.match(t, /\n\nSheets: 1 "Sheet1", 2 "Empty" \(hidden\), 3 "Later", 4 "Not read"\n\nSheet "Sheet1" \(A1:C3\):\nA1: 2\nA3: 6 \(=A1\*A2\)\nC1: "person"\nB2: TRUE\n\nSheet "Empty" \(A1\):\n\(empty\)\n\(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most\)\n\nSheet "Later": not read \(the sheets before it filled the read; read it with sheet\)$/);
   await tool(s, "office_read").execute("r2", { id: doc.docId, sheet: "Sheet1" });
   assert.deepEqual(s.seat.runs.at(-1)!.args, { sheet: "Sheet1" });
 });
@@ -469,9 +469,15 @@ test("office_read with Office stopped (or starting) reads the saved file and say
   s.office.state = "starting";
   assert.match(((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text, /Saved copy \(Office is still starting\)/);
   const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
-  assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId })) as ToolResult).content[0].text, /Saved copy .*\n\nSheet "Sheet1":\n\(empty\)/s);
+  assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId })) as ToolResult).content[0].text, /Saved copy .*\n\nSheets: 1 "Sheet1"\n\nSheet "Sheet1":\n\(empty\)$/s);
   assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Sheet1" })) as ToolResult).content[0].text, /Sheet "Sheet1"/);
-  assert.match(await refused(tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Nope" }), "no such sheet"), /^error:not_found there is no sheet named "Nope" \(the sheets: Sheet1\)/);
+  assert.match(await refused(tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Nope" }), "no such sheet"), /^error:not_found there is no sheet named "Nope" \(the sheets: "Sheet1"\)/);
+  // A second sheet, hidden: named with its position in the list, and read by its name in any case.
+  const file = path.join(s.root, "docs", sheet.docId, "Grid.xlsx");
+  const workbook = await (await (await import("jszip")).default.loadAsync(fs.readFileSync(file))).file("xl/workbook.xml")!.async("string");
+  fs.writeFileSync(file, rewriteZip(fs.readFileSync(file), { "xl/workbook.xml": workbook.replace(/(<sheet\b[^>]*\/>)/, '$1<sheet name="Hidden data" sheetId="2" state="hidden" r:id="rId1"/>') }));
+  const both = ((await tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "HIDDEN DATA" })) as ToolResult).content[0].text;
+  assert.match(both, /\n\nSheets: 1 "Sheet1", 2 "Hidden data" \(hidden\)\n\nSheet "Hidden data":\n\(empty\)$/);
   assert.deepEqual(s.seat.runs, []);
 });
 
@@ -553,6 +559,33 @@ test("office_edit (spreadsheet): the range ops go as one cell.edit job", async (
   const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
   await tool(s, "office_edit").execute("e1", { id: sheet.docId, ops: [{ range: "A1:A3", values: [[2], [3], ["=A1*A2"]] }] });
   assert.deepEqual(s.seat.runs.map((r) => [r.kind, r.args]), [["cell.edit", { ops: [{ range: "A1:A3", values: [[2], [3], ["=A1*A2"]] }] }]]);
+});
+
+test("office_edit (spreadsheet): sheet ops go in the same job, with time for the Document Server's answer to each, and the audit names them", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", owner: "/f/atlas" }, s.root);
+  const ops = [{ addSheet: "Data", position: 1 }, { sheet: "Data", range: "A1", values: [[1]] }, { copySheet: "Data", to: "Data 2" }, { hideSheet: "Data 2" }];
+  await tool(s, "office_edit").execute("e1", { id: sheet.docId, ops });
+  assert.deepEqual(s.seat.runs.map((r) => [r.kind, r.args]), [["cell.edit", { ops }]]);
+  assert.equal(s.seat.runs[0].timeoutMs, 20_000 + 3 * 20_000, "three sheet ops");
+  assert.match(s.seen.records.at(-1)!.reason, /office_edit: 4 op\(s\) \(sheets, cells\) on /);
+  // A call of cell writes alone keeps the seat's own time.
+  await tool(s, "office_edit").execute("e2", { id: sheet.docId, ops: [{ range: "A1", values: [[2]] }] });
+  assert.equal(s.seat.runs[1].timeoutMs, undefined);
+  // A name Excel refuses goes nowhere.
+  assert.match(await refused(tool(s, "office_edit").execute("e3", { id: sheet.docId, ops: [{ addSheet: "a/b" }] }), "bad name"), /^error:bad_op op 1: a sheet's name may not hold any of/);
+  assert.equal(s.seat.runs.length, 2);
+});
+
+test("office_edit and office_read say what the agent can do with sheets", () => {
+  const s = setup();
+  const edit = tool(s, "office_edit");
+  for (const key of ["addSheet", "renameSheet", "moveSheet", "copySheet", "hideSheet", "showSheet", "deleteSheet"]) {
+    assert.ok(edit.description.includes(`{${key}`), key);
+    assert.ok(key in edit.parameters.properties.ops.items.properties, key);
+  }
+  assert.match(edit.description, /='My data'!A1/);
+  assert.match(tool(s, "office_read").description, /the list of its sheets \(position, name, hidden or not\)/);
 });
 
 test("office_edit: bad ops are refused before anything is sent (bad_op, unsupported_format)", async () => {

@@ -454,3 +454,38 @@ test("a chat deleted by hand: the thread keeps its record, and its next reply ma
   docchat.folderRemoved("/f/aegis");
   assert.deepEqual(docchat.threadsOf(docId)["00000001"].agents, {});
 });
+
+test("a post that fails is tried again a little later; a reply a person's change took away is posted again; one that keeps failing says so", async () => {
+  Object.assign(docchat.postTimings, { repostMs: 50, retryMs: 50 });
+  try {
+    const docId = await word();
+    seatFails = { code: "agent_unavailable", message: "Docker did not answer in time" };
+    docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")]);
+    await settle();
+    prompts[0].resolve({ status: "done", answer: "Erledigt." });
+    await settle();
+    assert.equal(posts.length, 0);
+    seatFails = null;
+    await delay(200);
+    assert.equal(posts.filter((p) => p.job.kind === "word.reply").length, 1, "tried again");
+    // A reply the read back does not find is posted again, until it is there.
+    let lost = 2;
+    configure();
+    docchat.configureDocchat({
+      seatRun: async (home, d, mode, job) => {
+        posts.push({ home, docId: d, mode, job: job as never });
+        if (job.kind === "word.comments") return { comments: [{ guid: "00000001", userId: "portal-user", text: "+Aegis eins", replies: lost-- > 0 ? [] : [{ text: "Nochmal." }] }] };
+        return {};
+      },
+    });
+    posts = [];
+    docchat.report(docId, "k", [ui("u2", "reply", "00000001", "Und?")]);
+    await settle();
+    prompts[1].resolve({ status: "done", answer: "Nochmal." });
+    await delay(500);
+    assert.equal(posts.filter((p) => p.job.kind === "word.reply").length, 3, "posted again twice");
+    assert.notEqual(docchat.statesOf(docId)[0].state, "failed");
+  } finally {
+    Object.assign(docchat.postTimings, { repostMs: 5_000, retryMs: 10_000 });
+  }
+});

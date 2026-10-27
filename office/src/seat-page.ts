@@ -644,7 +644,9 @@ const CELL_REPLY = `function () {
     var a = Asc.scope.args, comment = null, all = Api.GetAllComments() || [];
     var plain = function (text) { return String(text == null ? "" : text).replace(/\\s+/g, " ").trim(); };
     var same = function (c) { return String(c.GetUserId() || "") === a.match.userId && plain(c.GetText()) === plain(a.match.text); };
-    if (a.sessionId) { var byId = Api.GetCommentById(a.sessionId); if (byId && same(byId)) comment = byId; }
+    // Found among all the comments (a comment GetCommentById gives takes no reply that lasts, in DS 10.0): by its id
+    // where that is still the comment the pages named.
+    if (a.sessionId) comment = all.filter(function (c) { return String(c.GetId()) === a.sessionId && same(c); })[0] || null;
     if (!comment) {
       var found = all.filter(function (c) { return same(c) && (!a.match.time || Math.abs((Number(c.GetTimeUTC()) || 0) - a.match.time) <= 1000); });
       if (found.length > 1) return { error: { code: "comment_ambiguous", message: "more than one comment has that author, time and text" } };

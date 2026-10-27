@@ -169,6 +169,10 @@ const PEOPLE_CHARS = 20_000;
 const TITLE_CHARS = 60;
 /** Saves after posts: at most one per document in this time. */
 const SAVE_EVERY_MS = 3_000;
+/** A reply lost to a person's change at the same moment is posted again this often, this far apart; a post that
+ * failed (the agents' browser starting, Docker slow) is tried again this often, further apart each time. Tests make
+ * them shorter. */
+export const postTimings = { reposts: 3, repostMs: 5_000, retries: 6, retryMs: 10_000 };
 
 export const DEFAULT_LIMITS: DocchatLimits = {
   runs: DEFAULT_SETTINGS.docchatRuns,
@@ -214,6 +218,7 @@ export function __resetDocchatForTests(): void {
   lastSave.clear();
   dialogs.clear();
   listening.clear();
+  retries.clear();
   loaded = false;
 }
 
@@ -732,10 +737,13 @@ async function postNow(t: Target): Promise<void> {
         (job.args as { guid?: string }).guid = made.guid;
       }
       await saveSoon(folder, docId);
-      // Each change of a thread rewrites it whole from the changing page's view: a person's change at the same moment
-      // can write it back without the reply. Read back once, and posted again where it is not there.
-      if (!(await replyThere(folder, docId, mode, t.guid, thread, reply))) {
-        log(`the answer in thread ${t.guid} of ${docId} was lost to a change at the same time: posted again`);
+      // Each change of a thread rewrites it whole from the changing page's view, and a spreadsheet's comment is locked
+      // while a person changes it: a reply at that moment can be lost. Read back, and posted again where it is not
+      // there, a few seconds apart, a few times.
+      for (let again = 1; !(await replyThere(folder, docId, mode, t.guid, thread, reply)); again++) {
+        if (again > postTimings.reposts) throw Object.assign(new Error("the comment was busy each time the answer was posted"), { code: "comment_busy" });
+        log(`the answer in thread ${t.guid} of ${docId} was lost to a change at the same time: posted again (${again})`);
+        await new Promise((resolve) => setTimeout(resolve, postTimings.repostMs));
         await run(folder, docId, mode, job, { post: true });
         await saveSoon(folder, docId);
       }
@@ -749,13 +757,24 @@ async function postNow(t: Target): Promise<void> {
     entry.state = "failed";
     entry.error = err.code === "comment_gone" ? "the comment is gone" : err.code === "office_stopped" ? "Office is stopped; the answer is posted once it runs again" : err.code === "agent_editor_missing" ? "the agents' editor is not downloaded: Start in Settings → Office downloads it" : String(err.message ?? e).slice(0, 200);
     // Gone for good: nothing left to post it to.
-    if (err.code === "comment_gone" || err.code === "comment_ambiguous" || err.code === "not_found") delete entry.toPost;
+    if (err.code === "comment_gone" || err.code === "comment_ambiguous" || err.code === "not_found" || err.code === "comment_busy") delete entry.toPost;
     log(`an answer could not be posted (${t.kind === "thread" ? `thread ${t.guid}` : `session ${t.key}`}): ${err.code ?? ""} ${err.message ?? e}`);
     persist(t);
+    // Anything else may pass in a moment (the agents' browser starting, Docker slow): tried again, a few times.
+    const tries = (retries.get(id) ?? 0) + 1;
+    if (entry.toPost && tries <= postTimings.retries) {
+      retries.set(id, tries);
+      timer(`post:${id}`, postTimings.retryMs * tries, () => void postNow(t));
+    }
+    return;
   } finally {
     posting.delete(id);
   }
+  retries.delete(id);
 }
+
+/** Posts tried again after they failed, by target. */
+const retries = new Map<string, number>();
 
 /** A save of the session the agent's editor of the document is in, at most once per document in SAVE_EVERY_MS: the
  * reply is in the file also when nobody is in the document. */
@@ -775,8 +794,9 @@ async function replyThere(folder: string, docId: string, mode: "edit" | "view" |
   try {
     const doc = getDoc(docId, root());
     const listed = (await cfg.seatRun!(folder, docId, mode === "comment" ? "comment" : mode, { kind: doc?.ext === "xlsx" ? "cell.comments" : "word.comments", args: {} }, { post: true })) as { comments?: { guid?: string; userId: string; text: string; replies: { text: string }[] }[] };
-    const comment = (listed.comments ?? []).find((c) => (c.guid ? c.guid === guid : c.userId === (thread.userId ?? "") && c.text === thread.text));
-    return !comment || comment.replies.some((r) => r.text === reply);
+    const plain = (text: string) => text.replace(/\s+/g, " ").trim();
+    const comment = (listed.comments ?? []).find((c) => (c.guid ? c.guid === guid : c.userId === (thread.userId ?? "") && plain(c.text) === plain(thread.text)));
+    return !comment || comment.replies.some((r) => plain(r.text) === plain(reply));
   } catch {
     // Not known: taken as there, rather than posted twice.
     return true;

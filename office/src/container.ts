@@ -682,9 +682,24 @@ const PROBE_FOR_MS = 15_000;
 let probedAgent: { id: string; at: number; memBytes?: number } | undefined;
 
 /**
+ * What a container runs to read the memory it uses, in plain `sh`, so it needs no other program in the image: its
+ * cgroup's memory (v2's memory.current, or v1's usage) less the file cache the kernel can drop again (the inactive
+ * file pages in memory.stat), which is what `docker stats` shows. The whole figure counts every font and image file
+ * the container ever read: a Document Server that has just started reads 1.8 GB of it, but uses 0.3 GB. Docker's exec
+ * gives stdout and stderr as one, so the message about a file that is not there (cgroup v1 has no memory.current) is
+ * silenced as a group: a redirection on the command itself is opened only after the failing `<`. Nothing is printed
+ * where there is no cgroup memory to read.
+ */
+export const MEM_COMMAND =
+  'if { read -r v < /sys/fs/cgroup/memory.current; } 2>/dev/null; then f=/sys/fs/cgroup/memory.stat; k=inactive_file; ' +
+  'else { read -r v < /sys/fs/cgroup/memory/memory.usage_in_bytes; } 2>/dev/null; f=/sys/fs/cgroup/memory/memory.stat; k=total_inactive_file; fi; ' +
+  'i=0; { while read -r a b; do [ "$a" = "$k" ] && i=$b; done < "$f"; } 2>/dev/null; ' +
+  'if [ -n "$v" ]; then echo $((v - i)); fi';
+
+/**
  * The running version, as the image's package says it (`dpkg-query`: "10.0.0-169"), and the memory the container uses
- * now, from its own cgroup (v2's memory.current, or v1's usage). Docker's inspect body has neither, and the Docker API
- * an extension has gives no stats. Never an error: what fails stays absent.
+ * now (MEM_COMMAND). Docker's inspect body has neither, and the Docker API an extension has gives no stats. Never an
+ * error: what fails stays absent.
  */
 async function probe(d: Docker, id: string): Promise<{ version?: string; memBytes?: number }> {
   if (probed && probed.id === id && Date.now() - probed.at < PROBE_FOR_MS) return { version: probed.version, memBytes: probed.memBytes };
@@ -692,7 +707,7 @@ async function probe(d: Docker, id: string): Promise<{ version?: string; memByte
   try {
     const res = await d.containers.exec(
       NAMES.container,
-      ["sh", "-c", "dpkg-query -W -f='${Version}\\n' onlyoffice-documentserver; cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes"],
+      ["sh", "-c", `dpkg-query -W -f='\${Version}\\n' onlyoffice-documentserver; ${MEM_COMMAND}`],
       { timeoutMs: 10_000 },
     );
     const [version, mem] = res.output.trim().split("\n").map((l) => l.trim());
@@ -706,16 +721,8 @@ async function probe(d: Docker, id: string): Promise<{ version?: string; memByte
 }
 
 /**
- * What the agents' browser runs to read its memory: the shell's own `read`, which needs no other program in the image.
- * Docker's exec gives stdout and stderr as one, so the message about a file that is not there (cgroup v1 has no
- * memory.current) is silenced as a group: a redirection on the command itself is opened only after the failing `<`.
- */
-export const AGENT_MEM_COMMAND =
-  '{ read -r v < /sys/fs/cgroup/memory.current; } 2>/dev/null || { read -r v < /sys/fs/cgroup/memory/memory.usage_in_bytes; } 2>/dev/null; echo "$v"';
-
-/**
- * The memory the agents' browser uses now, from its own cgroup, while it runs; nothing where it does not run or cannot be
- * read. Never an error: a browser that cannot be read adds nothing.
+ * The memory the agents' browser uses now (MEM_COMMAND), while it runs; nothing where it does not run or cannot be read.
+ * Never an error: a browser that cannot be read adds nothing.
  */
 async function probeAgent(d: Docker): Promise<number | undefined> {
   try {
@@ -726,7 +733,7 @@ async function probeAgent(d: Docker): Promise<number | undefined> {
     try {
       const res = await d.containers.exec(
         NAMES.agent,
-        ["bash", "-c", AGENT_MEM_COMMAND],
+        ["sh", "-c", MEM_COMMAND],
         { timeoutMs: 10_000 },
       );
       const mem = res.output.trim();

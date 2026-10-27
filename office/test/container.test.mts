@@ -17,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import { stamped } from "../../shared/service";
 import {
   AGENT_IMAGE,
-  AGENT_MEM_COMMAND,
+  MEM_COMMAND,
   AGENT_IMAGE_DIGEST,
   AGENT_IMAGE_TAG,
   BACK_PORT,
@@ -380,7 +380,7 @@ test("status: the memory is all of Office -- the Document Server's alone, plus t
   // Read with the shell's own builtin.
   const asked = m.calls.filter((c) => c.startsWith(`exec ${AGENT}`));
   assert.equal(asked.length, 1);
-  assert.match(asked[0], /^exec \S+ bash -c \{ read -r v < \/sys\/fs\/cgroup\/memory\.current/);
+  assert.match(asked[0], /^exec \S+ sh -c if \{ read -r v < \/sys\/fs\/cgroup\/memory\.current/);
   // Kept for a while, as the Document Server's is.
   await status(m.docker);
   assert.equal(m.calls.filter((c) => c.startsWith(`exec ${AGENT}`)).length, 1);
@@ -410,36 +410,42 @@ test("status: an agents' browser whose memory cannot be read adds nothing and br
   assert.ok(!m.calls.some((c) => c.startsWith(`exec ${AGENT}`)));
 });
 
-/** The browser's read command run for real by bash, against a stand-in for /sys/fs/cgroup, with stdout and stderr as one
+/** The memory command run for real by a shell, against a stand-in for /sys/fs/cgroup, with stdout and stderr as one
  * (what Docker's exec gives). */
-function runMemCommand(layout: Record<string, string>): string {
+function runMemCommand(layout: Record<string, string>, shell = "bash"): string {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), "office-cgroup-"));
   try {
     for (const [file, value] of Object.entries(layout)) {
       fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
       fs.writeFileSync(path.join(root, file), value);
     }
-    const r = spawnSync("bash", ["-c", AGENT_MEM_COMMAND.replaceAll("/sys/fs/cgroup", root)], { encoding: "utf8" });
+    const r = spawnSync(shell, ["-c", MEM_COMMAND.replaceAll("/sys/fs/cgroup", root)], { encoding: "utf8" });
     return r.stdout + r.stderr;
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
 
-test("status: the browser's memory is read on cgroup v1 and v2 alike, and the shell's own complaint stays out of the answer", async () => {
-  assert.equal(runMemCommand({ "memory.current": "123\n" }).trim(), "123", "cgroup v2");
-  assert.equal(runMemCommand({ "memory/memory.usage_in_bytes": "456\n" }).trim(), "456", "cgroup v1: no memory.current, and no message about it");
-  assert.equal(runMemCommand({}).trim(), "", "neither: nothing, and no message");
+test("status: the memory is read on cgroup v1 and v2 alike, less the file cache the kernel can drop, and the shell's own complaint stays out of the answer", async () => {
+  const stat2 = "anon 100\nfile 900\ninactive_file 400\nactive_file 500\n";
+  const stat1 = "cache 900\ntotal_inactive_file 300\ntotal_active_file 600\n";
+  for (const shell of ["bash", "sh"]) {
+    assert.equal(runMemCommand({ "memory.current": "1000\n", "memory.stat": stat2 }, shell).trim(), "600", `${shell}: cgroup v2, as docker stats counts it`);
+    assert.equal(runMemCommand({ "memory/memory.usage_in_bytes": "1000\n", "memory/memory.stat": stat1 }, shell).trim(), "700", `${shell}: cgroup v1: no memory.current, and no message about it`);
+    assert.equal(runMemCommand({ "memory.current": "123\n" }, shell).trim(), "123", `${shell}: no memory.stat: all of it`);
+    assert.equal(runMemCommand({ "memory.current": "123\n", "memory.stat": "anon 1\n" }, shell).trim(), "123", `${shell}: no inactive_file in it: all of it`);
+    assert.equal(runMemCommand({}, shell).trim(), "", `${shell}: neither: nothing, and no message`);
+  }
 
-  // Through status(): the answer a v1 host gives, as the shell really makes it.
+  // Through status(): the answers a v1 host gives, as the shell really makes them.
   const m = fresh();
   m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
   m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running" });
   m.state.answer = (cmd) => {
-    if (cmd.join(" ").includes("dpkg-query")) return { output: "10.0.0-169\n300000000\n", exitCode: 0, timedOut: false };
-    return { output: runMemCommand({ "memory/memory.usage_in_bytes": "200000000\n" }), exitCode: 0, timedOut: false };
+    const out = runMemCommand({ "memory/memory.usage_in_bytes": "500000000\n", "memory/memory.stat": "total_inactive_file 200000000\n" });
+    return { output: cmd.join(" ").includes("dpkg-query") ? `10.0.0-169\n${out}` : out, exitCode: 0, timedOut: false };
   };
-  assert.equal((await status(m.docker)).memBytes, 500000000);
+  assert.equal((await status(m.docker)).memBytes, 600000000);
 });
 
 test("status: the browser's figure is asked for again after PROBE_FOR_MS, and not before", async () => {

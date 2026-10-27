@@ -64,6 +64,8 @@ async function run(PITHAGORAS: string): Promise<void> {
   mkdirSync(data, { recursive: true, mode: 0o700 });
   writeFileSync(path.join(data, "settings.json"), JSON.stringify({ enabled: true, imageTag: IMAGE }));
 
+  // (After the environment above: the module names its containers when it loads.)
+  const { MEM_COMMAND } = await import("../../src/container.ts");
   const host = await import(from("core/server/dist/extension-host.js"));
   const { requiresOf } = await import(from("core/server/dist/extension-ui.js"));
   const db = await import(from("core/server/dist/db.js"));
@@ -87,6 +89,36 @@ async function run(PITHAGORAS: string): Promise<void> {
     const answer = await fetch(url, { ...init, headers: { "content-type": "application/json", origin, ...init?.headers } });
     return { status: answer.status, body: await answer.json() };
   };
+
+  /**
+   * What the page shows as Office's memory (GET /container/status) against what the containers use: each container's
+   * own cgroup less its droppable file cache, read before and after the status call (the figure lies between), and
+   * `docker stats`, which counts the same way. With the agents' browser up the figure is both containers', and with it
+   * stopped the Document Server's alone. The numbers go to the log (the owner's RAM line rests on them).
+   */
+  async function measure(label: string, browserUp: boolean): Promise<{ figure: number; ds: number; browser: number }> {
+    const cgroup = (name: string) => Number(execFileSync("docker", ["exec", name, "sh", "-c", MEM_COMMAND], { encoding: "utf8" }).trim());
+    const running = (name: string) => execFileSync("docker", ["ps", "-q", "--filter", `name=^${name}$`], { encoding: "utf8" }).trim() !== "";
+    assert.equal(running(`${PREFIX}-agent`), browserUp, `${label}: the agents' browser ${browserUp ? "runs" : "is stopped"}`);
+    await delay(16_000); // the status keeps what it read for 15 s
+    const ds0 = cgroup(PREFIX);
+    const br0 = browserUp ? cgroup(`${PREFIX}-agent`) : 0;
+    const status = (await json(`${at}/container/status`)).body;
+    const ds1 = cgroup(PREFIX);
+    const br1 = browserUp ? cgroup(`${PREFIX}-agent`) : 0;
+    const stats = execFileSync("docker", ["stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}", PREFIX, ...(browserUp ? [`${PREFIX}-agent`] : [])], { encoding: "utf8" }).trim().split("\n");
+    const statsBytes = stats.reduce((sum, line) => {
+      const [, n, unit] = / ([\d.]+)(KiB|MiB|GiB) \//.exec(line)!;
+      return sum + Number(n) * 1024 ** ({ KiB: 1, MiB: 2, GiB: 3 } as Record<string, number>)[unit];
+    }, 0);
+    const figure = status.memBytes as number;
+    const mib = (n: number) => `${(n / 1048576).toFixed(0)} MiB`;
+    console.log(`MEM ${label}: page ${mib(figure)}; Document Server cgroup ${mib(ds0)}..${mib(ds1)}; browser cgroup ${browserUp ? `${mib(br0)}..${mib(br1)}` : "stopped"}; docker stats: ${stats.join("; ")}`);
+    const slack = 64 * 1048576;
+    assert.ok(figure >= Math.min(ds0, ds1) + Math.min(br0, br1) - slack && figure <= Math.max(ds0, ds1) + Math.max(br0, br1) + slack, `${label}: the page's figure is the Document Server's plus ${browserUp ? "the browser's" : "nothing (the browser is stopped)"}`);
+    assert.ok(Math.abs(figure - statsBytes) <= 0.25 * statsBytes + slack, `${label}: the figure (${mib(figure)}) is what docker stats shows (${mib(statsBytes)})`);
+    return { figure, ds: Math.max(ds0, ds1), browser: Math.max(br0, br1) };
+  }
 
   after(async () => {
     // OFFICE_E2E_KEEP=1 leaves the containers for a look at the Document Server's logs; `docker rm -f` them after.
@@ -125,6 +157,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       if (state !== "running") await delay(2000);
     }
     assert.equal(state, "running", "the Document Server is set up");
+    await measure("Document Server idle, no editor, no browser", false);
     const inspect = (name: string) => JSON.parse(execFileSync("docker", ["inspect", name], { encoding: "utf8" }))[0];
     assert.equal(inspect(PREFIX).HostConfig.NetworkMode, `${PREFIX}-net`);
     assert.deepEqual(inspect(PREFIX).HostConfig.PortBindings ?? {}, {}, "nothing of the Document Server's is published");
@@ -140,7 +173,7 @@ async function run(PITHAGORAS: string): Promise<void> {
 
   /** A document made, opened in the editor from `pageOrigin` as the Office page does, typed into and closed: the text
    * must be in the file. */
-  async function openTypeSave(pageOrigin: string, title: string, typed: string): Promise<void> {
+  async function openTypeSave(pageOrigin: string, title: string, typed: string, measured = false): Promise<void> {
     const made = await json(`${at}/documents`, { method: "POST", body: JSON.stringify({ title, type: "word" }) });
     assert.equal(made.status, 201);
     const doc = made.body as { docId: string };
@@ -179,6 +212,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       await frame.locator("#editor_sdk").click({ position: { x: 300, y: 150 } });
       await page.keyboard.type(typed, { delay: 30 });
       await delay(3000);
+      if (measured) await measure("Document Server with one person editing, no browser", false);
       await page.evaluate(() => (window as unknown as { __editor: { destroyEditor(): void } }).__editor.destroyEditor());
       const file = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === doc.docId);
       const onDisk = path.join(data, "docs", doc.docId, `${file.title}.docx`);
@@ -196,7 +230,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   }
 
   test("a document opens in the editor, takes what is typed, and the save lands in the file", { timeout: 600_000 }, async () => {
-    await openTypeSave(origin, "End to end", "Typed end to end");
+    await openTypeSave(origin, "End to end", "Typed end to end", true);
   });
 
   /* ------------------------------------------------------------------ */
@@ -283,6 +317,8 @@ async function run(PITHAGORAS: string): Promise<void> {
     const read = (await tools.office_read.execute("r1", { id: doc })).content[0].text;
     assert.match(read, /\[1\] Quarterly report\n\[2\] \(Heading 1\) Findings\n\[3\] table\n\| Item \| Amount \|\n\| Ledger \| 42 \|/);
     assert.equal(agentContainer()?.State.Running, true);
+    const withBrowser = await measure("Document Server + agents' browser, one agent document open", true);
+    assert.ok(withBrowser.figure > withBrowser.ds, "the browser's memory is on top of the Document Server's");
     // Idle: the editor closes, its session closes with nothing new (the document as it was saved), the browser stops.
     seat.tuneSeats({ idleMs: 3000, agentIdleMs: 4000 });
     try {
@@ -291,6 +327,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       // (The close's save may be written again, the same document in a new file: its properties hold the time.)
       assert.equal(await partOf(doc, "word/document.xml"), xml, "its close changed nothing of the document");
       assert.ok(await until(async () => agentContainer() === undefined, 60_000), "the browser stopped");
+      await measure("Document Server alone again after the browser stopped", false);
     } finally {
       seat.tuneSeats({ idleMs: seat.LIMITS.idleMs, agentIdleMs: seat.LIMITS.agentIdleMs });
     }
@@ -327,6 +364,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.equal(await page.evaluate(() => (window as unknown as { __key: string }).__key), key, "the same session");
     // The person leaves; the agent's editor stays in the session, which is saved as they leave: the file has everything.
     await delay(2000);
+    await measure("Document Server + agents' browser, a person and the agent in one document", true);
     await page.evaluate(() => (window as unknown as { __editor: { destroyEditor(): void } }).__editor.destroyEditor());
     let text = "";
     const file = await fileOf(doc);

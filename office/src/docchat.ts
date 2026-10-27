@@ -1397,6 +1397,15 @@ function resume(t: Target, entry: AgentEntry | SessionRecord): void {
   if (t.kind === "thread") post(t, `${who} was interrupted before it answered. Reply to try again.`);
 }
 
+/** The thread a chat of ours was made for: what office_comments marks as the comment the agent was asked in. */
+export function threadOfChat(chatId: string): { docId: string; guid: string } | null {
+  if (!isInternal(chatId)) return null;
+  for (const docId of new Set([...docsWithThreads(), ...docs.keys()])) {
+    for (const [guid, thread] of Object.entries(docRecord(docId).threads)) if (Object.values(thread.agents).some((a) => a.chatId === chatId)) return { docId, guid };
+  }
+  return null;
+}
+
 /** All documents' threads, for a test or a look: the record as it is now. */
 export function threadsOf(docId: string): Record<string, Thread> {
   return docRecord(docId).threads;

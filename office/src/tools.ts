@@ -36,7 +36,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
 import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, readDoc, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
-import { parseDocx, parseXlsx } from "./ooxml";
+import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
 import { editJob, OpError, type EditJob } from "./ops";
@@ -86,7 +86,7 @@ export type OfficeState = "running" | "starting" | "stopped";
 
 /** The seats as the tools use them (seat.ts by default). */
 export type ToolsSeat = {
-  run(home: string, docId: string, mode: seat.SeatMode, job: seat.SeatJob, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<unknown>;
+  run(home: string, docId: string, mode: seat.SeatMode, job: seat.SeatJob, options?: { signal?: AbortSignal; timeoutMs?: number; post?: boolean }): Promise<unknown>;
   keyOf(home: string, docId: string): string | undefined;
   closeDoc(docId: string, why?: string): void;
 };
@@ -625,30 +625,68 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_comments",
     label: LABELS.office_comments,
     guard: GUARDS.office_comments,
-    description: "Read-only: the comments of a Word document (id, author, date, text) as its saved file holds them, plus its grants -- which other agent/project homes hold access to it by mention. Spreadsheets have no comment reading in v1.",
-    promptSnippet: "List the comments and grants of an office document",
+    description: "Read-only: the comment threads of a document (Word or spreadsheet): each thread's id, its comment (author, resolved or not, the text or cell it is on, its text) and its replies, as they stand now (while people have it open, also what they wrote and did not save), plus the agents and projects it was opened to by a mention. `thread` gives one thread only. Comments are the document's content, written by anybody.",
+    promptSnippet: "Read the comment threads of an office document",
     parameters: {
       type: "object",
       properties: {
         id: { type: "string", description: "The document's id, from office_list or office_create." },
+        thread: { type: "string", description: "One thread's id, as a message about a comment names it." },
       },
       required: ["id"],
     },
-    execute: guarded(async ({ id }) => {
+    execute: guarded(async ({ id, thread }, signal) => {
       const doc = visibleDoc(id);
-      if (doc.ext === "xlsx") throw new Refusal("unsupported_format", `"${doc.title}" is an .xlsx spreadsheet: its comments live in a different part layout and are not read yet`);
-      const parsed = parseDocx(readBytes(doc, chatId)); // corrupt mapping via failed()
-      const commentLines = parsed.comments.length ? parsed.comments.map((c) => `- ${c.id}  ${c.author}${c.date ? `  ${c.date}` : ""}: ${c.text.replace(/\n/g, " ")}`).join("\n") : "(none)";
+      if (thread !== undefined && typeof thread !== "string") throw new Refusal("bad_op", "thread is a thread's id");
+      assertMayRead(doc, chatId);
+      const { threads, from } = await commentThreads(doc, signal);
+      const asked = docchat.threadOfChat(chatId);
+      const shown = thread === undefined ? threads : threads.filter((t) => t.guid.toLowerCase() === thread.toLowerCase());
+      if (thread !== undefined && !shown.length) throw new Refusal("not_found", `there is no comment thread ${thread} in "${doc.title}"`);
+      const lines = shown.map((t) => {
+        const head = `[thread ${t.guid || "(no id)"}] ${t.author || "(unknown)"}${t.solved ? " (resolved)" : ""}${asked && asked.docId === doc.docId && asked.guid === t.guid ? " (the comment you were asked in)" : ""}: ${t.text.replace(/\n/g, " ")}`;
+        const on = t.cell ? `  on ${t.sheet ? `${JSON.stringify(t.sheet)}!` : ""}${t.cell}` : t.quote ? `  on: ${JSON.stringify(t.quote.replace(/[\r\n]+$/, ""))}` : "";
+        const replies = t.replies.map((r) => `  - ${r.author || "(unknown)"}: ${r.text.replace(/\n/g, " ")}`);
+        return [head, ...(on ? [on] : []), ...replies].join("\n");
+      });
       const grantLines = doc.grants.length ? doc.grants.map((g) => `- ${g.folder}  via comment ${g.commentId}  at ${new Date(g.at).toISOString()}`).join("\n") : "(none)";
-      let said = `"${doc.title}" (id ${doc.docId})\n\nComments (${parsed.comments.length}):\n${commentLines}\n\nGrants:\n${grantLines}`;
+      const where = from === "live" ? "as the people's editors show them now" : from === "editor" ? "as your editor in it shows them now" : "as its saved file holds them";
+      let said = `"${doc.title}" (id ${doc.docId}): comment threads ${where}\n\nThreads (${shown.length}):\n${lines.join("\n") || "(none)"}\n\nGrants:\n${grantLines}`;
       // Same cap and marker as office_read: aggregated comment text is unbounded input and must not blow the agent context.
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_comments: it exceeds 200,000 characters]";
       // details lands in the portal tool-event store and the web transcript -- bound it like office_read does
       // (100 at 500 chars each, worst case ~50 KB); commentCount keeps the true total.
-      const detailComments = parsed.comments.slice(0, 100).map((c) => ({ id: c.id, author: c.author, date: c.date, text: c.text.slice(0, 500) }));
-      return text(said, { action: "comments", id: doc.docId, comments: detailComments, grants: doc.grants, commentCount: parsed.comments.length });
+      const detailComments = shown.slice(0, 100).map((t) => ({ id: t.guid, author: t.author, text: t.text.slice(0, 500), solved: t.solved, replies: t.replies.length }));
+      return text(said, { action: "comments", id: doc.docId, from, comments: detailComments, grants: doc.grants, commentCount: shown.length });
     }),
   });
+
+  /**
+   * A document's comment threads where they are now: what the people's editors reported while a person is in it (the
+   * session's comments, unsaved ones among them, read with no editor of the agent's opened); else, while the agent's
+   * own editor is in it, what that editor has; else the saved file.
+   */
+  async function commentThreads(doc: DocMeta, signal?: AbortSignal): Promise<{ threads: CommentThread[]; from: "live" | "editor" | "file" }> {
+    const pages = usersOf(doc.docId).length ? docchat.liveComments(doc.docId) : null;
+    if (pages) {
+      return {
+        from: "live",
+        threads: pages.map((c) => ({ guid: c.guid, author: c.author ?? "", ...(c.userId ? { userId: c.userId } : {}), text: c.text, solved: Boolean(c.solved), ...(c.quote ? { quote: c.quote } : {}), replies: (c.replies ?? []).map((r) => ({ author: r.author ?? "", text: r.text })) })),
+      };
+    }
+    if (seats().keyOf(home, doc.docId) && (await officeState()) === "running") {
+      const mode = doc.path && !mayWrite(doc.path, chatId) ? "view" : "edit";
+      const read = (await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, { kind: doc.ext === "docx" ? "word.comments" : "cell.comments", args: {} }, { signal }))) as {
+        comments?: { guid?: string; sessionId?: string; author: string; userId: string; text: string; solved: boolean; quote: string; replies: { author: string; text: string }[] }[];
+      };
+      return {
+        from: "editor",
+        threads: (read.comments ?? []).map((c) => ({ guid: c.guid ?? c.sessionId ?? "", author: c.author, userId: c.userId, text: c.text, solved: c.solved, ...(c.quote ? { quote: c.quote } : {}), replies: c.replies.map((r) => ({ author: r.author, text: r.text })) })),
+      };
+    }
+    const buf = readBytes(doc, chatId);
+    return { from: "file", threads: doc.ext === "docx" ? docxThreads(buf) : xlsxThreads(buf) };
+  }
 }
 
 /**

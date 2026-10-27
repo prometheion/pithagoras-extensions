@@ -19,7 +19,8 @@ import zlib from "node:zlib";
 import { GUARDS, LABELS, registerTools, __resetToolsForTests } from "../src/tools";
 import { de } from "../src/de";
 import { createDoc, getDoc, readDoc } from "../src/store";
-import { parseDocx, rewriteZip } from "../src/ooxml";
+import { parseDocx, readPart, rewriteZip } from "../src/ooxml";
+import * as docchat from "../src/docchat";
 import { resetLive, setUser, setSession, nameAgent } from "../src/live";
 import { SeatError } from "../src/seat";
 import type { SaveAfterEdit } from "../src/editing";
@@ -797,32 +798,74 @@ test("office_read of the saved copy whose text part inflates past the cap (600 M
 /* office_comments                                                     */
 /* ------------------------------------------------------------------ */
 
-test("office_comments: docx lists comment ids/authors/text + grants; xlsx -> unsupported note", async () => {
+test("office_comments from the saved file: a Word document's threads with their replies, state and quote, and the grants; a spreadsheet's threaded comments; one thread by its id", async () => {
   const s = setup();
+  // Nobody in the documents and no editor of the agent's: the saved files.
+  s.office.state = "stopped";
   const doc = await createDoc({ title: "Commented", type: "word", owner: "/f/atlas" }, s.root);
-  // inject a comments part into the stored bytes (mtime moves -- the tool re-reads the meta anyway)
   const file = path.join(s.root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
-  fs.writeFileSync(file, rewriteZip(readDocBytes(s.root, doc.docId), { "word/comments.xml": commentsXml([{ id: "c1", author: "Ada Person", text: "@agent please fix this" }, { id: "c2", author: "Bob", text: "second note" }]) }));
-  addGrant(s.root, doc.docId, "/f/acme", "c1");
-
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"';
+  fs.writeFileSync(
+    file,
+    rewriteZip(readDocBytes(s.root, doc.docId), {
+      "word/comments.xml": `<w:comments ${W}><w:comment w:id="0" w:author="Ada Person"><w:p w14:paraId="00000001"><w:r><w:t>@Atlas please fix this</w:t></w:r></w:p></w:comment><w:comment w:id="1" w:author="Atlas (agent)"><w:p w14:paraId="00000002"><w:r><w:t>Fixed.</w:t></w:r></w:p></w:comment><w:comment w:id="2" w:author="Bob"><w:p w14:paraId="00000003"><w:r><w:t>second note</w:t></w:r></w:p></w:comment></w:comments>`,
+      "word/commentsExtended.xml": `<w15:commentsEx ${W}><w15:commentEx w15:paraId="00000001" w15:done="1"/><w15:commentEx w15:paraId="00000002" w15:paraIdParent="00000001" w15:done="0"/><w15:commentEx w15:paraId="00000003" w15:done="0"/></w15:commentsEx>`,
+      "word/commentsIds.xml": `<w16cid:commentsIds ${W}><w16cid:commentId w16cid:paraId="00000001" w16cid:durableId="626360DF"/><w16cid:commentId w16cid:paraId="00000003" w16cid:durableId="0000ABCD"/></w16cid:commentsIds>`,
+    }),
+  );
+  addGrant(s.root, doc.docId, "/f/acme", "626360df");
   const res = (await tool(s, "office_comments").execute("cm", { id: doc.docId })) as ToolResult;
   const t = res.content[0].text;
   assert.ok(!t.startsWith("error:"), t);
-  assert.match(t, /c1\s+Ada Person/);
-  assert.match(t, /@agent please fix this/);
-  assert.match(t, /c2\s+Bob/);
-  assert.match(t, /\/f\/acme.*via comment c1/s);
+  assert.match(t, /as its saved file holds them/);
+  assert.match(t, /\[thread 626360df\] Ada Person \(resolved\): @Atlas please fix this\n  - Atlas \(agent\): Fixed\./);
+  assert.match(t, /\[thread 0000abcd\] Bob: second note/);
+  assert.match(t, /\/f\/acme.*via comment 626360df/s);
   assert.equal(res.details.comments.length, 2);
-  assert.equal(res.details.grants[0].folder, "/f/acme");
+  assert.equal(res.details.from, "file");
+  const one = (await tool(s, "office_comments").execute("cm1", { id: doc.docId, thread: "0000ABCD" })) as ToolResult;
+  assert.match(one.content[0].text, /Threads \(1\):\n\[thread 0000abcd\] Bob/);
+  assert.match(await refused(tool(s, "office_comments").execute("cm2", { id: doc.docId, thread: "deadbeef" }), "no such thread"), /^error:not_found /);
 
   // a doc with no comments -> a readable "(none)", not an error
   const bare = await createDoc({ title: "Bare", type: "word", owner: "/f/atlas" }, s.root);
-  const bareRes = (await tool(s, "office_comments").execute("cm2", { id: bare.docId })) as ToolResult;
-  assert.match(bareRes.content[0].text, /Comments \(0\):\n\(none\)/);
+  const bareRes = (await tool(s, "office_comments").execute("cm3", { id: bare.docId })) as ToolResult;
+  assert.match(bareRes.content[0].text, /Threads \(0\):\n\(none\)/);
 
-  // xlsx: the unsupported note with the code prefix (xlsx comments are not read yet)
+  // A spreadsheet's threaded comments, by their cell.
   const sheet = await createDoc({ title: "Sheet", type: "cell", owner: "/f/atlas" }, s.root);
-  assert.match(await refused(tool(s, "office_comments").execute("cm3", { id: sheet.docId }), "xlsx comments"), /^error:unsupported_format /);
+  const sheetFile = path.join(s.root, "docs", sheet.docId, `${sheet.title}.${sheet.ext}`);
+  const bytes = readDocBytes(s.root, sheet.docId);
+  const rels = readPart(bytes, "xl/worksheets/_rels/sheet1.xml.rels");
+  fs.writeFileSync(
+    sheetFile,
+    rewriteZip(bytes, {
+      "xl/worksheets/_rels/sheet1.xml.rels": (rels ?? '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>').replace("</Relationships>", '<Relationship Id="rIdT" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/></Relationships>'),
+      "xl/threadedComments/threadedComment1.xml": '<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="C3" personId="{P}" id="{A}"><text>Bitte prüfen</text></threadedComment></ThreadedComments>',
+      "xl/persons/person.xml": '<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="Portal" id="{P}" userId="portal-user"/></personList>',
+    }),
+  );
+  const cells = (await tool(s, "office_comments").execute("cm4", { id: sheet.docId })) as ToolResult;
+  assert.match(cells.content[0].text, /\[thread \{A\}\] Portal: Bitte prüfen\n  on "Sheet1"!C3/);
+});
+
+test("office_comments while a person is in the document: what the people's editors reported, unsaved comments among them, with no editor of the agent's opened; while only the agent's editor is in it: what that editor has", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Live", type: "word", owner: "/f/atlas" }, s.root);
+  docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
+  setUser(doc.docId, { id: "portal-user", name: "Portal" }, true);
+  docchat.report(doc.docId, "k", [{ type: "comment", guid: "626360df", author: "Portal", userId: "portal-user", text: "Ungespeichert", quote: "Text", replies: [{ author: "Portal", text: "Und noch" }] }]);
+  const live = (await tool(s, "office_comments").execute("l1", { id: doc.docId })) as ToolResult;
+  assert.match(live.content[0].text, /as the people's editors show them now/);
+  assert.match(live.content[0].text, /\[thread 626360df\] Portal: Ungespeichert\n  on: "Text"\n  - Portal: Und noch/);
+  assert.equal(s.seat.runs.length, 0, "no editor opened for it");
+  resetLive();
+  // Nobody in it, the agent's editor open: through that editor.
+  s.seat.answer = (run) => (run.kind === "word.comments" ? { comments: [{ guid: "7164b85f", author: "Portal", userId: "portal-user", text: "Im Editor", solved: false, quote: "", replies: [] }] } : {});
+  const editor = (await tool(s, "office_comments").execute("l2", { id: doc.docId })) as ToolResult;
+  assert.match(editor.content[0].text, /as your editor in it shows them now[\s\S]*\[thread 7164b85f\] Portal: Im Editor/);
+  assert.deepEqual(s.seat.runs.map((r) => r.kind), ["word.comments"]);
+  docchat.__resetDocchatForTests();
 });
 
 test("office_comments: aggregated comment output is capped like office_read (marker + bounded details)", async () => {
@@ -833,10 +876,11 @@ test("office_comments: aggregated comment output is capped like office_read (mar
   const file = path.join(s.root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
   fs.writeFileSync(file, rewriteZip(readDocBytes(s.root, doc.docId), { "word/comments.xml": commentsXml(many) }));
 
+  s.office.state = "stopped";
   const res = (await tool(s, "office_comments").execute("cm4", { id: doc.docId })) as ToolResult;
   const t = res.content[0].text;
   assert.ok(!t.startsWith("error:"), t.slice(0, 200));
-  assert.match(t, /Comments \(300\):/, "the true total is announced even when truncated");
+  assert.match(t, /Threads \(300\):/, "the true total is announced even when truncated");
   assert.ok(t.length <= 200_000 + 100, `output bounded (got ${t.length} chars)`);
   assert.match(t, /\[output truncated by office_comments: it exceeds 200,000 characters\]/);
 
@@ -862,7 +906,7 @@ test("every refusal the agent reads starts with \"error:<code> \"", async () => 
   s.seat.answer = () => Promise.reject(new Error("something unexpected"));
   assert.match(await refused(tool(s, "office_read").execute("x7", { id: doc.docId }), "failed"), /^error:failed /);
   assert.match(await refused(tool(s, "office_create").execute("x4", { title: "Fmt", type: "word" }), "exists"), /^error:exists /);
-  assert.match(await refused(tool(s, "office_comments").execute("x5", { id: sheet.docId }), "xlsx comments"), /^error:unsupported_format /);
+  assert.match(await refused(tool(s, "office_comments").execute("x5", { id: sheet.docId, thread: 5 }), "thread"), /^error:bad_op /);
 });
 
 /* ------------------------------------------------------------------ */
@@ -886,4 +930,46 @@ test("the factory also registers the UI_RECEIVE ping drain for office chats only
     log: (l) => s.seen.logs.push(l),
   });
   assert.equal(notes.uiHandlers.length, 0); // no tools in a plain chat -> no drain either
+});
+
+/* ------------------------------------------------------------------ */
+/* comments and the editor's chat                                      */
+/* ------------------------------------------------------------------ */
+
+test("office_edit: comments its edit would have taken away are moved onto the new text; their threads follow, and the agent hears it", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Moving", type: "word", owner: "/f/atlas" }, s.root);
+  docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
+  // A thread on the comment that moves: its record goes on under the new GUID.
+  fs.mkdirSync(path.join(s.root, "state", "threads"), { recursive: true });
+  fs.writeFileSync(path.join(s.root, "state", "threads", `${doc.docId}.json`), JSON.stringify({ version: 1, threads: { "626360df": { createdAt: 1, text: "x", inFile: true, agents: {} } }, uiSeen: [] }));
+  s.seat.answer = (run) => (run.kind === "word.edit" ? { ops: 1, moved: [["626360df", "7164b85f"]] } : {});
+  const res = (await tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "a", replacement: "b" }] })) as ToolResult;
+  assert.match(res.content[0].text, /1 comment was moved onto your new text\./);
+  assert.deepEqual(res.details.moved, [["626360df", "7164b85f"]]);
+  assert.deepEqual(Object.keys(docchat.threadsOf(doc.docId)), ["7164b85f"]);
+  docchat.__resetDocchatForTests();
+});
+
+test("a chat of a comment thread or of the editor's chat gets no question tool: taken away, and refused where it is called", async () => {
+  const s = setup("chat-atlas-home");
+  docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
+  fs.mkdirSync(path.join(s.root, "state"), { recursive: true });
+  fs.writeFileSync(path.join(s.root, "state", "sessions.json"), JSON.stringify({ k: { docId: "d", folder: "/f/atlas", chatId: "chat-atlas-home", parent: "p", state: "idle", people: [], queue: [] } }));
+  const handlers: Record<string, ((e: any) => any)[]> = {};
+  let active = ["read", "ask_question"];
+  Object.assign(s.pi, { on: (name: string, fn: (e: any) => any) => (handlers[name] ??= []).push(fn), getActiveTools: () => active, setActiveTools: (names: string[]) => (active = names) });
+  (setup as any).__run();
+  handlers.session_start.forEach((h) => h({}));
+  assert.deepEqual(active, ["read"]);
+  assert.equal(handlers.tool_call.map((h) => h({ toolName: "ask_question" })).find(Boolean)?.block, true);
+  docchat.__resetDocchatForTests();
+  // Another chat keeps it.
+  const other = setup("chat-atlas-home");
+  docchat.configureDocchat({ root: other.root, folders: () => [], log: () => {} });
+  const seen: string[] = [];
+  Object.assign(other.pi, { on: (name: string) => seen.push(name) });
+  (setup as any).__run();
+  assert.ok(!seen.includes("tool_call"));
+  docchat.__resetDocchatForTests();
 });

@@ -706,9 +706,16 @@ async function probe(d: Docker, id: string): Promise<{ version?: string; memByte
 }
 
 /**
+ * What the agents' browser runs to read its memory: the shell's own `read`, which needs no other program in the image.
+ * Docker's exec gives stdout and stderr as one, so the message about a file that is not there (cgroup v1 has no
+ * memory.current) is silenced as a group: a redirection on the command itself is opened only after the failing `<`.
+ */
+export const AGENT_MEM_COMMAND =
+  '{ read -r v < /sys/fs/cgroup/memory.current; } 2>/dev/null || { read -r v < /sys/fs/cgroup/memory/memory.usage_in_bytes; } 2>/dev/null; echo "$v"';
+
+/**
  * The memory the agents' browser uses now, from its own cgroup, while it runs; nothing where it does not run or cannot be
- * read. Its image has no package tools and maybe no `cat`, so the file is read with the shell's own `read`. Never an
- * error: a browser that cannot be read adds nothing.
+ * read. Never an error: a browser that cannot be read adds nothing.
  */
 async function probeAgent(d: Docker): Promise<number | undefined> {
   try {
@@ -719,7 +726,7 @@ async function probeAgent(d: Docker): Promise<number | undefined> {
     try {
       const res = await d.containers.exec(
         NAMES.agent,
-        ["bash", "-c", "read -r v < /sys/fs/cgroup/memory.current 2>/dev/null || read -r v < /sys/fs/cgroup/memory/memory.usage_in_bytes; echo \"$v\""],
+        ["bash", "-c", AGENT_MEM_COMMAND],
         { timeoutMs: 10_000 },
       );
       const mem = res.output.trim();
@@ -781,8 +788,9 @@ export async function settled(docker?: Docker): Promise<boolean> {
 /**
  * The Document Server for the status block: absent or exited/created -> "stopped", another extension's -> "foreign";
  * otherwise Docker's own inspect word (with `State.Starting` folded in as "starting"), and while it runs its version
- * and memory use (the Document Server's and, while it runs, the agents' browser's). Pull progress comes from the in-memory last state of an ensure, and `error` says why the last start
- * failed, until one succeeds or the person stops or removes it.
+ * and memory use (the Document Server's and, while it runs, the agents' browser's). Pull progress comes from the
+ * in-memory last state of an ensure, and `error` says why the last start failed, until one succeeds or the person stops
+ * or removes it.
  */
 export async function status(docker?: Docker): Promise<{ state: string; version?: string; memBytes?: number; pull?: PullState | null; error?: string }> {
   const out: { state: string; version?: string; memBytes?: number; pull?: PullState | null; error?: string } = { state: "stopped", pull: pullState ? { ...pullState } : null };

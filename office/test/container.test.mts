@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import http from "node:http";
@@ -17,6 +17,7 @@ import type { AddressInfo } from "node:net";
 import { stamped } from "../../shared/service";
 import {
   AGENT_IMAGE,
+  AGENT_MEM_COMMAND,
   AGENT_IMAGE_DIGEST,
   AGENT_IMAGE_TAG,
   BACK_PORT,
@@ -376,11 +377,10 @@ test("status: the memory is all of Office -- the Document Server's alone, plus t
   const s = await status(m.docker);
   assert.equal(s.memBytes, 500000000, "the browser's memory on top");
   assert.equal(s.version, "10.0.0-169");
-  // Read with the shell's own builtin: the browser's image has bash, and maybe no cat.
+  // Read with the shell's own builtin.
   const asked = m.calls.filter((c) => c.startsWith(`exec ${AGENT}`));
   assert.equal(asked.length, 1);
-  assert.match(asked[0], /^exec \S+ bash -c read -r v < \/sys\/fs\/cgroup\/memory\.current/);
-  assert.ok(!asked[0].includes("cat "), "no cat");
+  assert.match(asked[0], /^exec \S+ bash -c \{ read -r v < \/sys\/fs\/cgroup\/memory\.current/);
   // Kept for a while, as the Document Server's is.
   await status(m.docker);
   assert.equal(m.calls.filter((c) => c.startsWith(`exec ${AGENT}`)).length, 1);
@@ -408,6 +408,70 @@ test("status: an agents' browser whose memory cannot be read adds nothing and br
   memoryAnswers(m, "200000000\n");
   assert.equal((await status(m.docker)).memBytes, 300000000);
   assert.ok(!m.calls.some((c) => c.startsWith(`exec ${AGENT}`)));
+});
+
+/** The browser's read command run for real by bash, against a stand-in for /sys/fs/cgroup, with stdout and stderr as one
+ * (what Docker's exec gives). */
+function runMemCommand(layout: Record<string, string>): string {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), "office-cgroup-"));
+  try {
+    for (const [file, value] of Object.entries(layout)) {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+      fs.writeFileSync(path.join(root, file), value);
+    }
+    const r = spawnSync("bash", ["-c", AGENT_MEM_COMMAND.replaceAll("/sys/fs/cgroup", root)], { encoding: "utf8" });
+    return r.stdout + r.stderr;
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("status: the browser's memory is read on cgroup v1 and v2 alike, and the shell's own complaint stays out of the answer", async () => {
+  assert.equal(runMemCommand({ "memory.current": "123\n" }).trim(), "123", "cgroup v2");
+  assert.equal(runMemCommand({ "memory/memory.usage_in_bytes": "456\n" }).trim(), "456", "cgroup v1: no memory.current, and no message about it");
+  assert.equal(runMemCommand({}).trim(), "", "neither: nothing, and no message");
+
+  // Through status(): the answer a v1 host gives, as the shell really makes it.
+  const m = fresh();
+  m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+  m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running" });
+  m.state.answer = (cmd) => {
+    if (cmd.join(" ").includes("dpkg-query")) return { output: "10.0.0-169\n300000000\n", exitCode: 0, timedOut: false };
+    return { output: runMemCommand({ "memory/memory.usage_in_bytes": "200000000\n" }), exitCode: 0, timedOut: false };
+  };
+  assert.equal((await status(m.docker)).memBytes, 500000000);
+});
+
+test("status: the browser's figure is asked for again after PROBE_FOR_MS, and not before", async () => {
+  const m = fresh();
+  m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+  m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running" });
+  memoryAnswers(m, "200000000\n");
+  const real = Date.now;
+  let now = real.call(Date);
+  Date.now = () => now;
+  try {
+    await status(m.docker);
+    now += 14_000;
+    await status(m.docker);
+    assert.equal(m.calls.filter((c) => c.startsWith(`exec ${AGENT}`)).length, 1, "kept inside the 15 seconds");
+    now += 2_000;
+    await status(m.docker);
+    assert.equal(m.calls.filter((c) => c.startsWith(`exec ${AGENT}`)).length, 2, "asked again after them");
+  } finally {
+    Date.now = real;
+  }
+});
+
+test("status: without a figure for the Document Server there is no figure for Office, not the browser's alone", async () => {
+  const m = fresh();
+  m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+  m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running" });
+  m.state.answer = (cmd) =>
+    cmd.join(" ").includes("dpkg-query") ? { output: "10.0.0-169\n", exitCode: 0, timedOut: false } : { output: "200000000\n", exitCode: 0, timedOut: false };
+  const s = await status(m.docker);
+  assert.equal(s.version, "10.0.0-169");
+  assert.equal(s.memBytes, undefined, "a part of Office would read as all of it");
 });
 
 test("a new Document Server that still makes its fonts is starting, and refused to an editor, until its set-up script is done", async () => {

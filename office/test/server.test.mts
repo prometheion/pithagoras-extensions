@@ -1526,7 +1526,7 @@ test("POST /docchat/events and /ready: the page's protocol, a key of that docume
   assert.deepEqual((await send({ comments: [{ guid: "626360df", text: "Hallo" }] }, "/docchat/ready")).statusCode, 200);
   assert.equal((await send({ events: Array.from({ length: 65 }, () => ({ type: "removed", guids: [] })) })).statusCode, 413);
   let limited = 0;
-  for (let i = 0; i < 25; i++) if ((await send({})).statusCode === 429) limited++;
+  for (let i = 0; i < 60; i++) if ((await send({})).statusCode === 429) limited++;
   assert.ok(limited > 0, "a page that reports too often is held back");
   live.resetLive();
   await b.cleanup();

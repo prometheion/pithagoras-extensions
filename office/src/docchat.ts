@@ -159,7 +159,8 @@ export const PROTOCOL = 1;
 /** One message of the editor's chat at most, as its panel splits them. */
 export const CHAT_CHUNK = 2048;
 /** The page's reports: events in one request, its size, a text, requests per page in 10 s. */
-export const CAPS = { events: 64, bytes: 256 * 1024, text: 20_000, perTenSeconds: 20 };
+/** (The rate is per editing session: every page in it shares its key, each reporting at most every 300 ms.) */
+export const CAPS = { events: 64, bytes: 256 * 1024, text: 20_000, perTenSeconds: 50 };
 /** Report ids kept per document against a retried request. */
 const UI_SEEN = 2000;
 /** A session's people's messages kept for a chat made anew. */

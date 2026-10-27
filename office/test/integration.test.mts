@@ -68,8 +68,8 @@ async function boot(): Promise<Booted> {
     audit: { record: (e: Record<string, unknown>) => audits.push(e) },
     router: { get() {}, post() {}, put() {}, delete() {}, use() {} }, // UI routes are covered by server.test.mts; the listener is what this file drives
     http: { json: () => (_a?: unknown, _b?: unknown, next?: () => void) => next?.(), text: () => (_a?: unknown, _b?: unknown, next?: () => void) => next?.(), raw: () => () => {}, send: () => () => {}, upgrade: () => undefined },
-    folders: { list: () => [] as never[], allowed: () => false, label: () => ({ name: "" }) },
-    chats: { extend: () => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: () => { throw new Error("no workspace folder"); }, send: () => {}, tell: async () => false },
+    folders: { list: () => [] as never[], allowed: () => false, label: () => ({ name: "" }), on: () => {} },
+    chats: { extend: () => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: () => { throw new Error("no workspace folder"); }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {} },
     extensions: { use: () => fakeDocker },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);

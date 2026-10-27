@@ -37,13 +37,15 @@ import { randomBytes } from "node:crypto";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { setPortal, portal, dataDir } from "./host";
 import * as container from "./container";
-import { loadSettings, saveSettings, type OfficeSettings } from "./settings";
+import { LIMIT_BOUNDS, limitOk, loadSettings, saveSettings, type OfficeSettings } from "./settings";
 import { signJwt } from "./jwt";
 import { mintTicket, verifyTicket } from "./tickets";
 import * as store from "./store";
 import * as live from "./live";
 import * as callback from "./callback";
 import { wirePing } from "./ping";
+import * as docchat from "./docchat";
+import { saveNow } from "./editing";
 import { holdWayBack } from "./back";
 import { registerTools } from "./tools";
 import * as seat from "./seat";
@@ -329,6 +331,28 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
   return { config, ticketUrl: `${base}/doc/${ticket}`, key };
 }
 
+/** Keys a command service's `info` said a person is in, with when: a page's reports after a restart are taken without
+ * asking again for each. */
+const confirmedKeys = new Map<string, number>();
+
+/** Whether `key` is an open editing session of `docId` with a person in it: one the callbacks named, else (after a
+ * restart, before the next callback) one the command service's `info` names users of, which also tells `live`. */
+async function liveKey(docId: string, key: string): Promise<boolean> {
+  if (live.sessionKeys(docId).includes(key)) return true;
+  const at = confirmedKeys.get(key);
+  if (at !== undefined && Date.now() - at < 10 * 60_000) return true;
+  try {
+    const info = await callback.command({ c: "info", key });
+    const users = info.error === 0 && Array.isArray(info.users) ? (info.users as unknown[]).map(String) : [];
+    if (!users.some((u) => !live.isAgentId(u))) return false;
+    live.setSession(docId, key, users);
+    confirmedKeys.set(key, Date.now());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* the UI routes (the portal mounts portal.router at /api/x/@pithagoras/office)*/
 /* ------------------------------------------------------------------ */
@@ -359,7 +383,8 @@ function registerRoutes(dd: string, secret: string): void {
       locks[d.docId] = live.usersOf(d.docId).map((u) => ({ id: u.id, name: u.name }));
     }
     const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG, browser: seat.health() };
-    res.json({ enabled: s.enabled, imageTag: s.imageTag, container: c, agent, docs, locks });
+    const limits = Object.fromEntries(Object.keys(LIMIT_BOUNDS).map((k) => [k, s[k as keyof typeof LIMIT_BOUNDS]]));
+    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, container: c, agent, docs, locks });
   });
 
   /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat's folder sees (store.docsForHome, the
@@ -452,6 +477,7 @@ function registerRoutes(dd: string, secret: string): void {
     }
     live.clearDoc(id); // nobody "has it open" for a gone doc anymore
     seat.closeDoc(id); // and no agent's editor holds it
+    void docchat.documentGone(id); // nor a chat of its comments or its editor's chat
     recordAudit({ subject: id, reason: "deleted (moved to .trash)" });
     res.json({ ok: true });
   });
@@ -529,10 +555,17 @@ function registerRoutes(dd: string, secret: string): void {
       if (tag.includes("@")) return res.status(400).json({ error: "name the image by its tag, like onlyoffice/documentserver:10.0.0.1 -- not by a digest", code: "invalid_image_tag" });
       patch.imageTag = tag;
     }
-    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "no known setting in the body -- send { enabled?, imageTag? }" });
+    // The limits of comments and the editor's chat with agents: whole numbers in their bounds.
+    for (const key of Object.keys(LIMIT_BOUNDS) as (keyof typeof LIMIT_BOUNDS)[]) {
+      if (!(key in body)) continue;
+      if (!limitOk(key, body[key])) return res.status(400).json({ error: `{ ${key} } must be a whole number from ${LIMIT_BOUNDS[key][0]} to ${LIMIT_BOUNDS[key][1]}`, code: "invalid_limit" });
+      patch[key] = body[key] as number;
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: `no known setting in the body -- send { enabled?, imageTag?, ${Object.keys(LIMIT_BOUNDS).map((k) => `${k}?`).join(", ")} }` });
 
     const settings = saveSettings(patch, dd);
-    recordAudit({ subject: "@pithagoras/office settings", reason: `enabled=${settings.enabled} imageTag=${settings.imageTag}` });
+    const limitsSaid = (Object.keys(LIMIT_BOUNDS) as (keyof typeof LIMIT_BOUNDS)[]).filter((k) => k in patch).map((k) => ` ${k}=${settings[k]}`).join("");
+    recordAudit({ subject: "@pithagoras/office settings", reason: `enabled=${settings.enabled} imageTag=${settings.imageTag}${limitsSaid}` });
 
     let starting = false;
     if (patch.enabled === true && !before.enabled) {
@@ -618,7 +651,57 @@ function registerRoutes(dd: string, secret: string): void {
     if (!docId || !parsed || parsed.keyId !== callback.keyIdOf(docId)) return res.status(400).json({ error: "the query needs { doc, key } of an editor opened on that document", code: "invalid" });
     const doc = store.refresh(docId, dd);
     if (!doc) return res.status(404).json({ error: `no document with id ${docId}`, code: "not_found" });
-    res.json({ standing: callback.keyStanding(key, doc.mtimeMs) });
+    res.json({ standing: callback.keyStanding(key, doc.mtimeMs), docchat: docchat.statesOf(docId) });
+  });
+
+  /** GET /mentionables -> { users }: who a comment can mention, as the editor's mention list takes them (docchat.ts). */
+  r.get("/mentionables", (_req, res) => {
+    res.json({ users: docchat.mentionables() });
+  });
+
+  /** POST /docchat/ready and /docchat/events: what a people's editor reports of comments and its chat (docchat.ts and
+   * web/docchat-page.ts). Each names its document and its session's key, which must be a session of that document:
+   * one the Document Server's callbacks named, or, for a key not heard of since a restart, one its command service
+   * says a person is in. A page of another protocol is told to reload. */
+  const docchatBody = portal().http.json({ limit: docchat.CAPS.bytes });
+  const checked = async (req: { body?: unknown }, res: { status: (c: number) => { json: (b: unknown) => void } }): Promise<{ docId: string; key: string; panelChat?: string; body: Record<string, unknown> } | null> => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.v !== docchat.PROTOCOL) {
+      res.status(409).json({ error: "Reload the page: Office was updated", code: "reload_page" });
+      return null;
+    }
+    const docId = typeof body.docId === "string" ? body.docId : "";
+    const key = typeof body.key === "string" ? body.key : "";
+    const parsed = callback.parseKey(key);
+    if (!docId || !parsed || parsed.keyId !== callback.keyIdOf(docId) || !store.getDoc(docId, dd)) {
+      res.status(400).json({ error: "the report needs { docId, key } of an editor opened on that document", code: "invalid" });
+      return null;
+    }
+    if (!docchat.rateOk(key)) {
+      res.status(429).json({ error: "too many reports: slow down", code: "rate" });
+      return null;
+    }
+    if (!(await liveKey(docId, key))) {
+      res.status(409).json({ error: "that editing session is not open", code: "not_live" });
+      return null;
+    }
+    const panelChat = typeof body.panelChat === "string" && body.panelChat ? body.panelChat : undefined;
+    return { docId, key, ...(panelChat ? { panelChat } : {}), body };
+  };
+  r.post("/docchat/ready", docchatBody, async (req, res) => {
+    const got = await checked(req, res);
+    if (!got) return;
+    const comments = Array.isArray(got.body.comments) ? (got.body.comments as docchat.PageComment[]).slice(0, 5000) : [];
+    docchat.ready(got.docId, got.key, comments);
+    res.json({ ok: true });
+  });
+  r.post("/docchat/events", docchatBody, async (req, res) => {
+    const got = await checked(req, res);
+    if (!got) return;
+    const events = Array.isArray(got.body.events) ? (got.body.events as docchat.PageEvent[]) : [];
+    if (events.length > docchat.CAPS.events) return res.status(413).json({ error: `at most ${docchat.CAPS.events} events a report`, code: "too_large" });
+    docchat.report(got.docId, got.key, events, got.panelChat);
+    res.json({ ok: true });
   });
 
   /** GET+POST /ds/<rest...> -> a thin reverse proxy for the browser's Document Server traffic (api.js, the editor
@@ -789,8 +872,44 @@ function wireSeats(dd: string, secret: string): void {
     dsOrigin: agentsDs,
     log: logLine,
   });
-  // A Document Server (re)started ends every session the agents' editors were in.
-  container.whenDsStarted(() => seat.resetSeats("their Document Server started again"));
+  // A Document Server (re)started ends every session the agents' editors were in, and with them the chats of the
+  // editor's chat; what waits to be posted is posted once it runs.
+  container.whenDsStarted(() => {
+    seat.resetSeats("their Document Server started again");
+    void docchat.dsStarted().then(() => docchat.postWaiting());
+  });
+}
+
+/** Comments and the editor's chat as the way to talk to agents (docchat.ts): the portal's chats and folders, the
+ * agents' editors to post with, the saves, and the hooks that tell it of saves, sessions and chats. */
+function wireDocchat(dd: string): void {
+  docchat.configureDocchat({
+    root: dd,
+    seatRun: (home, docId, mode, job, options) => seat.run(home, docId, mode, job, options),
+    keyOf: seat.keyOf,
+    save: (key) => saveNow(key),
+    command: (body) => callback.command(body),
+    officeState: () => officeState(dd),
+    // A scanned document is changed only where the agent could change its file itself (tools.ts asks the same).
+    mayWrite: (doc, _folder, chatId) => {
+      if (!doc.path) return true;
+      if (!chatId) return false;
+      try {
+        portal().files.identity(path.dirname(doc.path), ".", { likeParent: true, chats: [chatId] });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    record: (e) => recordAudit(e),
+    log: (line) => logLine(`docchat: ${line}`),
+  });
+  callback.onPersisted((docId, buffer) => docchat.persisted(docId, buffer));
+  live.onSessionChange((_docId, key, users) => docchat.sessionUsers(key, users));
+  portal().chats.onEvent((chatId, event) => docchat.chatEvent(chatId, event));
+  portal().chats.on("deleted", (chatId) => docchat.chatDeleted(chatId));
+  portal().folders.on("removed", (folder) => docchat.folderRemoved(folder));
+  void dd;
 }
 
 /** Where the agents' browser reaches the Document Server: the relay's way in, on the agents' own network. */
@@ -892,6 +1011,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     logLine(`@pithagoras/office: owners could not be moved to folders: ${(e as Error).message}`);
   }
   wirePing({ root: dd, record: recordAudit });
+  wireDocchat(dd);
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd, record: recordAudit });
   live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);
 
@@ -913,7 +1033,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
 
   // boot settle: reclaim trash + reconcile index vs disk, then adopt an existing DS if settings say it should run
   try {
-    settleKept(dd);
+    for (const gone of settleKept(dd).prunedDocs) void docchat.documentGone(gone);
   } catch (e) {
     logLine(`settleKept at boot failed: ${(e as Error).message}`);
   }
@@ -939,12 +1059,14 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     }, () => {});
   };
   recover();
+  // The records of comments' and the editor's chats: runs that went on, removals, sessions still open, posts waiting.
+  void docchat.boot().catch((e) => logLine(`docchat boot failed: ${(e as Error).message}`));
 
   let stopped = false;
   const timer = setInterval(() => {
     if (stopped) return;
     try {
-      settleKept(dd);
+      for (const gone of settleKept(dd).prunedDocs) void docchat.documentGone(gone);
     } catch (e) {
       logLine(`settleKept failed: ${(e as Error).message}`);
     }

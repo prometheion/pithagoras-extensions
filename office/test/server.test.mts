@@ -148,8 +148,8 @@ async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<stri
     audit: { record: (e: Record<string, unknown>) => audits.push(e) },
     router,
     http: { json: (_o?: unknown) => (_req: unknown, _res: unknown, next: () => void) => next(), text: () => () => undefined, raw: () => () => undefined, send: () => () => {}, upgrade: () => undefined },
-    folders: { list: () => [] as never[], allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: () => ({ name: "" }) },
-    chats: { extend: (_f: unknown) => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false },
+    folders: { list: () => [] as never[], allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: () => ({ name: "" }), on: () => {} },
+    chats: { extend: (_f: unknown) => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {} },
     extensions: { use: () => ddock },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
@@ -454,15 +454,15 @@ test("/editor-state: an editor's key is current on its own revision and on what 
   const doc = await store.createDoc({ title: "Standing", type: "word" }, b.root);
   const key = makeKey(doc.docId, doc.mtimeMs);
   const ask = async (k = key) => (await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}&key=${encodeURIComponent(k)}`)).body;
-  assert.deepEqual(await ask(), { standing: "current" });
+  assert.deepEqual(await ask(), { standing: "current", docchat: [] });
   const saved = await savedBySession(b, doc, key, "saved by the session");
-  assert.deepEqual(await ask(), { standing: "current" }, "its own save does not take it off its revision");
+  assert.deepEqual(await ask(), { standing: "current", docchat: [] }, "its own save does not take it off its revision");
   assert.ok(saved > doc.mtimeMs);
   const file = path.join(b.root, "docs", doc.docId, "Standing.docx");
   // A script writes the file: nothing the editor's session had is in that revision.
   fs.writeFileSync(file, "a script's");
   fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
-  assert.deepEqual(await ask(), { standing: "behind" });
+  assert.deepEqual(await ask(), { standing: "behind", docchat: [] });
   // A key of another document, or none, is refused.
   const other = await store.createDoc({ title: "Other", type: "word" }, b.root);
   assert.equal((await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}&key=${encodeURIComponent(makeKey(other.docId, other.mtimeMs))}`)).statusCode, 400);
@@ -588,7 +588,7 @@ test("/state: settings + container status + docs list + locks for EVERY doc", as
   const res = await b.router.dispatch("GET", "/state");
   assert.equal(res.statusCode, 200);
   const body = res.body as Record<string, unknown>;
-  assert.deepEqual(Object.keys(body).sort(), ["agent", "container", "docs", "enabled", "imageTag", "locks"]);
+  assert.deepEqual(Object.keys(body).sort(), ["agent", "container", "docs", "enabled", "imageTag", "limits", "locks"]);
   assert.deepEqual(
     body.agent,
     { present: false, pull: null, tag: container.AGENT_IMAGE_TAG, browser: { running: false, starting: false, editors: 0 } },
@@ -1480,4 +1480,54 @@ test("the agents' seats, wired: the agents' editors reach the Document Server th
   } finally {
     await w.done();
   }
+});
+
+
+/* ---------------- comments and the editor's chat (docchat) ---------------- */
+
+test("the limits of comments and the editor's chat are settings: GET /state gives them with their defaults, POST /settings takes whole numbers in their bounds and refuses others", async () => {
+  const b = await boot();
+  const state = (await b.router.dispatch("GET", "/state")).body as { limits: Record<string, number> };
+  assert.deepEqual(state.limits, { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60 });
+  const saved = await b.router.dispatch("POST", "/settings", { docchatRuns: 3, docchatChatEndS: 0 });
+  assert.equal(saved.statusCode, 200);
+  assert.equal((saved.body as { settings: { docchatRuns: number; docchatChatEndS: number } }).settings.docchatRuns, 3);
+  assert.equal(((await b.router.dispatch("GET", "/state")).body as { limits: Record<string, number> }).limits.docchatChatEndS, 0);
+  for (const bad of [{ docchatRuns: 0 }, { docchatRuns: 2.5 }, { docchatThreads: "50" }, { docchatReplyChars: 10 }]) {
+    const res = await b.router.dispatch("POST", "/settings", bad);
+    assert.equal(res.statusCode, 400, JSON.stringify(bad));
+    assert.equal((res.body as { code: string }).code, "invalid_limit");
+  }
+  assert.ok(b.audits.some((a) => /docchatRuns=3/.test(String(a.reason))), "audited");
+  await b.cleanup();
+});
+
+test("GET /mentionables: the agents by their names and the projects as project:<name>, as the editor's mention list takes them", async () => {
+  const b = await boot();
+  (b.portal.folders as { list: () => unknown[] }).list = () => [{ path: "/w/aegis", name: "Aegis", kind: "agent" }, { path: "/w/report", name: "Report", kind: "project" }, { path: "/w/chat", name: "Scratch", kind: "chat" }];
+  assert.deepEqual((await b.router.dispatch("GET", "/mentionables")).body, { users: [{ name: "Aegis", email: "Aegis" }, { name: "Report (project)", email: "project:Report" }] });
+  await b.cleanup();
+});
+
+test("POST /docchat/events and /ready: the page's protocol, a key of that document's open session (or one the command service says a person is in), and a rate cap; what passes is taken", async () => {
+  const b = await boot();
+  const doc = await store.createDoc({ title: "Talk", type: "word" }, b.root);
+  const key = makeKey(doc.docId, doc.mtimeMs);
+  const send = (body: Record<string, unknown>, path = "/docchat/events") => b.router.dispatch("POST", path, { v: 1, docId: doc.docId, key, events: [], ...body });
+  assert.equal((await send({ v: 0 })).statusCode, 409, "another protocol reloads");
+  assert.equal(((await send({ v: 0 })).body as { code: string }).code, "reload_page");
+  const other = await store.createDoc({ title: "Other", type: "word" }, b.root);
+  assert.equal((await send({ key: makeKey(other.docId, other.mtimeMs) })).statusCode, 400, "a key of another document");
+  // No session the callbacks named, and no Document Server to ask: not taken.
+  assert.equal((await send({})).statusCode, 409);
+  live.setSession(doc.docId, key, ["portal-user"]);
+  const taken = await send({ events: [{ type: "comment", guid: "626360df", text: "Hallo", userId: "portal-user" }] });
+  assert.equal(taken.statusCode, 200);
+  assert.deepEqual((await send({ comments: [{ guid: "626360df", text: "Hallo" }] }, "/docchat/ready")).statusCode, 200);
+  assert.equal((await send({ events: Array.from({ length: 65 }, () => ({ type: "removed", guids: [] })) })).statusCode, 413);
+  let limited = 0;
+  for (let i = 0; i < 25; i++) if ((await send({})).statusCode === 429) limited++;
+  assert.ok(limited > 0, "a page that reports too often is held back");
+  live.resetLive();
+  await b.cleanup();
 });

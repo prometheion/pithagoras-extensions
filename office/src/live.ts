@@ -141,7 +141,21 @@ export function setUser(docId: string, user: { id: string; name?: string }, join
 /** The Document Server's word on who is in the editing session of `key` (a status-1 callback): its users now, an empty
  * list for none left. Presence follows every session of the document together: a user still in another key's session
  * stays. */
+/** Who hears of a session's users (docchat.ts: the editor's chat of a session goes after its last person left). */
+let sessionHeard: ((docId: string, key: string, users: string[] | null) => void) | undefined;
+export function onSessionChange(fn: typeof sessionHeard): void {
+  sessionHeard = fn;
+}
+function tellSession(docId: string, key: string, users: string[] | null): void {
+  try {
+    sessionHeard?.(docId, key, users);
+  } catch {
+    // a listener's failure is its own
+  }
+}
+
 export function setSession(docId: string, key: string, userIds: string[]): void {
+  tellSession(docId, key, userIds);
   let keys = sessions.get(docId);
   if (!keys) {
     keys = new Map();
@@ -158,6 +172,7 @@ export function setSession(docId: string, key: string, userIds: string[]): void 
  * presence and the flag go (clearDoc). Another key's session (an editor that already loads a newer revision) keeps
  * its users and the lock. */
 export function endSession(docId: string, key: string): void {
+  tellSession(docId, key, null);
   const keys = sessions.get(docId);
   keys?.delete(key);
   if (!keys?.size) {

@@ -42,6 +42,7 @@ import { saveNow, type SaveAfterEdit } from "./editing";
 import { editJob, OpError, type EditJob } from "./ops";
 import * as seat from "./seat";
 import { drainWakeQueue } from "./ping";
+import * as docchat from "./docchat";
 
 /** The UI_RECEIVE bus event chats.tell rings (the portal's own document tools listen on the same name). */
 const UI_RECEIVE = "pithagoras:v1:ui:receive";
@@ -230,6 +231,8 @@ function installForChat(pi: unknown, chat: { id: string }): void {
   }
   const folder = folders().find((f) => f.path === folderPath);
   if (!folder || (folder.kind !== "agent" && folder.kind !== "project")) return; // not an agent/project home: no tools
+  // A chat of a comment thread or of the editor's chat: nobody is there to answer a question.
+  if (docchat.isInternal(chat.id)) docchat.hush(pi);
   installTools(pi, canonical(folder.path), chat.id);
   hearOfficePings(pi, chat.id); // the same factory owns the drain side of the wake queue
 }
@@ -591,6 +594,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           throw e;
         }
         const changed = (made as { changed?: unknown } | null)?.changed !== false;
+        // Comments the edit would have taken away with their text were made again on the new text: their threads, and
+        // the chats of those threads, go on under the comments' new GUIDs.
+        const movedComments = Array.isArray((made as { moved?: unknown } | null)?.moved) ? ((made as { moved: [string, string][] }).moved) : [];
+        if (movedComments.length) docchat.moved(doc.docId, movedComments);
+        const movedSaid = movedComments.length ? ` ${movedComments.length === 1 ? "1 comment was" : `${movedComments.length} comments were`} moved onto your new text.` : "";
         const watching = usersOf(doc.docId).length;
         const key = seats().keyOf(home, doc.docId);
         const outcome: SaveAfterEdit = key ? await (cfg.save ?? ((k: string) => saveNow(k)))(key) : "failed";
@@ -608,7 +616,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           throw new Refusal("editor_not_saved", `your edit of "${doc.title}" (${n} op${n === 1 ? "" : "s"}) is made and live in the document, but the Document Server did not save it ${outcome === "timeout" ? "in time" : "now"}: it reaches the file with the editor's next save or when the document closes. Do not make it again.`);
         }
         const seen = watching ? ` ${people(watching)} in the document saw it live.` : "";
-        return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"}), saved as revision ${to}.${seen}`, { action: "edit", id: doc.docId, ops: n, from, to, live: watching });
+        return text(`Edited "${doc.title}" (${n} op${n === 1 ? "" : "s"}), saved as revision ${to}.${seen}${movedSaid}`, { action: "edit", id: doc.docId, ops: n, from, to, live: watching, ...(movedComments.length ? { moved: movedComments } : {}) });
       });
     }),
   });

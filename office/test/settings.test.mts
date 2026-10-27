@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadSettings, saveSettings, DEFAULT_SETTINGS } from "../src/settings";
+import { loadSettings, saveSettings, DEFAULT_SETTINGS, limitOk } from "../src/settings";
 
 function tmpRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "office-settings-"));
@@ -26,16 +26,16 @@ test("the default image is the full tag of the tested build, not one that moves 
 test("loadSettings: partial file merges field by field, unknown fields ignored", () => {
   const root = tmpRoot();
   fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: true, imageTag: "some/other:9.9", nonsense: 42 }));
-  assert.deepEqual(loadSettings(root), { enabled: true, imageTag: "some/other:9.9" });
+  assert.deepEqual(loadSettings(root), { ...DEFAULT_SETTINGS, enabled: true, imageTag: "some/other:9.9" });
 });
 
 test("loadSettings: a LEGACY file carrying the removed \"coEdit\" key loads without crashing and simply ignores it", () => {
   const root = tmpRoot();
   fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: true, imageTag: "some/other:9.9", coEdit: true }));
-  assert.deepEqual(loadSettings(root), { enabled: true, imageTag: "some/other:9.9" }, "legacy key tolerated and not surfaced");
+  assert.deepEqual(loadSettings(root), { ...DEFAULT_SETTINGS, enabled: true, imageTag: "some/other:9.9" }, "legacy key tolerated and not surfaced");
   // and saving over the legacy file rewrites it clean (the removed key is dropped, never echoed back)
   const saved = saveSettings({ enabled: false }, root);
-  assert.deepEqual(saved, { enabled: false, imageTag: "some/other:9.9" });
+  assert.deepEqual(saved, { ...DEFAULT_SETTINGS, enabled: false, imageTag: "some/other:9.9" });
   assert.ok(!JSON.stringify(fs.readFileSync(path.join(root, "settings.json"), "utf8")).includes("coEdit"));
 });
 
@@ -62,7 +62,7 @@ test("saveSettings: round-trip keeps other fields and ignores unknown patch keys
   // a later patch must not clobber the earlier one; keys outside OfficeSettings (incl. the legacy
   // "coEdit") are dropped at runtime and never persisted back
   const second = saveSettings({ imageTag: "pinned/x:2.0", bogusKey: "x" } as Partial<{ enabled: boolean; imageTag: string; coEdit?: boolean }>, root);
-  assert.deepEqual(second, { enabled: true, imageTag: "pinned/x:2.0" });
+  assert.deepEqual(second, { ...DEFAULT_SETTINGS, enabled: true, imageTag: "pinned/x:2.0" });
   assert.deepEqual(loadSettings(root), second);
 });
 
@@ -95,7 +95,20 @@ test("saveSettings: only what the person set is stored, so a later version's def
 test("loadSettings: the default an earlier version wrote down for everyone (:10.0) counts as not set, and is not written again", () => {
   const root = tmpRoot();
   fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0" }));
-  assert.deepEqual(loadSettings(root), { enabled: true, imageTag: DEFAULT_SETTINGS.imageTag });
+  assert.deepEqual(loadSettings(root), { ...DEFAULT_SETTINGS, enabled: true, imageTag: DEFAULT_SETTINGS.imageTag });
   saveSettings({ enabled: true }, root);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")), { enabled: true });
+});
+
+test("the limits of comments and the editor's chat: defaults, kept when set, a value out of its bounds read as not set", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), "office-settings-"));
+  try {
+    assert.deepEqual(saveSettings({ docchatRuns: 5, docchatChatEndS: 0 }, root), { ...DEFAULT_SETTINGS, docchatRuns: 5, docchatChatEndS: 0 });
+    fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ docchatRuns: 0, docchatThreads: 3.5, docchatReplyChars: "x" }));
+    assert.deepEqual(loadSettings(root), DEFAULT_SETTINGS, "out of bounds: the defaults");
+    assert.equal(limitOk("docchatRuns", 20), true);
+    assert.equal(limitOk("docchatRuns", 21), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

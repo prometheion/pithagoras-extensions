@@ -10,12 +10,46 @@ import fs from "node:fs";
 import path from "node:path";
 import { dataDir } from "./host";
 
-export type OfficeSettings = { enabled: boolean; imageTag: string };
+export type OfficeSettings = {
+  enabled: boolean;
+  imageTag: string;
+  /** Comments and the editor's chat with agents (docchat.ts): comment chats of one agent or project that run at once. */
+  docchatRuns: number;
+  /** Comment threads with agents in one document. */
+  docchatThreads: number;
+  /** The longest answer posted in a comment thread, in characters. */
+  docchatReplyChars: number;
+  /** The most messages (of 2,048 characters each) an answer in the editor's chat is posted as. */
+  docchatChatMessages: number;
+  /** Seconds a deleted comment's chat waits before it goes (an undo in that time keeps it). */
+  docchatRemoveAfterS: number;
+  /** Seconds after the last person left an editing session before its chat goes. */
+  docchatChatEndS: number;
+};
+
+/** What each limit may be set to: whole numbers in these bounds (POST /settings refuses others). */
+export const LIMIT_BOUNDS: Record<"docchatRuns" | "docchatThreads" | "docchatReplyChars" | "docchatChatMessages" | "docchatRemoveAfterS" | "docchatChatEndS", [number, number]> = {
+  docchatRuns: [1, 20],
+  docchatThreads: [1, 1000],
+  docchatReplyChars: [200, 20_000],
+  docchatChatMessages: [1, 20],
+  docchatRemoveAfterS: [0, 86_400],
+  docchatChatEndS: [0, 86_400],
+};
 
 /** The image by the full tag of the build it was tested with (DocService 10.0.0 build 169): `10.0` and `10.0.0` move
  * to each new 10.0.x build under every install, which is what `:latest` is refused for. Docker for extensions takes a
  * reference by its tag (it splits at the last colon), so not by its digest. */
-export const DEFAULT_SETTINGS: OfficeSettings = { enabled: false, imageTag: "onlyoffice/documentserver:10.0.0.1" };
+export const DEFAULT_SETTINGS: OfficeSettings = {
+  enabled: false,
+  imageTag: "onlyoffice/documentserver:10.0.0.1",
+  docchatRuns: 2,
+  docchatThreads: 50,
+  docchatReplyChars: 4000,
+  docchatChatMessages: 4,
+  docchatRemoveAfterS: 120,
+  docchatChatEndS: 60,
+};
 
 const FILE = "settings.json";
 
@@ -28,7 +62,15 @@ function setField(raw: Record<string, unknown>, key: keyof OfficeSettings): unkn
   const value = raw[key];
   if (value === undefined || typeof value !== typeof DEFAULT_SETTINGS[key]) return undefined;
   if (key === "imageTag" && PAST_DEFAULT_TAGS.has(value as string)) return undefined;
+  // A limit out of its bounds (a file edited by hand) is not set: its default applies.
+  if (key in LIMIT_BOUNDS && !limitOk(key as keyof typeof LIMIT_BOUNDS, value)) return undefined;
   return value;
+}
+
+/** Whether `value` is a whole number in the bounds of the limit `key`. */
+export function limitOk(key: keyof typeof LIMIT_BOUNDS, value: unknown): boolean {
+  const [min, max] = LIMIT_BOUNDS[key];
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
 
 function field<K extends keyof OfficeSettings>(raw: Record<string, unknown>, key: K): OfficeSettings[K] {
@@ -48,7 +90,7 @@ export function loadSettings(root = dataDir()): OfficeSettings {
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ...DEFAULT_SETTINGS };
   const obj = raw as Record<string, unknown>;
-  return { enabled: field(obj, "enabled"), imageTag: field(obj, "imageTag") };
+  return Object.fromEntries((Object.keys(DEFAULT_SETTINGS) as (keyof OfficeSettings)[]).map((key) => [key, field(obj, key)])) as OfficeSettings;
 }
 
 /** Apply a patch of any subset of fields (ignoring absent/undefined and unknown ones) over what the file holds, persist

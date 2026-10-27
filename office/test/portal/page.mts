@@ -161,11 +161,14 @@ import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { setPortal } from "./src/portal";
 import { OfficeEditor, editorTimings } from "./src/web/office-editor";
+import { pageTimings } from "./src/web/docchat-page";
 
 const BASE = ${JSON.stringify(base)};
 window.__events = [];
 // A test that makes an editor's app fail does not wait the full time before it is made anew.
 if (window.__appFailsOnce) editorTimings.appReadyMs = 300;
+// A test of the comments' reports does not wait the full time for a report's event.
+if (window.__confirmMs) pageTimings.confirmMs = window.__confirmMs;
 setPortal({
   extension: "@pithagoras/office",
   t: (text, vars) => text.replace(/\\{(\\w+)\\}/g, (m, k) => (vars && k in vars ? String(vars[k]) : m)),
@@ -194,7 +197,10 @@ function recorded(Real) {
       config.events = {
         ...page,
         ...config.events,
-        onDocumentReady: () => window.__events.push(["ready"]),
+        onDocumentReady: () => {
+          window.__events.push(["ready"]);
+          page.onDocumentReady && page.onDocumentReady();
+        },
         onError: (e) => window.__events.push(["error", e && e.data]),
         onWarning: (e) => window.__events.push(["warning", e && e.data]),
         onRequestRefreshFile: () => {
@@ -226,7 +232,8 @@ Object.defineProperty(window, "DocsAPI", {
 });
 
 const doc = new URLSearchParams(location.search).get("doc");
-createRoot(document.getElementById("root")).render(createElement(OfficeEditor, { docId: doc, onBack: () => {} }));
+const panelChat = new URLSearchParams(location.search).get("chat") || undefined;
+createRoot(document.getElementById("root")).render(createElement(OfficeEditor, { docId: doc, onBack: () => {}, chatId: panelChat }));
 `;
 }
 

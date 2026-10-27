@@ -26,8 +26,10 @@ type Pull = null | { active: boolean; line: string; error?: string };
 const now = {
   container: { state: "running", version: "10.0.0-169" } as { state: string; version?: string; pull?: Pull; error?: string },
   agent: { present: false, pull: null as Pull, tag: TAG, browser: { running: false, starting: false, editors: 0 } as { running: boolean; starting: boolean; editors: number; error?: string } },
+  limits: { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60 } as Record<string, number>,
 };
 const asked: string[] = [];
+const saved: Record<string, unknown>[] = [];
 let starting: { during(): void; after(): void } = { during() {}, after() {} };
 let release: () => void = () => {};
 let pageJs = "";
@@ -37,9 +39,20 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/settings.html") return send(200, "text/html", SETTINGS_HTML);
   if (url.pathname === "/settings-page.js") return send(200, "text/javascript", pageJs);
   if (url.pathname === `${BASE}/state`) {
-    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0.0.1", container: now.container, agent: now.agent, docs: [], locks: {} }));
+    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0.0.1", limits: now.limits, container: now.container, agent: now.agent, docs: [], locks: {} }));
   }
   if (req.method === "POST") asked.push(url.pathname.slice(BASE.length));
+  if (url.pathname === `${BASE}/settings` && req.method === "POST") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const patch = JSON.parse(body);
+      saved.push(patch);
+      Object.assign(now.limits, patch);
+      send(200, "application/json", JSON.stringify({ settings: { enabled: true, imageTag: "x", ...now.limits }, container: now.container }));
+    });
+    return;
+  }
   if (url.pathname === `${BASE}/container/start` && req.method === "POST") {
     starting.during();
     new Promise<void>((r) => (release = r)).then(() => {
@@ -193,5 +206,24 @@ test("the page says no prose: labels, states and short hints only, none of the e
   // Nothing on it reads as a paragraph: every line is a label, a state or a hint.
   const long = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 80);
   assert.deepEqual(long, []);
+  await page.context().close();
+});
+
+test("the limits of comments and the editor's chat with agents: each a labelled number with its value, saved as typed", async () => {
+  saved.length = 0;
+  const page = await opened();
+  const runs = page.getByRole("textbox", { name: "Comment chats running at once, per agent or project" });
+  assert.equal(await runs.inputValue(), "2");
+  assert.equal(await page.getByRole("textbox", { name: "Seconds the editor's chat stays after the last person left" }).inputValue(), "60");
+  await runs.fill("3");
+  await page.getByRole("textbox", { name: "Comment chats per document" }).fill("20");
+  await page.getByRole("region", { name: "Comments and chat with agents" }).getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() => true);
+  for (let i = 0; i < 50 && !saved.length; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(saved, [{ docchatRuns: 3, docchatThreads: 20 }]);
+  await runs.fill("x");
+  await page.getByRole("region", { name: "Comments and chat with agents" }).getByRole("button", { name: "Save" }).click();
+  await page.getByRole("alert").getByText("A limit is a whole number.").waitFor({ timeout: 5000 });
+  assert.equal(saved.length, 1, "not sent");
   await page.context().close();
 });

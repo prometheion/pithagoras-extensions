@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { portal, t } from "../portal";
-import { api, sayError } from "./api";
+import { api, sayError, type DocchatLimits } from "./api";
 import { floatingTag, officeHealth, type OfficeHealth } from "../office-ui";
 import { refreshOfficeState, useOfficeState } from "./state";
 
@@ -36,6 +36,8 @@ export function OfficeSettings() {
   const [problem, setProblem] = useState<string | null>(null);
   // Null: still saying what the server says. A string: what is in the input now.
   const [tag, setTag] = useState<string | null>(null);
+  // The limits of comments and the editor's chat as typed, by field; what is not typed is what the server says.
+  const [typed, setTyped] = useState<Partial<Record<keyof DocchatLimits, string>>>({});
 
   if (!state) return <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />;
 
@@ -85,6 +87,28 @@ export function OfficeSettings() {
       // The same refusal the server makes, made here first: never a floating tag (it breaks the co-editing keys).
       if (floatingTag(next)) throw new Error(t("Pin a full tag, never :latest or none."));
       await api.saveSettings({ imageTag: next });
+    });
+
+  const limits = state.limits;
+  const LIMIT_FIELDS: [keyof DocchatLimits, string][] = [
+    ["docchatRuns", t("Comment chats running at once, per agent or project")],
+    ["docchatThreads", t("Comment chats per document")],
+    ["docchatReplyChars", t("Longest answer in a comment, in characters")],
+    ["docchatChatMessages", t("Messages per answer in the editor's chat")],
+    ["docchatRemoveAfterS", t("Seconds before a deleted comment's chat goes")],
+    ["docchatChatEndS", t("Seconds the editor's chat stays after the last person left")],
+  ];
+  const saveLimits = () =>
+    act("settings", async () => {
+      const patch: Partial<DocchatLimits> = {};
+      for (const [key] of LIMIT_FIELDS) {
+        const value = typed[key];
+        if (value === undefined) continue;
+        if (!/^\d+$/.test(value.trim())) throw new Error(t("A limit is a whole number."));
+        patch[key] = Number(value.trim());
+      }
+      await api.saveSettings(patch);
+      setTyped({});
     });
 
   const start = () =>
@@ -165,6 +189,30 @@ export function OfficeSettings() {
           </button>
         </div>
       </portal.ui.Field>
+
+      {limits && (
+        <section className="space-y-2" aria-label={t("Comments and chat with agents")}>
+          <h3 className="text-sm font-medium">{t("Comments and chat with agents")}</h3>
+          <div className="po-limits">
+            {LIMIT_FIELDS.map(([key, label]) => (
+              <div key={key} className="po-limit">
+                <span>{label}</span>
+                <input
+                  className={`${portal.ui.classes.input} font-mono text-xs`}
+                  inputMode="numeric"
+                  value={typed[key] ?? String(limits[key])}
+                  aria-label={label}
+                  disabled={busy !== null}
+                  onChange={(e) => setTyped((now) => ({ ...now, [key]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+          <button type="button" className={portal.ui.classes.primarySmall} disabled={busy !== null || !Object.keys(typed).length} onClick={() => void saveLimits()}>
+            {t("Save")}
+          </button>
+        </section>
+      )}
 
       {problem && (
         <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>

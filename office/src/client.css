@@ -42,7 +42,8 @@
 }
 
 .po-editor-panel .po-editor-bar > button,
-.po-editor-panel .po-editor-bar > .po-chip-lock {
+.po-editor-panel .po-editor-bar > .po-chip-lock,
+.po-editor-panel .po-editor-bar > .po-chip-talk {
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -250,6 +251,18 @@
   color: rgb(var(--fg));
 }
 
+/* How the document's comments and chat with agents stand: an agent at work, or something to look at. */
+.po-chip-talk {
+  border-color: rgb(var(--accent) / 0.6);
+  background: rgb(var(--accent) / 0.1);
+  color: rgb(var(--fg));
+}
+
+.po-chip-talk-problem {
+  border-color: rgb(var(--danger) / 0.6);
+  background: rgb(var(--danger) / 0.12);
+}
+
 /* "The agent changed it while you had it open" -- a badge until the editor can reload the file by itself. */
 .po-chip-stale {
   border-color: rgb(var(--danger) / 0.6);
@@ -372,4 +385,23 @@
   font-size: 11px;
   color: rgb(var(--fg-muted));
   overflow-wrap: anywhere;
+}
+
+/* The limits of comments and the editor's chat: a label and a short number input each. */
+.po-limits {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.po-limit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.po-limit input {
+  width: 6rem;
+  flex-shrink: 0;
 }

@@ -21,7 +21,7 @@ import { de } from "./de";
  */
 
 /** The editor (web/office-editor.tsx), loaded as the panel first opens a document. Set as the extension is loaded. */
-let PanelEditor: ComponentType<{ docId: string; onBack(): void; onFullPage?: () => void; place?: "page" | "panel" }>;
+let PanelEditor: ComponentType<{ docId: string; onBack(): void; onFullPage?: () => void; place?: "page" | "panel"; chatId?: string }>;
 
 /**
  * The Office panel beside a chat: its list of documents, or one of them open in the editor, beside the conversation
@@ -61,7 +61,7 @@ function OfficePanel({ chat, panel }: PanelProps) {
   return (
     <div className="po-panel">
       <Suspense fallback={<portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />}>
-        <PanelEditor key={docId} docId={docId} place="panel" onBack={() => choose(null)} onFullPage={() => portal.navigate(officeUrl(docId))} />
+        <PanelEditor key={docId} docId={docId} place="panel" chatId={chat.id} onBack={() => choose(null)} onFullPage={() => portal.navigate(officeUrl(docId))} />
       </Suspense>
     </div>
   );

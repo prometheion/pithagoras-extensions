@@ -57,6 +57,7 @@ export interface OfficeAgentImage {
 export interface OfficeState {
   enabled: boolean;
   imageTag: string;
+  limits?: DocchatLimits;
   container: OfficeContainer;
   agent: OfficeAgentImage;
   docs: OfficeDoc[];
@@ -70,7 +71,25 @@ export interface EditorConfig extends Record<string, unknown> {
   apiJs: string;
 }
 
-export type SettingsPatch = { enabled?: boolean; imageTag?: string };
+/** How a thread's or the editor's chat stands, as the editor's bar shows it (docchat.ts statesOf). */
+export interface DocchatItem {
+  kind: "thread" | "chat";
+  label: string;
+  state: "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "nobody" | "interrupted" | "limit" | "idle";
+  error?: string;
+}
+
+/** The limits of comments and the editor's chat with agents (settings.ts). */
+export interface DocchatLimits {
+  docchatRuns: number;
+  docchatThreads: number;
+  docchatReplyChars: number;
+  docchatChatMessages: number;
+  docchatRemoveAfterS: number;
+  docchatChatEndS: number;
+}
+
+export type SettingsPatch = { enabled?: boolean; imageTag?: string } & Partial<DocchatLimits>;
 
 /** The settings answer: what was saved, where the container stands as of now, and that a start went on its own. */
 export interface SettingsAnswer {
@@ -96,7 +115,19 @@ export const api = {
   editorConfig: (docId: string) => call<EditorConfig>("/editor-config", { method: "POST", body: JSON.stringify({ doc: docId }) }),
   /** How the editor opened with `key` stands to the document now: "behind" means the file changed outside the editor. */
   editorState: (docId: string, key: string) =>
-    call<{ standing: "current" | "behind" }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
+    call<{ standing: "current" | "behind"; docchat?: DocchatItem[] }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
+  /** Who a comment can mention, as the editor's mention list takes them. */
+  mentionables: () => call<{ users: { name: string; email: string }[] }>("/mentionables"),
+  /** A report of the people's editor (docchat-page.ts): its answer's status, also for one refused. */
+  docchat: async (path: string, body: unknown, keepalive = false): Promise<{ ok: boolean; status: number }> => {
+    try {
+      await call(path, { method: "POST", body: JSON.stringify(body), ...(keepalive ? { keepalive: true } : {}) });
+      return { ok: true, status: 200 };
+    } catch (e) {
+      const status = typeof (e as { status?: unknown })?.status === "number" ? (e as { status: number }).status : 0;
+      return { ok: false, status };
+    }
+  },
   saveSettings: (patch: SettingsPatch) => call<SettingsAnswer>("/settings", { method: "POST", body: JSON.stringify(patch) }),
   /** Awaits the whole start, both images' downloads included -- the page shows their progress from /state meanwhile. */
   startContainer: () => call<{ started: boolean; container: OfficeContainer; agent: { present: boolean; error?: string } }>("/container/start", { method: "POST" }),

@@ -24,7 +24,7 @@
   "scripts": {
     "build": "node build.mjs && tsc --noEmit -p .",
     "test": "node --import tsx --test --test-timeout=60000 test/*.test.mts",
-    "test:portal": "node --import tsx --test --test-timeout=120000 test/portal/portal.test.mts test/portal/editor.test.mts test/portal/settings.test.mts test/portal/panel.test.mts",
+    "test:portal": "node --import tsx --test --test-timeout=120000 test/portal/portal.test.mts test/portal/editor.test.mts test/portal/settings.test.mts test/portal/panel.test.mts test/portal/docchat.test.mts",
     "test:e2e": "node --import tsx --test --test-concurrency=1 --test-timeout=900000 test/portal/e2e.test.mts test/portal/spike.test.mts test/portal/docchat-spike.test.mts",
     "test:real": "node --import tsx --test --test-concurrency=1 --test-timeout=1800000 test/portal/real-portal.test.mts",
     "prepack": "npm run build"

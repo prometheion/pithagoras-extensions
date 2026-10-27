@@ -41,6 +41,8 @@ type Data = {
 };
 
 type EditorApi = Record<string, any> & { asc_registerCallback(name: string, fn: (...args: any[]) => void): void };
+/** The editor app's own (web-apps) controllers, of which the comments panel's collection is read at ready. */
+type Ui5 = { getController?(name: string): { collection?: { models?: { get(key: string): unknown }[] } } | undefined };
 
 export type DocchatHook = {
   /** The editor in the placeholder said its app started: its frame is hooked (again, after a remake or a refresh). */
@@ -333,6 +335,22 @@ export function hookDocchat(options: {
       // The comments the editor loaded come as events a moment after it is ready (a late joiner's replay among them).
       setTimeout(() => {
         if (stopped || gone) return;
+        // What the editor's own comments panel holds, for any comment whose event came before this page listened: a
+        // list that misses one would start that thread's removal.
+        try {
+          const win = options.frame()?.contentWindow as (Window & { DE?: Ui5; SSE?: Ui5 }) | null | undefined;
+          const ui = win?.DE ?? win?.SSE;
+          const models = ui?.getController?.("Common.Controllers.Comments")?.collection?.models ?? [];
+          for (const m of models) {
+            const get = (k: string) => m.get(k);
+            const sid = str(get("uid"));
+            if (!sid || known.has(sid) || !str(get("guid"))) continue;
+            const replies = (Array.isArray(get("replys")) ? (get("replys") as { get(k: string): unknown }[]) : []).map((r) => ({ userId: str(r.get("userid")), author: str(r.get("username")), text: str(r.get("reply")) }));
+            known.set(sid, { guid: str(get("guid")), sessionId: sid, userId: str(get("userid")), author: str(get("username")), text: str(get("comment")), solved: Boolean(get("resolved")), quote: str(get("quote")), replies });
+          }
+        } catch {
+          // the panel's internals of another version: the events alone
+        }
         const comments = [...known.values()].filter((c) => c.guid);
         void options.post("/docchat/ready", { v: PROTOCOL, docId, key: options.key(), ...(options.panelChat ? { panelChat: options.panelChat } : {}), comments }).catch(() => {});
       }, 1500);

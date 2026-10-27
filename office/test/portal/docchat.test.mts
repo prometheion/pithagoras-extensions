@@ -54,6 +54,8 @@ window.DocsAPI = { DocEditor: function (id, config) {
   window.__ids = window.__ids || 0;
   window.__api = api;
   frame.contentWindow.Asc = { editor: api };
+  // The editor app's comments panel, with what it loaded before the page listened (window.__panel).
+  if (window.__panel) frame.contentWindow.DE = { getController: () => ({ collection: { models: window.__panel.map((c) => ({ get: (k) => c[k] })) } }) };
   setTimeout(() => (config.events.onAppReady && config.events.onAppReady(), config.events.onDocumentReady && config.events.onDocumentReady()), 0);
   return { destroyEditor() { frame.remove(); }, setUsers: (data) => window.__fake.setUsers.push(data) };
 } };`;
@@ -203,9 +205,12 @@ test("the GUID a comment's events carry is the one the page names it by, also af
   await page.context().close();
 });
 
-test("ready: the comments the editor sees are reported; a report that failed is tried again; the last ones go out as the page goes", async () => {
-  const page = await opened();
-  assert.ok(await until(() => routes.reports.some((r) => r.path === "/docchat/ready")));
+test("ready: the comments the editor sees are reported, the comments panel's among them; a report that failed is tried again; the last ones go out as the page goes", async () => {
+  const page = await (await browser.newContext()).newPage();
+  await page.addInitScript(() => Object.assign(window, { __mode: "word", __confirmMs: 600, __panel: [{ uid: "9_9", guid: "0000beef", comment: "Vorher", userid: "portal-user", username: "Portal", resolved: false, quote: "", replys: [] }] }));
+  await page.goto(`${origin}/editor.html?doc=d1`);
+  assert.ok(await until(() => routes.reports.some((r) => r.path === "/docchat/ready"), 6000));
+  assert.deepEqual(routes.reports.find((r) => r.path === "/docchat/ready")!.body.comments.map((c: any) => [c.guid, c.text]), [["0000beef", "Vorher"]], "the panel's comment is in the list");
   routes.refuse = 1;
   await page.evaluate(() => {
     const w = window as any;

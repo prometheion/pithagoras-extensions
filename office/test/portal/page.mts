@@ -189,8 +189,11 @@ function recorded(Real) {
     wrapped.set(Real, function (id, config) {
       const page = config.events || {};
       window.__page = page;
+      // A test that adds to the editor's config (events of its own) before the editor is made.
+      if (window.__configHook) window.__configHook(config);
       config.events = {
         ...page,
+        ...config.events,
         onDocumentReady: () => window.__events.push(["ready"]),
         onError: (e) => window.__events.push(["error", e && e.data]),
         onWarning: (e) => window.__events.push(["warning", e && e.data]),

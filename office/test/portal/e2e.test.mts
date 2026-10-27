@@ -764,6 +764,8 @@ async function run(PITHAGORAS: string): Promise<void> {
   test("15. how long the edits take in the real editor: 200 cell ops in one call, and 20 sheet ops in one call", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Timings", "cell");
     const { page, frame } = await personOpens(doc);
+    // The agent's editor opened first: what is timed is the edits alone.
+    await tools.office_read.execute("m-open", { id: doc });
     let t0 = Date.now();
     await tools.office_edit.execute("m-cells", { id: doc, ops: Array.from({ length: 200 }, (_, n) => ({ range: `A${n + 1}`, values: [[n]] })) });
     const cells = Date.now() - t0;

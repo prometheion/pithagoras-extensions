@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import JSZip from "jszip";
-import { parseDocx, parseXlsx, rewriteZip, diffComments, type Comment } from "../src/ooxml";
+import { parseDocx, parseXlsx, rewriteZip, diffComments, docxThreads, xlsxThreads, type Comment } from "../src/ooxml";
 
 /* ---------------- fixture building (jszip) ---------------- */
 
@@ -277,4 +277,76 @@ test("readZip refuses an archive whose COMBINED advertised expansion exceeds the
   buf.writeUInt32LE(cdSize, eocd + 12); // size of the central directory
   buf.writeUInt32LE(0, eocd + 16); // offset of the central directory
   assert.throws(() => parseDocx(buf), /archive cap/);
+});
+
+/* ---------------- comment threads ---------------- */
+
+const W = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"`;
+
+test("docxThreads: a comment with its replies, solved, its GUID the durableId, its author's user id and its quote; a comment on the document from its own parts", async () => {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", CONTENT_TYPES);
+  zip.file("_rels/.rels", ROOT_RELS);
+  zip.file("word/document.xml", `<w:document ${W}><w:body><w:p><w:r><w:t xml:space="preserve">Revenue </w:t></w:r><w:commentRangeStart w:id="0"/><w:r><w:t>was revised</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:t>.</w:t></w:r></w:p></w:body></w:document>`);
+  zip.file("word/comments.xml", `<w:comments ${W}>` +
+    `<w:comment w:id="0" w:author="Portal" w:date="2026-10-27T10:00:00Z"><w:p w14:paraId="1A2B3C4D"><w:r><w:t>Bitte übersetzen +Aegis</w:t></w:r></w:p></w:comment>` +
+    `<w:comment w:id="1" w:author="Aegis (agent)" w:date="2026-10-27T10:01:00Z"><w:p w14:paraId="5E6F7A8B"><w:r><w:t>Done: was updated.</w:t></w:r></w:p></w:comment>` +
+    `<w:comment w:id="2" w:author="Portal"><w:p w14:paraId="00000011"><w:r><w:t>Danke</w:t></w:r></w:p></w:comment>` +
+    `</w:comments>`);
+  zip.file("word/commentsExtended.xml", `<w15:commentsEx ${W}><w15:commentEx w15:paraId="1A2B3C4D" w15:done="1"/><w15:commentEx w15:paraId="5E6F7A8B" w15:paraIdParent="1A2B3C4D" w15:done="0"/><w15:commentEx w15:paraId="00000011" w15:paraIdParent="1A2B3C4D" w15:done="0"/></w15:commentsEx>`);
+  zip.file("word/commentsIds.xml", `<w16cid:commentsIds ${W}><w16cid:commentId w16cid:paraId="1A2B3C4D" w16cid:durableId="626360DF"/><w16cid:commentId w16cid:paraId="5E6F7A8B" w16cid:durableId="0A000001"/></w16cid:commentsIds>`);
+  zip.file("word/people.xml", `<w15:people ${W}><w15:person w15:author="Portal"><w15:presenceInfo w15:providerId="Teamlab" w15:userId="portal-user"/></w15:person><w15:person w15:author="Aegis (agent)"><w15:presenceInfo w15:providerId="Teamlab" w15:userId="agent:abc"/></w15:person></w15:people>`);
+  zip.file("word/commentsDocument.xml", `<w:comments ${W}><w:comment w:id="0" w:author="Portal"><w:p w14:paraId="22222222"><w:r><w:t>On the whole document</w:t></w:r></w:p></w:comment></w:comments>`);
+  zip.file("word/commentsIdsDocument.xml", `<w16cid:commentsIds ${W}><w16cid:commentId w16cid:paraId="22222222" w16cid:durableId="7164B85F"/></w16cid:commentsIds>`);
+  const threads = docxThreads(await zip.generateAsync({ type: "nodebuffer" }));
+  assert.equal(threads.length, 2);
+  assert.deepEqual(threads[0], {
+    guid: "626360df",
+    author: "Portal",
+    userId: "portal-user",
+    date: "2026-10-27T10:00:00Z",
+    text: "Bitte übersetzen +Aegis",
+    solved: true,
+    quote: "was revised",
+    replies: [
+      { author: "Aegis (agent)", userId: "agent:abc", date: "2026-10-27T10:01:00Z", text: "Done: was updated." },
+      { author: "Portal", userId: "portal-user", text: "Danke" },
+    ],
+  });
+  assert.equal(threads[1].guid, "7164b85f");
+  assert.equal(threads[1].text, "On the whole document");
+  assert.equal(threads[1].quote, undefined);
+});
+
+test("docxThreads: a file an outside tool saved, with no durableIds or extended parts, gives each comment as a thread without a GUID", async () => {
+  const threads = docxThreads(await buildDocxZip());
+  assert.deepEqual(threads.map((t) => [t.guid, t.author, t.text, t.solved, t.replies.length]), [["", "Alice Adams", "Fix the title.", false, 0], ["", "Bob Brown", "@agent please review", false, 0]]);
+});
+
+test("xlsxThreads: the threaded comments of each sheet, replies by parentId, names and user ids from the persons part", async () => {
+  const zip = new JSZip();
+  zip.file("xl/workbook.xml", WORKBOOK_XML);
+  zip.file("xl/_rels/workbook.xml.rels", WORKBOOK_RELS);
+  zip.file("xl/worksheets/sheet1.xml", `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`);
+  zip.file("xl/worksheets/sheet2.xml", `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`);
+  zip.file("xl/worksheets/_rels/sheet2.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/></Relationships>`);
+  zip.file("xl/threadedComments/threadedComment1.xml", `<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">` +
+    `<threadedComment ref="B2" dT="2026-10-27T10:00:00.00" personId="{P1}" id="{CEDAB90E-0000-4000-8000-000000000001}" done="1"><text>Bitte prüfen +Aegis &amp; danke</text></threadedComment>` +
+    `<threadedComment ref="B2" dT="2026-10-27T10:01:00.00" personId="{P2}" id="{CEDAB90E-0000-4000-8000-000000000002}" parentId="{CEDAB90E-0000-4000-8000-000000000001}"><text>Geprüft.</text></threadedComment>` +
+    `</ThreadedComments>`);
+  zip.file("xl/persons/person.xml", `<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="Portal" id="{P1}" userId="portal-user" providerId="Teamlab"/><person displayName="Aegis (agent)" id="{P2}" userId="agent:abc" providerId="Teamlab"/></personList>`);
+  const threads = xlsxThreads(await zip.generateAsync({ type: "nodebuffer" }));
+  assert.deepEqual(threads, [
+    {
+      guid: "{CEDAB90E-0000-4000-8000-000000000001}",
+      author: "Portal",
+      userId: "portal-user",
+      date: "2026-10-27T10:00:00.00",
+      text: "Bitte prüfen +Aegis & danke",
+      solved: true,
+      sheet: "Notes",
+      cell: "B2",
+      replies: [{ author: "Aegis (agent)", userId: "agent:abc", date: "2026-10-27T10:01:00.00", text: "Geprüft." }],
+    },
+  ]);
 });

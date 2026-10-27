@@ -345,6 +345,171 @@ function parseComments(xml: string): Comment[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* comment threads (docx and xlsx)                                     */
+/* ------------------------------------------------------------------ */
+
+/** A reply in a comment thread, as a saved file holds it. */
+export type ThreadReply = { author: string; userId?: string; date?: string; text: string };
+
+/**
+ * A comment thread as a saved file holds it: the comment and its replies. `guid` is what the editor calls the thread
+ * (asc_getGuid): a Word comment's durableId (word/commentsIds.xml, or commentsIdsDocument.xml for a comment on the
+ * document), 8 hex digits in lower case, or "" where the file has none (a file an outside tool saved); a spreadsheet's
+ * threaded comment id, `{…}` as written. `userId` is the editor's user id of the author, where the file names it
+ * (word/people.xml, xl/persons/person.xml). A spreadsheet thread says its sheet and cell.
+ */
+export type CommentThread = {
+  guid: string;
+  author: string;
+  userId?: string;
+  date?: string;
+  text: string;
+  solved: boolean;
+  quote?: string;
+  sheet?: string;
+  cell?: string;
+  replies: ThreadReply[];
+};
+
+/** The most threads, and replies of one thread, a file is read for: what a document of people's comments holds is far
+ * below, and a file made to be large costs no more than this. */
+const MAX_THREADS = 2000;
+const MAX_REPLIES = 500;
+
+/** `w14:paraId` of every paragraph of an element's content, in order. */
+function paraIds(content: string): string[] {
+  return [...content.matchAll(/<w:p\b([^>]*)>/g)].map((m) => parseAttributes(m[1])["paraId"] ?? "").filter(Boolean);
+}
+
+/** Text of a comment's paragraphs, one line each. */
+function commentText(content: string): string {
+  const lines: string[] = [];
+  for (const m of content.matchAll(/<w:p\b[^>]*?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) lines.push(paragraphText(m[1] ?? ""));
+  return lines.join("\n");
+}
+
+/**
+ * The comment threads of a docx: word/comments.xml and OnlyOffice's comments on the document, each comment put with its
+ * thread by commentsExtended's `paraIdParent` (a reply names its comment's last paragraph), solved by its `done`, its
+ * GUID from commentsIds' durableId of its last paragraph, its author's user id from word/people.xml, and for a comment
+ * on text the text between its range marks in word/document.xml.
+ */
+export function docxThreads(buf: Buffer): CommentThread[] {
+  const parts = readZipParts(buf);
+  const people = new Map<string, string>();
+  const peopleXml = parts["word/people.xml"]?.toString("utf8") ?? "";
+  for (const m of peopleXml.matchAll(/<w15:person\b([^>]*)>([\s\S]*?)<\/w15:person>/g)) {
+    const author = parseAttributes(m[1])["author"];
+    const info = /<w15:presenceInfo\b([^>]*)\/?>/.exec(m[2]);
+    const userId = info ? parseAttributes(info[1])["userId"] : undefined;
+    if (author !== undefined && userId) people.set(author, userId);
+  }
+  const document = parts["word/document.xml"]?.toString("utf8") ?? "";
+  const threads: CommentThread[] = [];
+  for (const part of commentParts(parts)) {
+    const suffix = /comments(\w*)\.xml$/.exec(part)?.[1] ?? "";
+    const dir = part.slice(0, part.lastIndexOf("/") + 1);
+    const extended = new Map<string, { parent?: string; done: boolean }>();
+    for (const m of (parts[`${dir}commentsExtended${suffix}.xml`]?.toString("utf8") ?? "").matchAll(/<w15:commentEx\b([^>]*)\/?>/g)) {
+      const a = parseAttributes(m[1]);
+      if (a["paraId"]) extended.set(a["paraId"], { parent: a["paraIdParent"], done: a["done"] === "1" || a["done"] === "true" });
+    }
+    const durable = new Map<string, string>();
+    for (const m of (parts[`${dir}commentsIds${suffix}.xml`]?.toString("utf8") ?? "").matchAll(/<w16cid:commentId\b([^>]*)\/?>/g)) {
+      const a = parseAttributes(m[1]);
+      if (a["paraId"] && a["durableId"]) durable.set(a["paraId"], a["durableId"].toLowerCase().padStart(8, "0"));
+    }
+    const byPara = new Map<string, CommentThread>();
+    const replies: { parent: string; reply: ThreadReply }[] = [];
+    for (const m of parts[part]!.toString("utf8").matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)) {
+      const a = parseAttributes(m[1]);
+      const last = paraIds(m[2]).pop() ?? "";
+      const ex = extended.get(last);
+      const author = a["author"] ?? "";
+      const text = commentText(m[2]);
+      const userId = people.get(author);
+      if (ex?.parent) {
+        replies.push({ parent: ex.parent, reply: { author, ...(userId ? { userId } : {}), ...(a["date"] ? { date: a["date"] } : {}), text } });
+        continue;
+      }
+      if (threads.length >= MAX_THREADS) continue;
+      const thread: CommentThread = { guid: durable.get(last) ?? "", author, ...(userId ? { userId } : {}), ...(a["date"] ? { date: a["date"] } : {}), text, solved: ex?.done ?? false, replies: [] };
+      if (suffix === "" && a["id"] !== undefined) {
+        const id = a["id"].replace(/[^\w-]/g, "");
+        const range = new RegExp(`<w:commentRangeStart\\b[^>]*w:id="${id}"[^>]*/>([\\s\\S]*?)<w:commentRangeEnd\\b[^>]*w:id="${id}"[^>]*/>`).exec(document);
+        if (range) {
+          let quote = "";
+          for (const t of range[1].matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)) quote += decodeEntities(t[1]);
+          if (quote) thread.quote = quote.slice(0, 2000);
+        }
+      }
+      threads.push(thread);
+      if (last) byPara.set(last, thread);
+    }
+    for (const { parent, reply } of replies) {
+      const thread = byPara.get(parent);
+      if (thread && thread.replies.length < MAX_REPLIES) thread.replies.push(reply);
+    }
+  }
+  return threads;
+}
+
+/**
+ * The comment threads of an xlsx: the threaded comments of each sheet (`xl/threadedComments/*.xml`, found through the
+ * sheet's relationships), a reply by its `parentId`, the author's name and user id from `xl/persons/person.xml`. A
+ * workbook with only legacy notes (`xl/commentsN.xml`, no threads) has none: the editor writes every comment threaded.
+ */
+export function xlsxThreads(buf: Buffer): CommentThread[] {
+  const parts = readZipParts(buf);
+  const persons = new Map<string, { name: string; userId?: string }>();
+  for (const name of Object.keys(parts).filter((n) => /^xl\/persons\/[^/]+\.xml$/.test(n))) {
+    for (const m of parts[name]!.toString("utf8").matchAll(/<person\b([^>]*)\/?>/g)) {
+      const a = parseAttributes(m[1]);
+      if (a["id"]) persons.set(a["id"], { name: a["displayName"] ?? "", ...(a["userId"] ? { userId: a["userId"] } : {}) });
+    }
+  }
+  const workbook = parts["xl/workbook.xml"]?.toString("utf8") ?? "";
+  const relsXml = parts["xl/_rels/workbook.xml.rels"]?.toString("utf8") ?? "";
+  const targets: Record<string, string> = {};
+  for (const m of relsXml.matchAll(/<Relationship\b([^>]*?)\/?>/g)) {
+    const a = parseAttributes(m[1]);
+    if (a["Id"] && a["Target"]) targets[a["Id"]] = a["Target"];
+  }
+  const threads: CommentThread[] = [];
+  for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    const a = parseAttributes(m[1]);
+    const target = a["id"] !== undefined ? targets[a["id"]] : undefined;
+    if (!target) continue;
+    const sheetPart = resolveTarget(target);
+    const rels = parts[`${sheetPart.slice(0, sheetPart.lastIndexOf("/"))}/_rels/${sheetPart.slice(sheetPart.lastIndexOf("/") + 1)}.rels`]?.toString("utf8") ?? "";
+    for (const r of rels.matchAll(/<Relationship\b([^>]*?)\/?>/g)) {
+      const ra = parseAttributes(r[1]);
+      if (!/threadedComment$/.test(ra["Type"] ?? "") || !ra["Target"]) continue;
+      const resolved = ra["Target"].startsWith("/") ? ra["Target"].slice(1) : resolveTarget(`${sheetPart.slice(3, sheetPart.lastIndexOf("/"))}/${ra["Target"]}`);
+      const xml = parts[resolved]?.toString("utf8");
+      if (!xml) continue;
+      const byId = new Map<string, CommentThread>();
+      for (const c of xml.matchAll(/<threadedComment\b([^>]*)>([\s\S]*?)<\/threadedComment>/g)) {
+        const ca = parseAttributes(c[1]);
+        const person = persons.get(ca["personId"] ?? "");
+        const text = decodeEntities(/<text>([\s\S]*?)<\/text>/.exec(c[2])?.[1] ?? "");
+        const who = { author: person?.name ?? "", ...(person?.userId ? { userId: person.userId } : {}), ...(ca["dT"] ? { date: ca["dT"] } : {}) };
+        if (ca["parentId"]) {
+          const thread = byId.get(ca["parentId"]);
+          if (thread && thread.replies.length < MAX_REPLIES) thread.replies.push({ ...who, text });
+          continue;
+        }
+        if (threads.length >= MAX_THREADS) continue;
+        const thread: CommentThread = { guid: ca["id"] ?? "", ...who, text, solved: ca["done"] === "1" || ca["done"] === "true", sheet: a["name"] ?? "", ...(ca["ref"] ? { cell: ca["ref"] } : {}), replies: [] };
+        threads.push(thread);
+        if (ca["id"]) byId.set(ca["id"], thread);
+      }
+    }
+  }
+  return threads;
+}
+
+/* ------------------------------------------------------------------ */
 /* xlsx                                                                */
 /* ------------------------------------------------------------------ */
 

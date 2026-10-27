@@ -678,6 +678,8 @@ export async function removeContainers(removeData: boolean, docker?: Docker, roo
  * time would be a process in the container each time. */
 let probed: { id: string; at: number; version?: string; memBytes?: number } | undefined;
 const PROBE_FOR_MS = 15_000;
+/** The same for the agents' browser, whose memory is added to the Document Server's (one figure for all of Office). */
+let probedAgent: { id: string; at: number; memBytes?: number } | undefined;
 
 /**
  * The running version, as the image's package says it (`dpkg-query`: "10.0.0-169"), and the memory the container uses
@@ -703,9 +705,39 @@ async function probe(d: Docker, id: string): Promise<{ version?: string; memByte
   return out;
 }
 
+/**
+ * The memory the agents' browser uses now, from its own cgroup, while it runs; nothing where it does not run or cannot be
+ * read. Its image has no package tools and maybe no `cat`, so the file is read with the shell's own `read`. Never an
+ * error: a browser that cannot be read adds nothing.
+ */
+async function probeAgent(d: Docker): Promise<number | undefined> {
+  try {
+    const found = await d.containers.get(NAMES.agent);
+    if (!found || found.state !== "running" || found.owner !== ownName()) return undefined;
+    if (probedAgent && probedAgent.id === found.id && Date.now() - probedAgent.at < PROBE_FOR_MS) return probedAgent.memBytes;
+    let memBytes: number | undefined;
+    try {
+      const res = await d.containers.exec(
+        NAMES.agent,
+        ["bash", "-c", "read -r v < /sys/fs/cgroup/memory.current 2>/dev/null || read -r v < /sys/fs/cgroup/memory/memory.usage_in_bytes; echo \"$v\""],
+        { timeoutMs: 10_000 },
+      );
+      const mem = res.output.trim();
+      if (/^\d+$/.test(mem) && Number(mem) > 0) memBytes = Number(mem);
+    } catch {
+      // no answer: it adds nothing
+    }
+    probedAgent = { id: found.id, at: Date.now(), memBytes };
+    return memBytes;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Drops what the probe kept, and what the last start and download said, for tests. */
 export function forgetProbe(): void {
   probed = undefined;
+  probedAgent = undefined;
   settledRun = undefined;
   startError = undefined;
   agentPull = null;
@@ -749,7 +781,7 @@ export async function settled(docker?: Docker): Promise<boolean> {
 /**
  * The Document Server for the status block: absent or exited/created -> "stopped", another extension's -> "foreign";
  * otherwise Docker's own inspect word (with `State.Starting` folded in as "starting"), and while it runs its version
- * and memory use. Pull progress comes from the in-memory last state of an ensure, and `error` says why the last start
+ * and memory use (the Document Server's and, while it runs, the agents' browser's). Pull progress comes from the in-memory last state of an ensure, and `error` says why the last start
  * failed, until one succeeds or the person stops or removes it.
  */
 export async function status(docker?: Docker): Promise<{ state: string; version?: string; memBytes?: number; pull?: PullState | null; error?: string }> {
@@ -786,7 +818,11 @@ export async function status(docker?: Docker): Promise<{ state: string; version?
   out.state = st.Status === "running" && st.Starting ? "starting" : st.Status === "exited" ? "stopped" : st.Status;
   // Running, but still making its fonts: an editor opened now would lose its connection (see settled).
   if (out.state === "running" && !(await settled(d))) out.state = "starting";
-  if (out.state === "running") Object.assign(out, await probe(d, existing.id));
+  if (out.state === "running") {
+    Object.assign(out, await probe(d, existing.id));
+    // All of Office is one figure: the browser's memory comes on top while it runs.
+    if (out.memBytes !== undefined) out.memBytes += (await probeAgent(d)) ?? 0;
+  }
   return out;
 }
 

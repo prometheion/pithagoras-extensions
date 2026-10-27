@@ -94,7 +94,7 @@ test("one Office on the page: one status, no part named while all is well, one m
   const text = await page.locator("#root").innerText();
   for (const part of ["Document Server", "agents' editor", "Agents' editor", TAG]) assert.ok(!text.includes(part), `names a part: ${part}`);
   await office(page).getByText("10.0.0-169 · Agents in 2 documents", { exact: true }).waitFor();
-  await page.getByText("Needs about 4 GB of RAM, up to 7 GB while agents work in documents.", { exact: true }).waitFor();
+  await page.getByText("At least 1 GB of RAM, more with each person and agent in a document.", { exact: true }).waitFor();
   assert.equal(await start(page).isDisabled(), true, "everything is there: nothing to start");
   await page.context().close();
 });

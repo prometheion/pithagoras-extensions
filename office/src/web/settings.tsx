@@ -130,7 +130,7 @@ export function OfficeSettings() {
         ))}
         {error && <div className="po-pull-line text-danger">{error}</div>}
       </div>
-      <p className="text-xs text-fg-subtle">{t("Needs about 4 GB of RAM, up to 7 GB while agents work in documents.")}</p>
+      <p className="text-xs text-fg-subtle">{t("At least 1 GB of RAM, more with each person and agent in a document.")}</p>
 
       <portal.ui.SwitchRow
         title={t("Use Office")}

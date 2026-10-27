@@ -355,6 +355,61 @@ test("status: an answer that is no version or number leaves both out", async () 
   assert.equal(s.memBytes, undefined);
 });
 
+/** The cgroup figures the Document Server and the agents' browser answer with, by the container each command runs in. */
+function memoryAnswers(m: ReturnType<typeof fakeDocker>, browser: string | Error) {
+  m.state.answer = (cmd) => {
+    if (cmd.join(" ").includes("dpkg-query")) return { output: "10.0.0-169\n300000000\n", exitCode: 0, timedOut: false };
+    if (browser instanceof Error) throw browser;
+    return { output: browser, exitCode: 0, timedOut: false };
+  };
+}
+
+test("status: the memory is all of Office -- the Document Server's alone, plus the agents' browser's while it runs", async () => {
+  const m = fresh();
+  m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+  memoryAnswers(m, "200000000\n");
+  assert.equal((await status(m.docker)).memBytes, 300000000, "no browser: the Document Server's alone");
+  assert.ok(!m.calls.some((c) => c.startsWith(`exec ${AGENT}`)), "no browser to ask");
+
+  m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running" });
+  forgetProbe();
+  const s = await status(m.docker);
+  assert.equal(s.memBytes, 500000000, "the browser's memory on top");
+  assert.equal(s.version, "10.0.0-169");
+  // Read with the shell's own builtin: the browser's image has bash, and maybe no cat.
+  const asked = m.calls.filter((c) => c.startsWith(`exec ${AGENT}`));
+  assert.equal(asked.length, 1);
+  assert.match(asked[0], /^exec \S+ bash -c read -r v < \/sys\/fs\/cgroup\/memory\.current/);
+  assert.ok(!asked[0].includes("cat "), "no cat");
+  // Kept for a while, as the Document Server's is.
+  await status(m.docker);
+  assert.equal(m.calls.filter((c) => c.startsWith(`exec ${AGENT}`)).length, 1);
+
+  // Stopped: it adds nothing again.
+  m.containers.get(AGENT)!.info.state = "exited";
+  assert.equal((await status(m.docker)).memBytes, 300000000);
+});
+
+test("status: an agents' browser whose memory cannot be read adds nothing and breaks nothing", async () => {
+  for (const browser of [new Error("exec failed"), "bash: read: Permission denied\n", "0\n", ""] as const) {
+    const m = fresh();
+    m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+    m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running" });
+    memoryAnswers(m, browser);
+    const s = await status(m.docker);
+    assert.equal(s.state, "running");
+    assert.equal(s.version, "10.0.0-169");
+    assert.equal(s.memBytes, 300000000, `Document Server's alone for ${JSON.stringify(String(browser))}`);
+  }
+  // Another extension's container of that name is not asked.
+  const m = fresh();
+  m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });
+  m.put(AGENT, { Image: AGENT_IMAGE }, { state: "running", owner: "@someone/else" });
+  memoryAnswers(m, "200000000\n");
+  assert.equal((await status(m.docker)).memBytes, 300000000);
+  assert.ok(!m.calls.some((c) => c.startsWith(`exec ${AGENT}`)));
+});
+
 test("a new Document Server that still makes its fonts is starting, and refused to an editor, until its set-up script is done", async () => {
   const m = fresh();
   const ds = m.put(DS_NAME, stamped(dsSpec(DEFAULT_TAG, [], NET)), { state: "running" });

@@ -332,7 +332,7 @@ test("xlsxThreads: the threaded comments of each sheet, replies by parentId, nam
   zip.file("xl/worksheets/_rels/sheet2.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/></Relationships>`);
   zip.file("xl/threadedComments/threadedComment1.xml", `<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">` +
     `<threadedComment ref="B2" dT="2026-10-27T10:00:00.00" personId="{P1}" id="{CEDAB90E-0000-4000-8000-000000000001}" done="1"><text>Bitte prüfen +Aegis &amp; danke</text></threadedComment>` +
-    `<threadedComment ref="B2" dT="2026-10-27T10:01:00.00" personId="{P2}" id="{CEDAB90E-0000-4000-8000-000000000002}" parentId="{CEDAB90E-0000-4000-8000-000000000001}"><text>Geprüft.</text></threadedComment>` +
+    `<threadedComment ref="B2" dT="2026-10-27T10:01:00.00" personId="{P2}" id="{CEDAB90E-0000-4000-8000-000000000002}" parentId="{CEDAB90E-0000-4000-8000-000000000001}"><text xml:space="preserve">Geprüft.</text></threadedComment>` +
     `</ThreadedComments>`);
   zip.file("xl/persons/person.xml", `<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="Portal" id="{P1}" userId="portal-user" providerId="Teamlab"/><person displayName="Aegis (agent)" id="{P2}" userId="agent:abc" providerId="Teamlab"/></personList>`);
   const threads = xlsxThreads(await zip.generateAsync({ type: "nodebuffer" }));

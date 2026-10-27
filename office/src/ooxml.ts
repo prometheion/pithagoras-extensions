@@ -492,7 +492,8 @@ export function xlsxThreads(buf: Buffer): CommentThread[] {
       for (const c of xml.matchAll(/<threadedComment\b([^>]*)>([\s\S]*?)<\/threadedComment>/g)) {
         const ca = parseAttributes(c[1]);
         const person = persons.get(ca["personId"] ?? "");
-        const text = decodeEntities(/<text>([\s\S]*?)<\/text>/.exec(c[2])?.[1] ?? "");
+        // `<text xml:space="preserve">`, as the editor writes a text with spaces at its ends.
+        const text = decodeEntities(/<(?:\w+:)?text\b[^>]*>([\s\S]*?)<\/(?:\w+:)?text>/.exec(c[2])?.[1] ?? "");
         const who = { author: person?.name ?? "", ...(person?.userId ? { userId: person.userId } : {}), ...(ca["dT"] ? { date: ca["dT"] } : {}) };
         if (ca["parentId"]) {
           const thread = byId.get(ca["parentId"]);

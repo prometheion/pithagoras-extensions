@@ -29,6 +29,13 @@ export const SHOT_SIDE = { normal: 1024, large: 1568 };
 /** JPEG quality, and the lower one where a picture would be larger than SHOT_MAX_BYTES. */
 export const SHOT_QUALITY = { normal: 0.75, low: 0.6 };
 export const SHOT_MAX_BYTES = 1024 * 1024;
+/** The largest picture the portal takes, in bytes: the frame function's lower quality may leave a picture above
+ * SHOT_MAX_BYTES, but what runs in the editor's frame is the document's side, and a picture far larger than any the
+ * editor makes (a page's script can replace the canvas's own methods) would fail the model's every later turn. */
+export const SHOT_TAKEN_BYTES = 1.5 * SHOT_MAX_BYTES;
+/** The most the client takes of the editor's answer, and the portal of the client's output, in characters: such a
+ * picture as base64 and a little more. Docker's exec gives the output whole, so the client stops a larger answer. */
+export const SHOT_MAX_CHARS = Math.ceil((SHOT_TAKEN_BYTES * 4) / 3) + 4096;
 
 /** What the locate command (seat-page.ts) says is to be shown, as the frame function takes it. */
 export type ShotTarget =
@@ -271,7 +278,8 @@ let done = false;
 function finish(out) {
   if (done) return;
   done = true;
-  const json = JSON.stringify(out);
+  let json = JSON.stringify(out);
+  if (json.length > ${SHOT_MAX_CHARS}) json = JSON.stringify({ error: { code: "failed", message: "the editor's answer is larger than a picture may be" } });
   process.stdout.write("CDP " + Buffer.byteLength(json) + " " + crypto.createHash("sha256").update(json).digest("hex") + " " + json + "\\n", () => process.exit(0));
 }
 const fail = (code, message) => finish({ error: { code: code, message: message } });
@@ -299,6 +307,8 @@ if (!input || typeof input.browser !== "string" || typeof input.editorId !== "st
     const waiting = new Map();
     const contexts = [];
     ws.onmessage = (event) => {
+      // Nothing the editor's frame answers is taken larger than a picture may be (a page's script can answer more).
+      if (String(event.data).length > ${SHOT_MAX_CHARS}) return fail("failed", "the editor's answer is larger than a picture may be");
       const m = JSON.parse(String(event.data));
       if (m.method === "Runtime.executionContextCreated") contexts.push(m.params.context);
       const w = m.id !== undefined && waiting.get(m.id);
@@ -363,8 +373,10 @@ export interface CdpDeps {
   port?: number;
 }
 
-/** The answer in the client's output: its one `CDP <length> <sha256> <json>` line, whole and as written. */
+/** The answer in the client's output: its one `CDP <length> <sha256> <json>` line, whole and as written, and no
+ * larger than the client writes. */
 export function readFrame(output: string): unknown {
+  if (output.length > SHOT_MAX_CHARS + 1024) throw new ShotError("failed", "the picture's channel gave more than a picture may be");
   const at = output.lastIndexOf("CDP ");
   const m = at === -1 ? null : /^CDP (\d+) ([0-9a-f]{64}) /.exec(output.slice(at));
   if (!m) throw new ShotError("failed", `the picture's channel gave no answer${output.trim() ? `: ${output.trim().slice(0, 200)}` : ""}`);
@@ -392,5 +404,41 @@ export async function shot(editorId: string, target: ShotTarget & { large?: bool
   const out = readFrame(res.output) as { error?: { code?: string; message?: string }; data?: unknown; width?: unknown; height?: unknown; zoom?: unknown; pages?: unknown };
   if (out.error) throw new ShotError(String(out.error.code ?? "failed"), String(out.error.message ?? "the picture failed"));
   if (typeof out.data !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(out.data) || typeof out.width !== "number" || typeof out.height !== "number") throw new ShotError("failed", "the picture's channel gave no picture");
+  // The picture as the editor's frame gave it is the document's side: taken only as a JPEG of the size it says, and
+  // no larger than the editor makes one.
+  const bytes = Buffer.from(out.data, "base64");
+  if (bytes.length > SHOT_TAKEN_BYTES) throw new ShotError("failed", `the editor gave a picture of ${bytes.length} bytes, larger than a picture may be`);
+  const side = (n: number) => Number.isInteger(n) && n >= 1 && n <= SHOT_SIDE.large;
+  const size = jpegSize(bytes);
+  if (!size || !side(out.width) || !side(out.height) || size.width !== out.width || size.height !== out.height) throw new ShotError("failed", "the editor gave no JPEG picture of the size it says");
   return { data: out.data, width: out.width, height: out.height, ...(typeof out.zoom === "number" ? { zoom: out.zoom } : {}), ...(typeof out.pages === "number" ? { pages: out.pages } : {}) };
+}
+
+/** A JPEG's width and height, from its frame header (SOF); null where `bytes` is no JPEG or has none. */
+export function jpegSize(bytes: Buffer): { width: number; height: number } | null {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let at = 2;
+  while (at + 4 <= bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1];
+    // Fill bytes, and the markers that stand alone.
+    if (marker === 0xff) {
+      at++;
+      continue;
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+      at += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    const length = bytes.readUInt16BE(at + 2);
+    if (length < 2) return null;
+    // SOF0 to SOF15, not DHT (C4), JPG (C8) or DAC (CC).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (at + 9 > bytes.length) return null;
+      return { height: bytes.readUInt16BE(at + 5), width: bytes.readUInt16BE(at + 7) };
+    }
+    at += 2 + length;
+  }
+  return null;
 }

@@ -13,7 +13,7 @@ import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import vm from "node:vm";
-import { CDP_SRC, FRAME_FN, readFrame, shot, ShotError, SHOT_SIDE, SHOT_QUALITY, SHOT_MAX_BYTES } from "../src/cdp";
+import { CDP_SRC, FRAME_FN, jpegSize, readFrame, shot, ShotError, SHOT_SIDE, SHOT_QUALITY, SHOT_MAX_BYTES, SHOT_MAX_CHARS, SHOT_TAKEN_BYTES } from "../src/cdp";
 
 /* ---------------- a DevTools server ---------------- */
 
@@ -176,15 +176,31 @@ test("readFrame takes the answer only whole and as written", () => {
   assert.throws(() => readFrame("node: bad option"), /gave no answer: node: bad option/);
 });
 
+/** The start of a JPEG of `width` x `height` (its SOI, a JFIF header and its frame header), `pad` bytes after it, as
+ * base64. */
+function jpegOf(width: number, height: number, pad = 0): string {
+  const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+  const sof = Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, sof, Buffer.alloc(pad), Buffer.from([0xff, 0xd9])]).toString("base64");
+}
+
+test("jpegSize reads a JPEG's size from its frame header, past the segments before it; anything else is no JPEG", () => {
+  assert.deepEqual(jpegSize(Buffer.from(jpegOf(1024, 724), "base64")), { width: 1024, height: 724 });
+  assert.equal(jpegSize(Buffer.from("QUJD", "base64")), null);
+  assert.equal(jpegSize(Buffer.from([0xff, 0xd8, 0xff, 0xda, 0, 2])), null, "scan data before a frame header");
+  assert.equal(jpegSize(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])), null, "a PNG");
+});
+
 test("shot runs the client in the relay with its spec, and turns its answer into a picture or a coded error", async () => {
   const calls: { cmd: string[]; ms: number }[] = [];
   const answer = (o: unknown) => {
     const json = JSON.stringify(o);
     return `CDP ${Buffer.byteLength(json)} ${createHash("sha256").update(json).digest("hex")} ${json}\n`;
   };
-  let output = answer({ data: "QUJD", width: 7, height: 9, pages: 4 });
+  const picture = jpegOf(7, 9);
+  let output = answer({ data: picture, width: 7, height: 9, pages: 4 });
   const deps = { browser: "pithagoras-office-ds-agent", exec: async (cmd: string[], ms: number) => (calls.push({ cmd, ms }), { output, exitCode: 0, timedOut: false }) };
-  assert.deepEqual(await shot("e1", { kind: "word", page: 2, pages: 4, large: true }, deps), { data: "QUJD", width: 7, height: 9, pages: 4 });
+  assert.deepEqual(await shot("e1", { kind: "word", page: 2, pages: 4, large: true }, deps), { data: picture, width: 7, height: 9, pages: 4 });
   assert.deepEqual(calls[0].cmd.slice(0, 4), ["node", "--no-warnings", "-e", CDP_SRC]);
   assert.equal(calls[0].ms, 15_000);
   const spec = JSON.parse(calls[0].cmd[4]);
@@ -195,6 +211,43 @@ test("shot runs the client in the relay with its spec, and turns its answer into
   await assert.rejects(shot("e1", { kind: "word", page: 1, pages: 1 }, deps), (e: unknown) => e instanceof ShotError && e.code === "failed");
   const late = { ...deps, exec: async () => ({ output: "", exitCode: null, timedOut: true }) };
   await assert.rejects(shot("e1", { kind: "word", page: 1, pages: 1 }, late), (e: unknown) => e instanceof ShotError && e.code === "timeout");
+});
+
+test("shot takes the picture the editor's frame gives only as a JPEG of the size it says, no larger than the editor makes one", async () => {
+  const answer = (o: unknown) => {
+    const json = JSON.stringify(o);
+    return `CDP ${Buffer.byteLength(json)} ${createHash("sha256").update(json).digest("hex")} ${json}\n`;
+  };
+  let output = "";
+  const deps = { browser: "b", exec: async () => ({ output, exitCode: 0, timedOut: false }) };
+  const refused = async (o: unknown, message: RegExp) => {
+    output = answer(o);
+    await assert.rejects(shot("e1", { kind: "word", page: 1, pages: 1 }, deps), (e: unknown) => e instanceof ShotError && e.code === "failed" && message.test(e.message));
+  };
+  await refused({ data: "QUJD", width: 1, height: 1 }, /no JPEG picture of the size it says/);
+  await refused({ data: jpegOf(7, 9), width: 9, height: 7 }, /no JPEG picture of the size it says/);
+  await refused({ data: jpegOf(7, 9), width: 7.5, height: 9 }, /no JPEG picture of the size it says/);
+  await refused({ data: jpegOf(SHOT_SIDE.large + 1, 9), width: SHOT_SIDE.large + 1, height: 9 }, /no JPEG picture of the size it says/);
+  // Just above the largest picture taken, and still within what the channel carries.
+  const big = jpegOf(1000, 700, SHOT_TAKEN_BYTES + 100 - 41);
+  assert.ok(big.length < SHOT_MAX_CHARS);
+  await refused({ data: big, width: 1000, height: 700 }, /larger than a picture may be/);
+  output = answer({ data: jpegOf(1000, 700, SHOT_TAKEN_BYTES - 100), width: 1000, height: 700 });
+  assert.equal((await shot("e1", { kind: "word", page: 1, pages: 1 }, deps)).width, 1000, "a picture below it is taken");
+  // More output than the client ever writes is not read at all.
+  output = answer({ data: jpegOf(1000, 700, 3_000_000), width: 1000, height: 700 });
+  await assert.rejects(shot("e1", { kind: "word", page: 1, pages: 1 }, deps), (e: unknown) => e instanceof ShotError && /gave more than a picture may be/.test(e.message));
+});
+
+test("the client stops an answer of the editor's frame larger than a picture may be, and writes one short line that says so", async () => {
+  const d = await devtools({ frames: FRAMES, answer: (m) => (m.method === "Runtime.callFunctionOn" ? { result: { type: "object", value: { data: "A".repeat(SHOT_MAX_CHARS + 10), width: 3, height: 2 } } } : {}) });
+  try {
+    const out = await runClient({ browser: "127.0.0.1", port: d.port, editorId: EDITOR, ms: 8000, target: { kind: "word" } });
+    assert.ok(out.length < 500, `${out.length} characters written`);
+    assert.deepEqual(readFrame(out), { error: { code: "failed", message: "the editor's answer is larger than a picture may be" } });
+  } finally {
+    await d.close();
+  }
 });
 
 /* ---------------- the frame function, on a scripted editor ---------------- */

@@ -14,14 +14,15 @@ const tokens = (text: string) => Math.ceil(text.length / 4);
 /** A tool's cost as the model is charged for it: the description, the schema and the line pi lists it by. */
 const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.stringify(tool.parameters)) + (tool.promptSnippet ? tokens(`- ${tool.name}: ${tool.promptSnippet}`) : 0);
 
-/** The agreed cost of each tool, in tokens (office_screenshot: about 260 in the plan of #13, 248 as written). */
+/** The agreed cost of each tool, in tokens (office_screenshot: about 260 in the plan of #13, 254 as written: `large` says
+ * that a picture is never larger than the editor draws it). */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 190,
   office_read: 246,
   office_edit: 958,
   office_comments: 181,
-  office_screenshot: 248,
+  office_screenshot: 254,
 };
 const ROOM = 1.03;
 
@@ -44,5 +45,5 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 1936);
+  assert.equal(agreed, 1942);
 });

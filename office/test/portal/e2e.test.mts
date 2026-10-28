@@ -783,12 +783,13 @@ async function run(PITHAGORAS: string): Promise<void> {
   /* ------------------------------------------------------------------ */
 
   type Shot = { content: ({ type: string; text?: string; data?: string; mimeType?: string })[]; details: Record<string, any> };
+  /** office_screenshot, logged under `label` (the test's number first). */
   const shoot = async (label: string, params: Record<string, unknown>, through: Record<string, Tool> = tools) => {
     const t0 = Date.now();
     const out = (await through.office_screenshot.execute(`p-${label}`, params)) as unknown as Shot;
     const took = Date.now() - t0;
     const image = out.content.find((c) => c.type === "image")!;
-    console.log(`16. ${label}: ${took} ms, ${JSON.stringify(out.details)}; ${JSON.stringify(out.content[0].text!.split("\n")[0])}`);
+    console.log(`${label}: ${took} ms, ${JSON.stringify(out.details)}; ${JSON.stringify(out.content[0].text!.split("\n")[0])}`);
     return { out, image: image.data!, text: out.content[0].text!, took };
   };
   /** The pixels of a JPEG (base64) at `points`, [r, g, b] each, as a page of Chromium decodes it. A string, not a
@@ -812,8 +813,9 @@ async function run(PITHAGORAS: string): Promise<void> {
   };
   /**
    * A workbook made outside the editor (as a person's file would be), written over `docId`'s file: "Grid" with a
-   * number in each cell of A1:BH120 and C3 filled with `fill`; "Frozen", A1:J100 with its rows 1-5 frozen; and
-   * "Secret", hidden.
+   * number in each cell of A1:BH120 and C3 filled with `fill`; "Frozen", A1:J100 with its rows 1-5 frozen;
+   * "Secret", hidden; and "Filtered", A1:J300 with rows 6-290 and column B hidden (as a filter or an outline hides
+   * them).
    */
   async function workbookFile(docId: string, fill: string): Promise<void> {
     const col = (n: number) => {
@@ -821,27 +823,74 @@ async function run(PITHAGORAS: string): Promise<void> {
       for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
       return s;
     };
-    const rows = (cols: number, count: number, styled?: string) =>
-      Array.from({ length: count }, (_, r) => `<row r="${r + 1}">${Array.from({ length: cols }, (_, c) => `<c r="${col(c)}${r + 1}"${`${col(c)}${r + 1}` === styled ? ' s="1"' : ""}><v>${(r + 1) * 100 + c}</v></c>`).join("")}</row>`).join("");
+    const rows = (cols: number, count: number, styled?: string, hidden?: (r: number) => boolean) =>
+      Array.from({ length: count }, (_, r) => `<row r="${r + 1}"${hidden?.(r + 1) ? ' hidden="1"' : ""}>${Array.from({ length: cols }, (_, c) => `<c r="${col(c)}${r + 1}"${`${col(c)}${r + 1}` === styled ? ' s="1"' : ""}><v>${(r + 1) * 100 + c}</v></c>`).join("")}</row>`).join("");
     const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
     const zip = new JSZip();
-    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' + [1, 2, 3].map((n) => `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>");
+    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' + [1, 2, 3, 4].map((n) => `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>");
     zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
-    zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns}><sheets><sheet name="Grid" sheetId="1" r:id="rId1"/><sheet name="Frozen" sheetId="2" r:id="rId2"/><sheet name="Secret" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>`);
-    zip.file("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + [1, 2, 3].map((n) => `<Relationship Id="rId${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${n}.xml"/>`).join("") + '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+    zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns}><sheets><sheet name="Grid" sheetId="1" r:id="rId1"/><sheet name="Frozen" sheetId="2" r:id="rId2"/><sheet name="Secret" sheetId="3" state="hidden" r:id="rId3"/><sheet name="Filtered" sheetId="4" r:id="rId4"/></sheets></workbook>`);
+    zip.file("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + [1, 2, 3, 4].map((n) => `<Relationship Id="rId${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${n}.xml"/>`).join("") + '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
     zip.file("xl/styles.xml", `<?xml version="1.0" encoding="UTF-8"?><styleSheet ${ns}><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF${fill}"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/></cellXfs></styleSheet>`);
     zip.file("xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${rows(60, 120, "C3")}</sheetData></worksheet>`);
     zip.file("xl/worksheets/sheet2.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>${rows(10, 100)}</sheetData></worksheet>`);
     zip.file("xl/worksheets/sheet3.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${rows(2, 2)}</sheetData></worksheet>`);
+    zip.file("xl/worksheets/sheet4.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><cols><col min="2" max="2" width="0" hidden="1" customWidth="1"/></cols><sheetData>${rows(10, 300, undefined, (r) => r >= 6 && r <= 290)}</sheetData></worksheet>`);
     writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
   }
+  /**
+   * `expression` evaluated in each of the agents' editors' frames, through the debugging port from the relay (as cdp.ts
+   * does), with the frame's title (the document's name, as the editor sets it).
+   */
+  const inEditors = async <T,>(expression: string): Promise<{ title: string; value: T }[]> => {
+    const probe = `
+      const dns = require("dns");
+      (async () => {
+        const a = (await dns.promises.lookup(process.argv[1])).address;
+        const list = await (await fetch("http://" + a + ":9222/json/list")).json();
+        const seat = list.find((p) => p.type === "page" && /\\/seat\\//.test(p.url));
+        const ws = new WebSocket("ws://" + a + ":9222" + seat.webSocketDebuggerUrl.replace(/^ws:\\/\\/[^/]+/, ""));
+        const contexts = [], waiting = new Map();
+        let n = 0;
+        ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.method === "Runtime.executionContextCreated") contexts.push(m.params.context); const w = waiting.get(m.id); if (w) { waiting.delete(m.id); w(m.result); } };
+        await new Promise((ok) => (ws.onopen = ok));
+        const send = (method, params) => new Promise((ok) => { n++; waiting.set(n, ok); ws.send(JSON.stringify({ id: n, method, params: params || {} })); });
+        const tree = await send("Page.getFrameTree");
+        const frames = [];
+        (function walk(node) { frames.push(node.frame); for (const c of node.childFrames || []) walk(c); })(tree.frameTree);
+        await send("Runtime.enable");
+        const out = [];
+        for (const f of frames.filter((f) => /frameEditorId=/.test(f.url))) {
+          const c = contexts.find((c) => c.auxData && c.auxData.frameId === f.id && c.auxData.isDefault);
+          if (c) out.push((await send("Runtime.evaluate", { expression: "({ title: document.title, value: " + process.argv[2] + " })", contextId: c.id, returnByValue: true })).result.value);
+        }
+        console.log(JSON.stringify(out));
+        process.exit(0);
+      })().catch((e) => { console.log(JSON.stringify([{ title: "", value: null, failed: e.message }])); process.exit(0); });`;
+    const r = await promisify(execFile)("docker", ["exec", `${PREFIX}-relay`, "node", "--no-warnings", "-e", probe, `${PREFIX}-agent`, expression], { encoding: "utf8", timeout: 60_000, maxBuffer: 1 << 22 });
+    return JSON.parse(r.stdout.trim());
+  };
+  /** Each of the agents' editors' canvases: a checksum and the count of drawn (not transparent) pixels of each. */
+  const editorCanvases = () =>
+    inEditors<Record<string, [number, number]>>(`(function () {
+      var out = {};
+      Array.prototype.forEach.call(document.querySelectorAll("canvas"), function (c, i) {
+        if (!c.width || !c.height) return;
+        var d;
+        try { d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; } catch (e) { return; }
+        var sum = 0, drawn = 0;
+        for (var k = 0; k < d.length; k += 4) { sum = (sum * 31 + d[k] + d[k + 1] * 3 + d[k + 2] * 7 + d[k + 3] * 11) % 1000000007; if (d[k + 3]) drawn++; }
+        out[(c.id || "canvas") + "#" + i] = [sum, drawn];
+      });
+      return out;
+    })()`);
   const red = (p: number[]) => p[0] > 200 && p[1] < 90 && p[2] < 90;
   const blue = (p: number[]) => p[2] > 200 && p[0] < 90 && p[1] < 90;
 
   test("16. office_screenshot of a sheet: a range at 100 %, a larger one at 75 %, one too large refused with the part that fits, the used range cut to what fits, a range beyond frozen panes and one across them, a hidden sheet refused; the filled cell where it is", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Pictured", "cell");
     await workbookFile(doc, "FF0000");
-    const small = await shoot("Grid!A1:E5", { id: doc, sheet: "grid", range: "A1:E5" });
+    const small = await shoot("16. Grid!A1:E5", { id: doc, sheet: "grid", range: "A1:E5" });
     assert.match(small.text, /^Sheet "Grid" A1:E5 at 100 %, as your editor shows it now\. Its cells:\n\nA1: 100\nB1: 101\n/);
     assert.equal(small.out.details.zoom, 100);
     // Headers of 26 x 19 px, cells of 64 x 19: C3's middle, and B2's.
@@ -850,25 +899,34 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`16. C3 ${c3}, B2 ${b2}`);
     assert.ok(red(c3), `C3 is red: ${c3}`);
     assert.ok(!red(b2), `B2 is not: ${b2}`);
-    const wider = await shoot("Grid!A1:AD55", { id: doc, range: "A1:AD55" });
+    const wider = await shoot("16. Grid!A1:AD55", { id: doc, range: "A1:AD55" });
     assert.equal(wider.out.details.zoom, 75);
     assert.equal(wider.out.details.width, 1024, "made smaller to 1,024 px");
-    const native = await shoot("Grid!A1:AD55 large", { id: doc, range: "A1:AD55", large: true });
+    const native = await shoot("16. Grid!A1:AD55 large", { id: doc, range: "A1:AD55", large: true });
     assert.ok(native.out.details.width > 1024 && native.out.details.width <= 1568);
     await assert.rejects(tools.office_screenshot.execute("p-big", { id: doc, range: "A1:AH60" }), (e: Error) => /^error:range_too_large the range A1:AH60 is larger than the editor shows at 75 %: the largest range from A1 that fits is A1:AD55; take it in parts/.test(e.message));
-    const used = await shoot("Grid used range", { id: doc });
+    const used = await shoot("16. Grid used range", { id: doc });
     assert.match(used.text, /^Sheet "Grid" A1:AD55 at 75 %, as your editor shows it now\. The sheet's used range is A1:BH120: this is the part that fits from A1; take the rest with range\./);
-    const far = await shoot("Grid!AA90:AF100", { id: doc, range: "AA90:AF100" });
+    const far = await shoot("16. Grid!AA90:AF100", { id: doc, range: "AA90:AF100" });
     assert.match(far.text, /\nAA90: 9026\n/);
     assert.equal(far.out.details.zoom, 100);
-    const beyond = await shoot("Frozen!A40:E60", { id: doc, sheet: "Frozen", range: "A40:E60" });
+    const beyond = await shoot("16. Frozen!A40:E60", { id: doc, sheet: "Frozen", range: "A40:E60" });
     assert.match(beyond.text, /^Sheet "Frozen" A40:E60 at 100 %.*\n\nA40: 4000\n/s);
     assert.equal(beyond.out.details.height, 19 + 21 * 19, "the 21 rows asked for, not the frozen ones above them");
-    const across = await shoot("Frozen!A3:E12", { id: doc, sheet: "Frozen", range: "A3:E12" });
+    const across = await shoot("16. Frozen!A3:E12", { id: doc, sheet: "Frozen", range: "A3:E12" });
     assert.equal(across.out.details.height, 19 + 10 * 19);
     await assert.rejects(tools.office_screenshot.execute("p-hidden", { id: doc, sheet: "Secret" }), (e: Error) => /^error:sheet_hidden "Secret" is hidden/.test(e.message));
+    // Hidden rows and a hidden column: left out of the picture and of its cells; a range spans 200 rows at most.
+    const filtered = await shoot("16. Filtered!A280:J300", { id: doc, sheet: "Filtered", range: "A280:J300" });
+    assert.match(filtered.text, /^Sheet "Filtered" A280:J300 at 100 %, as your editor shows it now\. Its hidden rows and columns are not in the picture, and their cells are not listed\. Its cells:\n\nA291: 29100\nC291: 29102\n/);
+    assert.equal(filtered.text.split("\n").filter((l) => /^[A-J]\d+: /.test(l)).length, 10 * 9, "rows 291-300 without column B");
+    assert.deepEqual([filtered.out.details.width, filtered.out.details.height], [26 + 9 * 64, 19 + 10 * 19], "the rows and columns shown, and nothing of the hidden ones");
+    const first = await shoot("16. Filtered used range", { id: doc, sheet: "Filtered" });
+    assert.match(first.text, /^Sheet "Filtered" A1:J200 at 75 %, .*The sheet's used range is A1:J300: this is the part that fits from A1/);
+    assert.equal(first.text.split("\n").filter((l) => /^[A-J]\d+: /.test(l)).length, 5 * 9);
+    await assert.rejects(tools.office_screenshot.execute("p-filtered", { id: doc, sheet: "Filtered", range: "A1:J300" }), (e: Error) => /^error:range_too_large the range A1:J300 is larger than the editor shows at 75 % \(a picture takes 100 columns and 200 rows at most, hidden ones counted\)/.test(e.message));
     // With the editor open, a picture takes about this long.
-    const timed = await shoot("Grid!A1:H20 timed", { id: doc, range: "A1:H20" });
+    const timed = await shoot("16. Grid!A1:H20 timed", { id: doc, range: "A1:H20" });
     console.log(`16. a sheet range with the editor open: ${timed.took} ms`);
   });
 
@@ -876,9 +934,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     const doc = await agentDoc("Long pictured", "word");
     const paragraphs = Array.from({ length: 1200 }, (_, n) => `Paragraph ${n + 1}: the quick brown fox jumps over the lazy dog, and then it runs on for a while so that the line wraps at least once.`);
     await tools.office_edit.execute("w-fill", { id: doc, ops: [{ quote: "New document", replacement: "Top line" }, { after: "Top line", paragraphs }] });
-    const first = await shoot("page 1", { id: doc });
+    const first = await shoot("17. page 1", { id: doc });
     const pages = first.out.details.pages as number;
-    console.log(`16. pages: ${pages}`);
+    console.log(`17. pages: ${pages}`);
     assert.ok(pages >= 30, `${pages} pages`);
     assert.match(first.text, new RegExp(`^Page 1 of ${pages} of "Long pictured" \\(id ${doc}\\), as your editor shows it now\\. Its text:\\n\\n\\[1\\] Top line\\n\\[2\\] Paragraph 1:`));
     const ratio = first.out.details.height / first.out.details.width;
@@ -886,28 +944,43 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.equal(first.out.details.height, 1024);
     const [corner, middle] = await pixels(first.image, [[3, 3], [Math.round(first.out.details.width / 2), 3]]);
     assert.ok(corner.every((v) => v > 240) && middle.every((v) => v > 240), `the page's white top edge: ${corner} ${middle}`);
-    const quoted = await shoot("quote", { id: doc, quote: "Paragraph 600:" });
+    // `large`: as large as the editor draws the page, which is less than 1,568 px in its 1,400 px high editor.
+    const big = await shoot("17. page 1 large", { id: doc, large: true });
+    console.log(`17. a Word page with large: ${big.out.details.width} x ${big.out.details.height}`);
+    assert.ok(big.out.details.height > 1024 && big.out.details.height < 1400, `${big.out.details.height}`);
+    const quoted = await shoot("17. quote", { id: doc, quote: "Paragraph 600:" });
     assert.match(quoted.text, /\nParagraph 600:|\] Paragraph 600:/);
     const quotedPage = quoted.out.details.page as number;
     assert.ok(quotedPage > 10 && quotedPage < pages, `${quotedPage}`);
     await assert.rejects(tools.office_screenshot.execute("p-amb", { id: doc, quote: "lazy dog" }), (e: Error) => /^error:quote_ambiguous .* 1200 times: give nth/.test(e.message));
-    const nth = await shoot("nth", { id: doc, quote: "lazy dog", nth: 600 });
+    const nth = await shoot("17. nth", { id: doc, quote: "lazy dog", nth: 600 });
     assert.equal(nth.out.details.page, quotedPage);
     // An edit at the top that adds pages, and at once a picture of the last page.
     const long = "A much longer top line. ".repeat(400);
     await tools.office_edit.execute("w-top", { id: doc, ops: [{ quote: "Top line", replacement: long }] });
-    const last = await shoot("the last page after an edit at the top", { id: doc, page: pages + 1 }).catch(async (e: Error) => {
-      console.log(`16. page ${pages + 1}: ${e.message}`);
+    const last = await shoot("17. the last page after an edit at the top", { id: doc, page: pages + 1 }).catch(async (e: Error) => {
+      console.log(`17. page ${pages + 1}: ${e.message}`);
       throw e;
     });
     const settled = last.out.details.pages as number;
     assert.ok(settled > pages, `the edit added a page (${pages} -> ${settled})`);
     assert.ok(Math.abs(last.out.details.height / last.out.details.width - 297 / 210) < 0.02, "whole");
     await assert.rejects(tools.office_screenshot.execute("p-past", { id: doc, page: settled + 1 }), (e: Error) => new RegExp(`^error:no_page the document has ${settled} pages`).test(e.message));
-    const again = await shoot("the last page", { id: doc, page: settled });
+    const again = await shoot("17. the last page", { id: doc, page: settled });
     assert.equal(again.out.details.pages, settled, "the count it said was the settled one");
     assert.match(again.text, /Paragraph 1200:/, "the last page holds the last paragraph");
-    console.log(`16. a Word page with the editor open: ${again.took} ms`);
+    console.log(`17. a Word page with the editor open: ${again.took} ms`);
+    // A page inside a table over many pages gives the table's rows on it, not the whole table.
+    const table = await agentDoc("Long table", "word");
+    const rows = Array.from({ length: 400 }, (_, n) => [`Row ${n + 1}`, `the second cell of row ${n + 1}`, `the third cell of row ${n + 1}`]);
+    await tools.office_edit.execute("w-table", { id: table, ops: [{ quote: "New document", replacement: "Heading" }, { after: "Heading", table: rows }, { paragraphs: ["After the table"] }] });
+    const inTable = await shoot("17. page 3 of a long table", { id: table, page: 3 });
+    const m = /^\[2\] table, rows (\d+)-(\d+) of 400\n\| Row (\d+) \|/m.exec(inTable.text);
+    assert.ok(m, inTable.text.slice(0, 400));
+    console.log(`17. page 3 of ${inTable.out.details.pages}: rows ${m[1]}-${m[2]} of the table`);
+    assert.ok(Number(m[1]) > 1 && Number(m[2]) < 400 && Number(m[2]) - Number(m[1]) < 100, "the rows of the page, and the one the next page starts in");
+    assert.equal(m[3], m[1]);
+    assert.doesNotMatch(inTable.text, /Heading|After the table/);
   });
 
   test("18. two homes' pictures at once each show their own document; three editors' memory", { timeout: 600_000 }, async () => {
@@ -925,14 +998,14 @@ async function run(PITHAGORAS: string): Promise<void> {
     await tools.office_read.execute("r-mine", { id: mine, sheet: "Grid" });
     await theirs.office_read.execute("r-yours", { id: yours, sheet: "Grid" });
     for (let round = 0; round < 3; round++) {
-      const [a, b] = await Promise.all([shoot(`mine ${round}`, { id: mine, range: "A1:E5" }), shoot(`theirs ${round}`, { id: yours, range: "A1:E5" }, theirs)]);
+      const [a, b] = await Promise.all([shoot(`18. mine ${round}`, { id: mine, range: "A1:E5" }), shoot(`18. theirs ${round}`, { id: yours, range: "A1:E5" }, theirs)]);
       const [pa] = await pixels(a.image, [[26 + 2 * 64 + 32, 19 + 2 * 19 + 9]]);
       const [pb] = await pixels(b.image, [[26 + 2 * 64 + 32, 19 + 2 * 19 + 9]]);
       assert.ok(red(pa) && blue(pb), `round ${round}: mine ${pa}, theirs ${pb}`);
     }
     // A third editor, a Word document's, and what the three take.
     const word = await agentDoc("Third", "word");
-    await shoot("third", { id: word });
+    await shoot("18. third", { id: word });
     assert.equal(seat.seats().length, 3);
     await measure("Document Server + agents' browser, three agent editors at their size (two sheets, one Word page)", true);
   });
@@ -976,6 +1049,69 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`19. from a page in the agents' browser: ${inPage.stdout.trim()}`);
     const seen = JSON.parse(inPage.stdout.trim()) as Record<string, string>;
     for (const [what, how] of Object.entries(seen)) assert.match(how, what.endsWith(" ws") ? /^(refused|no answer)$/ : /^failed/, what);
+  });
+
+  /** Which canvases of the agent's editor of `title` differ between two looks. */
+  const changed = (a: Awaited<ReturnType<typeof editorCanvases>>, b: Awaited<ReturnType<typeof editorCanvases>>, title: string) => {
+    const x = a.find((e) => e.title === title)?.value ?? {};
+    const y = b.find((e) => e.title === title)?.value ?? {};
+    return Object.keys(y).filter((k) => JSON.stringify(x[k]) !== JSON.stringify(y[k]));
+  };
+  /** The largest difference of any colour channel between two pictures of the same size, at points 10 px apart. */
+  const difference = async (a: string, b: string, width: number, height: number) => {
+    const points: [number, number][] = [];
+    for (let y = 2; y < height; y += 10) for (let x = 2; x < width; x += 10) points.push([x, y]);
+    const [pa, pb] = [await pixels(a, points), await pixels(b, points)];
+    return Math.max(...pa.map((p, i) => Math.max(...p.map((v, c) => Math.abs(v - pb[i][c])))));
+  };
+
+  test("20. a person's selection, the cell they type in and their cursor, in the same sheet and page as the agent's editor, are not in its picture; the memory with a person's editor of each", { timeout: 600_000 }, async () => {
+    // A sheet: the picture before the person comes, while they have a range selected, and while they type in a cell.
+    const sheet = await agentDoc("Watched sheet", "cell");
+    await workbookFile(sheet, "FF0000");
+    const params = { id: sheet, sheet: "Grid", range: "A1:H10" };
+    const before = await shoot("20. the sheet alone", params);
+    const looks = [await editorCanvases()];
+    const title = looks[0].map((e) => e.title).find((t) => /Watched sheet/.test(t)) ?? "";
+    console.log(`20. the agent's editors: ${JSON.stringify(looks[0].map((e) => e.title))}; the canvases of "${title}": ${JSON.stringify(looks[0].find((e) => e.title === title)?.value)}`);
+    assert.ok(title, "the agent's editor of the sheet is found by its title");
+    const person = await personOpens(sheet);
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("E3:G6")`);
+    await delay(3000);
+    looks.push(await editorCanvases());
+    const selected = await shoot("20. the person has E3:G6 selected", params);
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("F8")`);
+    await person.page.keyboard.type("typing in F8", { delay: 30 });
+    await delay(3000);
+    looks.push(await editorCanvases());
+    const typing = await shoot("20. the person types in F8", params);
+    console.log(`20. the agent's editor's canvases that changed as the person came: ${JSON.stringify(changed(looks[0], looks[1], title))}, as they selected and typed: ${JSON.stringify(changed(looks[1], looks[2], title))}`);
+    // The agent's editor draws the person's marks, on the canvas above the cells: not one the picture is drawn from.
+    const marked = changed(looks[0], looks[2], title);
+    assert.ok(marked.some((k) => /^ws-canvas-overlay#/.test(k)), `the person's marks are drawn in the agent's editor: ${JSON.stringify(marked)}`);
+    assert.ok(!marked.some((k) => /^ws-canvas(-graphic)?#/.test(k)), `not on the cells' canvases: ${JSON.stringify(marked)}`);
+    for (const [what, shot] of [["selected", selected], ["typing", typing]] as const) {
+      assert.deepEqual([shot.out.details.width, shot.out.details.height], [before.out.details.width, before.out.details.height]);
+      const most = await difference(before.image, shot.image, before.out.details.width, before.out.details.height);
+      console.log(`20. ${what}: the same picture ${shot.image === before.image}, the largest difference ${most}`);
+      assert.ok(most <= 24, `${what}: the picture shows the person (a difference of ${most})`);
+    }
+    // A Word page: before the person comes, and with their cursor in its text.
+    const word = await agentDoc("Watched page", "word");
+    await tools.office_edit.execute("w-watched", { id: word, ops: [{ quote: "New document", replacement: "A first line" }, { after: "A first line", paragraphs: Array.from({ length: 12 }, (_, n) => `Line ${n + 2} of the page the person reads along.`) }] });
+    const page = await shoot("20. the page alone", { id: word });
+    const writer = await personOpens(word);
+    await writer.page.mouse.click(640, 420);
+    await writer.page.keyboard.press("End");
+    await delay(3000);
+    const cursor = await shoot("20. the person's cursor in the page", { id: word });
+    const most = await difference(page.image, cursor.image, page.out.details.width, page.out.details.height);
+    console.log(`20. the Word page: the same picture ${cursor.image === page.image}, the largest difference ${most}`);
+    assert.ok(most <= 24, `the page shows the person's cursor (a difference of ${most})`);
+    await measure("Document Server + agents' browser, three agent editors at their size, two of them with a person's editor of the same document", true);
+    await person.page.keyboard.press("Escape");
+    await person.page.context().close();
+    await writer.page.context().close();
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

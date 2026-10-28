@@ -1670,13 +1670,15 @@ test("the agents' seats, wired: the agents' editors reach the Document Server th
 
 test("the agents' seats, wired: a picture is taken by cdp's client in Office's relay, of the agent's own editor in the agents' browser", async () => {
   const dock = fakeDocker();
-  const json = JSON.stringify({ data: "/9j/", width: 4, height: 3, pages: 1 });
+  // The start of a JPEG of 4 x 3: its SOI and its frame header, which the portal reads the picture's size from.
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x03, 0x00, 0x04, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9]).toString("base64");
+  const json = JSON.stringify({ data: jpeg, width: 4, height: 3, pages: 1 });
   dock.state.answer = (cmd) => (cmd[0] === "node" ? { output: `CDP ${json.length} ${createHash("sha256").update(json).digest("hex")} ${json}\n`, exitCode: 0, timedOut: false } : undefined);
   const w = await withSeats(dock);
   try {
     const doc = await store.createDoc({ title: "Look", type: "word", folder: homeIn(w.b.root) }, w.b.root);
     const out = await seat.shot("/homes/a", doc.docId, "edit", { kind: "view.locate", args: { kind: "word", page: 1 } });
-    assert.deepEqual(out.image, { data: "/9j/", width: 4, height: 3, pages: 1 });
+    assert.deepEqual(out.image, { data: jpeg, width: 4, height: 3, pages: 1 });
     const call = dock.calls.find((c) => c.startsWith("exec pithagoras-office-ds-relay node"));
     assert.ok(call, dock.calls.join(", "));
     assert.ok(call.startsWith(`exec pithagoras-office-ds-relay node --no-warnings -e ${CDP_SRC}`));

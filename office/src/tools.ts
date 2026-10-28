@@ -64,8 +64,10 @@ export const LABELS: Record<string, string> = {
  * guard's rules after a suspected prompt injection (`acts`): office_create makes a blank document in the agent's own
  * folder (its home, or its project's), where it writes anyway, and office_edit changes text in a document of the agent's own scope through its editor, which runs
  * nothing, carries nothing out and lands nowhere a later run reads as instructions. office_screenshot's picture is the
- * document too: its text part carries the text the picture shows, which the guard reads (text inside the document's
- * own pictures is not).
+ * document too: its text part carries a Word page's body text and a sheet range's cells (20,000 characters at most),
+ * which the guard reads. Only in the picture, and not read by the guard: a page's header and footer, text boxes,
+ * shapes and charts, text inside the document's own pictures, and a long text that runs into the range from a cell
+ * outside it.
  */
 export const GUARDS: Record<string, { outside: boolean; acts: string[] }> = {
   office_list: { outside: true, acts: [] },
@@ -695,7 +697,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     label: LABELS.office_screenshot,
     guard: GUARDS.office_screenshot,
     description:
-      "A picture (JPEG) of a document of your library as your editor in it shows it now, with the text it shows: a Word page, or a spreadsheet range with its column letters and row numbers. For how it looks (layout, formatting, tables); office_read is cheaper for text. Word: `page` (default 1) or the page holding `quote` (`nth` picks a repeat). Spreadsheet: `sheet` (default the first visible) and `range` (default the used range from A1, as much as fits), at 100 % zoom, else 75 %; larger is refused with the part that fits. 1,024 px, `large` up to 1,568. A picture costs about 1,000-1,600 input tokens on every later turn.",
+      "A picture (JPEG) of a document of your library as your editor shows it now, with the text it shows: a Word page, or a spreadsheet range with its column letters and row numbers. For how it looks (layout, formatting, tables); office_read is cheaper for text. Word: `page` (default 1) or the page holding `quote` (`nth` picks a repeat). Spreadsheet: `sheet` (default the first visible) and `range` (default the used range from A1, as much as fits), at 100 %, else 75 %; larger is refused with the part that fits. 1,024 px; `large` as large as the editor draws it, at most 1,568. A picture costs about 1,000-1,600 input tokens on every later turn.",
     promptSnippet: "See a Word page or a spreadsheet range as your editor shows it",
     parameters: {
       type: "object",

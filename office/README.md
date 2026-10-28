@@ -21,9 +21,10 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
 - Recommended: 1 GB of RAM.
-  About 700 MiB were measured while one document is edited, and 770-860 MiB with three documents open in the
-  agents' editors (the most there are at once: 540-620 MiB of it the agents' browser). The settings page shows the memory all of Office uses
-  while it runs: the Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
+  About 700 MiB were measured while one document is edited, and 770 MiB to 1.05 GB with three documents open in
+  the agents' editors (the most there are at once: 540-975 MiB of it the agents' browser), 800-810 MiB with people's
+  editors of two of them open as well. The settings page shows the memory all of Office uses while it runs: the
+  Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
   10 minutes after its last editor closed, and is capped at 3 GB. The figure is what `docker stats` shows: the
   containers' memory less the file cache the kernel can drop again.
 - Disk for the images (`onlyoffice/documentserver`, several GB, Node's `node:22.23.4-alpine3.23`, about 50 MB, for the
@@ -75,8 +76,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
   as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`,
-  `office_read`, `office_edit`, `office_comments` and `office_screenshot`. An agent sees the documents in its own folder (its home, or its project's) and
-  the ones it was granted by a mention; another agent's, and the files in another agent's or project's folder, are not
+  `office_read`, `office_edit`, `office_comments` and `office_screenshot`. An agent sees the documents in its own
+  folder (its home, or its project's) and the ones it was granted by a mention; another agent's, and the files in
+  another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
   goes into its folder and belongs to it, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
@@ -115,15 +117,23 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still; or
   a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
   refused beyond that with the largest range from its first cell that fits (about 23 columns by 41 rows of default
-  cells at 100 %, 30 by 55 at 75 %). By default a sheet's used range from A1, as much as fits. 1,024 px on the longer
-  side (`large`: up to 1,568, never larger than the editor draws it). The picture is drawn from the editor's own page
-  or grid, so it shows that document alone: no other editor, no selection, no cursors or names of the people in it.
-  The text the picture shows comes with it, as office_read gives it, so the guard reads it (text inside pictures in
-  the document is not read). A model that cannot take pictures is refused (`error:no_images`) before anything is
-  done. A picture costs the model about 1,000 to 1,600 input tokens on every later turn of the chat. Taking one moves
-  the agent's own view (its page, zoom, sheet and selection), which you may see as its cursor moving; pictures are
-  taken one at a time in the agents' browser. The page is laid out as the editor lays it out: with its fonts (Carlito
-  for Calibri, for instance), so a page break may fall elsewhere than in desktop Word.
+  cells at 100 %, 30 by 55 at 75 %); hidden rows and columns are left out. By default a sheet's used range from A1, as
+  much as fits. 1,024 px on the longer side (`large`: as large as the editor draws it, up to 1,568 for a sheet range,
+  about 1,170 for a Word page). The picture is drawn from the canvases the editor draws the page or the cells on (a
+  sheet's with its charts and pictures), not from the one above them where it draws selections, cursors and the names
+  of the people in the document: so it shows that document alone, with no other editor in it, and no person's
+  selection, cursor or name (measured with a person selecting and typing in the same sheet, and with their cursor on
+  the same page). The agent's own active cell shows only as its highlighted column letter and row number. The text
+  the picture shows comes with it, as office_read gives it, so the guard reads it: a Word page's body text (of a table
+  over many pages, the rows on the page), or the cells of the range that are shown; 20,000 characters at most. Only in
+  the picture, so the guard does not read them: a page's header and footer, text boxes, shapes and charts, text inside
+  the document's own pictures, and a long text that runs into the range from a cell outside it. A model that cannot
+  take pictures is refused (`error:no_images`) before anything is done. A picture costs the model about 1,000 to
+  1,600 input tokens on every later turn of the chat. Taking one moves the agent's own view (its page, zoom, sheet and
+  selection), which you may see as its cursor moving; pictures are taken one at a time in the agents' browser, and a
+  sheet a person hid, moved or renamed meanwhile is not shown (`sheet_changed`). The page is laid out as the editor
+  lays it out: with its fonts (Carlito for Calibri, for instance), so a page break may fall elsewhere than in desktop
+  Word.
   A save that would overwrite a newer revision (the file changed on disk while it was open: a script, a git pull) is
   not lost and does not overwrite it: it is kept beside the document as "<title> (conflict <date time>)", and the audit
   log says so; the agent is told, and its editor of that document closes. A save the Document Server could not hand
@@ -212,8 +222,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   out of reach), and the extension's listener through the relay's way back; nothing else, never the portal, its pages
   or anyone's session (a portal in a container of its own is on the Document Server's network, not on this one). It
   runs as a user that is not root, with none of the kernel's capabilities,
-  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most. Chromium's own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses:
-  the container is the boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
+  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most. Chromium's
+  own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses: the container is the
+  boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
   extension's listener through the relay, under a secret that is new at every start of the server half and is only in
   its command line (`/seat/<secret>/`), and that page opens an editor for each document an agent works in, with a
   config the server half signs. Those configs are the only ones with a plugin: Office's own (people's editors keep
@@ -340,9 +351,9 @@ agents' editor.
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
-- `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %; a
-  larger range is taken in parts. A Word page beyond the count the editor has laid out after 5 s is refused with that
-  count.
+- `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
+  100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
+  editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most.
 
 ## Licences
 

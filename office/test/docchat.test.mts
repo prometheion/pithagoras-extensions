@@ -13,6 +13,7 @@ import * as docchat from "../src/docchat";
 import { createDoc, getDoc, rewriteZipFor } from "./docchat-helpers.mts";
 import { fakePlaces } from "./homes.mts";
 import { migrateLibrary } from "../src/store";
+import type { ChatAnswer, StartChatOptions } from "../src/extension-api-339.temporary";
 
 const FOLDERS = [
   { path: "/f/aegis", name: "Aegis", kind: "agent" as const },
@@ -23,13 +24,16 @@ const FOLDERS = [
   { path: "/f/notes", name: "Notes", kind: "chat" as const },
 ];
 
-type Chat = { id: string; title?: string; kind?: string; parent?: string; status?: string; folder: string; listed?: boolean; mode?: string };
+type Chat = { id: string; title?: string; kind?: string; status?: string; folder: string; listed?: boolean; unattended?: true };
 type Deferred = { chatId: string; message: string; resolve: (r: docchat.ChildRun) => void };
 
 let root = "";
 let chats: Chat[] = [];
 let prompts: Deferred[] = [];
-let aborted: string[] = [];
+let started: StartChatOptions[] = [];
+/** What chats.lastAnswer says of a chat, by id: nothing for one that never ran. */
+let answers: Record<string, ChatAnswer> = {};
+let startFails: string | null = null;
 let removed: string[] = [];
 let posts: { home: string; docId: string; mode: string; job: { kind: string; args: any }; post?: boolean }[] = [];
 let audits: { subject: string; reason: string; chatId?: string }[] = [];
@@ -46,20 +50,18 @@ function configure(): void {
     folders: () => FOLDERS,
     chats: {
       get: (id) => chats.find((c) => c.id === id),
-      list: () => chats.filter((c) => c.listed !== false),
-      folder: (id) => {
-        const c = chats.find((x) => x.id === id);
-        if (!c) throw new Error("no chat");
-        return c.folder;
-      },
-      create: ({ parent, title, listed, mode }) => {
-        const p = chats.find((c) => c.id === parent)!;
-        const chat = { id: `child-${++created}`, title, parent, folder: p.folder, listed, mode };
+      start: (options) => {
+        if (startFails) throw new Error(startFails);
+        started.push(options);
+        const chat: Chat = { id: `started-${++created}`, title: options.title, folder: options.folder, listed: options.listed, ...(options.unattended ? { unattended: true as const } : {}) };
         chats.push(chat);
         return chat;
       },
       prompt: (chatId, message) => new Promise((resolve) => prompts.push({ chatId, message, resolve })),
-      abort: async (id) => void aborted.push(id),
+      lastAnswer: (id) => {
+        if (!chats.some((c) => c.id === id)) throw new Error(`There is no chat ${id}: it was deleted, or never was`);
+        return answers[id];
+      },
       remove: async (id) => {
         removed.push(id);
         chats = chats.filter((c) => c.id !== id);
@@ -94,7 +96,9 @@ beforeEach(() => {
     { id: "my-main", folder: "/f/my-agent" },
   ];
   prompts = [];
-  aborted = [];
+  started = [];
+  answers = {};
+  startFails = null;
   removed = [];
   posts = [];
   audits = [];
@@ -119,7 +123,8 @@ const ui = (id: string, kind: "comment" | "reply" | "edit" | "editReply" | "reso
 // The folders here are names only: each document is made in a folder of the test's own that stands for its owner's.
 fakePlaces();
 const word = async (owner = "/f/aegis") => (await createDoc({ title: `Doc ${Math.random().toString(36).slice(2, 8)}`, type: "word", folder: owner }, root)).docId;
-const childOf = (parent: string) => chats.filter((c) => c.parent === parent);
+/** The chats Office started in `folder`. */
+const startedIn = (folder: string) => chats.filter((c) => c.id.startsWith("started-") && c.folder === folder);
 /** A spreadsheet's threaded comment id, as the editor names one. */
 const SHEET_GUID = "{CEDAB90E-0000-4000-8000-000000000001}";
 
@@ -146,7 +151,7 @@ test("mentions: +Name and @Name an agent (names with spaces too, any case), +pro
 
 /* ---------------- threads ---------------- */
 
-test("a person's comment that mentions an agent makes one internal chat under the agent's first task chat, prompted with the document, the thread and the person's words; the grant is made; a state event never prompts, a retried report is taken once", async () => {
+test("a person's comment that mentions an agent starts one internal chat in the agent's home, in no list and attended by nobody, prompted with the document, the thread and the person's words; the grant is made; a state event never prompts, a retried report is taken once", async () => {
   const docId = await word();
   docchat.report(docId, "k", [{ type: "comment", guid: "626360df", text: "Bitte übersetzen +Aegis", userId: "portal-user" }]);
   assert.equal(prompts.length, 0, "a state event prompts nobody");
@@ -154,10 +159,10 @@ test("a person's comment that mentions an agent makes one internal chat under th
   docchat.report(docId, "k", [event]);
   docchat.report(docId, "k", [event]);
   await settle();
-  const made = childOf("aegis-main");
-  assert.equal(made.length, 1, "one chat, under the first task chat (not the channel conversation)");
-  assert.equal(made[0].listed, false, "listed nowhere");
-  assert.equal(made[0].title, "Comment: Bitte übersetzen @Aegis");
+  const made = startedIn("/f/aegis");
+  assert.equal(made.length, 1, "one chat, of the agent's home");
+  assert.deepEqual(started, [{ folder: "/f/aegis", title: "Comment: Bitte übersetzen @Aegis", listed: false, unattended: true }], "listed nowhere, attended by nobody");
+  assert.equal(chats.filter((c) => c.title === undefined).length, 5, "the person's own chats are none of its business");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0].message, new RegExp(`office document ${docId} \\(comment thread 626360df\\)`));
   assert.match(prompts[0].message, /Bitte übersetzen @Aegis/);
@@ -170,21 +175,27 @@ test("a person's comment that mentions an agent makes one internal chat under th
   assert.equal(prompts.length, 1);
 });
 
-test("the parent: the chat whose panel the editor is in, else the one the document's other threads use, else the folder's first task chat; never a channel conversation; a folder with none says so", async () => {
+test("an agent or a project with no chat of its own answers: each thread's chat and the editor's chat are started in its home or the project's folder; one that cannot be started says so", async () => {
+  chats = [];
   const docId = await word();
-  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")], "aegis-other");
-  docchat.report(docId, "k", [ui("u2", "comment", "00000002", "+Aegis zwei")]);
+  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+My Agent eins"), ui("u2", "comment", "00000002", "+project:Report zwei")]);
+  docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Hallo")]);
   await settle();
-  assert.deepEqual(chats.filter((c) => c.parent).map((c) => c.parent), ["aegis-other", "aegis-other"]);
-  // A panel of a chat of another folder is no parent for Aegis's thread.
-  const other = await word();
-  docchat.report(other, "k", [ui("u3", "comment", "00000003", "+Aegis drei")], "report-main");
+  assert.deepEqual(
+    started.map((o) => [o.folder, o.title]),
+    [
+      ["/f/my-agent", "Comment: @My Agent eins"],
+      ["/f/report", "Comment: @project:Report zwei"],
+      ["/f/aegis", "Office chat"],
+    ],
+  );
+  assert.ok(started.every((o) => o.listed === false && o.unattended === true));
+  assert.equal(prompts.length, 3, "each is prompted");
+  startFails = "the folder is gone";
+  docchat.report(docId, "k", [ui("u3", "comment", "00000003", "+Aegis drei")]);
   await settle();
-  assert.equal(chats.at(-1)!.parent, "aegis-main");
-  chats = chats.filter((c) => c.folder !== "/f/my-agent");
-  docchat.report(other, "k", [ui("u4", "comment", "00000004", "+My Agent vier")]);
-  await settle();
-  assert.deepEqual(docchat.statesOf(other).find((s) => s.label === "My Agent"), { kind: "thread", label: "My Agent", state: "no_chat", error: "My Agent has no chat to work from: start one with My Agent" });
+  assert.deepEqual(docchat.statesOf(docId).find((x) => x.state === "failed"), { kind: "thread", label: "Aegis", state: "failed", error: "its chat could not be started: the folder is gone" });
+  assert.equal(prompts.length, 3);
 });
 
 test("a reply in the thread goes to the same chat; one that names another agent adds it; an edit that adds a mention adds it; resolve and a reply's edit prompt nobody; a plain reply in a thread with no record does nothing", async () => {
@@ -200,7 +211,7 @@ test("a reply in the thread goes to the same chat; one that names another agent 
   assert.equal(prompts[1].message, "A reply in the thread:\nUnd noch etwas");
   docchat.report(docId, "k", [ui("u3", "reply", "00000001", "Frag auch @project:Report")]);
   await settle();
-  const report = prompts.find((p) => chats.find((c) => c.id === p.chatId)?.parent === "report-main");
+  const report = prompts.find((p) => chats.find((c) => c.id === p.chatId)?.folder === "/f/report");
   assert.ok(report, "Report joins the thread with its own chat");
   assert.match(report!.message, /\+Aegis bitte|@Aegis bitte/);
   assert.match(report!.message, /Frag auch @project:Report/);
@@ -209,7 +220,7 @@ test("a reply in the thread goes to the same chat; one that names another agent 
   docchat.report(docId, "k", [ui("u6", "edit", "00000001", "+Aegis bitte, und +My Agent")]);
   await settle();
   assert.equal(prompts.length, before + 1, "only the edit's new mention prompts");
-  assert.equal(chats.find((c) => c.id === prompts.at(-1)!.chatId)?.parent, "my-main");
+  assert.equal(chats.find((c) => c.id === prompts.at(-1)!.chatId)?.folder, "/f/my-agent");
   docchat.report(docId, "k", [ui("u7", "reply", "0000dead", "eine Antwort ohne Faden")]);
   await settle();
   assert.equal(prompts.length, before + 1);
@@ -302,7 +313,7 @@ test("limits: a third comment chat of one agent waits for a free run; a thread b
   docchat.report(docId, "k", [ui("u4", "comment", "00000004", "+Aegis vier")]);
   await settle();
   assert.deepEqual(docchat.statesOf(docId).find((s) => s.state === "limit"), { kind: "thread", label: "Aegis", state: "limit", error: "Too many comment chats in this document: delete some comments" });
-  assert.equal(chats.filter((c) => c.parent).length, 3);
+  assert.equal(started.length, 3);
 });
 
 test("removal: a deleted comment's chat goes after the grace; seen again within it (an undo), it stays; a moved comment carries its thread", async () => {
@@ -415,69 +426,76 @@ test("the editor's chat ends after the last person left (only agents in its sess
   assert.deepEqual({ ...docchat.sessionsNow() }, {});
 });
 
-test("a dialog or a guard question in one of these chats stops its run at once, which is told and goes on; a second one ends it with an error in the thread", async () => {
+test("after a restart of the half, each run that was going is read back: one that goes on is heard to its end and its answer posted; one that ended meanwhile is posted at once, unless the guard marked its chat; one the portal's restart cut off says it was interrupted", async () => {
+  limits = { ...limits, runs: 4 };
   const docId = await word();
-  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")]);
+  docchat.report(docId, "k", [1, 2, 3, 4].map((n) => ui(`u${n}`, "comment", `0000000${n}`, `+Aegis ${n}`)));
+  docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Hallo")]);
   await settle();
-  const chatId = prompts[0].chatId;
-  docchat.chatEvent(chatId, { type: "extension_ui_request", method: "notify", message: "fyi" });
-  assert.deepEqual(aborted, [], "news is no dialog");
-  docchat.chatEvent(chatId, { type: "extension_ui_request", method: "confirm", title: "Allow the write?" });
-  assert.deepEqual(aborted, [chatId]);
-  prompts[0].resolve({ status: "stopped", answer: "" });
-  await settle();
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[1].message, /waited for a person's answer \(Allow the write\?\)/);
-  docchat.chatEvent(chatId, { type: "extension_ui_request", method: "questions", title: "Which?" });
-  prompts[1].resolve({ status: "stopped", answer: "" });
-  await settle();
-  assert.match(posts[0].job.args.text, /^Aegis could not answer: it waited for a person's answer/);
-  // Another chat's dialog is none of ours.
-  docchat.chatEvent("aegis-main", { type: "extension_ui_request", method: "confirm" });
-  assert.equal(aborted.length, 2);
-});
-
-test("the question tool: taken away from the chat's tools at its start and before each run, and refused at once where it is called", () => {
-  const handlers: Record<string, ((e: any) => any)[]> = {};
-  let active = ["read", "ask_question", "office_read"];
-  const pi = { on: (name: string, fn: (e: any) => any) => (handlers[name] ??= []).push(fn), getActiveTools: () => active, setActiveTools: (names: string[]) => (active = names) };
-  docchat.hush(pi);
-  handlers.session_start[0]({});
-  assert.deepEqual(active, ["read", "office_read"]);
-  active = [...active, "ask_question"];
-  handlers.before_agent_start[0]({});
-  assert.deepEqual(active, ["read", "office_read"]);
-  assert.deepEqual(handlers.tool_call[0]({ toolName: "ask_question" }).block, true);
-  assert.match(handlers.tool_call[0]({ toolName: "ask_question" }).reason, /not available in this chat/);
-  assert.equal(handlers.tool_call[0]({ toolName: "office_read" }), undefined);
-});
-
-test("after a restart of the half, a run that goes on is heard to its end, but its answer is not posted (whether it read a suspected injection is not known); after a restart of the portal the thread says it was interrupted", async () => {
-  const docId = await word();
-  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins"), ui("u2", "comment", "00000002", "+Aegis zwei")]);
-  await settle();
-  const [one, two] = [prompts[0].chatId, prompts[1].chatId];
-  // The records as a run left them: the second's from another process (the portal restarted).
-  const file = path.join(root, "state", "threads", `${docId}.json`);
-  const rec = JSON.parse(fs.readFileSync(file, "utf8"));
-  rec.threads["00000002"].agents["/f/aegis"].pending.pid = -1;
-  fs.writeFileSync(file, JSON.stringify(rec));
+  assert.equal(prompts.length, 5, "each runs");
+  const chatOf = (n: number) => prompts.find((p) => new RegExp(`comment thread 0000000${n}`).test(p.message))!.chatId;
+  const [one, two, three, four] = [1, 2, 3, 4].map(chatOf);
+  const session = prompts.find((p) => /editor's chat/.test(p.message))!.chatId;
+  // The half stops while all five run; meanwhile two of them end, one marked, and the portal cuts one off.
   docchat.__resetDocchatForTests();
+  Object.assign(docchat.runTimings, { listenMs: 30 });
   configure();
-  chats.find((c) => c.id === one)!.status = "running";
+  answers = {
+    [one]: { status: "running", answer: "" },
+    [two]: { status: "stopped", answer: "", error: "The portal stopped while it ran" },
+    [three]: { status: "done", answer: "Drei erledigt." },
+    [four]: { status: "done", answer: "Vier, nach einer Injection.", marked: true },
+    [session]: { status: "running", answer: "" },
+  };
+  try {
+    await docchat.boot();
+    await settle();
+    const replies = () => posts.filter((p) => p.job.kind === "word.reply").map((p) => [p.job.args.guid, p.job.args.text]);
+    assert.deepEqual(replies(), [
+      ["00000002", "Aegis was interrupted before it answered. Reply to try again."],
+      ["00000003", "Drei erledigt."],
+    ]);
+    assert.equal(docchat.statesOf(docId).filter((x) => x.state === "not_posted").length, 1, "the marked answer is not posted");
+    assert.ok(audits.some((a) => /not posted: its chat had read a suspected prompt injection/.test(a.reason)));
+    assert.equal(docchat.statesOf(docId).filter((x) => x.state === "working").length, 2, "the two that go on still work");
+    // One ends with nothing said on its events: read back again a little later.
+    answers[one] = { status: "done", answer: "Eins erledigt." };
+    await delay(150);
+    assert.deepEqual(replies().at(-1), ["00000001", "Eins erledigt."]);
+    // The other's end is heard on its chat's events.
+    answers[session] = { status: "done", answer: "Hallo zurück." };
+    docchat.chatEvent(session, { type: "portal_status", status: "idle" });
+    await settle();
+    assert.deepEqual(posts.filter((p) => p.job.kind === "chat.send").map((p) => p.job.args.text), ["Hallo zurück."]);
+    assert.ok(!docchat.statesOf(docId).some((x) => x.state === "working"));
+    // A new message once it ended runs as any.
+    docchat.report(docId, "k", [ui("u5", "reply", "00000001", "Danke")]);
+    await settle();
+    assert.equal(prompts.at(-1)!.chatId, one);
+  } finally {
+    Object.assign(docchat.runTimings, { listenMs: 5_000 });
+  }
+});
+
+test("an earlier version's chats (children of the person's chats, attended): each is replaced at its next message by one started for nobody to attend, told of the earlier conversation, and removed; one that had no chat to work from starts one", async () => {
+  const docId = await word();
+  chats.push({ id: "old-child", folder: "/f/aegis", listed: false });
+  fs.mkdirSync(path.join(root, "state", "threads"), { recursive: true });
+  const entry = (more: Record<string, unknown>) => ({ parent: "aegis-main", state: "idle", queue: [], ...more });
+  fs.writeFileSync(path.join(root, "state", "threads", `${docId}.json`), JSON.stringify({ version: 1, uiSeen: [], made: ["00000001"], threads: { "00000001": { createdAt: 1, text: "+Aegis eins", inFile: false, agents: { "/f/aegis": entry({ chatId: "old-child" }) } } } }));
+  fs.writeFileSync(path.join(root, "state", "sessions.json"), JSON.stringify({ "key-a": { docId, folder: "/f/aegis", people: [], ...entry({ chatId: null, state: "no_chat", error: "Aegis has no chat to work from: start one with Aegis" }) } }));
   await docchat.boot();
+  assert.deepEqual(docchat.statesOf(docId), [], "no chat to work from is no state any more");
+  docchat.report(docId, "k", [ui("u2", "reply", "00000001", "Noch da?")]);
+  docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Hallo")]);
   await settle();
-  assert.equal(posts.find((p) => p.job.kind === "word.reply")?.job.args.text, "Aegis was interrupted before it answered. Reply to try again.");
-  assert.ok(docchat.isInternal(one) && docchat.isInternal(two), "known as internal after the restart");
-  docchat.chatEvent(one, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Übersetzt." }] } });
-  docchat.chatEvent(one, { type: "agent_end" });
-  await settle();
-  assert.deepEqual(posts.filter((p) => p.job.kind === "word.reply").map((p) => [p.job.args.guid, p.job.args.text]), [
-    ["00000002", "Aegis was interrupted before it answered. Reply to try again."],
-    ["00000001", "Aegis answered while Office restarted; that answer could not be checked, so it is not posted. Reply to try again."],
-  ]);
-  assert.equal(docchat.statesOf(docId).find((x) => x.state === "not_posted")?.label, "Aegis");
-  assert.ok(audits.some((a) => /not posted: its run ended while Office restarted/.test(a.reason)));
+  assert.deepEqual(removed, ["old-child"]);
+  assert.deepEqual(started.map((o) => [o.folder, o.unattended]), [["/f/aegis", true], ["/f/aegis", true]]);
+  assert.ok(prompts.every((p) => p.chatId !== "old-child"));
+  assert.match(prompts[0].message, /earlier conversation/);
+  assert.match(prompts[0].message, /A reply in the thread:\nNoch da\?/);
+  assert.match(prompts[1].message, /Hallo$/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state", "threads", `${docId}.json`), "utf8")).threads["00000001"].agents["/f/aegis"].parent, undefined, "no parent kept");
 });
 
 test("a chat deleted by hand: the thread keeps its record, and its next reply makes a new chat told of the earlier one; a folder removed takes its entries away", async () => {
@@ -633,12 +651,9 @@ test("a run cut off by a portal restart: the messages that came meanwhile are gi
   await settle();
   docchat.report(docId, "k", [ui("u2", "reply", "00000001", "und noch")]);
   await settle();
-  const file = path.join(root, "state", "threads", `${docId}.json`);
-  const rec = JSON.parse(fs.readFileSync(file, "utf8"));
-  rec.threads["00000001"].agents["/f/aegis"].pending.pid = -1;
-  fs.writeFileSync(file, JSON.stringify(rec));
   docchat.__resetDocchatForTests();
   configure();
+  answers[prompts[0].chatId] = { status: "stopped", answer: "", error: "The portal stopped while it ran" };
   await docchat.boot();
   await settle();
   assert.equal(prompts.length, 2);
@@ -872,13 +887,11 @@ test("floods: at most the setting's messages wait for a chat (the next prompt sa
   assert.equal([...Array(20)].filter(() => docchat.rateOk("one-key", "another-doc")).length, 10);
 });
 
-test("these chats are made in no mode, whatever mode their parent is in; a failed run in the editor's chat says so there", async () => {
+test("a failed run in the editor's chat says so there", async () => {
   const docId = await word();
-  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")]);
   docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Hallo")]);
   await settle();
-  assert.deepEqual(chats.filter((c) => c.parent).map((c) => c.mode), ["standard", "standard"]);
-  prompts[1].resolve({ status: "error", answer: "", error: "the model is down" });
+  prompts[0].resolve({ status: "error", answer: "", error: "the model is down" });
   await settle();
   assert.deepEqual(posts.filter((p) => p.job.kind === "chat.send").map((p) => p.job.args.text), ["Aegis could not answer: the model is down. Write again to try again."]);
 });

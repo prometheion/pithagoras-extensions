@@ -23,7 +23,8 @@
  * by a mention is read with the portal's rights instead (byGrantOnly): the mention is the person's word that it may.
  *
  * Comments that mention an agent, and the editor's chat, are no wake of these tools: each gets an internal chat of
- * its own (docchat.ts), which this factory gives the tools as any chat of the folder, without the question tool.
+ * its own (docchat.ts), started in the agent's home or the project's folder, which this factory gives the tools as any
+ * chat of the folder. Nobody attends it, which the portal holds it to (no question tool, no dialog that waits).
  *
  * Injection seams (unit tests must never reach portal()): registerTools(opts) takes the portal bits -- chats.extend
  * registrar, chat->folder lookup, folders list, the file reader, store root, audit record fn, log fn, the seats, the
@@ -109,6 +110,9 @@ export type ToolsDeps = {
   save?: (key: string) => Promise<SaveAfterEdit>;
   /** Whether Office runs (server.ts gives it from container.ts). Default: "running". */
   officeState?: () => Promise<OfficeState> | OfficeState;
+  /** What Office says where the portal is too old for agents to answer comments and the editor's chat (host.ts
+   * `tooOld`), else nothing. Default: nothing. */
+  docchatOff?: () => string | undefined;
   /** The audit sink for mutating ops. Default: a one-line log via the log seam. */
   record?: (entry: OfficeAuditEntry) => void;
   /** Log line. Default: lazy portal().log. */
@@ -137,6 +141,11 @@ function folders(): ToolsFolderInfo[] {
 }
 function seats(): ToolsSeat {
   return cfg.seat ?? seat;
+}
+/** The words office_list and office_comments end with where agents cannot answer comments here. */
+function offNote(): string {
+  const off = cfg.docchatOff?.();
+  return off ? `\n\n${off}` : "";
 }
 /** The file of a document opened as the agent of `chatId` would open it: refused where that agent could not
  * read it, and never through a link. */
@@ -225,8 +234,6 @@ function installForChat(pi: unknown, chat: { id: string }): void {
   }
   const folder = folders().find((f) => f.path === folderPath);
   if (!folder || (folder.kind !== "agent" && folder.kind !== "project")) return; // not an agent/project home: no tools
-  // A chat of a comment thread or of the editor's chat: nobody is there to answer a question.
-  if (docchat.isInternal(chat.id)) docchat.hush(pi);
   installTools(pi, canonical(folder.path), chat.id);
 }
 
@@ -448,13 +455,13 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(() => {
       refreshAll(rootDir());
       const docs = docsForHome(home, rootDir());
-      if (!docs.length) return text("No documents in your office library yet. Make one with office_create.", { action: "list", home, documents: [] });
+      if (!docs.length) return text(`No documents in your office library yet. Make one with office_create.${offNote()}`, { action: "list", home, documents: [] });
       const lines = docs.map((doc) => {
         const users = usersOf(doc.docId);
         const agents = agentsOf(doc.docId);
         return `- ${doc.docId}  "${doc.title}"  ${doc.ext}  owner ${doc.owner === home ? "you" : doc.owner}  ${doc.grants.length} grant${doc.grants.length === 1 ? "" : "s"}  revision ${doc.mtimeMs}${users.length ? `  ${users.length} editing now` : ""}${agents.length ? `  agents in it: ${agents.map((a) => a.name).join(", ")}` : ""}`;
       });
-      return text(`${docs.length} document${docs.length === 1 ? "" : "s"}:\n${lines.join("\n")}`, {
+      return text(`${docs.length} document${docs.length === 1 ? "" : "s"}:\n${lines.join("\n")}${offNote()}`, {
         action: "list",
         home,
         documents: docs.map((doc) => ({ id: doc.docId, title: doc.title, ext: doc.ext, owner: doc.owner, grants: doc.grants.length, sizeBytes: doc.sizeBytes, mtimeMs: doc.mtimeMs, locked: isLocked(doc.docId) || usersOf(doc.docId).length > 0, agents: agentsOf(doc.docId).map((a) => a.name) })),
@@ -665,6 +672,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       let said = `"${doc.title}" (id ${doc.docId}): comment threads ${where}\n\nThreads (${shown.length}):\n${lines.join("\n") || "(none)"}\n\nGrants:\n${grantLines}`;
       // Same cap and marker as office_read: aggregated comment text is unbounded input and must not blow the agent context.
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_comments: it exceeds 200,000 characters]";
+      said += offNote();
       // details lands in the portal tool-event store and the web transcript -- bound it like office_read does
       // (100 at 500 chars each, worst case ~50 KB); commentCount keeps the true total.
       const detailComments = shown.slice(0, 100).map((t) => ({ id: t.guid, author: t.author, text: t.text.slice(0, 500), solved: t.solved, replies: t.replies.length }));

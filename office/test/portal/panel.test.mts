@@ -254,7 +254,7 @@ test("a document an agent just made opens from its card at once, never said to b
   await page.context().close();
 });
 
-test("a new document: the Office tab's asks for none but a title and kind (the server half makes it in the default agent's home, and says so), the panel's names its chat; every row says whose it is", async () => {
+test("a new document: the Office tab's asks for none but a title and kind (the server half makes it in the home New starts chats in, and says so), the panel's names its chat; every row says whose it is", async () => {
   asked.length = 0;
   const page = await chatPage([], "?tab=");
   const tab = page.locator("#tab");
@@ -263,7 +263,7 @@ test("a new document: the Office tab's asks for none but a title and kind (the s
   assert.equal(await tab.getByText("unowned").count(), 0);
   await tab.getByLabel("Title of a new document").fill("Minutes");
   const make = tab.getByRole("button", { name: "New document" });
-  assert.equal(await make.getAttribute("title"), "Made in the default agent's home");
+  assert.equal(await make.getAttribute("title"), "Made in the home of the agent New starts chats with");
   await make.click();
   await page.getByRole("button", { name: "Office panel button" }).click();
   await panel(page).getByLabel("New document title").fill("Notes");

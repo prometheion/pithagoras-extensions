@@ -999,27 +999,32 @@ test("office_edit: comments its edit would have taken away are moved onto the ne
   docchat.__resetDocchatForTests();
 });
 
-test("a chat of a comment thread or of the editor's chat gets no question tool: taken away, and refused where it is called", async () => {
+test("a chat of a comment thread or of the editor's chat gets the tools as any chat of its folder, and nothing taken away: the portal keeps it from asking anybody (it is started unattended)", async () => {
   const s = setup("chat-atlas-home");
   docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
   fs.mkdirSync(path.join(s.root, "state"), { recursive: true });
-  fs.writeFileSync(path.join(s.root, "state", "sessions.json"), JSON.stringify({ k: { docId: "d", folder: "/f/atlas", chatId: "chat-atlas-home", parent: "p", state: "idle", people: [], queue: [] } }));
-  const handlers: Record<string, ((e: any) => any)[]> = {};
-  let active = ["read", "ask_question"];
-  Object.assign(s.pi, { on: (name: string, fn: (e: any) => any) => (handlers[name] ??= []).push(fn), getActiveTools: () => active, setActiveTools: (names: string[]) => (active = names) });
-  (setup as any).__run();
-  handlers.session_start.forEach((h) => h({}));
-  assert.deepEqual(active, ["read"]);
-  assert.equal(handlers.tool_call.map((h) => h({ toolName: "ask_question" })).find(Boolean)?.block, true);
-  docchat.__resetDocchatForTests();
-  // Another chat keeps it.
-  const other = setup("chat-atlas-home");
-  docchat.configureDocchat({ root: other.root, folders: () => [], log: () => {} });
+  fs.writeFileSync(path.join(s.root, "state", "sessions.json"), JSON.stringify({ k: { docId: "d", folder: "/f/atlas", chatId: "chat-atlas-home", state: "idle", people: [], queue: [] } }));
+  assert.ok(docchat.isInternal("chat-atlas-home"));
   const seen: string[] = [];
-  Object.assign(other.pi, { on: (name: string) => seen.push(name) });
+  Object.assign(s.pi, { on: (name: string) => seen.push(name), getActiveTools: () => ["read", "ask_question"], setActiveTools: () => assert.fail("no tool is switched off") });
   (setup as any).__run();
-  assert.ok(!seen.includes("tool_call"));
+  assert.deepEqual(seen, [], "no hook on its runs or its tool calls");
+  assert.deepEqual(s.pi.registered.map((t) => t.name).sort(), ["office_comments", "office_create", "office_edit", "office_list", "office_read"]);
   docchat.__resetDocchatForTests();
+});
+
+test("where the portal is too old for agents to answer comments, office_list and office_comments say so", async () => {
+  const s = setup();
+  const said = "Agents do not answer comments or the editor's chat here: this portal is too old for it (it lacks chats.start).";
+  registerTools({ docchatOff: () => said });
+  const doc = await createDoc({ title: "Notes", type: "word", folder: "/f/atlas" }, s.root);
+  const listed = ((await tool(s, "office_list").execute("l", {})) as ToolResult).content[0].text;
+  assert.ok(listed.endsWith(`\n\n${said}`), listed);
+  const comments = ((await tool(s, "office_comments").execute("c", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.ok(comments.endsWith(`\n\n${said}`), comments);
+  // On a portal that has it, nothing more is said.
+  registerTools({ docchatOff: () => undefined });
+  assert.ok(!((await tool(s, "office_list").execute("l2", {})) as ToolResult).content[0].text.includes("too old"));
 });
 
 test("no wake on a saved comment any more: the factory hears no bell, and a saved mention starts nothing (comments go through docchat)", () => {

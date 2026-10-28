@@ -134,9 +134,26 @@ interface Booted {
 }
 
 /** The folders the fake portal lists (folders.list): an agent's home, a project, or a folder a chat works in. */
-type ListedFolder = { path: string; name: string; kind: "agent" | "project" | "chat"; home?: true };
+type ListedFolder = { path: string; name: string; kind: "agent" | "project" | "chat"; home?: true; newChats?: true };
 
-async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<string, string> = {}, listed: ListedFolder[] = []): Promise<Booted> {
+/** Who the fake portal says is behind each request (http.person): the primary person, unless a test says otherwise. */
+const OWNER = { id: "owner", name: "Owner", role: "primary" } as const;
+let requestPerson: { id: string; name: string; role: string } | undefined = OWNER;
+
+/** Whose a chat is, as the fake portal says (chats.owner): a test's own answer where it gives one (`owners`), else the
+ * agent's home or project the chat's folder is in, by its path as given. */
+function ownerOf(chatFolders: Record<string, string>, listed: ListedFolder[], owners: Record<string, string>, id: string): ListedFolder | undefined {
+  if (owners[id]) return listed.find((l) => l.path === owners[id]);
+  const at = chatFolders[id];
+  if (!at) return undefined;
+  return listed.filter((l) => (l.kind === "agent" || l.kind === "project") && (at === l.path || at.startsWith(l.path + path.sep))).sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+/**
+ * Boots the half against a fake portal. `api`: "339" the extension API of thecodacus/pithagoras#339 (chats.start,
+ * lastAnswer, owner, http.person), "old" one without them. `owners` overrides whose a chat is, by chat id.
+ */
+async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<string, string> = {}, listed: ListedFolder[] = [], api: "339" | "old" = "339", owners: Record<string, string> = {}): Promise<Booted> {
   container.forgetReach();
   container.forgetProbe(); // and what a start or a download of a test before said
   const rootDir = root ?? fs.mkdtempSync(path.join(os.tmpdir(), "office-server-"));
@@ -151,9 +168,12 @@ async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<stri
     log: (l: unknown) => logs.push(String(l)),
     audit: { record: (e: Record<string, unknown>) => audits.push(e) },
     router,
-    http: { json: (_o?: unknown) => (_req: unknown, _res: unknown, next: () => void) => next(), text: () => () => undefined, raw: () => () => undefined, send: () => () => {}, upgrade: () => undefined },
+    http: { json: (_o?: unknown) => (_req: unknown, _res: unknown, next: () => void) => next(), text: () => () => undefined, raw: () => () => undefined, send: () => () => {}, upgrade: () => undefined, ...(api === "339" ? { person: () => requestPerson } : {}) },
     folders: { list: () => listed, allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: (f: string) => ({ name: listed.find((l) => l.path === f)?.name ?? path.basename(f) }), on: () => {} },
-    chats: { extend: (_f: unknown) => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {} },
+    chats: {
+      extend: (_f: unknown) => {}, get: (id: string) => (chatFolders[id] ? { id } : undefined), list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {},
+      ...(api === "339" ? { start: () => { throw new Error("no chats in this test"); }, lastAnswer: () => undefined, owner: (id: string) => ownerOf(chatFolders, listed, owners, id) } : {}),
+    },
     files: { create: filesCreate },
     extensions: { use: () => ddock },
   } as unknown as ServerPortal;
@@ -562,10 +582,13 @@ function workspace(): { ws: string; home: string; a: string; project: string; su
   };
 }
 
-test("/scope: what the agent or project of a chat sees, by the tools' own rule; a chat in a project's subfolder is the project's, one outside every home and project the default agent's; a chat that is gone sees none", async () => {
+test("/scope: what the agent or project of a chat sees, whose the portal says the chat is (chats.owner); a chat in a project's subfolder is the project's, one in a link in an agent's home that leads into a project the agent's, one outside every home and project the default agent's; a chat that is gone sees none", async () => {
   const w = workspace();
   fs.writeFileSync(path.join(w.project, "theirs.docx"), await store.templateDocx());
-  const bt = await boot(undefined, fakeDocker(), w.chats, w.listed);
+  // A link in the default agent's home into the project: the portal holds a chat there to be the agent's (the sandbox
+  // runs it as that agent), wherever the link leads.
+  fs.symlinkSync(w.project, path.join(w.home, "report-link"));
+  const bt = await boot(undefined, fakeDocker(), { ...w.chats, "chat-link": path.join(w.home, "report-link") }, w.listed);
   const theirs = store.listDocs(bt.root).find((d) => d.title === "theirs")!;
   assert.equal(theirs.owner, w.project, "the boot scan found it, and it is the project's");
   const human = await store.createDoc({ title: "The person's", type: "word", folder: w.home }, bt.root);
@@ -576,12 +599,13 @@ test("/scope: what the agent or project of a chat sees, by the tools' own rule; 
   assert.deepEqual(await scope("chat-sub"), [theirs.docId]);
   assert.deepEqual(await scope("chat-home"), [human.docId]);
   assert.deepEqual(await scope("chat-loose"), [human.docId]);
+  assert.deepEqual(await scope("chat-link"), [human.docId], "the agent's, as the portal says");
   assert.deepEqual(await scope("chat-gone"), []);
   await bt.cleanup();
   fs.rmSync(w.ws, { recursive: true, force: true });
 });
 
-test("POST /documents: the Office tab's New document is made in the default agent's home, a chat panel's in the chat's agent home or project folder; no home is a 409", async () => {
+test("POST /documents: the Office tab's New document is made in the home New starts the person's chats in (the default agent's where none is marked), a chat panel's in the chat's agent home or project folder; no home is a 409", async () => {
   const w = workspace();
   const bt = await boot(undefined, fakeDocker(), w.chats, w.listed);
   const make = async (body: Record<string, unknown>) => bt.router.dispatch("POST", "/documents", { type: "word", ...body });
@@ -600,6 +624,13 @@ test("POST /documents: the Office tab's New document is made in the default agen
   assert.equal((await make({ title: "Gone", chat: "chat-gone" })).statusCode, 404);
   assert.ok(bt.audits.some((a) => String(a.reason).includes(path.join(w.home, "Minutes.docx"))), "the audit says where it was made");
   await bt.cleanup();
+  // The person picked Atlas for new chats ("New chats start here"): the Office tab's new documents go to its home.
+  const picked = await boot(undefined, fakeDocker(), w.chats, w.listed.map((f) => (f.path === w.a ? { ...f, newChats: true as const } : f)));
+  const made = await picked.router.dispatch("POST", "/documents", { type: "word", title: "Picked" });
+  assert.equal(made.statusCode, 201);
+  assert.equal((made.body as store.DocMeta).path, path.join(w.a, "Picked.docx"));
+  assert.equal((made.body as store.DocMeta).owner, w.a);
+  await picked.cleanup();
   const none = await boot(undefined, fakeDocker(), {}, w.listed.filter((f) => !f.home));
   const refused = await none.router.dispatch("POST", "/documents", { title: "Nowhere", type: "word" });
   assert.equal(refused.statusCode, 409);
@@ -1611,6 +1642,72 @@ test("the agents' seats, wired: the agents' editors reach the Document Server th
 
 
 /* ---------------- comments and the editor's chat (docchat) ---------------- */
+
+test("who is behind a request (http.person): nobody signed in is refused every route but the Document Server's own traffic; a person who is not the primary one may read, not change documents or talk to the agents", async () => {
+  const w = workspace();
+  const b = await boot(undefined, fakeDocker(), w.chats, w.listed);
+  const doc = await store.createDoc({ title: "Talk", type: "word", folder: w.home }, b.root);
+  try {
+    requestPerson = undefined;
+    for (const [method, url, body] of [["GET", "/state"], ["GET", `/documents/${doc.docId}`], ["GET", "/mentionables"], ["POST", "/documents", { title: "X", type: "word" }], ["POST", "/docchat/events", { v: 1 }]] as [string, string, unknown?][]) {
+      const res = await b.router.dispatch(method, url, body);
+      assert.equal(res.statusCode, 401, `${method} ${url}`);
+      assert.equal((res.body as { code: string }).code, "no_person");
+    }
+    // The editor's own traffic is opened by a config this half signed, not by a login: not asked here.
+    let passed = false;
+    for (const fn of b.router.middleware) fn({ method: "GET", url: "/ds/web-apps/apps/api/documents/api.js", headers: {} }, {} as never, () => void (passed = true));
+    assert.ok(passed);
+    requestPerson = { id: "guest-1", name: "Gwen", role: "guest" };
+    assert.equal((await b.router.dispatch("GET", "/state")).statusCode, 200, "a person may read");
+    for (const [url, body] of [["/documents", { title: "X", type: "word" }], [`/documents/${doc.docId}/rename`, { title: "Y" }], ["/docchat/events", { v: 1 }], ["/settings", { enabled: false }]] as [string, unknown][]) {
+      const res = await b.router.dispatch("POST", url, body);
+      assert.equal(res.statusCode, 403, url);
+      assert.equal((res.body as { code: string }).code, "not_primary");
+    }
+    assert.equal((await b.router.dispatch("DELETE", `/documents/${doc.docId}`)).statusCode, 403);
+    requestPerson = OWNER;
+    assert.equal((await b.router.dispatch("POST", `/documents/${doc.docId}/rename`, { title: "Y" })).statusCode, 200, "the primary person may");
+  } finally {
+    requestPerson = OWNER;
+    await b.cleanup();
+    fs.rmSync(w.ws, { recursive: true, force: true });
+  }
+});
+
+test("on a portal without the extension API of #339, comments and the editor's chat with agents are off and say so (the Office page, the editor, the reports), and the rest of Office works", async () => {
+  const w = workspace();
+  const b = await boot(undefined, fakeDocker(), w.chats, w.listed, "old");
+  try {
+    const off = ((await b.router.dispatch("GET", "/state")).body as { docchatOff?: string }).docchatOff;
+    assert.match(off ?? "", /this portal is too old for it \(it lacks chats\.start, chats\.lastAnswer, chats\.owner, http\.person\)/);
+    assert.ok(b.logs.some((l) => l.includes(off!)), "logged at the start");
+    const doc = await store.createDoc({ title: "Talk", type: "word", folder: w.home }, b.root);
+    const key = makeKey(doc.docId, doc.mtimeMs);
+    live.setSession(doc.docId, key, ["portal-user"]);
+    for (const route of ["/docchat/events", "/docchat/ready"]) {
+      const res = await b.router.dispatch("POST", route, { v: 1, docId: doc.docId, key, events: [], comments: [] });
+      assert.equal(res.statusCode, 501, route);
+      assert.deepEqual(res.body, { error: off, code: "portal_too_old" });
+    }
+    assert.deepEqual((await b.router.dispatch("GET", "/mentionables")).body, { users: [] }, "nobody to mention");
+    assert.deepEqual((await b.router.dispatch("GET", `/editor-state?doc=${doc.docId}&key=${encodeURIComponent(key)}`)).body, { standing: "current", docchat: [], docchatOff: off });
+    // Documents still work: the Office tab's New document, a download; a chat's panel cannot say whose the chat is.
+    assert.equal((await b.router.dispatch("POST", "/documents", { title: "Still", type: "word" })).statusCode, 201);
+    assert.equal((await b.router.dispatch("GET", `/documents/${doc.docId}`)).statusCode, 200);
+    const panel = await b.router.dispatch("POST", "/documents", { title: "Panel", type: "word", chat: "chat-a" });
+    assert.equal(panel.statusCode, 501);
+    assert.equal((panel.body as { code: string }).code, "portal_too_old");
+    live.resetLive();
+  } finally {
+    await b.cleanup();
+    fs.rmSync(w.ws, { recursive: true, force: true });
+  }
+  // With it, nothing is said.
+  const b2 = await boot();
+  assert.equal(((await b2.router.dispatch("GET", "/state")).body as { docchatOff?: string }).docchatOff, undefined);
+  await b2.cleanup();
+});
 
 test("the limits of comments and the editor's chat are settings: GET /state gives them with their defaults, POST /settings takes whole numbers in their bounds and refuses others", async () => {
   const b = await boot();

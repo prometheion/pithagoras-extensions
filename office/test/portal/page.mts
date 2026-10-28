@@ -235,8 +235,7 @@ Object.defineProperty(window, "DocsAPI", {
 });
 
 const doc = new URLSearchParams(location.search).get("doc");
-const panelChat = new URLSearchParams(location.search).get("chat") || undefined;
-createRoot(document.getElementById("root")).render(createElement(OfficeEditor, { docId: doc, onBack: () => {}, chatId: panelChat }));
+createRoot(document.getElementById("root")).render(createElement(OfficeEditor, { docId: doc, onBack: () => {} }));
 `;
 }
 

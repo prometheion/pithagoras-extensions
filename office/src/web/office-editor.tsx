@@ -78,9 +78,11 @@ function loadScript(src: string): Promise<void> {
 }
 
 /** The most urgent of a document's comment and chat states, as the bar's one chip says it, with a count of the busy ones
- * and every one in its title. Nothing to say: null. */
-export function docchatChip(items: DocchatItem[]): { text: string; title: string; tone: "busy" | "problem" } | null {
-  const order: DocchatItem["state"][] = ["failed", "not_posted", "no_chat", "limit", "interrupted", "working", "queued"];
+ * and every one in its title. Nothing to say: null. `off`: what the server half says where the portal is too old for
+ * agents to answer here, which the chip says instead. */
+export function docchatChip(items: DocchatItem[], off?: string): { text: string; title: string; tone: "busy" | "problem" } | null {
+  if (off) return { text: t("Agents do not answer comments or the chat here: the portal is too old"), title: off, tone: "problem" };
+  const order: DocchatItem["state"][] = ["failed", "not_posted", "limit", "interrupted", "working", "queued"];
   const shown = items.filter((i) => order.includes(i.state));
   if (!shown.length) return null;
   const first = [...shown].sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))[0];
@@ -89,7 +91,6 @@ export function docchatChip(items: DocchatItem[]): { text: string; title: string
   const say: Record<string, string> = {
     failed: t("{name} could not answer", { name }),
     not_posted: t("{name} answered; not posted after a suspected prompt injection", { name }),
-    no_chat: t("{name} has no chat to work from: start one with {name}", { name }),
     limit: t("Too many comment chats in this document: delete some comments"),
     interrupted: t("{name} was interrupted before it answered", { name }),
     working: busy > 1 ? t("Agents are answering ({n})", { n: busy }) : first.kind === "chat" ? t("{name} is answering in the chat", { name }) : t("{name} is answering a comment", { name }),
@@ -99,7 +100,7 @@ export function docchatChip(items: DocchatItem[]): { text: string; title: string
   return { text: say[first.state], title, tone: first.state === "working" || first.state === "queued" ? "busy" : "problem" };
 }
 
-export function OfficeEditor({ docId, onBack, onFullPage, place = "page", chatId }: { docId: string; onBack(): void; onFullPage?: () => void; place?: "page" | "panel"; chatId?: string }) {
+export function OfficeEditor({ docId, onBack, onFullPage, place = "page" }: { docId: string; onBack(): void; onFullPage?: () => void; place?: "page" | "panel" }) {
   portal.locale.use();
   /** This editor's own placeholder id: DocsAPI finds its place by id, on the whole page. */
   const [holder] = useState(() => `po-doceditor-${++placeholders}`);
@@ -114,6 +115,8 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page", chatId
   const [behind, setBehind] = useState(false);
   /** How the document's comment and chat conversations with agents stand (GET /editor-state). */
   const [talk, setTalk] = useState<DocchatItem[]>([]);
+  /** What the server half says where the portal is too old for agents to answer here (GET /editor-state). */
+  const [talkOff, setTalkOff] = useState<string | undefined>(undefined);
   const box = useRef<HTMLDivElement>(null);
   const editor = useRef<DestroyableEditor | null>(null);
   /** Loads the document's newest revision into the open editor (set by the effect below, for the badge's button). */
@@ -194,7 +197,6 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page", chatId
         docId,
         key: () => key,
         user: String(((copy.editorConfig as { user?: { id?: unknown } } | undefined)?.user?.id) ?? ""),
-        ...(chatId ? { panelChat: chatId } : {}),
         post: (path, body, keepalive) => api.docchat(path, body, keepalive),
       });
       const made = new window.DocsAPI.DocEditor(ph.id, {
@@ -297,6 +299,7 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page", chatId
             if (!alive || asked !== key) return;
             setBehind(answer.standing === "behind");
             setTalk(Array.isArray(answer.docchat) ? answer.docchat : []);
+            setTalkOff(typeof answer.docchatOff === "string" ? answer.docchatOff : undefined);
           }, () => {
             // the server half restarting, or the network: asked again in a second
           });
@@ -323,10 +326,10 @@ export function OfficeEditor({ docId, onBack, onFullPage, place = "page", chatId
       document.getElementById(holder)?.remove(); // sweep a placeholder DS never replaced; ours to clean, not React's
       editor.current = null;
     };
-  }, [docId, holder, chatId]);
+  }, [docId, holder]);
 
   const users = state?.locks[docId] ?? [];
-  const chip = docchatChip(talk);
+  const chip = docchatChip(talk, talkOff);
 
   return (
     <div className={place === "page" ? "po-page po-editor po-editor-page" : "po-editor po-editor-panel"} data-doc={docId}>

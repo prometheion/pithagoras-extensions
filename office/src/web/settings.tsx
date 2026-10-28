@@ -3,6 +3,7 @@ import { portal, t } from "../portal";
 import { api, sayError, type DocchatLimits } from "./api";
 import { floatingTag, officeHealth, type OfficeHealth } from "../office-ui";
 import { refreshOfficeState, useOfficeState } from "./state";
+import { TooOld } from "./too-old";
 
 /**
  * The Office page in Settings: Office as one thing -- how it stands (and what its downloads are doing), start, stop and
@@ -201,6 +202,7 @@ export function OfficeSettings() {
       {limits && (
         <section className="space-y-2" aria-label={t("Comments and chat with agents")}>
           <h3 className="text-sm font-medium">{t("Comments and chat with agents")}</h3>
+          {state.docchatOff && <TooOld said={state.docchatOff} />}
           <div className="po-limits">
             {LIMIT_FIELDS.map(([key, label]) => (
               <div key={key} className="po-limit">

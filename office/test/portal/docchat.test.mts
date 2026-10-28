@@ -61,7 +61,7 @@ window.DocsAPI = { DocEditor: function (id, config) {
   return { destroyEditor() { frame.remove(); }, setUsers: (data) => window.__fake.setUsers.push(data) };
 } };`;
 
-const routes = { docchat: [] as unknown[], reports: [] as { path: string; body: any }[], mentionables: [] as { name: string; email: string }[], refuse: 0 };
+const routes = { docchat: [] as unknown[], reports: [] as { path: string; body: any }[], mentionables: [] as { name: string; email: string }[], refuse: 0, off: undefined as string | undefined };
 let pageJs = "";
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
@@ -72,7 +72,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === `${BASE}/editor-config` && req.method === "POST") {
     return send(200, "application/json", JSON.stringify({ document: { key: "k1", fileType: "docx" }, editorConfig: { user: { id: "portal-user", name: "Portal" } }, token: "t", apiJs: "/fake-api.js" }));
   }
-  if (url.pathname === `${BASE}/editor-state`) return send(200, "application/json", JSON.stringify({ standing: "current", docchat: routes.docchat }));
+  if (url.pathname === `${BASE}/editor-state`) return send(200, "application/json", JSON.stringify({ standing: "current", docchat: routes.docchat, ...(routes.off ? { docchatOff: routes.off } : {}) }));
   if (url.pathname === `${BASE}/mentionables`) return send(200, "application/json", JSON.stringify({ users: routes.mentionables }));
   if (url.pathname.startsWith(`${BASE}/docchat/`) && req.method === "POST") {
     const chunks: Buffer[] = [];
@@ -80,6 +80,8 @@ const server = http.createServer(async (req, res) => {
     // The route's body limit (docchat.CAPS.bytes): a larger request is refused whole.
     if (Buffer.concat(chunks).length > 256 * 1024) return send(413, "application/json", JSON.stringify({ error: "too large" }));
     routes.reports.push({ path: url.pathname.slice(BASE.length), body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+    // A portal too old for agents to answer: every report is refused, as the server half does.
+    if (routes.off) return send(501, "application/json", JSON.stringify({ error: routes.off, code: "portal_too_old" }));
     if (routes.refuse) {
       routes.refuse--;
       return send(503, "application/json", JSON.stringify({ error: "away" }));
@@ -106,7 +108,7 @@ after(async () => {
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
 });
-beforeEach(() => Object.assign(routes, { docchat: [], reports: [], mentionables: [{ name: "Aegis", email: "Aegis" }, { name: "Report (project)", email: "project:Report" }], refuse: 0 }));
+beforeEach(() => Object.assign(routes, { docchat: [], reports: [], mentionables: [{ name: "Aegis", email: "Aegis" }, { name: "Report (project)", email: "project:Report" }], refuse: 0, off: undefined }));
 
 async function opened(mode: "word" | "cell" | "lost" = "word", query = ""): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
@@ -142,14 +144,14 @@ test("the mention list: typing @ asks the page, which answers from /mentionables
 });
 
 test("Word: the UI's comment, reply, edit and resolve are ui reports once the editor heard them (inside the call); events nobody here called are state reports only", async () => {
-  const page = await opened("word", "&chat=c1");
+  const page = await opened("word");
   await page.evaluate(() => {
     const w = window as any;
     w.__api.asc_addComment(w.__data({ text: "Bitte +Aegis", guid: "626360df", userId: "portal-user" }));
   });
   assert.ok(await until(() => ui().length === 1));
   assert.deepEqual(ui()[0], { ...ui()[0], kind: "comment", guid: "626360df", text: "Bitte +Aegis" });
-  assert.equal(routes.reports.find((r) => r.path === "/docchat/events")!.body.panelChat, "c1", "the panel's chat rides along");
+  assert.deepEqual(Object.keys(routes.reports.find((r) => r.path === "/docchat/events")!.body).sort(), ["docId", "events", "key", "v"], "no chat rides along: the agent's own chat answers");
   assert.equal(routes.reports[0].body.v, 1);
   await page.evaluate(() => {
     const w = window as any;
@@ -244,6 +246,30 @@ test("the chip follows how the comments and the chat with agents stand: the most
   assert.match((await chip.getAttribute("title")) ?? "", /the model is down/);
   routes.docchat = [{ kind: "thread", label: "Aegis", state: "answered" }];
   await chip.waitFor({ state: "detached", timeout: 5000 });
+  await page.context().close();
+});
+
+test("a portal too old for agents to answer: the chip says so with the server half's words, and the page reports nothing more after the first refusal, never tried again", async () => {
+  routes.off = "Agents do not answer comments or the editor's chat here: this portal is too old for it (it lacks chats.start).";
+  const page = await opened();
+  const chip = page.locator(".po-chip-talk-problem");
+  await chip.waitFor({ timeout: 5000 });
+  assert.equal(await chip.innerText(), "Agents do not answer comments or the chat here: the portal is too old");
+  assert.match((await chip.getAttribute("title")) ?? "", /it lacks chats\.start/);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__api.asc_addComment(w.__data({ text: "Bitte +Aegis", guid: "626360df", userId: "portal-user" }));
+  });
+  assert.ok(await until(() => routes.reports.some((r) => r.path === "/docchat/events")));
+  await delay(1500);
+  const sent = routes.reports.filter((r) => r.path === "/docchat/events").length;
+  assert.equal(sent, 1, "refused once, not tried again");
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__api.asc_addComment(w.__data({ text: "Noch einmal +Aegis", guid: "0000abcd", userId: "portal-user" }));
+  });
+  await delay(1500);
+  assert.equal(routes.reports.filter((r) => r.path === "/docchat/events").length, sent, "nothing more from this page");
   await page.context().close();
 });
 

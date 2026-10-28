@@ -100,9 +100,9 @@ async function run(PITHAGORAS: string): Promise<void> {
   type Tool = { execute: (id: string, params: unknown) => Promise<{ content: { text: string }[]; details: Record<string, unknown> }> };
   const tools: Record<string, Tool> = {};
 
-  /** The portal's chats as docchat sees them: the project's task chat, the children docchat makes, the prompts they
-   * are given (answered by the test), and the ones removed. */
-  const fake = { chats: [{ id: "acme-main", folder: home }] as { id: string; folder: string; parent?: string; title?: string; listed?: boolean; kind?: string }[], prompts: [] as Prompt[], removed: [] as string[] };
+  /** The portal's chats as docchat sees them: the chats docchat starts in the project's folder, the prompts they are
+   * given (answered by the test), and the ones removed. */
+  const fake = { chats: [] as { id: string; folder: string; title?: string; listed?: boolean; unattended?: true }[], prompts: [] as Prompt[], removed: [] as string[] };
 
   test("the Document Server comes up, and docchat is given the stand-in chats", { timeout: 600_000 }, async () => {
     await host.syncServerHalves([half(path.join(PITHAGORAS, "extensions/docker"), "src/server.ts"), half(PACKAGE, "src/server.ts")]);
@@ -120,19 +120,13 @@ async function run(PITHAGORAS: string): Promise<void> {
       folders: () => [{ path: project, name: "Acme", kind: "project" }],
       chats: {
         get: (id) => fake.chats.find((c) => c.id === id),
-        list: () => fake.chats.filter((c) => c.listed !== false),
-        folder: (id) => {
-          const c = fake.chats.find((x) => x.id === id);
-          if (!c) throw new Error("no chat");
-          return c.folder;
-        },
-        create: ({ parent, title, listed }) => {
-          const chat = { id: `child-${fake.chats.length}`, parent, title, listed, folder: home };
+        start: ({ folder, title, listed, unattended }) => {
+          const chat = { id: `started-${fake.chats.length}`, title, listed, folder, ...(unattended ? { unattended } : {}) };
           fake.chats.push(chat);
           return chat;
         },
         prompt: (id, message) => new Promise((resolve) => fake.prompts.push({ chatId: id, message, resolve })),
-        abort: async () => {},
+        lastAnswer: () => undefined,
         remove: async (id) => {
           fake.removed.push(id);
           fake.chats = fake.chats.filter((c) => c.id !== id);
@@ -196,9 +190,10 @@ async function run(PITHAGORAS: string): Promise<void> {
     await mentionInPopover(person.page, person.frame, "Bitte übersetzen ", "proj", "Acme");
 
     const first = await nextPrompt(1);
-    const child = fake.chats.find((c) => c.id === first.chatId)!;
-    assert.equal(child.parent, "acme-main");
-    assert.equal(child.listed, false);
+    const started = fake.chats.find((c) => c.id === first.chatId)!;
+    assert.equal(started.folder, home, "started in the project's folder");
+    assert.equal(started.listed, false);
+    assert.equal(started.unattended, true);
     const guid = (await threads(person.frame))[0].guid;
     assert.match(first.message, new RegExp(`comment thread ${guid}`));
     assert.match(first.message, /Bitte übersetzen @project:Acme/);

@@ -96,6 +96,10 @@ function describe(sessionId: string, d: Data): Comment {
   };
 }
 
+/** Answers a report is not tried again after; of those, the ones after which this page reports nothing more. */
+const STOPS = new Set([401, 403, 409, 501]);
+const FINAL = new Set([400, 413, ...STOPS]);
+
 /**
  * Hooks the editor whose frame `frame()` finds (inside this editor's own placeholder), for the document `docId` whose
  * session `key()` names now. `user` is this page's editor user id (its config's). `post` sends a report to the server
@@ -106,7 +110,6 @@ export function hookDocchat(options: {
   docId: string;
   key: () => string;
   user: string;
-  panelChat?: string;
   post: (path: string, body: unknown, keepalive?: boolean) => Promise<{ ok: boolean; status: number }>;
   log?: (line: string) => void;
 }): DocchatHook {
@@ -147,13 +150,13 @@ export function hookDocchat(options: {
 
   /** Sends `events`; the answer's status, or 0 where every try failed. */
   async function send(events: Event[], keepalive: boolean): Promise<number> {
-    const body = { v: PROTOCOL, docId, key: options.key(), ...(options.panelChat ? { panelChat: options.panelChat } : {}), events };
+    const body = { v: PROTOCOL, docId, key: options.key(), events };
     let status = 0;
     for (let i = 0; i < 3; i++) {
       try {
         const r = await options.post("/docchat/events", body, keepalive);
         status = r.status;
-        if (r.ok || r.status === 400 || r.status === 409 || r.status === 413) return r.status;
+        if (r.ok || FINAL.has(r.status)) return r.status;
       } catch {
         // tried again
       }
@@ -178,8 +181,9 @@ export function hookDocchat(options: {
       if (ui.length && ui.length < events.length) status = await send(ui, keepalive);
       if (status === 413) log(`docchat reports refused as too large: ${events.length} dropped`);
     }
-    if (status === 409) {
-      // Office was updated (another protocol), or the session is not open: nothing more is taken from this page.
+    if (STOPS.has(status)) {
+      // Office was updated (another protocol), the session is not open, this person may not talk to the agents, or the
+      // portal is too old for agents to answer (501): nothing more is taken from this page.
       log(`docchat reports refused (${status}): reload the page`);
       gone = true;
       return;
@@ -392,7 +396,7 @@ export function hookDocchat(options: {
         const body = (list: Comment[]) => size({ v: PROTOCOL, docId, key: options.key(), comments: list });
         if (body(comments) > pageCaps.bytes) comments = comments.map((c) => ({ ...c, replies: [], repliesCut: c.replies.length }));
         if (body(comments) > pageCaps.bytes) comments = comments.map((c) => ({ ...c, text: c.text.slice(0, 200), quote: "" }));
-        void options.post("/docchat/ready", { v: PROTOCOL, docId, key: options.key(), ...(options.panelChat ? { panelChat: options.panelChat } : {}), comments }).catch(() => {});
+        void options.post("/docchat/ready", { v: PROTOCOL, docId, key: options.key(), comments }).catch(() => {});
       }, 1500);
     },
     stop() {

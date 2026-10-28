@@ -7,6 +7,7 @@ import { editorsIn } from "../office-ui";
 import { parseDocQuery } from "../office-ui";
 import { OfficeEditor } from "./office-editor";
 import { refreshOfficeState, useDocGone, useOfficeState } from "./state";
+import { TooOld } from "./too-old";
 
 /**
  * The Office page -- the global tab's view of the library. With `?doc=<id>` in its address it is the full-bleed
@@ -14,7 +15,7 @@ import { refreshOfficeState, useDocGone, useOfficeState } from "./state";
  * a new-document line and the list of every document with who owns it and who is in it. The list itself is the
  * workspace scan -- every .docx/.xlsx of the agent homes and projects, indexed at boot and on Rescan, each in
  * place (its file IS the document) and belonging to the agent or project whose folder it is in. What is made here goes
- * into the default agent's home.
+ * into the home of the agent New starts the person's chats with.
  */
 
 // How the list sorts and where that choice sticks live in web/sort.tsx, shared with the sidebar panel:
@@ -246,7 +247,7 @@ function NewDocument() {
         onChange={setKind}
         showLabel={false}
       />
-      <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || title.trim() === ""} title={t("Made in the default agent's home")}>
+      <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || title.trim() === ""} title={t("Made in the home of the agent New starts chats with")}>
         {t("New document")}
       </button>
       {problem && (
@@ -316,10 +317,11 @@ function Library() {
         <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
       ) : (
         <>
+          {state.docchatOff && <TooOld said={state.docchatOff} />}
           <NewDocument />
           {state.docs.length === 0 ? (
             <>
-              <portal.ui.Empty>{t("No documents yet. Make a Word or sheet document above (in the default agent's home), ask an agent to write one -- or drop a .docx / .xlsx into an agent's home or a project and press Rescan: everything is indexed here automatically, in place.")}</portal.ui.Empty>
+              <portal.ui.Empty>{t("No documents yet. Make a Word or sheet document above (in the home of the agent New starts chats with), ask an agent to write one -- or drop a .docx / .xlsx into an agent's home or a project and press Rescan: everything is indexed here automatically, in place.")}</portal.ui.Empty>
               <RescanLibrary />
             </>
           ) : (

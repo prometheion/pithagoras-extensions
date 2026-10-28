@@ -67,6 +67,8 @@ export interface OfficeState {
   docs: OfficeDoc[];
   /** Every doc has an entry: empty while nobody is editing it, so the badge code needs no null check. */
   locks: Record<string, { id: string; name?: string }[]>;
+  /** Where the portal is too old for agents to answer comments and the editor's chat: what the server half says of it. */
+  docchatOff?: string;
 }
 
 /** POST /editor-config: the plain DocsAPI.DocEditor config plus its JWT and where api.js lives -- apiJs is dropped again before the call. */
@@ -79,7 +81,7 @@ export interface EditorConfig extends Record<string, unknown> {
 export interface DocchatItem {
   kind: "thread" | "chat";
   label: string;
-  state: "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "interrupted" | "limit" | "idle";
+  state: "queued" | "working" | "answered" | "not_posted" | "failed" | "interrupted" | "limit" | "idle";
   error?: string;
 }
 
@@ -113,7 +115,8 @@ export const api = {
   state: () => call<OfficeState>("/state"),
   /** The documents the agent or project of a chat sees: the panel beside it shows those. */
   scope: (chatId: string) => call<{ docIds: string[] }>(`/scope?chat=${encodeURIComponent(chatId)}`),
-  /** A new document: in the chat's agent home or project folder with `chat`, else in the default agent's home. */
+  /** A new document: in the chat's agent home or project folder with `chat`, else in the home New starts the person's
+   * chats in. */
   createDocument: (body: { title: string; type: "word" | "cell"; chat?: string }) =>
     call<OfficeDoc>("/documents", { method: "POST", body: JSON.stringify(body) }),
   renameDocument: (id: string, title: string) =>
@@ -124,7 +127,7 @@ export const api = {
   editorConfig: (docId: string) => call<EditorConfig>("/editor-config", { method: "POST", body: JSON.stringify({ doc: docId }) }),
   /** How the editor opened with `key` stands to the document now: "behind" means the file changed outside the editor. */
   editorState: (docId: string, key: string) =>
-    call<{ standing: "current" | "behind"; docchat?: DocchatItem[] }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
+    call<{ standing: "current" | "behind"; docchat?: DocchatItem[]; docchatOff?: string }>(`/editor-state?doc=${encodeURIComponent(docId)}&key=${encodeURIComponent(key)}`),
   /** Who a comment can mention, as the editor's mention list takes them. */
   mentionables: () => call<{ users: { name: string; email: string }[] }>("/mentionables"),
   /** A report of the people's editor (docchat-page.ts): its answer's status, also for one refused. */

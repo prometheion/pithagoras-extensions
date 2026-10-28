@@ -27,6 +27,8 @@ const now = {
   container: { state: "running", version: "10.0.0-169" } as { state: string; version?: string; pull?: Pull; error?: string },
   agent: { present: false, pull: null as Pull, tag: TAG, browser: { running: false, starting: false, editors: 0 } as { running: boolean; starting: boolean; editors: number; error?: string } },
   limits: { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60, docchatReportsPer10S: 50, docchatMessageChars: 20_000, docchatSaveEveryS: 3, docchatQueued: 20 } as Record<string, number>,
+  /** What the server half says where the portal is too old for agents to answer comments (GET /state docchatOff). */
+  docchatOff: undefined as string | undefined,
   limitBounds: { docchatRuns: [1, 20], docchatThreads: [1, 1000], docchatReplyChars: [200, 19_990], docchatChatMessages: [1, 20], docchatRemoveAfterS: [0, 86_400], docchatChatEndS: [0, 86_400], docchatReportsPer10S: [10, 1000], docchatMessageChars: [200, 20_000], docchatSaveEveryS: [1, 600], docchatQueued: [1, 200] } as Record<string, [number, number]>,
 };
 const asked: string[] = [];
@@ -40,7 +42,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/settings.html") return send(200, "text/html", SETTINGS_HTML);
   if (url.pathname === "/settings-page.js") return send(200, "text/javascript", pageJs);
   if (url.pathname === `${BASE}/state`) {
-    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0.0.1", limits: now.limits, limitBounds: now.limitBounds, container: now.container, agent: now.agent, docs: [], locks: {} }));
+    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0.0.1", limits: now.limits, limitBounds: now.limitBounds, container: now.container, agent: now.agent, docs: [], locks: {}, ...(now.docchatOff ? { docchatOff: now.docchatOff } : {}) }));
   }
   if (req.method === "POST") asked.push(url.pathname.slice(BASE.length));
   if (url.pathname === `${BASE}/settings` && req.method === "POST") {
@@ -226,6 +228,24 @@ test("the limits of comments and the editor's chat with agents: each a labelled 
   await page.getByRole("region", { name: "Comments and chat with agents" }).getByRole("button", { name: "Save" }).click();
   await page.getByRole("alert").getByText("A limit is a whole number.").waitFor({ timeout: 5000 });
   assert.equal(saved.length, 1, "not sent");
+  await page.context().close();
+});
+
+test("a portal too old for agents to answer comments: the section of comments and chat says so, in one line, with the server half's words in its title", async () => {
+  now.docchatOff = "Agents do not answer comments or the editor's chat here: this portal is too old for it (it lacks chats.start).";
+  try {
+    const page = await opened();
+    const section = page.getByRole("region", { name: "Comments and chat with agents" });
+    const line = section.getByText("Agents do not answer comments or the chat here: the portal is too old", { exact: true });
+    await line.waitFor({ timeout: 5000 });
+    assert.match((await line.getAttribute("title")) ?? "", /it lacks chats\.start/);
+    await page.context().close();
+  } finally {
+    now.docchatOff = undefined;
+  }
+  const page = await opened();
+  await page.getByRole("region", { name: "Comments and chat with agents" }).waitFor();
+  assert.equal(await page.getByText("the portal is too old", { exact: false }).count(), 0, "said only where it is so");
   await page.context().close();
 });
 

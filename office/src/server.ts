@@ -37,7 +37,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
-import { setPortal, portal, dataDir } from "./host";
+import { setPortal, portal, dataDir, missingApi, tooOld } from "./host";
+import { portal339, type RequestPerson } from "./extension-api-339.temporary";
 import * as container from "./container";
 import { LIMIT_BOUNDS, limitOk, loadSettings, saveSettings, type OfficeSettings } from "./settings";
 import { signJwt } from "./jwt";
@@ -176,6 +177,7 @@ const CODE_STATUS: Record<string, number> = {
   no_docker: 503,
   too_large: 413, // store's 512 MiB cap: on import, and on every read of a file whole
   no_home: 409, // no agent's home or project to make a document in
+  portal_too_old: 501, // the portal lacks what this needs of the extension API (host.ts missingApi)
 };
 
 /* ------------------------------------------------------------------ */
@@ -188,19 +190,31 @@ function docFolders(): string[] {
   return portal().folders.list().filter((f) => f.kind === "agent" || f.kind === "project").map((f) => store.canonical(f.path));
 }
 
-/** The portal's default agent's home: the folder folders.list() marks `home`, the first agent's, which the sidebar calls
- * Home and which a chat, channel or routine goes to when none is named. Undefined where it is not listed (gone, out of
- * reach). */
+/** The default agent's home: the folder folders.list() marks `home`, the agent a chat, channel or routine goes to when
+ * none is named. Undefined where it is not listed (gone, out of reach). */
 export function defaultHome(): string | undefined {
   const home = portal().folders.list().find((f) => f.kind === "agent" && f.home);
   return home && store.canonical(home.path);
 }
 
-/** The folder a chat's documents live in and belong to: the agent's home or the project folder the chat works in (the
- * deepest that holds its folder), else the default agent's home, the agent a chat outside every home and project runs
- * as. Throws where the chat or its folder is gone. */
+/** Where a document the person makes on the Office tab goes: the home of the agent New starts the person's chats with
+ * (`newChats`, which the person may have picked on its Agent page), else the default agent's (a portal that marks no
+ * such home). A new document of the person's is something new of theirs, as a new chat is. */
+export function newDocumentHome(): string | undefined {
+  const listed = portal339().folders.list();
+  const picked = listed.find((f) => f.kind === "agent" && f.newChats) ?? listed.find((f) => f.kind === "agent" && f.home);
+  return picked && store.canonical(picked.path);
+}
+
+/** The folder a chat's documents live in and belong to: its agent's home or its project's folder, as the portal says
+ * whose the chat is (chats.owner), else the default agent's home, the agent the sandbox runs a chat in neither as.
+ * Throws `not_found` where there is no such chat, and `portal_too_old` on a portal that cannot say whose a chat is. */
 export function folderForChat(chatId: string): string | undefined {
-  return store.ownerFolder(store.canonical(portal().chats.folder(chatId)), docFolders()) ?? defaultHome();
+  const chats = portal339().chats;
+  if (typeof chats.owner !== "function") throw Object.assign(new Error(tooOld(["chats.owner"])), { code: "portal_too_old" });
+  if (!chats.get(chatId)) throw Object.assign(new Error(`there is no chat ${chatId}`), { code: "not_found" });
+  const owner = chats.owner(chatId);
+  return owner ? store.canonical(owner.path) : defaultHome();
 }
 
 /** What the person calls the agent or project a document belongs to (folders.label), or its folder's last part; none
@@ -416,6 +430,34 @@ async function liveKey(docId: string, key: string): Promise<boolean> {
   }
 }
 
+/** What Office says where the portal is too old for agents to answer comments and the editor's chat (host.ts
+ * missingApi, asked as the half starts), else nothing: those are off then, and the rest of Office works as it did. */
+let docchatOff: string | undefined;
+
+/** Methods that only read. */
+const READS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Who is behind a request (http.person): every route but the Document Server's own traffic under /ds (which only an
+ * editor config this half signed opens) needs a signed-in person, and a change, or a report of what a person did in
+ * an editor, the primary person: what those do lands in the agents' folders, and a comment or a chat message goes to
+ * an agent as the primary user's own words (chats.start). A portal without http.person (older than
+ * thecodacus/pithagoras#339) has only its own sign-in gate in front of these routes, as before.
+ */
+function personGate(req: { method?: string; url?: string }, res: { status: (c: number) => { json: (b: unknown) => void } }, next: () => void): void {
+  const http = portal339().http;
+  if (typeof http.person !== "function" || /^\/ds(\/|$|\?)/.test(req.url ?? "")) return next();
+  let person: RequestPerson | undefined;
+  try {
+    person = http.person(req as never);
+  } catch (e) {
+    logLine(`@pithagoras/office: who is behind a request could not be read: ${(e as Error).message}`);
+  }
+  if (!person) return void res.status(401).json({ error: "Sign in to the portal first.", code: "no_person" });
+  if (!READS.has(req.method ?? "GET") && person.role !== "primary") return void res.status(403).json({ error: "Only the portal's primary person may change documents or talk to the agents in them.", code: "not_primary" });
+  next();
+}
+
 /* ------------------------------------------------------------------ */
 /* the UI routes (the portal mounts portal.router at /api/x/@pithagoras/office)*/
 /* ------------------------------------------------------------------ */
@@ -427,6 +469,7 @@ function registerRoutes(dd: string, secret: string): void {
   // which a page on another port or name of the same site is still sent, and these routes delete documents, remove
   // the Document Server and change its image.
   r.use(writesFromHere);
+  r.use(personGate);
 
   /** GET /state -> settings + container status + the agents' editor (its image, its download, its browser) + the document
    * list + who has what open. The poller's payload. */
@@ -449,7 +492,7 @@ function registerRoutes(dd: string, secret: string): void {
     const limits = Object.fromEntries(Object.keys(LIMIT_BOUNDS).map((k) => [k, s[k as keyof typeof LIMIT_BOUNDS]]));
     // Each with the name the person knows its owner by: the agent's, or the project's place.
     const named = docs.map((d) => ({ ...d, owner: d.owner ?? "", ownerName: ownerName(d.owner) }));
-    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, limitBounds: LIMIT_BOUNDS, container: c, agent, docs: named, locks });
+    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, limitBounds: LIMIT_BOUNDS, container: c, agent, docs: named, locks, ...(docchatOff ? { docchatOff } : {}) });
   });
 
   /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat sees (store.docsForHome of
@@ -467,8 +510,8 @@ function registerRoutes(dd: string, secret: string): void {
 
   /** POST /documents {title, type:"word"|"cell", chat?} -> 201 meta; 409 exists or no home to make it in. Made in the
    * folder it then belongs to: the chat's agent home or project folder (folderForChat) where the chat's panel makes
-   * it, else the default agent's home (the Office tab). A failure is logged too, so a live failure LEAVES A LINE in the
-   * portal's log. */
+   * it, else the home New starts the person's chats in (newDocumentHome, the Office tab). A failure is logged too, so a
+   * live failure LEAVES A LINE in the portal's log. */
   r.post("/documents", json, async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const title = typeof body.title === "string" ? body.title : "";
@@ -479,8 +522,9 @@ function registerRoutes(dd: string, secret: string): void {
     try {
       let folder: string | undefined;
       try {
-        folder = chatId ? folderForChat(chatId) : defaultHome();
-      } catch {
+        folder = chatId ? folderForChat(chatId) : newDocumentHome();
+      } catch (e) {
+        if ((e as { code?: string }).code === "portal_too_old") throw e;
         throw Object.assign(new Error(`there is no chat ${chatId}, or its folder is gone`), { code: "not_found" });
       }
       if (!folder) throw Object.assign(new Error("the portal's default agent has no home to make it in"), { code: "no_home" });
@@ -725,21 +769,27 @@ function registerRoutes(dd: string, secret: string): void {
     if (!docId || !parsed || parsed.keyId !== callback.keyIdOf(docId)) return res.status(400).json({ error: "the query needs { doc, key } of an editor opened on that document", code: "invalid" });
     const doc = store.refresh(docId, dd);
     if (!doc) return res.status(404).json({ error: `no document with id ${docId}`, code: "not_found" });
-    res.json({ standing: callback.keyStanding(key, doc.mtimeMs), docchat: docchat.statesOf(docId) });
+    res.json({ standing: callback.keyStanding(key, doc.mtimeMs), docchat: docchatOff ? [] : docchat.statesOf(docId), ...(docchatOff ? { docchatOff } : {}) });
   });
 
   /** GET /mentionables -> { users }: who a comment can mention, as the editor's mention list takes them (docchat.ts). */
   r.get("/mentionables", (_req, res) => {
-    res.json({ users: docchat.mentionables() });
+    // Nobody to mention where no agent can answer.
+    res.json({ users: docchatOff ? [] : docchat.mentionables() });
   });
 
   /** POST /docchat/ready and /docchat/events: what a people's editor reports of comments and its chat (docchat.ts and
    * web/docchat-page.ts). Each names its document and its session's key, which must be a session of that document:
    * one the Document Server's callbacks named, or, for a key not heard of since a restart, one its command service
-   * says a person is in. A page of another protocol is told to reload. */
+   * says a person is in. A page of another protocol is told to reload; on a portal too old for agents to answer, every
+   * report is refused with what Office says of it (501 portal_too_old), and the page stops reporting. */
   const docchatBody = portal().http.json({ limit: docchat.CAPS.bytes });
-  const checked = async (req: { body?: unknown }, res: { status: (c: number) => { json: (b: unknown) => void } }): Promise<{ docId: string; key: string; panelChat?: string; body: Record<string, unknown> } | null> => {
+  const checked = async (req: { body?: unknown }, res: { status: (c: number) => { json: (b: unknown) => void } }): Promise<{ docId: string; key: string; body: Record<string, unknown> } | null> => {
     const body = (req.body ?? {}) as Record<string, unknown>;
+    if (docchatOff) {
+      res.status(501).json({ error: docchatOff, code: "portal_too_old" });
+      return null;
+    }
     if (body.v !== docchat.PROTOCOL) {
       res.status(409).json({ error: "Reload the page: Office was updated", code: "reload_page" });
       return null;
@@ -761,8 +811,7 @@ function registerRoutes(dd: string, secret: string): void {
       res.status(409).json({ error: "that editing session is not open", code: "not_live" });
       return null;
     }
-    const panelChat = typeof body.panelChat === "string" && body.panelChat ? body.panelChat : undefined;
-    return { docId, key, ...(panelChat ? { panelChat } : {}), body };
+    return { docId, key, body };
   };
   r.post("/docchat/ready", docchatBody, async (req, res) => {
     const got = await checked(req, res);
@@ -776,7 +825,7 @@ function registerRoutes(dd: string, secret: string): void {
     if (!got) return;
     const events = Array.isArray(got.body.events) ? (got.body.events as docchat.PageEvent[]) : [];
     if (events.length > docchat.CAPS.events) return res.status(413).json({ error: `at most ${docchat.CAPS.events} events a report`, code: "too_large" });
-    docchat.report(got.docId, got.key, events, got.panelChat);
+    docchat.report(got.docId, got.key, events);
     res.json({ ok: true });
   });
 
@@ -952,7 +1001,7 @@ function wireSeats(dd: string, secret: string): void {
   // editor's chat; what waits to be posted is posted once it runs.
   container.whenDsStarted(() => {
     seat.resetSeats("their Document Server started again");
-    void docchat.dsStarted().then(() => docchat.postWaiting());
+    if (!docchatOff) void docchat.dsStarted().then(() => docchat.postWaiting());
   });
 }
 
@@ -1072,7 +1121,12 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
 
   // the seams, as their module headers describe them (audit lands in portal().audit AND a log line). The tools read and
   // edit through the agents' editors (seat.ts) while Office runs; they ask here whether it does.
-  registerTools({ root: dd, record: recordAudit, officeState: () => officeState(dd) });
+  // Comments and the editor's chat with agents need what the extension API of thecodacus/pithagoras#339 gives: on an
+  // older portal they are off, which the Office page, the editor and the tools say; the rest works as it did.
+  const missing = missingApi(portalObj);
+  docchatOff = missing.length ? tooOld(missing) : undefined;
+  if (docchatOff) logLine(`@pithagoras/office: ${docchatOff}`);
+  registerTools({ root: dd, record: recordAudit, officeState: () => officeState(dd), docchatOff: () => docchatOff });
   // A new document is put into its folder through the portal, which gives it the folder's owner: the agent's file.
   store.configureStore({ place: (folder, name, bytes) => path.join(folder, portal().files.create(folder, ".", name, bytes)) });
   // Owners and grants were chat ids before: moved to the folders those chats work in.
@@ -1091,7 +1145,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   // Documents an earlier version made in the extension's own docs folder: moved once into their owner's folder, else
   // the default agent's home. Before the scan, which would otherwise find a moved file as a document of its own.
   moveLibrary(dd);
-  wireDocchat(dd);
+  if (!docchatOff) wireDocchat(dd);
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd, record: recordAudit });
   live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);
 
@@ -1141,7 +1195,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   };
   recover();
   // The records of comments' and the editor's chats: runs that went on, removals, sessions still open, posts waiting.
-  void docchat.boot().catch((e) => logLine(`docchat boot failed: ${(e as Error).message}`));
+  if (!docchatOff) void docchat.boot().catch((e) => logLine(`docchat boot failed: ${(e as Error).message}`));
 
   let stopped = false;
   const timer = setInterval(() => {

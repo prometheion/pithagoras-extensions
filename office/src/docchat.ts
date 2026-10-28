@@ -3,8 +3,9 @@
  * owner's answers of 2026-10-27).
  *
  * - A comment that mentions an agent or a project (`@Aegis`, `@project:Report`; the editor's mention list inserts
- *   `+Aegis`, `+project:Report`) starts a chat of its own with that agent or project: an internal child chat (listed
- *   nowhere) of one of its task chats, with only that comment's context. Replies a person writes in the thread go to
+ *   `+Aegis`, `+project:Report`) starts a chat of its own with that agent or project: an internal chat Office starts in
+ *   the agent's home or the project's folder (chats.start: listed nowhere, attended by nobody), with only that
+ *   comment's context. Replies a person writes in the thread go to
  *   the same chat; its answers are posted as the agent's replies in the thread. The chat stays while the comment does
  *   (resolved and unresolved again too), and goes when the comment is deleted (after a grace, which an undo or a save
  *   that still has it cancels).
@@ -13,8 +14,11 @@
  *   the last person left the session.
  * - Only what a person did through the editor's own UI on their page counts as their words (a "ui report", see
  *   web/docchat-page.ts): paste, undo, a co-author's change and the file's own comments never prompt anybody.
- * - Nothing in these chats may wait for a person: the question tool is taken away (tools.ts asks `isInternal`), and a
- *   dialog or a guard question the chat opens anyway stops the run at once; it is told why and goes on without it.
+ * - Nothing in these chats waits for a person: they are started `unattended`, so the portal offers them no question tool,
+ *   answers a dialog at once with its no-answer value, and has the guard refuse a call it holds rather than ask.
+ * - After a restart of the half, a run that was going is read back with chats.lastAnswer: one that goes on is heard to
+ *   its end, one that ended meanwhile gives its answer (posted unless the guard marked the chat), one the portal's
+ *   restart cut off is said to be interrupted.
  *
  * Records under `<data>/state/`: `threads/<docId>.json` (each thread's agents with their chats, what waits to be
  * posted, a removal under way) and `sessions.json` (the chats of the editor's chat, by key), written whole through a
@@ -31,15 +35,16 @@ import { addGrant, canonical, getDoc, listDocs, readDoc, type DocMeta } from "./
 import { docxThreads, xlsxThreads, type CommentThread } from "./ooxml";
 import { keyIdOf } from "./callback";
 import { DEFAULT_SETTINGS, loadSettings } from "./settings";
+import { portal339, type ChatAnswer, type StartChatOptions } from "./extension-api-339.temporary";
 
 /* ------------------------------------------------------------------ */
 /* types                                                               */
 /* ------------------------------------------------------------------ */
 
 /** What the person sees of a thread's or a session's chat (the editor's bar, GET /editor-state). */
-export type ChatState = "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "interrupted" | "limit" | "idle";
+export type ChatState = "queued" | "working" | "answered" | "not_posted" | "failed" | "interrupted" | "limit" | "idle";
 
-type Pending = { since: number; pid: number; asked?: string };
+type Pending = { since: number };
 /** An answer waiting to be posted. `sent`: the chunks of an editor's chat answer posted already; `check`: a post of it
  * may have run (its editor closed or timed out while it ran), so a thread reads back before it posts it again. */
 type ToPost = { text: string; at: number; sent?: number; check?: true };
@@ -47,7 +52,6 @@ type ToPost = { text: string; at: number; sent?: number; check?: true };
 /** One agent or project in a thread. */
 type AgentEntry = {
   chatId: string | null;
-  parent: string | null;
   state: ChatState;
   error?: string;
   /** Messages for its chat not given to it yet: a run is going, or it waits for its turn. */
@@ -86,7 +90,6 @@ type SessionRecord = {
   docId: string;
   folder: string;
   chatId: string | null;
-  parent: string | null;
   state: ChatState;
   error?: string;
   /** The people's messages of the session (the last 50, at most 20,000 characters): what a new chat is given when the
@@ -133,7 +136,7 @@ export type DocchatLimits = {
   queued: number;
 };
 
-export type DocchatChat = { id: string; title?: string; workspace?: string; kind?: string; parent?: string; status?: string };
+export type DocchatChat = { id: string; title?: string; status?: string; unattended?: true };
 export type ChildRun = { status: "done" | "stopped" | "error"; answer: string; marked?: true; error?: string };
 
 /** What the module needs of the rest of the half and the portal. */
@@ -141,11 +144,9 @@ export type DocchatDeps = {
   root?: string;
   chats?: {
     get(id: string): DocchatChat | undefined;
-    list(): DocchatChat[];
-    folder(id: string): string;
-    create(options: { parent: string; title: string; listed?: boolean; mode?: string }): DocchatChat;
+    start(options: StartChatOptions): DocchatChat;
     prompt(id: string, message: string): Promise<ChildRun>;
-    abort(id: string): Promise<void>;
+    lastAnswer(id: string): ChatAnswer | undefined;
     remove(id: string): Promise<void>;
   };
   folders?: () => { path: string; name: string; kind: "agent" | "project" | "chat" }[];
@@ -203,6 +204,9 @@ export const guidOk = (guid: unknown): guid is string => typeof guid === "string
  * failed (the agents' browser starting, Docker slow) is tried again this often, further apart each time. Tests make
  * them shorter. */
 export const postTimings = { reposts: 3, repostMs: 5_000, retries: 6, retryMs: 10_000, freshMs: 5_000 };
+/** A run the half listens for after its restart is read back this often too (chats.lastAnswer), beside its chat's
+ * events: an end the half missed is still found. */
+export const runTimings = { listenMs: 5_000 };
 
 export const DEFAULT_LIMITS: DocchatLimits = {
   runs: DEFAULT_SETTINGS.docchatRuns,
@@ -220,17 +224,6 @@ export const DEFAULT_LIMITS: DocchatLimits = {
 /** What an agent in one of these chats is told about the people it cannot ask. */
 const NOBODY_TO_ASK =
   "Nobody watches this chat while you work: there is no one to answer a question or a confirmation, so do not ask any. Decide for yourself, or say in your answer what you need.";
-
-/** The dialogs of pi's UI requests: what waits for somebody (ui-requests.ts of the portal). */
-const DIALOGS = new Set(["select", "confirm", "input", "editor", "questions"]);
-
-/** The mode these chats are made in: none ("standard"), whatever mode the person chose for the parent chat; what the
- * parent's mode took away stays off (ChildChatOptions.mode). Nobody watches them, so a mode chosen for one conversation
- * must not carry over to every comment. */
-const CHILD_MODE = "standard";
-
-/** The question tool the portal gives a chat with a person, which these chats must not have. */
-export const QUESTION_TOOL = "ask_question";
 
 /* ------------------------------------------------------------------ */
 /* seams                                                               */
@@ -255,14 +248,13 @@ export function __resetDocchatForTests(): void {
   rates.clear();
   live.clear();
   lastSave.clear();
-  dialogs.clear();
   listening.clear();
   retries.clear();
   loaded = false;
 }
 
 const root = () => cfg.root ?? portal().dataDir();
-const chats = () => cfg.chats ?? (portal().chats as unknown as NonNullable<DocchatDeps["chats"]>);
+const chats = () => cfg.chats ?? (portal339().chats as unknown as NonNullable<DocchatDeps["chats"]>);
 const folders = () => (cfg.folders ?? (() => portal().folders.list()))();
 const now = () => (cfg.now ?? Date.now)();
 const log = (line: string) => (cfg.log ?? ((l: string) => portal().log(`@pithagoras/office: docchat: ${l}`)))(line);
@@ -312,6 +304,21 @@ const bare = <T>(from?: Record<string, T>): Record<string, T> => Object.assign(O
 /** Answers waiting, as a record holds them (one answer, as an earlier version kept it, is a list of one). */
 const waitingOf = (v: unknown): ToPost[] | undefined => (Array.isArray(v) ? v : v && typeof v === "object" ? [v as ToPost] : undefined);
 
+/** A thread's or a session's entry as a record holds it, in today's shape: an earlier version's chat was a child of one
+ * of the folder's task chats (`parent`), and one whose folder had none stood as `no_chat`, which the next message now
+ * starts a chat for. */
+function fromRecord<T extends AgentEntry | SessionRecord>(raw: T): T {
+  const { parent: _parent, ...rest } = raw as T & { parent?: unknown };
+  const toPost = waitingOf(rest.toPost);
+  const entry = { ...rest, queue: Array.isArray(rest.queue) ? rest.queue : [], ...(toPost ? { toPost } : {}) } as T;
+  if (!toPost) delete entry.toPost;
+  if ((entry.state as string) === "no_chat") {
+    entry.state = "idle";
+    delete entry.error;
+  }
+  return entry;
+}
+
 function docRecord(docId: string): DocRecord {
   let rec = docs.get(docId);
   if (rec) return rec;
@@ -322,11 +329,7 @@ function docRecord(docId: string): DocRecord {
       for (const [guid, t] of Object.entries(raw.threads as Record<string, Thread>)) {
         if (!guidOk(guid) || !t || typeof t !== "object") continue;
         const agents = bare<AgentEntry>();
-        for (const [folder, a] of Object.entries(t.agents ?? {})) {
-          const toPost = waitingOf(a.toPost);
-          agents[folder] = { ...a, queue: Array.isArray(a.queue) ? a.queue : [], ...(toPost ? { toPost } : {}) };
-          if (!toPost) delete agents[folder].toPost;
-        }
+        for (const [folder, a] of Object.entries(t.agents ?? {})) agents[folder] = fromRecord(a);
         threads[guid] = { ...t, agents };
       }
       rec = { version: 1, threads, uiSeen: Array.isArray(raw.uiSeen) ? raw.uiSeen : [], made: Array.isArray(raw.made) ? raw.made.filter(guidOk) : [] };
@@ -356,11 +359,7 @@ function sessionRecords(): Record<string, SessionRecord> {
     const raw = JSON.parse(fs.readFileSync(sessionsFile(), "utf8"));
     sessions = bare<SessionRecord>();
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      for (const [key, s] of Object.entries(raw as Record<string, SessionRecord>)) {
-        const toPost = waitingOf(s.toPost);
-        sessions[key] = { ...s, queue: Array.isArray(s.queue) ? s.queue : [], ...(toPost ? { toPost } : {}) };
-        if (!toPost) delete sessions[key].toPost;
-      }
+      for (const [key, s] of Object.entries(raw as Record<string, SessionRecord>)) sessions[key] = fromRecord(s);
     }
   } catch {
     sessions = bare();
@@ -389,7 +388,7 @@ function docsWithThreads(): string[] {
 /* the chats that are ours                                             */
 /* ------------------------------------------------------------------ */
 
-/** The chat ids of the thread and session chats: they get no question tool (tools.ts). */
+/** The chat ids of the thread and session chats (office_comments names the thread a chat was started for). */
 const internal = new Set<string>();
 
 /** Whether `chatId` is one of the internal chats of comments and the editor's chat. */
@@ -411,27 +410,6 @@ function loadAll(): void {
   loaded = true;
   for (const docId of docsWithThreads()) for (const t of Object.values(docRecord(docId).threads)) for (const a of Object.values(t.agents)) if (a.chatId) internal.add(a.chatId);
   for (const s of Object.values(sessionRecords())) if (s.chatId) internal.add(s.chatId);
-}
-
-/**
- * Takes the question tool away from an internal chat's pi, and refuses it at once where it is called all the same
- * (through a script, or a pi that gave it back): `pi` is what chats.extend's factory is given.
- */
-export function hush(pi: any): void {
-  const drop = () => {
-    try {
-      const active: string[] = pi.getActiveTools?.() ?? [];
-      if (active.includes(QUESTION_TOOL)) pi.setActiveTools(active.filter((n) => n !== QUESTION_TOOL));
-    } catch (e) {
-      log(`the question tool could not be taken away: ${(e as Error).message}`);
-    }
-  };
-  pi.on?.("session_start", drop);
-  pi.on?.("before_agent_start", drop);
-  pi.on?.("tool_call", (event: { toolName?: string }) => {
-    if (event?.toolName !== QUESTION_TOOL) return undefined;
-    return { block: true, reason: `${QUESTION_TOOL} is not available in this chat: nobody is there to answer. Decide for yourself, or say in your answer what you need.` };
-  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -519,40 +497,6 @@ function asTyped(text: string): string {
 const labelOf = (folder: string) => mentionable().find((f) => canonical(f.path) === folder)?.name ?? (path.basename(folder) || "Agent");
 
 /* ------------------------------------------------------------------ */
-/* the parent chat                                                     */
-/* ------------------------------------------------------------------ */
-
-/**
- * The chat a new thread or session chat is made under, for `folder`: the chat whose Office panel the editor is in
- * where that is a task chat of the folder; else the parent this document's other chats of that folder use; else the
- * folder's first task chat in the order the portal lists them (the sidebar's). A channel conversation, a routine, a
- * heartbeat or a child is never one: its speaker may be someone else, and the child would take its role.
- */
-function parentFor(folder: string, docId: string, panelChat?: string): string | null {
-  const c = chats();
-  const taskOf = (chat: DocchatChat | undefined): chat is DocchatChat => {
-    if (!chat || chat.kind || chat.parent) return false;
-    try {
-      return canonical(c.folder(chat.id)) === folder;
-    } catch {
-      return false;
-    }
-  };
-  if (panelChat) {
-    const panel = c.get(panelChat);
-    const top = panel?.parent ? c.get(panel.parent) : panel;
-    if (taskOf(top)) return top.id;
-  }
-  const rec = docRecord(docId);
-  for (const t of Object.values(rec.threads)) {
-    const p = t.agents[folder]?.parent;
-    if (p && taskOf(c.get(p))) return p;
-  }
-  for (const s of Object.values(sessionRecords())) if (s.docId === docId && s.folder === folder && s.parent && taskOf(c.get(s.parent))) return s.parent;
-  return c.list().find((chat) => taskOf(chat))?.id ?? null;
-}
-
-/* ------------------------------------------------------------------ */
 /* prompts                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -603,9 +547,6 @@ const DROPPED_NOTE = (n: number) => `(${n === 1 ? "An earlier message" : `${n} e
 
 const CUT_NOTE = "Your last run was cut off before you answered (the portal restarted). What came meanwhile:";
 
-const DIALOG_NOTE = (what: string) =>
-  `Your last step waited for a person's answer (${what}), which nobody can give in this chat, so it was stopped. Go on without it: decide for yourself, or say in your answer what you need.`;
-
 /* ------------------------------------------------------------------ */
 /* runs                                                                */
 /* ------------------------------------------------------------------ */
@@ -617,9 +558,7 @@ const targetId = (t: Target) => (t.kind === "thread" ? `t:${t.docId}:${t.guid}:$
 /** Runs going, by target, and for each folder the threads waiting for their turn. */
 const running = new Map<string, Target>();
 const waiting = new Map<string, Target[]>();
-/** A chat's dialog that stopped its run, by chat id: the run is told, once. */
-const dialogs = new Map<string, { what: string; told: boolean }>();
-/** The children whose run's end the half listens for (after a restart of the half). */
+/** The chats whose run's end the half listens for: runs that went on while it restarted. */
 const listening = new Map<string, Target>();
 
 function entryOf(t: Target): AgentEntry | SessionRecord | undefined {
@@ -674,7 +613,7 @@ function start(t: Target, entry: AgentEntry | SessionRecord, message: string): v
   running.set(id, t);
   entry.state = "working";
   delete entry.error;
-  entry.pending = { since: now(), pid: process.pid };
+  entry.pending = { since: now() };
   persist(t);
   let run: Promise<ChildRun>;
   try {
@@ -688,30 +627,13 @@ function start(t: Target, entry: AgentEntry | SessionRecord, message: string): v
   );
 }
 
-/** How a run ended. `unchecked`: its end was heard on the chat's events (the half restarted while it ran), which do not
- * say whether it read a suspected prompt injection. */
-type RunEnd = ChildRun & { unchecked?: true };
-
-function ended(t: Target, chatId: string, r: RunEnd): void {
+function ended(t: Target, chatId: string, r: ChildRun): void {
   const id = targetId(t);
   running.delete(id);
   const entry = entryOf(t);
-  const dialog = dialogs.get(chatId);
   if (entry && entry.chatId === chatId) {
     delete entry.pending;
-    if (dialog && r.status === "stopped") {
-      // Stopped for a dialog nobody can answer: told once, and it goes on; a second one ends it.
-      if (!dialog.told) {
-        dialog.told = true;
-        entry.queue.unshift(DIALOG_NOTE(dialog.what));
-      } else {
-        dialogs.delete(chatId);
-        answered(t, entry, { status: "error", answer: "", error: `it waited for a person's answer (${dialog.what}), which nobody can give here` });
-      }
-    } else {
-      dialogs.delete(chatId);
-      answered(t, entry, r);
-    }
+    answered(t, entry, r);
     persist(t);
   }
   next(t);
@@ -722,7 +644,7 @@ function ended(t: Target, chatId: string, r: RunEnd): void {
 }
 
 /** What a run's end comes to: an answer posted, not posted, an error said, or nothing (stopped). */
-function answered(t: Target, entry: AgentEntry | SessionRecord, r: RunEnd): void {
+function answered(t: Target, entry: AgentEntry | SessionRecord, r: ChildRun): void {
   const who = t.kind === "thread" ? labelOf(t.folder) : labelOf((entry as SessionRecord).folder);
   if (r.status === "stopped") {
     entry.state = "idle";
@@ -742,13 +664,6 @@ function answered(t: Target, entry: AgentEntry | SessionRecord, r: RunEnd): void
   if (r.marked) {
     entry.state = "not_posted";
     record({ subject: subjectOf(t), reason: "an answer was not posted: its chat had read a suspected prompt injection", chatId: entry.chatId ?? undefined });
-    return;
-  }
-  if (r.unchecked) {
-    // Whether the run read a suspected injection is not known: not posted (fail closed).
-    entry.state = "not_posted";
-    record({ subject: subjectOf(t), reason: "an answer was not posted: its run ended while Office restarted, so whether it had read a suspected prompt injection is not known", chatId: entry.chatId ?? undefined });
-    post(t, `${who} answered while Office restarted; that answer could not be checked, so it is not posted. ${again(t)}`);
     return;
   }
   entry.state = "answered";
@@ -1044,26 +959,39 @@ export function statesOf(docId: string): DocchatItem[] {
   return out;
 }
 
-/** A thread's chat for `folder`, made where it has none: under the parent chosen for it; null where there is none. */
-function chatFor(docId: string, guid: string, folder: string, entry: AgentEntry, text: string, panelChat?: string): string | null {
-  if (entry.chatId && chats().get(entry.chatId)) return entry.chatId;
+/**
+ * A chat of the agent's home or the project's folder `folder`, started for one of these: in no list, and attended by
+ * nobody (the portal offers it no question tool, answers its dialogs at once and has the guard refuse what it would ask
+ * the person). Its own chat, not a child of one of the person's: it takes nobody's mode, tool switches or role, and an
+ * agent or project with no chat of its own yet answers too. Throws where it cannot be started (a folder that is gone).
+ */
+function startChat(folder: string, title: string): string {
+  const chat = chats().start({ folder, title, listed: false, unattended: true });
+  internal.add(chat.id);
+  return chat.id;
+}
+
+/** Whether `chatId` is a chat of ours that is still there and was started for nobody to attend. An earlier version's
+ * chat is a child of one of the person's chats, which the portal would let ask the person a question nobody sees: it
+ * is replaced at its next message. */
+const usable = (chatId: string | null): chatId is string => Boolean(chatId && chats().get(chatId)?.unattended);
+
+/** A chat of ours that `usable` refuses: forgotten, and removed where it is still there. */
+function dropChat(chatId: string): void {
+  if (chats().get(chatId)) void removeChat(chatId);
+  internal.delete(chatId);
+}
+
+/** A thread's chat for `folder`, started where it has none. */
+function chatFor(folder: string, entry: AgentEntry, text: string): string {
+  if (usable(entry.chatId)) return entry.chatId;
   if (entry.chatId) {
-    internal.delete(entry.chatId);
+    dropChat(entry.chatId);
     entry.chatId = null;
     entry.earlier = true;
   }
-  const parent = parentFor(folder, docId, panelChat);
-  if (!parent) {
-    entry.state = "no_chat";
-    entry.error = `${labelOf(folder)} has no chat to work from: start one with ${labelOf(folder)}`;
-    return null;
-  }
-  const title = `Comment: ${asTyped(text).replace(/\s+/g, " ").trim().slice(0, TITLE_CHARS)}`;
-  const chat = chats().create({ parent, title, listed: false, mode: CHILD_MODE });
-  internal.add(chat.id);
-  entry.chatId = chat.id;
-  entry.parent = parent;
-  return chat.id;
+  entry.chatId = startChat(folder, `Comment: ${asTyped(text).replace(/\s+/g, " ").trim().slice(0, TITLE_CHARS)}`);
+  return entry.chatId;
 }
 
 /** Whether a thread counts toward the document's limit: it has an agent that was not refused for the limit. */
@@ -1079,7 +1007,7 @@ type Said = { text: string; prompt: string };
 /** An agent or project mentioned in a thread: its entry made (within the document's limit) and its chat given its first
  * prompt where it is new, else what the person said (`said`). One refused for the limit before tries again: there may
  * be room now. */
-function mention(docId: string, guid: string, folder: string, panelChat: string | undefined, said?: Said): void {
+function mention(docId: string, guid: string, folder: string, said?: Said): void {
   const rec = docRecord(docId);
   const thread = rec.threads[guid];
   let entry = thread.agents[folder];
@@ -1087,29 +1015,27 @@ function mention(docId: string, guid: string, folder: string, panelChat: string 
   if (fresh) {
     const withAgents = Object.values(rec.threads).filter((t) => t !== thread && counted(t)).length;
     if (!counted(thread) && withAgents >= limits().threads) {
-      thread.agents[folder] = { chatId: null, parent: null, state: "limit", error: "Too many comment chats in this document: delete some comments", queue: [] };
+      thread.agents[folder] = { chatId: null, state: "limit", error: "Too many comment chats in this document: delete some comments", queue: [] };
       saveDoc(docId);
       return;
     }
-    entry = thread.agents[folder] = { chatId: null, parent: null, state: "idle", queue: [] };
+    entry = thread.agents[folder] = { chatId: null, state: "idle", queue: [] };
     // Granted the document for good, keyed by the thread (store.addGrant).
     addGrant(docId, folder, guid, now(), root());
     record({ subject: getDoc(docId, root())?.title ?? docId, reason: `comment thread ${guid}: ${folder} mentioned, given access to the document` });
   }
   // The comment's text is the person's words only where they made it here; any other comment is the document's.
   const words = ownComment(rec, guid) ? thread.text : null;
-  const hadChat = Boolean(entry.chatId && chats().get(entry.chatId));
-  let chatId: string | null;
+  const hadChat = usable(entry.chatId);
   try {
-    chatId = chatFor(docId, guid, folder, entry, words ?? said?.text ?? "", panelChat);
+    chatFor(folder, entry, words ?? said?.text ?? "");
   } catch (e) {
     entry.state = "failed";
-    entry.error = `its chat could not be made: ${(e as Error).message}`.slice(0, 200);
+    entry.error = `its chat could not be started: ${(e as Error).message}`.slice(0, 200);
     saveDoc(docId);
     return;
   }
   saveDoc(docId);
-  if (!chatId) return;
   const target: Target = { kind: "thread", docId, guid, folder };
   // A new chat is given the comment; one added by a reply, or made anew after its chat was lost, the reply too.
   if (fresh || !hadChat) deliver(target, `${threadPrompt(docId, guid, words, entry.earlier)}${said ? `\n\n${said.prompt}` : ""}`);
@@ -1117,11 +1043,11 @@ function mention(docId: string, guid: string, folder: string, panelChat: string 
 }
 
 /** A person's own act in the editor (a ui report): what it starts or tells. */
-function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>, panelChat?: string): void {
+function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>): void {
   const doc = getDoc(docId, root());
   if (!doc) return;
   const text = String(e.text ?? "").slice(0, limits().messageChars);
-  if (e.kind === "chat") return onChat(doc, key, text, panelChat);
+  if (e.kind === "chat") return onChat(doc, key, text);
   if (!guidOk(e.guid)) return;
   const guid = e.guid;
   const rec = docRecord(docId);
@@ -1137,7 +1063,7 @@ function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>,
     rec.threads[guid].text = text;
     const c = live.get(docId)?.comments.get(guid);
     if (c) seen(docId, key, c);
-    for (const folder of folders) mention(docId, guid, folder, panelChat);
+    for (const folder of folders) mention(docId, guid, folder);
     return;
   }
   if (e.kind === "edit") {
@@ -1158,7 +1084,7 @@ function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>,
     // A comment not theirs: only what they added is their words.
     const words = added(before, text);
     const said = own ? undefined : { text: words, prompt: addedPrompt(words) };
-    for (const folder of folders) mention(docId, guid, folder, panelChat, said);
+    for (const folder of folders) mention(docId, guid, folder, said);
     return;
   }
   if (e.kind === "reply") {
@@ -1172,18 +1098,18 @@ function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>,
       if (!named.length) return;
       const original = live.get(docId)?.comments.get(guid)?.text ?? "";
       rec.threads[guid] = { createdAt: now(), text: original, inFile: false, agents: bare() };
-      for (const folder of named) mention(docId, guid, folder, panelChat, said);
+      for (const folder of named) mention(docId, guid, folder, said);
       return;
     }
     // Newcomers, and those the thread refused for the limit that the reply names again.
     const newcomers = named.filter((f) => !thread.agents[f] || thread.agents[f].state === "limit");
-    for (const folder of newcomers) mention(docId, guid, folder, panelChat, said);
+    for (const folder of newcomers) mention(docId, guid, folder, said);
     // The reply goes to every chat of the thread, or to the ones it names where it names any.
     const to = Object.keys(thread.agents).filter((f) => !newcomers.includes(f) && (!named.length || named.includes(f)));
     for (const folder of to) {
       const entry = thread.agents[folder];
       if (entry.state === "limit") continue;
-      if (!entry.chatId || !chats().get(entry.chatId)) mention(docId, guid, folder, panelChat, said);
+      if (!usable(entry.chatId)) mention(docId, guid, folder, said);
       else deliver({ kind: "thread", docId, guid, folder }, replyPrompt(text));
     }
     return;
@@ -1195,7 +1121,7 @@ function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>,
 /* the editor's chat                                                   */
 /* ------------------------------------------------------------------ */
 
-function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): void {
+function onChat(doc: DocMeta, key: string, text: string): void {
   if (!text.trim()) return;
   // The agent or project the document belongs to: every document has one (an entry of an earlier version that has
   // none yet gets it at the next scan).
@@ -1203,7 +1129,7 @@ function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): vo
   if (!folder) return void log(`the editor's chat of ${doc.docId}: the document has no owner yet`);
   const all = sessionRecords();
   let s = all[key];
-  if (!s || s.docId !== doc.docId) s = all[key] = { docId: doc.docId, folder, chatId: null, parent: null, state: "idle", people: [], queue: [] };
+  if (!s || s.docId !== doc.docId) s = all[key] = { docId: doc.docId, folder, chatId: null, state: "idle", people: [], queue: [] };
   // A person writes: the session goes on, and its end under way with it.
   delete s.ending;
   clearTimer(`end:${key}`);
@@ -1211,25 +1137,15 @@ function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): vo
   s.people.push({ text, at: now() });
   while (s.people.length > PEOPLE_KEPT || s.people.reduce((n, p) => n + p.text.length, 0) > PEOPLE_CHARS) s.people.shift();
   let fresh = false;
-  if (!s.chatId || !chats().get(s.chatId)) {
-    if (s.chatId) internal.delete(s.chatId);
-    const parent = parentFor(folder, doc.docId, panelChat);
-    if (!parent) {
-      s.chatId = null;
-      s.state = "no_chat";
-      s.error = `${labelOf(folder)} has no chat to work from: start one with ${labelOf(folder)}`;
-      saveSessions();
-      return;
-    }
+  if (!usable(s.chatId)) {
+    if (s.chatId) dropChat(s.chatId);
+    s.chatId = null;
     try {
-      const chat = chats().create({ parent, title: "Office chat", listed: false, mode: CHILD_MODE });
-      internal.add(chat.id);
+      s.chatId = startChat(folder, "Office chat");
       fresh = true;
-      s.chatId = chat.id;
-      s.parent = parent;
     } catch (e) {
       s.state = "failed";
-      s.error = `its chat could not be made: ${(e as Error).message}`.slice(0, 200);
+      s.error = `its chat could not be started: ${(e as Error).message}`.slice(0, 200);
       saveSessions();
       return;
     }
@@ -1444,11 +1360,13 @@ export function folderRemoved(folder: string): void {
   saveSessions();
 }
 
-/** A chat deleted (by the person, or with its parent): the records keep their thread without it; the next message
- * makes a new one. */
+/** A chat deleted (by the person, or with its agent or project): the records keep their thread without it; the next
+ * message starts a new one. */
 export function chatDeleted(chatId: string): void {
   if (!internal.has(chatId)) return;
   internal.delete(chatId);
+  listening.delete(chatId);
+  clearTimer(`listen:${chatId}`);
   for (const docId of docs.keys()) {
     const rec = docRecord(docId);
     for (const [guid, thread] of Object.entries(rec.threads)) {
@@ -1477,39 +1395,50 @@ export function chatDeleted(chatId: string): void {
 /* a chat's events                                                     */
 /* ------------------------------------------------------------------ */
 
-/** Every event of every chat (chats.onEvent): a dialog of one of ours stops its run at once; after a restart of the
- * half, the end of a run it no longer waits for gives the answer. */
+/** Every event of every chat (chats.onEvent): the status of a run the half listens for (one that went on while it
+ * restarted) says it may have ended, which its last answer tells. */
 export function chatEvent(chatId: string, event: Record<string, unknown>): void {
-  if (!internal.has(chatId)) return;
-  if (event?.type === "extension_ui_request" && DIALOGS.has(String(event.method))) {
-    const what = String(event.title ?? event.method).slice(0, 120);
-    const known = dialogs.get(chatId);
-    dialogs.set(chatId, { what, told: known?.told ?? false });
-    log(`chat ${chatId} opened a dialog (${event.method}) nobody can answer: stopped`);
-    chats()
-      .abort(chatId)
-      .catch((e: unknown) => log(`chat ${chatId} could not be stopped: ${(e as Error)?.message ?? e}`));
-    return;
-  }
+  if (!listening.has(chatId)) return;
+  if (event?.type === "portal_status" || event?.type === "agent_end") heard(chatId);
+}
+
+/** A run the half listens for, read back (chats.lastAnswer): still going, it is read again a little later; ended, it
+ * ends here as a run the half waited for, its answer posted unless the guard marked the chat; cut off by the portal's
+ * restart (or not to be read), its thread or the editor's chat says so. */
+function heard(chatId: string): void {
   const t = listening.get(chatId);
   if (!t) return;
-  if (event?.type === "message_end") {
-    const m = event.message as { role?: string; content?: { type: string; text?: string }[] } | undefined;
-    if (m?.role === "assistant") {
-      const said = (m.content ?? []).filter((c) => c?.type === "text").map((c) => c.text ?? "").join("");
-      if (said.trim()) lastSaid.set(chatId, said);
-    }
+  let last: ChatAnswer | undefined;
+  try {
+    last = chats().lastAnswer(chatId);
+  } catch (e) {
+    log(`the last answer of chat ${chatId} could not be read: ${(e as Error).message}`);
   }
-  if (event?.type === "agent_end") {
-    listening.delete(chatId);
-    const answer = lastSaid.get(chatId) ?? "";
-    lastSaid.delete(chatId);
-    // Its run's promise is gone with the half that waited for it, and with it the mark of a suspected injection: the
-    // answer is not posted (fail closed).
-    ended(t, chatId, { status: "done", answer, unchecked: true });
+  if (last?.status === "running") {
+    timer(`listen:${chatId}`, runTimings.listenMs, () => heard(chatId));
+    return;
   }
+  listening.delete(chatId);
+  clearTimer(`listen:${chatId}`);
+  const entry = entryOf(t);
+  if (!entry || entry.chatId !== chatId) {
+    // Its chat was replaced meanwhile: what waits goes to the new one.
+    running.delete(targetId(t));
+    next(t);
+    return;
+  }
+  if (!last || cutOff(last)) {
+    running.delete(targetId(t));
+    interrupted(t, entry);
+    persist(t);
+    return;
+  }
+  ended(t, chatId, { status: last.status as ChildRun["status"], answer: last.answer, ...(last.marked ? { marked: true as const } : {}), ...(last.error ? { error: last.error } : {}) });
 }
-const lastSaid = new Map<string, string>();
+
+/** A run the portal's restart cut off: stopped, with the error the portal's next start gave it. A run the person
+ * stopped has none. */
+const cutOff = (last: ChatAnswer) => last.status === "stopped" && Boolean(last.error);
 
 /* ------------------------------------------------------------------ */
 /* the page's reports                                                  */
@@ -1536,7 +1465,7 @@ export function rateOk(key: string, docId?: string): boolean {
 
 /** A page's batch of events for `docId` in the session of `key`. A ui report whose id was taken already is taken
  * once (a retried request). */
-export function report(docId: string, key: string, events: PageEvent[], panelChat?: string): void {
+export function report(docId: string, key: string, events: PageEvent[]): void {
   const rec = docRecord(docId);
   for (const e of events) {
     try {
@@ -1545,7 +1474,7 @@ export function report(docId: string, key: string, events: PageEvent[], panelCha
         rec.uiSeen.push(e.id);
         if (rec.uiSeen.length > UI_SEEN) rec.uiSeen.splice(0, rec.uiSeen.length - UI_SEEN);
         saveDoc(docId);
-        onUi(docId, key, e, panelChat);
+        onUi(docId, key, e);
       } else if (e.type === "comment") {
         if (guidOk(e.guid)) seen(docId, key, e);
       } else if (e.type === "removed") {
@@ -1584,9 +1513,9 @@ export function ready(docId: string, key: string, comments: PageComment[]): void
 /* ------------------------------------------------------------------ */
 
 /**
- * At the half's start: every record read; a run that was going when the half stopped is listened for where the portal
- * went on (the same process: its run goes on, and its end gives the answer), else the chat was cut off with the
- * portal and the thread says so; a removal past its grace is done, one under way waits on; each session's key is asked
+ * At the half's start: every record read; a run that was going when the half stopped is read back (chats.lastAnswer):
+ * listened for where it goes on, ended where it ended meanwhile, said to be cut off where the portal's restart cut it
+ * off; a removal past its grace is done, one under way waits on; each session's key is asked
  * whether a person is still in it (the command service's `info`), and one that has none ends; a chat the portal no
  * longer knows is dropped from its record; then what waits to be posted is posted.
  */
@@ -1643,23 +1572,24 @@ export async function boot(): Promise<void> {
   postWaiting();
 }
 
-/** A run that was going when the half stopped: listened for where the portal went on, else said to be cut off. */
+/** A run that was going when the half stopped: read back, as `heard` does. */
 function resume(t: Target, entry: AgentEntry | SessionRecord): void {
   if (!entry.pending || !entry.chatId) {
     if (entry.queue.length) next(t);
     return;
   }
-  if (entry.pending.pid === process.pid && chats().get(entry.chatId)?.status === "running") {
-    running.set(targetId(t), t);
-    listening.set(entry.chatId, t);
-    return;
-  }
+  running.set(targetId(t), t);
+  listening.set(entry.chatId, t);
+  heard(entry.chatId);
+}
+
+/** A run that was cut off before it answered: said where the person wrote (the thread, or the editor's chat), and what
+ * came while it ran given now, with a word of the cut. */
+function interrupted(t: Target, entry: AgentEntry | SessionRecord): void {
   delete entry.pending;
   entry.state = "interrupted";
   const who = labelOf(t.kind === "thread" ? t.folder : (entry as SessionRecord).folder);
-  // Said where the person wrote: the thread, or the editor's chat.
   post(t, `${who} was interrupted before it answered. ${again(t)}`);
-  // What came while it ran is given now, with a word of the cut.
   if (entry.queue.length) {
     entry.queue.unshift(CUT_NOTE);
     next(t);

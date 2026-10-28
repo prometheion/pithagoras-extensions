@@ -224,7 +224,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     // Deleted: its chat goes after the grace (3 s here).
     await person.frame.evaluate(`${controller}.onRemoveComment(${JSON.stringify((await threads(person.frame))[0].uid)})`);
     assert.ok(await waitFor(() => fake.removed.includes(first.chatId), 15_000), "the thread's chat is removed");
-    assert.deepEqual(docchat.threadsOf(docId), {});
+    assert.deepEqual({ ...docchat.threadsOf(docId) }, {});
     await person.page.context().close();
   });
 

@@ -263,6 +263,10 @@ export const AGENT_IMAGE_TAG = "chromedp/headless-shell:157.0.8103.15";
 export const AGENT_IMAGE_DIGEST = "sha256:f76fce2964611eb1e25b90d906727884db12a8918a6d85a0df2619a9ef845c7c";
 export const AGENT_IMAGE = `chromedp/headless-shell@${AGENT_IMAGE_DIGEST}`;
 
+/** The browser's window: as wide as a spreadsheet's editor and as high as a Word editor (seat-page.ts EDITOR_SIZE), so
+ * the editors, stacked at its top left, are inside it whole. */
+export const AGENT_WINDOW = { width: 1600, height: 1400 };
+
 /** How much the browser may use: about 0.9 GB for one open document, and three at most (seat.ts). */
 const AGENT_MEMORY = 3 * 1024 ** 3;
 
@@ -279,7 +283,7 @@ export function agentSpec(network: string, url: string): ContainerSpec {
     Image: AGENT_IMAGE,
     User: "1000:1000",
     Entrypoint: ["/headless-shell/headless-shell"],
-    Cmd: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", url],
+    Cmd: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", `--window-size=${AGENT_WINDOW.width},${AGENT_WINDOW.height}`, url],
     Env: ["HOME=/tmp"],
     HostConfig: {
       NetworkMode: network,

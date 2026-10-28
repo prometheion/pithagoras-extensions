@@ -1482,7 +1482,9 @@ test("an agent's editor config: its own user, the plugin by its GUID from its ow
   assert.deepEqual(ec.user, { id: `agent:${keyIdOf(home)}`, name: "Research (agent)", group: "agents" });
   assert.equal(ec.mode, "view");
   assert.deepEqual(ec.coEditing, { mode: "fast", change: false }, "a viewer is live too");
-  assert.deepEqual(ec.customization, { macros: false, plugins: true, compactHeader: true });
+  // No spell check in an agent's editor: its squiggles would be in the agent's screenshots.
+  assert.deepEqual(ec.customization, { macros: false, plugins: true, compactHeader: true, features: { spellcheck: { mode: false, change: false } } });
+  assert.equal("width" in (built.config as object), false, "its size is the seat page's, outside what is signed");
   assert.deepEqual(ec.plugins, { pluginsData: ["http://relay:3891/plugin/0123456789abcdef0123456789abcdef/config.json"], autostart: [PLUGIN_GUID] });
   assert.equal(built.key, makeKey(doc.docId, doc.mtimeMs));
   assert.equal(ec.callbackUrl, "http://pithagoras-office-ds-relay:3891/callback");

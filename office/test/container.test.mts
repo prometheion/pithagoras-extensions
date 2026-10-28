@@ -693,6 +693,8 @@ test("the agents' browser: on a network of its own alone, nothing published, har
   assert.equal(spec.Cmd.at(-1), PAGE);
   assert.ok(spec.Cmd.includes("--headless") && spec.Cmd.includes("--no-sandbox"));
   assert.ok(!spec.Cmd.some((a: string) => /remote-debugging/.test(a)), "no debugging port");
+  // The window holds the editors whole: as wide as a spreadsheet's (1600), as high as a Word editor (1400).
+  assert.ok(spec.Cmd.includes("--window-size=1600,1400"));
   const host = spec.HostConfig;
   assert.equal(host.NetworkMode, AGENTS);
   assert.equal(spec.NetworkingConfig, undefined, "on that one network alone");

@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { setImmediate as tick } from "node:timers/promises";
-import { BRIDGE_JS, COMMANDS, MAX_READ_TEXT, SEAT_PAGE_JS } from "../src/seat-page";
+import { BRIDGE_JS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS } from "../src/seat-page";
 
 /** The seat page running: its polls answered by `order`, what it posts as events, the editors it made, and the
  * scripts it loads (each loaded when the test says). */
@@ -100,6 +100,22 @@ test("seat page: an editor whose app never says it started is made anew, once; o
   page.timers.shift()!.fn();
   assert.equal(page.editors.length, 4);
   assert.equal(page.editors[3].destroyed, true);
+});
+
+test("seat page: each editor is made at its own size, a Word editor 1100 x 1400 and a sheet's 1600 x 1000, stacked at the top left", async () => {
+  const page = seatPage();
+  const order = (editorId: string, documentType: string) => ({ open: { editorId, apiJs: "http://office-ds/web-apps/apps/api/documents/api.js", config: { documentType, document: { key: editorId } } } });
+  await page.order(order("w", "word"));
+  page.scripts[0].onload();
+  await page.settle();
+  await page.order(order("c", "cell"));
+  await page.settle();
+  const sizes = page.editors.map((e) => [(e.config as { width?: string }).width, (e.config as { height?: string }).height]);
+  assert.deepEqual(sizes, [["1100px", "1400px"], ["1600px", "1000px"]]);
+  assert.deepEqual(EDITOR_SIZE, { word: { width: 1100, height: 1400 }, cell: { width: 1600, height: 1000 } });
+  // The editor's frame takes the place of its box, so the page places the frames themselves: all at its top left,
+  // inside the browser's window.
+  assert.match(SEAT_PAGE_HTML, /iframe\{position:absolute;top:0;left:0\}/);
 });
 
 test("seat page: an editor whose close came while the editor's script still loaded is never made", async () => {

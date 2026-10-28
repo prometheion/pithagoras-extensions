@@ -905,12 +905,21 @@ export function pluginIndex(ds: string): string {
 }
 
 /**
+ * The size each agent's editor is made at, in CSS pixels, by its document's kind: a Word page fits whole at "fit to
+ * page", and a sheet shows about 23 columns by 41 rows of default cells at 100 %. Made at that size from the start: a
+ * spreadsheet editor resized after it was made draws no grid. The editors are stacked at the page's top left, inside
+ * the browser's window (container.ts `--window-size`), where none is drawn less often for being off screen.
+ */
+export const EDITOR_SIZE: Record<string, { width: number; height: number }> = { word: { width: 1100, height: 1400 }, cell: { width: 1600, height: 1000 } };
+
+/**
  * The seat page: it long-polls the listener (`poll`) for what to open and close, opens each editor in a frame of its
  * own (`new DocsAPI.DocEditor`, with the config the half minted and signed), and tells the listener what each editor
  * says of itself (`event`: ready; an error, which ends the wait for it; whether it holds changes it has not sent to
  * the Document Server yet, which an edit's save waits for).
  */
 export const SEAT_PAGE_JS = `(function () {
+  var sizes = ${JSON.stringify(EDITOR_SIZE)};
   var apis = {};
   var editors = {};
   // Editors closed before they were made (an order to close came while api.js still loaded): never made after.
@@ -944,6 +953,10 @@ export const SEAT_PAGE_JS = `(function () {
     document.body.appendChild(box);
     // A copy for each try: the editor takes the config it is given as its own.
     var config = JSON.parse(JSON.stringify(order.config));
+    // Its size is the page's, not part of what the Document Server checks of the config.
+    var size = sizes[config.documentType] || sizes.word;
+    config.width = size.width + "px";
+    config.height = size.height + "px";
     var started = false;
     config.events = {
       onAppReady: function () { started = true; },
@@ -991,4 +1004,4 @@ export const SEAT_PAGE_JS = `(function () {
 })();
 `;
 
-export const SEAT_PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Office agents</title><style>body{margin:0}div[id^=editor-]{width:1280px;height:900px}</style></head><body><script src="page.js"></script></body></html>`;
+export const SEAT_PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Office agents</title><style>body{margin:0}iframe{position:absolute;top:0;left:0}</style></head><body><script src="page.js"></script></body></html>`;

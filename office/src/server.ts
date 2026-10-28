@@ -390,7 +390,8 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
     // The one editor with a plugin: Office's own, which makes the agent's edits (seat-page.ts). It runs in the agents'
     // browser on its own network, on the Document Server's origin there (the relay's way in), where no person's session
     // is.
-    editorConfig.customization = { macros: false, plugins: true, compactHeader: true };
+    // No spell check: nobody reads its squiggles, and they would be in the agent's screenshots (office_screenshot).
+    editorConfig.customization = { macros: false, plugins: true, compactHeader: true, features: { spellcheck: { mode: false, change: false } } };
     editorConfig.plugins = { pluginsData: [`${as.pluginUrl}config.json`], autostart: [PLUGIN_GUID] };
     return { config, ticketUrl: `${base}/doc/${ticket}`, key };
   }

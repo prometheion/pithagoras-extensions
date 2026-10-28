@@ -80,7 +80,8 @@ window.__opens = [];
 window.__calls = window.__calls || [];
 office({
   extension: "@pithagoras/office",
-  t: (text, vars) => text.replace(/\{(\w+)\}/g, (m, k) => (vars && k in vars ? String(vars[k]) : m)),
+  // Escaped twice: this is the source of a template literal, which would take a single backslash away.
+  t: (text, vars) => text.replace(/\\{(\\w+)\\}/g, (m, k) => (vars && k in vars ? String(vars[k]) : m)),
   locale: { use: () => {}, add: () => {} },
   api: {
     url: (p) => BASE + p,

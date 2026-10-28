@@ -311,7 +311,7 @@ export default function office(given: Portal): void {
   });
 
   // A call of one of the tools, in place of the portal's card for a finished one that names its document.
-  for (const tool of ["office_list", "office_create", "office_read", "office_edit", "office_comments"]) {
+  for (const tool of ["office_list", "office_create", "office_read", "office_edit", "office_comments", "office_screenshot"]) {
     portal.slots.register("chat.tool", { id: tool, tool, component: OfficeCall });
   }
 

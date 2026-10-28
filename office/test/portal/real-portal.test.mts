@@ -235,6 +235,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const own = page.locator('[data-extension="@pithagoras/office"]').filter({ has: page.getByRole("status") }).first();
     const office = own.getByRole("status");
     await office.waitFor({ timeout: 60_000 });
+    // Its status is there while it still loads ("Loading…"): the page is read once its Start is.
+    await own.getByRole("button", { name: /^(Start container|Container starten)$/ }).waitFor({ timeout: 60_000 });
     const lines = (await own.innerText()).split("\n").map((l) => l.trim()).filter(Boolean);
     console.log(`setup: the page before Start: ${JSON.stringify(lines)}`);
     for (const line of lines) assert.ok(line.length <= 80, `no prose on the page: ${JSON.stringify(line)}`);

@@ -908,6 +908,21 @@ function plainFile(doc: DocMeta, file: string): fs.Stats {
   return st;
 }
 
+/** A document's size, from its own file as readDoc would open it (plainFile, then opened without following a link), and
+ * refused above the library's cap: what a read through the portal's rights checks before the Document Server is handed
+ * the file. */
+export function docSize(doc: DocMeta): number {
+  plainFile(doc, doc.path);
+  const fd = fs.openSync(doc.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const { size } = fs.fstatSync(fd);
+    if (size > MAX_IMPORT_BYTES) throw tooLarge(doc.path, size);
+    return size;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** A document's bytes, from its own file and never through a link (plainFile, then opened without following one), so
  * that an agent that put a link in its file's place cannot have the portal hand out what the link leads to. */
 export function readDoc(doc: DocMeta): Buffer {

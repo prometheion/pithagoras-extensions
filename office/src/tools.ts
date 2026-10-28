@@ -19,7 +19,8 @@
  * A document is opened for the agent only where the agent could read its file itself (portal.files.open, as
  * the chat's agent: with the sandbox on, a file the agent could not read is refused, and a link is not followed), and
  * in edit mode only where it could change it (portal.files.identity); otherwise its editor opens in view mode and
- * office_edit is refused (`read_only`).
+ * office_edit is refused (`read_only`). A document in another agent's or project's folder that a person opened to it
+ * by a mention is read with the portal's rights instead (byGrantOnly): the mention is the person's word that it may.
  *
  * Comments that mention an agent, and the editor's chat, are no wake of these tools: each gets an internal chat of
  * its own (docchat.ts), which this factory gives the tools as any chat of the folder, without the question tool.
@@ -32,7 +33,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
-import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
+import { canonical, createDoc, docSize, docsForHome, MAX_IMPORT_BYTES, readDoc, refresh, refreshAll, tooLarge, within, type DocMeta } from "./store";
 import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
@@ -288,11 +289,21 @@ const text = (content: string, details?: unknown) => ({ content: [{ type: "text"
  * office_read's sibling office_comments truncate at this length with an explicit marker. */
 const MAX_READ_CHARS = 200_000;
 
-/** A doc's saved bytes, for the agent of `chatId`: its own file as that agent could read it (portal.files); a
- * not_found refusal where it is gone. */
-function readBytes(doc: DocMeta, chatId: string): Buffer {
+/** Whether the agent or project of `home` sees `doc` only by a grant: a person mentioned it in one of the document's
+ * comments, and the document is in another agent's home or project folder. That mention is the person's word that it
+ * may read the document, which its own rights may not allow (with the sandbox on, an agent's home is closed to the
+ * other agents, and a project's chats run as the default agent): such a document is read with the portal's rights,
+ * from its own file and never through a link (store.readDoc). Whether it may also change it stays the agent's own
+ * rights' (mayWrite), so a grant never lets an agent write into a folder it could not write itself. */
+function byGrantOnly(doc: DocMeta, home: string): boolean {
+  return doc.owner !== home && !within(home, doc.path) && doc.grants.some((g) => g.folder === home);
+}
+
+/** A doc's saved bytes, for the agent of `chatId` (of `home`): its own file as that agent could read it (portal.files),
+ * or, for a document it was granted (byGrantOnly), as the portal reads it; a not_found refusal where it is gone. */
+function readBytes(doc: DocMeta, chatId: string, home: string): Buffer {
   try {
-    return readAsAgent(doc.path, chatId);
+    return byGrantOnly(doc, home) ? readDoc(doc) : readAsAgent(doc.path, chatId);
   } catch (e) {
     throw unreadable(doc, e);
   }
@@ -308,8 +319,17 @@ function unreadable(doc: DocMeta, e: unknown): unknown {
 }
 
 /** A document's file opened as the agent would and closed again: where it could not read it, the Document Server
- * (which reads as the portal) is never handed it. */
-function assertMayRead(doc: DocMeta, chatId: string): void {
+ * (which reads as the portal) is never handed it. A document it was granted is checked as the portal reads it
+ * (byGrantOnly): a plain file at its own name, within the library's cap. */
+function assertMayRead(doc: DocMeta, chatId: string, home: string): void {
+  if (byGrantOnly(doc, home)) {
+    try {
+      docSize(doc);
+    } catch (e) {
+      throw unreadable(doc, e);
+    }
+    return;
+  }
   let opened: { fd: number; size: number };
   try {
     opened = openAsAgent(doc.path, chatId);
@@ -366,8 +386,8 @@ function readHeader(doc: DocMeta, saved?: keyof typeof SAVED_BECAUSE): string {
 }
 
 /** A saved file read as office_read shows it when Office does not run (a spreadsheet's `sheet` alone, where named). */
-function savedText(doc: DocMeta, chatId: string, sheet?: string): string {
-  const buf = readBytes(doc, chatId);
+function savedText(doc: DocMeta, chatId: string, home: string, sheet?: string): string {
+  const buf = readBytes(doc, chatId, home);
   if (doc.ext === "xlsx") {
     const parsed = parseXlsx(buf); // throws {code:"invalid_zip"} -> corrupt
     // A sheet is named case-insensitively, as Excel and the live read do.
@@ -485,7 +505,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(async ({ id, sheet }, signal) => {
       const doc = visibleDoc(id);
       if (sheet !== undefined && (typeof sheet !== "string" || doc.ext !== "xlsx")) throw new Refusal("bad_op", doc.ext === "xlsx" ? "sheet is a sheet's name" : "sheet is for spreadsheets; a Word document has none");
-      assertMayRead(doc, chatId);
+      assertMayRead(doc, chatId, home);
       const state = await officeState();
       let said = "";
       let live = false;
@@ -501,9 +521,9 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           // as the editor starts (its network gone): the saved file too, as when it is stopped.
           const code = (e as { code?: string } | null)?.code;
           if (code !== "agent_editor_missing" && code !== "office_stopped") throw e;
-          said = `${readHeader(doc, code === "office_stopped" ? "stopped" : "missing")}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
+          said = `${readHeader(doc, code === "office_stopped" ? "stopped" : "missing")}\n\n${savedText(doc, chatId, home, sheet as string | undefined)}`;
         }
-      } else said = `${readHeader(doc, state)}\n\n${savedText(doc, chatId, sheet as string | undefined)}`;
+      } else said = `${readHeader(doc, state)}\n\n${savedText(doc, chatId, home, sheet as string | undefined)}`;
       if (said.length > MAX_READ_CHARS) said = said.slice(0, MAX_READ_CHARS) + "\n\n[output truncated by office_read: it exceeds 200,000 characters]";
       return text(said, { action: "read", id: doc.docId, ext: doc.ext, mtimeMs: doc.mtimeMs, live });
     }),
@@ -556,7 +576,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(async ({ id, ops }, signal) => {
       const doc = visibleDoc(id);
       const job: EditJob = editJob(doc.ext, ops);
-      assertMayRead(doc, chatId);
+      assertMayRead(doc, chatId, home);
       // Written with the portal's rights (and the Document Server's save): only where the agent could have written it.
       if (!mayWrite(doc.path, chatId)) throw new Refusal("read_only", `"${doc.title}" is not a file your agent may change: you can read it, not edit it`);
       const state = await officeState();
@@ -629,7 +649,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(async ({ id, thread }, signal) => {
       const doc = visibleDoc(id);
       if (thread !== undefined && typeof thread !== "string") throw new Refusal("bad_op", "thread is a thread's id");
-      assertMayRead(doc, chatId);
+      assertMayRead(doc, chatId, home);
       const { threads, from } = await commentThreads(doc, signal);
       const asked = docchat.threadOfChat(chatId);
       const shown = thread === undefined ? threads : threads.filter((t) => t.guid.toLowerCase() === thread.toLowerCase());
@@ -675,7 +695,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         threads: (read.comments ?? []).map((c) => ({ guid: c.guid ?? c.sessionId ?? "", author: c.author, userId: c.userId, text: c.text, solved: c.solved, ...(c.quote ? { quote: c.quote } : {}), replies: c.replies.map((r) => ({ author: r.author, text: r.text })) })),
       };
     }
-    const buf = readBytes(doc, chatId);
+    const buf = readBytes(doc, chatId, home);
     return { from: "file", threads: doc.ext === "docx" ? docxThreads(buf) : xlsxThreads(buf) };
   }
 }

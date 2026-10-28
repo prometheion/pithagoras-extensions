@@ -395,6 +395,65 @@ test("scanned documents the agent may read but not change: read in a view-mode e
   fs.rmSync(s.ws, { recursive: true, force: true });
 });
 
+test("a document another agent's home holds, granted by a mention: read as the portal reads it where the sandbox keeps the agent out, never written", async () => {
+  __resetToolsForTests();
+  resetLive();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-tools-"));
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-")));
+  const [mine, theirs] = [path.join(ws, "atlas"), path.join(ws, "home")];
+  fs.mkdirSync(mine);
+  fs.mkdirSync(theirs);
+  const plan = await createDoc({ title: "Plan", type: "word", folder: theirs }, root);
+  const secret = await createDoc({ title: "Secret", type: "word", folder: theirs }, root);
+  addGrant(root, plan.docId, mine, "c-mention");
+  const opened: string[] = [];
+  const pi = makePi();
+  const fake = fakeSeat(() => root);
+  const office = { state: "running" as "running" | "stopped" };
+  registerTools({
+    extend: (f) => f(pi, { id: "chat-a" }),
+    chatFolder: () => mine,
+    folders: () => [{ path: mine, name: "Atlas", kind: "agent" }, { path: theirs, name: "Home", kind: "agent", home: true }],
+    // The sandbox: another agent's home is closed to this agent, for reading and writing.
+    openFile: (file) => {
+      opened.push(file);
+      throw Object.assign(new Error("That folder is not one its agent may use"), { code: "invalid" });
+    },
+    mayWrite: () => {
+      throw Object.assign(new Error("That folder is not one its agent may use"), { code: "invalid" });
+    },
+    root,
+    record: () => {},
+    log: () => {},
+    seat: fake.seat,
+    save: fake.save,
+    officeState: () => office.state,
+  });
+  const find = (name: string) => pi.registered.find((t) => t.name === name)!;
+  const read = (await find("office_read").execute("c", { id: plan.docId })) as ToolResult;
+  assert.match(read.content[0].text, /\[1\] New document/);
+  assert.deepEqual(s0(fake.state.runs), [[plan.docId, "word.read", "view"]], "in a view-mode editor: it may not change the file");
+  const comments = (await find("office_comments").execute("c", { id: plan.docId })) as ToolResult;
+  assert.match(comments.content[0].text, /via comment c-mention/);
+  office.state = "stopped";
+  const saved = (await find("office_read").execute("c", { id: plan.docId })) as ToolResult;
+  assert.match(saved.content[0].text, /Saved copy[\s\S]*\[1\] New document/, "the saved file, read with the portal's rights");
+  office.state = "running";
+  assert.match(await refused(find("office_edit").execute("c", { id: plan.docId, ops: [{ quote: "New document", replacement: "x" }] }), "granted"), /^error:read_only /);
+  assert.deepEqual(opened, [], "never asked to open as the agent: the person's mention is what lets it read");
+  // Without a grant, nothing: another agent's document is not there for it.
+  await refused(find("office_read").execute("c", { id: secret.docId }), "not granted");
+  // A link put in the granted file's place is not followed.
+  fs.rmSync(plan.path);
+  fs.symlinkSync(secret.path, plan.path);
+  office.state = "stopped";
+  assert.match(await refused(find("office_read").execute("c", { id: plan.docId }), "link"), /^error:not_found /);
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+const s0 = (runs: Run[]) => runs.map((r) => [r.docId, r.kind, r.mode]);
+
 test("office_read/office_edit: a scanned file that grew past the library's cap since it was indexed is refused before it is opened anywhere", async () => {
   const s = await scanned({ openFile: () => ({ fd: -1, size: 600 * 1024 * 1024 }), mayWrite: () => {} });
   const realClose = fs.closeSync;

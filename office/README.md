@@ -72,7 +72,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
   goes into its folder and belongs to it, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
-  and a link is not followed.
+  and a link is not followed. A document in another agent's home or project folder that you opened to it by a mention
+  is read with the portal's rights (your mention says it may), and changed only where the agent could write that
+  folder itself: with the sandbox on, it reads and answers in comments.
 - **The agent edits beside you, live**: each agent (each agent's or project's folder) that works in a document has an
   OnlyOffice editor of its own open in it, in a browser of Office's own (the agents' editor), in the same editing
   session as the people in the document. People see it there as "<folder name> (agent)", with its

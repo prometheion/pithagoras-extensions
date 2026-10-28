@@ -198,14 +198,14 @@ export const FRAME_FN = `async function (t) {
       return { x: tl.x, y: tl.y, w: right - tl.x, h: last.y + last.h - tl.y };
     };
     var pixel = function (x, y) { return Array.prototype.join.call(g.getImageData(x, y, 1, 1).data, ","); };
-    // The headers' size, as drawn now (the row numbers' strip is wider for longer numbers): each strip is one colour
-    // up to its border, along a line through the first pixels of the range's first row and column; the border is the
-    // header's last pixel.
-    var headers = function (box) {
-      var bg = pixel(1, box.y + 1), x = 1, y = 1;
-      while (x < cv.width && pixel(x, box.y + 1) === bg) x++;
-      bg = pixel(box.x + 1, 1);
-      while (y < cv.height && pixel(box.x + 1, y) === bg) y++;
+    // The headers' size, as drawn now (the row numbers' strip is wider for longer numbers): the corner where both
+    // strips meet is one colour up to its borders, along its top and its left edge; the border is the header's last
+    // pixel. (Not along the range's first row or column: next to hidden rows or columns the editor draws a second line
+    // there.)
+    var headers = function () {
+      var bg = pixel(1, 1), x = 1, y = 1;
+      while (x < cv.width && pixel(x, 1) === bg) x++;
+      while (y < cv.height && pixel(1, y) === bg) y++;
       return { x: x + 1, y: y + 1 };
     };
     // In view as the editor stands, else from a cell just after frozen panes the range crosses (where the panes and
@@ -225,7 +225,7 @@ export const FRAME_FN = `async function (t) {
         if (!box) continue;
         await drawn();
         alive();
-        var head = headers(box);
+        var head = headers();
         if (box.x >= head.x && box.y >= head.y) return { box: box, head: head };
       }
       return null;

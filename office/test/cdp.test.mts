@@ -402,9 +402,11 @@ function sheetEditor(frozenRows = 0, hiddenRows: number[] = []) {
     },
   };
   // The headers' strips in a grey of their own up to their border; the grid white.
+  // Below hidden rows the editor draws a second line across the row numbers' strip, a pixel below the row's top.
+  const second = (y: number) => hiddenRows.some((h) => !hiddenRows.includes(h + 1) && h + 1 >= view.row && y === size().hy + above(h + 1) + 1);
   const ws = canvas(106, 44, (x, y) => {
     const s = size();
-    if (x === s.hx - 1 || y === s.hy - 1) return [180, 180, 180, 255];
+    if (x === s.hx - 1 || y === s.hy - 1 || (x < s.hx - 1 && second(y))) return [180, 180, 180, 255];
     return x < s.hx - 1 || y < s.hy - 1 ? [243, 243, 243, 255] : WHITE;
   });
   const charts = canvas(106, 44, () => [0, 0, 0, 0]);
@@ -489,6 +491,12 @@ test("frame function, sheets: the hidden rows of a range are skipped, never look
   assert.equal(out.zoom, 1);
   assert.deepEqual([out.width, out.height], [6 + 20, 4 + 30]);
   assert.ok(!s.found.some((a) => /^[A-Z]+([4-9])$/.test(a)), `no hidden row looked up: ${s.found.join(" ")}`);
+  // A range whose first rows are hidden starts below the second line the editor draws there: the headers' size is
+  // taken at their corner.
+  const below = sheetEditor(0, [3, 4, 5, 6, 7, 8]);
+  const bw = frameWindow({ Asc: { editor: below.editor } }, { "ws-canvas": below.ws, "ws-canvas-graphic": below.charts });
+  const rest = await frameFn(bw.window, { kind: "cell", index: 0, name: "Sheet1", c1: 0, r1: 3, c2: 1, r2: 11, centre: [0, 10], away: [0, 311], zoom: 1, hidden: { cols: [], rows: [3, 4, 5, 6, 7, 8] } });
+  assert.deepEqual([rest.zoom, rest.width, rest.height], [1, 6 + 20, 4 + 15]);
 });
 
 test("frame function, sheets: a sheet hidden, moved or renamed since the locate is never shown (showing a hidden one unhides it): the picture is refused", async () => {

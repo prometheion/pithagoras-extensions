@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import net from "node:net";
@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Frame, type Page } from "@playwright/test";
 import JSZip from "jszip";
 import { parseDocx } from "../../src/ooxml.ts";
+import { templateDocx, within } from "../../src/store.ts";
 import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
 
 /**
@@ -33,6 +34,12 @@ import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
  * its end.
  *
  *   OFFICE_E2E=1 PITHAGORAS_DIR=<a built Pithagoras> [OFFICE_PORTAL_MODE=container] node --import tsx --test test/portal/real-portal.test.mts
+ *
+ * Case m is where documents live: each in an agent's home or a project, owned by it. New document on the Office tab makes
+ * one in the default agent's home, office_create in the chat's agent home or project; the library has only what is in
+ * the homes and projects; a document an earlier version kept in the extension's own docs folder (one is put there
+ * before the portal starts) was moved into the default agent's home; the editor's chat of a document made on the tab is
+ * answered by the default agent.
  *
  * Cases h to l are comments and the editor's chat as the way to talk to agents, in Word and a spreadsheet: mentions
  * from the editor's list and typed by hand, answers in the thread and in the editor's chat, a thread's chat kept
@@ -92,6 +99,12 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   const origin = `http://127.0.0.1:${port}`;
   const at = `${origin}/api/x/%40pithagoras/office`;
   const officeData = path.join(data, "extension-data", "%40pithagoras%2Foffice");
+  // A document an earlier version made in the extension's own docs folder, which nobody owned (case m): Office moves it
+  // into the default agent's home when its half starts.
+  const LEGACY = "minutes-aaaaaa";
+  mkdirSync(path.join(officeData, "docs", LEGACY), { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(officeData, "docs", LEGACY, "Old minutes.docx"), await templateDocx());
+  writeFileSync(path.join(officeData, "index.json"), JSON.stringify({ version: 1, docs: [{ docId: LEGACY, title: "Old minutes", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] }] }));
 
   // The chat's model is the script, the only one there is.
   writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", contextWindow: 32768, maxTokens: 4096 }] } } }));
@@ -144,11 +157,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     }
     return { status: answer.status, body };
   };
-  const state = async () => (await json(`${at}/state`)).body as { docs: { docId: string; title: string; ext: string; mtimeMs: number }[]; locks: Record<string, { id: string; name?: string }[]>; agent: { present: boolean; pull: { error?: string } | null; browser: unknown }; container: { state: string } };
-  const fileOf = async (docId: string) => {
-    const doc = (await state()).docs.find((x) => x.docId === docId)!;
-    return path.join(officeData, "docs", docId, `${doc.title}.${doc.ext}`);
-  };
+  const state = async () => (await json(`${at}/state`)).body as { docs: { docId: string; title: string; ext: string; mtimeMs: number; path: string; owner: string; ownerName: string }[]; locks: Record<string, { id: string; name?: string }[]>; agent: { present: boolean; pull: { error?: string } | null; browser: unknown }; container: { state: string } };
+  /** A document's file: in place, in its owner's folder. */
+  const fileOf = async (docId: string) => (await state()).docs.find((x) => x.docId === docId)!.path;
   const partOf = async (docId: string, part: string) => (await JSZip.loadAsync(readFileSync(await fileOf(docId)))).file(part)!.async("string");
   const noConflictCopy = async (title: string) => assert.deepEqual((await state()).docs.filter((x) => x.title.startsWith(`${title} (conflict`)).map((x) => x.title), [], "no conflict copy");
   const newDoc = async (title: string, type: "word" | "cell") => {
@@ -227,7 +238,10 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const lines = (await own.innerText()).split("\n").map((l) => l.trim()).filter(Boolean);
     console.log(`setup: the page before Start: ${JSON.stringify(lines)}`);
     for (const line of lines) assert.ok(line.length <= 80, `no prose on the page: ${JSON.stringify(line)}`);
-    for (const gone of [/Made documents keep/, /through this portal's own proxy/, /runs in a browser of its own/]) assert.doesNotMatch(lines.join("\n"), gone);
+    for (const gone of [/Made documents keep/, /through this portal's own proxy/, /runs in a browser of its own/, /each person|each agent|jede Person|jeden Agenten/]) assert.doesNotMatch(lines.join("\n"), gone);
+    // The memory it needs, said plainly: one line, nothing about how it grows.
+    assert.ok(lines.some((l) => /^(Recommended: 1 GB of RAM\.|Empfohlen: 1 GB RAM\.)$/.test(l)), `the plain RAM line: ${JSON.stringify(lines)}`);
+    assert.equal(lines.filter((l) => /\bRAM\b/.test(l)).length, 1, "and only that line speaks of RAM");
     await own.getByRole("button", { name: /^(Start container|Container starten)$/ }).click();
     // What the one status said on the way, and every download line it showed.
     const healths: string[] = [];
@@ -828,6 +842,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
 
   let aegisChat = "";
   let reportChat = "";
+  let aegisHome = "";
+  let reportFolder = "";
   let wordDoc = "";
   let sheetDoc = "";
   const limitsNow = async () => (await json(`${at}/state`)).body.limits as Record<string, number>;
@@ -851,11 +867,13 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const withAegis = await json(`${origin}/api/sessions`, { method: "POST", body: JSON.stringify({ agent: agent.body.id }) });
     assert.equal(withAegis.status, 200, JSON.stringify(withAegis.body));
     aegisChat = withAegis.body.id;
+    aegisHome = realpathSync(agent.body.home);
     const project = await json(`${origin}/api/projects`, { method: "POST", body: JSON.stringify({ name: "Report" }) });
     assert.equal(project.status, 200, JSON.stringify(project.body));
     const inReport = await json(`${origin}/api/sessions`, { method: "POST", body: JSON.stringify({ workspace: project.body.path }) });
     assert.equal(inReport.status, 200, JSON.stringify(inReport.body));
     reportChat = inReport.body.id;
+    reportFolder = realpathSync(project.body.path);
     await say(reportChat, []);
     const [word, sheet] = await say(aegisChat, [
       { name: "office_create", arguments: { title: "Talk to Aegis", type: "word" } },
@@ -1048,6 +1066,106 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await view.context().close();
     await personCloses(word.page);
     await personCloses(sheet.page);
+  });
+
+  test("m: no document of nobody's: New document on the Office tab makes it in the default agent's home, office_create in the chat's agent home or project; the library has only the homes' and projects' documents; the earlier version's docs folder was moved into the default agent's home; the editor's chat of a document made on the tab is answered by the default agent", { timeout: 900_000 }, async () => {
+    const agents = (await json(`${origin}/api/agents`)).body.agents as { id: string; name: string; home: string; first: boolean }[];
+    const first = agents.find((a) => a.first)!;
+    assert.ok(first, JSON.stringify(agents));
+    const home = realpathSync(first.home);
+    assert.equal(home, realpathSync(env.AGENT_HOME), "the default agent's home is the portal's agent home");
+    console.log(`m. the default agent: ${first.name} at ${home}; Aegis at ${aegisHome}; the project Report at ${reportFolder}`);
+
+    // The document of the earlier version's docs folder: moved into the default agent's home at start, said in the log.
+    const old = (await state()).docs.find((d) => d.docId === LEGACY);
+    assert.ok(old, "the earlier version's document is in the library");
+    assert.equal(old.path, path.join(home, "Old minutes.docx"));
+    assert.equal(old.owner, home);
+    assert.equal(old.ownerName, first.name);
+    assert.ok(existsSync(old.path));
+    assert.ok(!existsSync(path.join(officeData, "docs")), "the extension's docs folder is gone");
+    const moved = readFileSync(path.join(root, "portal.log"), "utf8").split("\n").filter((l) => l.includes(LEGACY) && /moved from the extension's docs folder/.test(l));
+    console.log(`m. the log: ${JSON.stringify(moved)}`);
+    assert.ok(moved.some((l) => l.includes(`to ${old.path}`)), "the move is logged");
+
+    // New document on the Office tab, as a person makes one: in the default agent's home, and its.
+    const page = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
+    await page.goto(`${origin}/x/@pithagoras/office/office`);
+    const titleBox = page.getByRole("textbox", { name: /^(Title of a new document|Titel eines neuen Dokuments)$/ });
+    await titleBox.waitFor({ timeout: 60_000 });
+    await titleBox.fill("Made on the tab");
+    const make = page.getByRole("button", { name: /^(New document|Neues Dokument)$/ });
+    console.log(`m. the New document button says: ${JSON.stringify(await make.getAttribute("title"))}`);
+    await make.click();
+    let tabDoc: Awaited<ReturnType<typeof state>>["docs"][number] | undefined;
+    assert.ok(await until(async () => !!(tabDoc = (await state()).docs.find((d) => d.title === "Made on the tab")), 20_000), "the document is made");
+    assert.equal(tabDoc!.path, path.join(home, "Made on the tab.docx"), "in the default agent's home");
+    assert.equal(tabDoc!.owner, home, "owned by the default agent's home");
+    assert.equal(tabDoc!.ownerName, first.name);
+    assert.ok(existsSync(tabDoc!.path));
+    // Its row's owner chip names the default agent.
+    const chip = page.locator(".po-chip-owner", { hasText: first.name }).first();
+    await chip.waitFor({ timeout: 20_000 });
+    const chips = await page.locator(".po-chip-owner").allInnerTexts();
+    console.log(`m. the owner chips on the tab: ${JSON.stringify(chips)}`);
+    assert.ok(chips.every((c) => /^(owned|Besitzer) · \S/.test(c.trim())), "every row has an owner");
+    assert.doesNotMatch(await page.locator("body").innerText(), /unowned|ohne Besitzer|Nobody answers|Niemand antwortet/i);
+    await page.context().close();
+
+    // office_create from an agent's chat and from a project's chat: in that home, or that project's folder.
+    await say(aegisChat, [{ name: "office_create", arguments: { title: "Aegis plan", type: "word" } }]);
+    await say(reportChat, [{ name: "office_create", arguments: { title: "Report figures", type: "cell" } }]);
+    const docs = (await state()).docs;
+    const plan = docs.find((d) => d.title === "Aegis plan")!;
+    const figures = docs.find((d) => d.title === "Report figures")!;
+    assert.equal(plan.path, path.join(aegisHome, "Aegis plan.docx"));
+    assert.equal(plan.owner, aegisHome);
+    assert.equal(plan.ownerName, "Aegis");
+    assert.equal(figures.path, path.join(reportFolder, "Report figures.xlsx"));
+    assert.equal(figures.owner, reportFolder);
+    assert.ok(existsSync(plan.path) && existsSync(figures.path));
+
+    // Files dropped in: in an agent's home or a project (also deeper in it) they are documents; in a chat's folder or
+    // elsewhere in the workspace they are not.
+    const workspaces = realpathSync(env.WORKSPACE_ROOT);
+    const drafts = path.join(workspaces, ".drafts");
+    mkdirSync(drafts, { recursive: true });
+    const inDrafts = await json(`${origin}/api/sessions`, { method: "POST", body: JSON.stringify({ workspace: drafts }) });
+    assert.equal(inDrafts.status, 200, JSON.stringify(inDrafts.body));
+    const bytes = await templateDocx();
+    mkdirSync(path.join(reportFolder, "minutes"), { recursive: true });
+    writeFileSync(path.join(aegisHome, "Dropped in Aegis.docx"), bytes);
+    writeFileSync(path.join(reportFolder, "minutes", "Dropped in Report.docx"), bytes);
+    writeFileSync(path.join(drafts, "In a chat folder.docx"), bytes);
+    writeFileSync(path.join(workspaces, "Loose in the workspace.docx"), bytes);
+    const rescan = await json(`${at}/documents/rescan`, { method: "POST", body: "{}" });
+    assert.equal(rescan.status, 200, JSON.stringify(rescan.body));
+    console.log(`m. Rescan: ${JSON.stringify(rescan.body)}`);
+    const after = (await state()).docs;
+    const titled = (title: string) => after.find((d) => d.title === title);
+    assert.equal(titled("Dropped in Aegis")?.owner, aegisHome, "the one in Aegis's home is Aegis's");
+    assert.equal(titled("Dropped in Report")?.owner, reportFolder, "the one deeper in the project is the project's");
+    assert.equal(titled("Dropped in Report")?.path, path.join(reportFolder, "minutes", "Dropped in Report.docx"));
+    assert.equal(titled("In a chat folder"), undefined, "not the one in a chat's folder");
+    assert.equal(titled("Loose in the workspace"), undefined, "nor the one elsewhere in the workspace");
+    console.log(`m. the library's owners: ${JSON.stringify([...new Set(after.map((d) => d.owner))])}`);
+    assert.ok(after.every((d) => [home, aegisHome, reportFolder].includes(d.owner) && within(d.owner, d.path)), "every document is in its owner's folder, an agent's home or a project");
+
+    // The editor's chat of the document made on the tab: answered by the default agent, in a chat of its home.
+    const m1 = `m1-${process.pid}`;
+    const { page: editor, frame } = await personOpens(tabDoc!.docId, "word");
+    await openChat(frame);
+    await sendChat(editor, frame, `Wer antwortet? SCRIPT#${m1} <<<[]>>>`);
+    let heard: string[][] = [];
+    assert.ok(await until(async () => (heard = await chatHeard(frame)).some(([id, name, said]) => /^agent:/.test(id) && name.includes(first.name) && said === `Done ${m1}.`), 60_000, 300), `the default agent's answer in the editor's chat: ${JSON.stringify(heard)}`);
+    console.log(`m. the editor's chat heard: ${JSON.stringify(heard)}`);
+    const session = Object.values(sessionRecords()).find((s) => s.docId === tabDoc!.docId);
+    assert.ok(session?.chatId, "the editor's chat has a chat");
+    const behind = await json(`${origin}/api/sessions/${session!.chatId}`);
+    assert.equal(behind.status, 200);
+    assert.equal(realpathSync(behind.body.workspace), home, "the chat behind it works in the default agent's home");
+    await shot(editor, "owned-tab-document-chat");
+    await personCloses(editor);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

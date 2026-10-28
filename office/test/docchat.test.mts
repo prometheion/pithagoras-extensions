@@ -373,6 +373,28 @@ test("a save removes only threads an earlier saved file had, after the grace; a 
   assert.equal(removed.length, 1);
 });
 
+test("a comment deleted in the editor goes after the grace although a save asked for before the delete still has it (the one after an answer's post); one a save lacks goes the same way, and a later save that has it keeps it", async () => {
+  limits = { ...limits, removeAfterS: 0.2 };
+  const docId = await word();
+  docchat.report(docId, "k", [{ type: "comment", guid: "00000001", text: "+Aegis eins", userId: "portal-user" }, ui("u1", "comment", "00000001", "+Aegis eins"), ui("u2", "comment", "00000002", "+Aegis zwei")]);
+  await settle();
+  const [one, two] = [prompts[0].chatId, prompts[1].chatId];
+  const both = await rewriteZipFor([["00000001", "+Aegis eins"], ["00000002", "+Aegis zwei"]]);
+  docchat.persisted(docId, both);
+  // The person deletes the first; the save that comes back next was asked for before, and still has it.
+  docchat.report(docId, "k", [{ type: "removed", guids: ["00000001"] }]);
+  docchat.persisted(docId, both);
+  await delay(400);
+  assert.deepEqual(removed, [one]);
+  assert.deepEqual(Object.keys(docchat.threadsOf(docId)), ["00000002"]);
+  // A save that lacks the second starts its removal; one that has it again within the grace keeps it.
+  docchat.persisted(docId, await rewriteZipFor([]));
+  docchat.persisted(docId, await rewriteZipFor([["00000002", "+Aegis zwei"]]));
+  await delay(400);
+  assert.deepEqual(removed, [one]);
+  assert.ok(chats.some((c) => c.id === two));
+});
+
 test("the editor's chat: the first message makes one internal chat of the document's owner, messages during its run come together as the next prompt, the answer is posted in chunks of 2,048 characters, at most the limit", async () => {
   limits = { ...limits, chatMessages: 2 };
   const docId = await word();

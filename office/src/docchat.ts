@@ -1220,6 +1220,9 @@ function clearTimer(name: string): void {
   timers.delete(name);
 }
 
+/** Why a thread goes that a person deleted in the editor (a page's report). */
+const EDITOR_DELETE = "deleted in the editor";
+
 /** A thread seen gone (`reason`): it and its chats go after the grace, unless it is seen again in that time. */
 function startRemoval(docId: string, guid: string, reason: string): void {
   const thread = docRecord(docId).threads[guid];
@@ -1319,7 +1322,9 @@ function reconcile(docId: string, file: CommentThread[], reason: string): void {
   for (const [guid, thread] of Object.entries({ ...rec.threads })) {
     if (guids.has(guid)) {
       if (!thread.inFile) (thread.inFile = true), (changed = true);
-      if (thread.removing) cancelRemoval(docId, guid);
+      // A delete in the editor is undone only where an editor sees the comment again: a save asked for before it (the
+      // one after an answer's post, say) comes back with the comment still in it.
+      if (thread.removing && thread.removing.reason !== EDITOR_DELETE) cancelRemoval(docId, guid);
       continue;
     }
     if (!thread.inFile) continue;
@@ -1532,7 +1537,7 @@ export function report(docId: string, key: string, events: PageEvent[]): void {
           if (!guidOk(guid)) continue;
           live.get(docId)?.comments.delete(guid);
           live.get(docId)?.from.delete(guid);
-          startRemoval(docId, guid, "deleted in the editor");
+          startRemoval(docId, guid, EDITOR_DELETE);
         }
       }
     } catch (err) {

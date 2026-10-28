@@ -29,7 +29,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { portal } from "./host";
 import { addGrant, canonical, getDoc, listDocs, readDoc, type DocMeta } from "./store";
 import { docxThreads, xlsxThreads, type CommentThread } from "./ooxml";
@@ -44,7 +44,9 @@ import { portal339, type ChatAnswer, type StartChatOptions } from "./extension-a
 /** What the person sees of a thread's or a session's chat (the editor's bar, GET /editor-state). */
 export type ChatState = "queued" | "working" | "answered" | "not_posted" | "failed" | "interrupted" | "limit" | "idle";
 
-type Pending = { since: number };
+/** A run asked for. `before`: what the chat's last run had come to when this one was asked for (`runDigest`), where
+ * it had run before: a restart that finds the chat's last run still that one knows this run never started. */
+type Pending = { since: number; before?: string };
 /** An answer waiting to be posted. `sent`: the chunks of an editor's chat answer posted already; `check`: a post of it
  * may have run (its editor closed or timed out while it ran), so a thread reads back before it posts it again. */
 type ToPost = { text: string; at: number; sent?: number; check?: true };
@@ -249,6 +251,7 @@ export function __resetDocchatForTests(): void {
   live.clear();
   lastSave.clear();
   listening.clear();
+  unstarted.clear();
   retries.clear();
   loaded = false;
 }
@@ -560,6 +563,8 @@ const running = new Map<string, Target>();
 const waiting = new Map<string, Target[]>();
 /** The chats whose run's end the half listens for: runs that went on while it restarted. */
 const listening = new Map<string, Target>();
+/** The chats whose run, read back after a restart, was still the one before the run asked for once already. */
+const unstarted = new Set<string>();
 
 function entryOf(t: Target): AgentEntry | SessionRecord | undefined {
   if (t.kind === "session") return sessionRecords()[t.key];
@@ -613,7 +618,8 @@ function start(t: Target, entry: AgentEntry | SessionRecord, message: string): v
   running.set(id, t);
   entry.state = "working";
   delete entry.error;
-  entry.pending = { since: now() };
+  const before = lastRunOf(chatId);
+  entry.pending = { since: now(), ...(before ? { before } : {}) };
   persist(t);
   let run: Promise<ChildRun>;
   try {
@@ -1366,6 +1372,7 @@ export function chatDeleted(chatId: string): void {
   if (!internal.has(chatId)) return;
   internal.delete(chatId);
   listening.delete(chatId);
+  unstarted.delete(chatId);
   clearTimer(`listen:${chatId}`);
   for (const docId of docs.keys()) {
     const rec = docRecord(docId);
@@ -1404,7 +1411,7 @@ export function chatEvent(chatId: string, event: Record<string, unknown>): void 
 
 /** A run the half listens for, read back (chats.lastAnswer): still going, it is read again a little later; ended, it
  * ends here as a run the half waited for, its answer posted unless the guard marked the chat; cut off by the portal's
- * restart (or not to be read), its thread or the editor's chat says so. */
+ * restart, never started, or not to be read, its thread or the editor's chat says so. */
 function heard(chatId: string): void {
   const t = listening.get(chatId);
   if (!t) return;
@@ -1414,26 +1421,69 @@ function heard(chatId: string): void {
   } catch (e) {
     log(`the last answer of chat ${chatId} could not be read: ${(e as Error).message}`);
   }
+  const entry = entryOf(t);
+  const ours = entry !== undefined && entry.chatId === chatId;
   if (last?.status === "running") {
+    unstarted.delete(chatId);
+    // An earlier version's chat, a child of one of the person's, that ran on through the update: the portal would let
+    // it ask the person questions nobody sees, and keep the thread working until somebody answered them.
+    if (ours && !usable(chatId)) return upgraded(t, entry, chatId);
     timer(`listen:${chatId}`, runTimings.listenMs, () => heard(chatId));
     return;
   }
+  // The chat's last run is still the one before the run asked for: the half stopped before the portal took the message
+  // in, or the portal is about to start it (a reload of the chat settling first). Read once more a little later.
+  const before = ours && last && !cutOff(last) && entry.pending?.before === runDigest(last);
+  if (before && !unstarted.has(chatId)) {
+    unstarted.add(chatId);
+    timer(`listen:${chatId}`, runTimings.listenMs, () => heard(chatId));
+    return;
+  }
+  unstarted.delete(chatId);
   listening.delete(chatId);
   clearTimer(`listen:${chatId}`);
-  const entry = entryOf(t);
-  if (!entry || entry.chatId !== chatId) {
+  if (!entry || !ours) {
     // Its chat was replaced meanwhile: what waits goes to the new one.
     running.delete(targetId(t));
     next(t);
     return;
   }
-  if (!last || cutOff(last)) {
+  if (!last || cutOff(last) || before) {
     running.delete(targetId(t));
     interrupted(t, entry);
     persist(t);
     return;
   }
   ended(t, chatId, { status: last.status as ChildRun["status"], answer: last.answer, ...(last.marked ? { marked: true as const } : {}), ...(last.error ? { error: last.error } : {}) });
+}
+
+/** What a chat's last run came to, in short (its end and its answer), to tell it from the next: `Pending.before`. */
+const runDigest = (last: ChatAnswer) => createHash("sha256").update(JSON.stringify([last.status, last.answer, last.error ?? ""])).digest("hex").slice(0, 16);
+
+/** `runDigest` of the chat's last run now, none where it never ran (or cannot be read). */
+function lastRunOf(chatId: string): string | undefined {
+  try {
+    const last = chats().lastAnswer(chatId);
+    return last && runDigest(last);
+  } catch {
+    return undefined;
+  }
+}
+
+/** An earlier version's chat found running after the update: removed (which stops its run), and the run said to be
+ * interrupted. The next message starts a chat of the new kind, told of the earlier conversation; what waited for this
+ * one is in the thread's replies (office_comments) or the session's messages, which that chat is given. */
+function upgraded(t: Target, entry: AgentEntry | SessionRecord, chatId: string): void {
+  listening.delete(chatId);
+  clearTimer(`listen:${chatId}`);
+  running.delete(targetId(t));
+  dropChat(chatId);
+  entry.chatId = null;
+  if (t.kind === "thread") (entry as AgentEntry).earlier = true;
+  entry.queue = [];
+  delete entry.dropped;
+  interrupted(t, entry);
+  persist(t);
 }
 
 /** A run the portal's restart cut off: stopped, with the error the portal's next start gave it. A run the person

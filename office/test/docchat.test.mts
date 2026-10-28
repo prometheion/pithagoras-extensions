@@ -498,6 +498,69 @@ test("an earlier version's chats (children of the person's chats, attended): eac
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state", "threads", `${docId}.json`), "utf8")).threads["00000001"].agents["/f/aegis"].parent, undefined, "no parent kept");
 });
 
+test("after a restart of the half, a run asked for whose chat's last run is still the one before (the portal had not taken the message in) is not answered by that earlier answer: read once more, then said to be interrupted; one the portal starts meanwhile is heard", async () => {
+  const docId = await word();
+  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins"), ui("u2", "comment", "00000002", "+Aegis zwei")]);
+  await settle();
+  const [one, two] = [prompts[0].chatId, prompts[1].chatId];
+  // Both answer, as the portal keeps it.
+  answers = { [one]: { status: "done", answer: "Erste Antwort." }, [two]: { status: "done", answer: "Erste Antwort." } };
+  prompts[0].resolve({ status: "done", answer: "Erste Antwort." });
+  prompts[1].resolve({ status: "done", answer: "Erste Antwort." });
+  await settle();
+  // A reply in each: asked for, and the half stops before the portal ran either.
+  docchat.report(docId, "k", [ui("u3", "reply", "00000001", "Und weiter?"), ui("u4", "reply", "00000002", "Und weiter?")]);
+  await settle();
+  assert.equal(prompts.length, 4);
+  docchat.__resetDocchatForTests();
+  Object.assign(docchat.runTimings, { listenMs: 30 });
+  configure();
+  posts = [];
+  try {
+    await docchat.boot();
+    await settle();
+    const replies = () => posts.filter((p) => p.job.kind === "word.reply").map((p) => [p.job.args.guid, p.job.args.text]);
+    assert.deepEqual(replies(), [], "nothing said while it may still start");
+    // The portal starts the second one meanwhile (a reload of its chat settled first); the first never comes.
+    answers[two] = { status: "running", answer: "Erste Antwort." };
+    await delay(100);
+    assert.deepEqual(replies(), [["00000001", "Aegis was interrupted before it answered. Reply to try again."]]);
+    answers[two] = { status: "done", answer: "Zweite Antwort." };
+    await delay(100);
+    assert.deepEqual(replies(), [
+      ["00000001", "Aegis was interrupted before it answered. Reply to try again."],
+      ["00000002", "Zweite Antwort."],
+    ]);
+    assert.ok(!replies().some(([, text]) => text === "Erste Antwort."), "the earlier answer is not posted again");
+  } finally {
+    Object.assign(docchat.runTimings, { listenMs: 5_000 });
+  }
+});
+
+test("an earlier version's chat (an attended child) that runs on through the update is removed, which stops its run, and the run said to be interrupted; the next message starts a chat for nobody to attend, told of the earlier conversation", async () => {
+  const docId = await word();
+  chats.push({ id: "old-child", folder: "/f/aegis", listed: false }, { id: "old-session", folder: "/f/aegis", listed: false });
+  answers = { "old-child": { status: "running", answer: "" }, "old-session": { status: "running", answer: "" } };
+  fs.mkdirSync(path.join(root, "state", "threads"), { recursive: true });
+  const entry = (chatId: string) => ({ parent: "aegis-main", chatId, state: "working", queue: ["Noch etwas"], pending: { since: 1 } });
+  fs.writeFileSync(path.join(root, "state", "threads", `${docId}.json`), JSON.stringify({ version: 1, uiSeen: [], made: ["00000001"], threads: { "00000001": { createdAt: 1, text: "+Aegis eins", inFile: false, agents: { "/f/aegis": entry("old-child") } } } }));
+  fs.writeFileSync(path.join(root, "state", "sessions.json"), JSON.stringify({ "key-a": { docId, folder: "/f/aegis", people: [{ text: "Hallo", at: 1 }], ...entry("old-session") } }));
+  await docchat.boot();
+  await settle();
+  assert.deepEqual(removed.sort(), ["old-child", "old-session"]);
+  assert.deepEqual(posts.filter((p) => p.job.kind === "word.reply").map((p) => p.job.args.text), ["Aegis was interrupted before it answered. Reply to try again."]);
+  assert.deepEqual(posts.filter((p) => p.job.kind === "chat.send").map((p) => p.job.args.text), ["Aegis was interrupted before it answered. Write again to try again."]);
+  assert.equal(prompts.length, 0, "nothing given to a chat of the earlier kind");
+  docchat.report(docId, "k", [ui("u2", "reply", "00000001", "Noch da?")]);
+  docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Und jetzt?")]);
+  await settle();
+  assert.deepEqual(started.map((o) => o.unattended), [true, true]);
+  assert.match(prompts[0].message, /earlier conversation/);
+  assert.match(prompts[0].message, /Noch da\?/);
+  assert.match(prompts[1].message, /Hallo/);
+  assert.match(prompts[1].message, /Und jetzt\?$/);
+});
+
 test("a chat deleted by hand: the thread keeps its record, and its next reply makes a new chat told of the earlier one; a folder removed takes its entries away", async () => {
   const docId = await word();
   docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")]);

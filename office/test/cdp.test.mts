@@ -310,33 +310,42 @@ test("frame function, Word: a large page is made smaller to 1,024 px on its long
  * columns, 8 rows in view at 100 %); looking up a cell out of view scrolls so that it is in the middle (as far as the
  * sheet's start allows). At 75 %, cells are 8 x 4 behind headers of 5 x 3 (12 columns in view).
  */
-function sheetEditor(frozenRows = 0) {
+function sheetEditor(frozenRows = 0, hiddenRows: number[] = []) {
   const did: string[] = [];
+  // Every cell looked up, by its address.
+  const found: string[] = [];
+  const sheets = [{ name: "Sheet1", hidden: false }, { name: "Sheet2", hidden: false }];
   // `row`: the first row of the part that scrolls (below the frozen rows).
   const view = { col: 0, row: frozenRows, zoom: 1, active: [0, 0] as [number, number], sheet: 0 };
+  // A hidden row is drawn 0 px high: the rows between the view's first one and `r`, in px.
+  const above = (r: number) => Array.from({ length: Math.max(0, r - view.row) }, (_, k) => (hiddenRows.includes(view.row + k) ? 0 : size().h)).reduce((a, b) => a + b, 0);
   // Whole pixels, as the editor draws them.
   const size = () => (view.zoom === 1 ? { w: 10, h: 5, hx: 6, hy: 4 } : { w: 8, h: 4, hx: 5, hy: 3 });
   const cols = () => Math.floor((106 - size().hx) / size().w);
   const rows = () => Math.floor((44 - size().hy) / size().h);
   const editor = {
+    asc_getWorksheetsCount: () => sheets.length,
+    asc_getWorksheetName: (i: number) => sheets[i]?.name,
+    asc_isWorksheetHidden: (i: number) => Boolean(sheets[i]?.hidden),
     asc_getActiveWorksheetIndex: () => view.sheet,
     asc_showWorksheet: (i: number) => (did.push(`sheet ${i}`), (view.sheet = i)),
     asc_getZoom: () => view.zoom,
     asc_setZoom: (z: number) => (did.push(`zoom ${z}`), (view.zoom = z)),
     asc_findCell: (a: string) => {
+      found.push(a);
       const m = /^([A-Z]+)(\d+)$/.exec(a)!;
       const c = [...m[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
       const r = Number(m[2]) - 1;
       if (c < view.col || c >= view.col + cols()) view.col = Math.max(0, c - Math.floor(cols() / 2));
       // Frozen rows are always in view. DS 10.0 does not scroll back to the first row after them: it stays out of view.
       const scrolling = rows() - frozenRows;
-      if (r >= frozenRows && r !== (frozenRows || -1) && (r < view.row || r >= view.row + scrolling)) view.row = Math.max(frozenRows, r - Math.floor(scrolling / 2));
+      if (r >= frozenRows && r !== (frozenRows || -1) && (r < view.row || above(r) + size().h > scrolling * size().h)) view.row = Math.max(frozenRows, r - Math.floor(scrolling / 2));
       view.active = [c, r];
     },
     asc_getActiveCellCoord: () => {
       const s = size();
       const [c, r] = view.active;
-      return { asc_getX: () => s.hx + (c - view.col) * s.w, asc_getY: () => s.hy + (r < frozenRows ? r : frozenRows + r - view.row) * s.h, asc_getWidth: () => s.w, asc_getHeight: () => s.h };
+      return { asc_getX: () => s.hx + (c - view.col) * s.w, asc_getY: () => s.hy + (r < frozenRows ? r * s.h : frozenRows * s.h + above(r)), asc_getWidth: () => s.w, asc_getHeight: () => (hiddenRows.includes(r) ? 0 : s.h) };
     },
   };
   // The headers' strips in a grey of their own up to their border; the grid white.
@@ -346,14 +355,14 @@ function sheetEditor(frozenRows = 0) {
     return x < s.hx - 1 || y < s.hy - 1 ? [243, 243, 243, 255] : WHITE;
   });
   const charts = canvas(106, 44, () => [0, 0, 0, 0]);
-  return { editor, view, did, ws, charts };
+  return { editor, view, did, found, sheets, ws, charts };
 }
 
 test("frame function, sheets: the sheet shown, the range in view as the editor stands, and drawn with its header strips from both canvases", async () => {
   const s = sheetEditor();
   const w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
   // B2:D3 (columns 1-3, rows 1-2) on the second sheet, at 100 %.
-  const out = await frameFn(w.window, { kind: "cell", index: 1, c1: 1, r1: 1, c2: 3, r2: 2, centre: [2, 1], away: [1, 302], zoom: 1 });
+  const out = await frameFn(w.window, { kind: "cell", index: 1, name: "Sheet2", c1: 1, r1: 1, c2: 3, r2: 2, centre: [2, 1], away: [1, 302], zoom: 1 });
   assert.deepEqual(out, { data: "QUJD", width: 6 + 30, height: 4 + 10, zoom: 1 });
   assert.deepEqual(s.did, ["sheet 1"]);
   // Corner, column letters over the range, row numbers beside it, the range: from the cells' canvas, then the charts'.
@@ -375,18 +384,18 @@ test("frame function, sheets: a range out of view is centred from a cell far fro
   // Rows 40-45 of columns C-E: out of view from the sheet's start.
   let s = sheetEditor();
   let w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
-  let out = await frameFn(w.window, { kind: "cell", index: 0, c1: 2, r1: 39, c2: 4, r2: 44, centre: [3, 42], away: [2, 344], zoom: 1 });
+  let out = await frameFn(w.window, { kind: "cell", index: 0, name: "Sheet1", c1: 2, r1: 39, c2: 4, r2: 44, centre: [3, 42], away: [2, 344], zoom: 1 });
   assert.equal(out.zoom, 1);
   assert.deepEqual([out.width, out.height], [6 + 30, 4 + 30]);
   // Eleven columns: ten fit at 100 %, twelve at 75 %.
   s = sheetEditor();
   w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
-  out = await frameFn(w.window, { kind: "cell", index: 0, c1: 0, r1: 0, c2: 10, r2: 1, centre: [5, 0], away: [0, 301], zoom: 1 });
+  out = await frameFn(w.window, { kind: "cell", index: 0, name: "Sheet1", c1: 0, r1: 0, c2: 10, r2: 1, centre: [5, 0], away: [0, 301], zoom: 1 });
   assert.equal(out.zoom, 0.75);
   assert.deepEqual(s.did, ["zoom 0.75"]);
   s = sheetEditor();
   w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
-  out = await frameFn(w.window, { kind: "cell", index: 0, c1: 0, r1: 0, c2: 20, r2: 1, centre: [10, 0], away: [0, 301], zoom: 1 });
+  out = await frameFn(w.window, { kind: "cell", index: 0, name: "Sheet1", c1: 0, r1: 0, c2: 20, r2: 1, centre: [10, 0], away: [0, 301], zoom: 1 });
   assert.deepEqual(out, { error: { code: "range_too_large", message: "the range does not fit in the editor's view at 75 %" } });
   assert.equal(w.drawn.length, 0, "nothing drawn");
 });
@@ -412,9 +421,33 @@ test("frame function, sheets: a range across frozen panes, with the view scrolle
   const s = sheetEditor(2);
   s.view.row = 30;
   const w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
-  const out = await frameFn(w.window, { kind: "cell", index: 0, c1: 0, r1: 1, c2: 1, r2: 4, centre: [0, 2], away: [0, 304], zoom: 1, frozen: [0, 2] });
+  const out = await frameFn(w.window, { kind: "cell", index: 0, name: "Sheet1", c1: 0, r1: 1, c2: 1, r2: 4, centre: [0, 2], away: [0, 304], zoom: 1, frozen: [0, 2] });
   assert.equal(out.zoom, 1);
   assert.deepEqual([out.width, out.height], [6 + 20, 4 + 20]);
   assert.equal(s.view.row, 2, "the part that scrolls is back at its start");
   assert.deepEqual(w.drawn.filter((d) => d.from === s.ws)[3].args.slice(0, 4), [6, 9, 20, 20], "rows 2 to 5 as they join below the panes");
+});
+
+test("frame function, sheets: the hidden rows of a range are skipped, never looked up; the picture is of the rows shown", async () => {
+  // A1:B12 with rows 4-9 hidden: rows 1-3 and 10-12 are shown, 30 px high, which fit in view.
+  const s = sheetEditor(0, [3, 4, 5, 6, 7, 8]);
+  const w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
+  const out = await frameFn(w.window, { kind: "cell", index: 0, name: "Sheet1", c1: 0, r1: 0, c2: 1, r2: 11, centre: [0, 9], away: [0, 311], zoom: 1, hidden: { cols: [], rows: [3, 4, 5, 6, 7, 8] } });
+  assert.equal(out.zoom, 1);
+  assert.deepEqual([out.width, out.height], [6 + 20, 4 + 30]);
+  assert.ok(!s.found.some((a) => /^[A-Z]+([4-9])$/.test(a)), `no hidden row looked up: ${s.found.join(" ")}`);
+});
+
+test("frame function, sheets: a sheet hidden, moved or renamed since the locate is never shown (showing a hidden one unhides it): the picture is refused", async () => {
+  for (const change of ["hidden", "renamed", "gone"] as const) {
+    const s = sheetEditor();
+    if (change === "hidden") s.sheets[1].hidden = true;
+    if (change === "renamed") s.sheets[1].name = "Salaries";
+    if (change === "gone") s.sheets.pop();
+    const w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
+    const out = await frameFn(w.window, { kind: "cell", index: 1, name: "Sheet2", c1: 0, r1: 0, c2: 1, r2: 1, centre: [0, 0], away: [0, 301], zoom: 1 });
+    assert.deepEqual(out, { error: { code: "sheet_changed", message: 'the sheet "Sheet2" was hidden, moved or renamed while the picture was taken; try again' } }, change);
+    assert.deepEqual(s.did, [], `${change}: not shown`);
+    assert.equal(w.drawn.length, 0);
+  }
 });

@@ -661,9 +661,15 @@ const CELL_REPLY = `function () {
   }
 }`;
 
-/** The most text a picture's locate gives of what the picture shows: a page holds far less, but a page the editor
- * cannot place (it starts in a text box) is answered with the whole document around it. */
+/** The most text a picture's locate gives of what the picture shows, in characters: a page holds far less, but a page
+ * the editor cannot place (it starts in a text box), or one in a long table, is answered with the text around it; a
+ * range of narrow columns and low rows shows thousands of cells. */
 export const MAX_SHOWN_TEXT = 20_000;
+
+/** The most columns and rows a sheet's picture takes, hidden ones counted (about three times what fits at 75 % with
+ * the default sizes): a range of many hidden rows "fits" by its pixels, and every row of it costs a look in the
+ * builder and the frame function. */
+export const SHEET_MOST = { cols: 100, rows: 200 };
 
 /**
  * The sheet's view the fit is reckoned on (seat-page EDITOR_SIZE's spreadsheet editor, measured in DS 10.0): its grid
@@ -691,13 +697,17 @@ export const VIEW_SETTLE = { ms: 300, max: 5_000, every: 50 };
  * the target the picture is taken of (cdp.ts ShotTarget). Changes nothing but the agent's own selection.
  * Word (`kind: "word"`, `page` from 1, or the page of `quote`, the `nth` time it is found): the page, the page count,
  * and the page's blocks as office_read numbers them, from the one the page starts in to the one the next page starts
- * in (the cursor put at each page's start and the paragraph there looked up). A page's start is not in a block of
- * the body where it is in a text box: then the text goes from the start, or to the end, of the document.
+ * in (the cursor put at each page's start and the paragraph there looked up), of a table there its rows from the one
+ * to the other (`row`, from 1, and `of`, its rows, where not all of them are given). A page's start is not in a block
+ * of the body where it is in a text box: then the text goes from the start, or to the end, of the document. Up to
+ * MAX_SHOWN_TEXT characters (`truncated`).
  * Sheets (`kind: "cell"`, `sheet`, `range` as {col, row, cols, rows} from ops.ts): the sheet (the first visible one
  * by default; a hidden one is refused), the range (by default the used range from A1), and the zoom it fits at:
  * 100 %, else 75 %, from its columns' widths and rows' heights (hidden ones count nothing; frozen panes the range is
  * beyond take their part of the view). A range that fits at neither is refused with the largest one from its first
- * cell that does; the default range is cut to that (`cut`). Its cells as cell.read gives them.
+ * cell that does; the default range is cut to that (`cut`). A range spans SHEET_MOST columns and rows at most, hidden
+ * ones counted. Its cells as cell.read gives them, of its rows and columns that are not hidden (what the picture shows;
+ * the frame function skips the hidden ones too), up to MAX_SHOWN_TEXT characters (`truncated`).
  */
 const VIEW_LOCATE = `function () {
   ${WORD_COLLECT_SRC}
@@ -714,16 +724,16 @@ const VIEW_LOCATE = `function () {
       page = hits[nth - 1].GetStartPage() + 1;
     }
     if (page > pages) throw { code: "no_page", message: "the document has " + pages + " page" + (pages === 1 ? "" : "s") };
-    // The blocks as office_read numbers them, and the block each paragraph is in (a table's cells are its table's).
+    // The blocks as office_read numbers them, and where each paragraph is: its block, and in a table its row.
     var blocks = [], of = {};
     (function add(content) {
       for (var i = 0; i < content.GetElementsCount(); i++) {
         var el = content.GetElement(i), type = el.GetClassType();
-        if (type === "paragraph") { of[el.GetInternalId()] = blocks.length; blocks.push(el); }
+        if (type === "paragraph") { of[el.GetInternalId()] = { block: blocks.length, row: -1 }; blocks.push(el); }
         else if (type === "table") {
           for (var r = 0; r < el.GetRowsCount(); r++) {
             var row = el.GetRow(r);
-            for (var c = 0; c < row.GetCellsCount(); c++) collect(row.GetCell(c).GetContent(), []).forEach(function (x) { of[x.p.GetInternalId()] = blocks.length; });
+            for (var c = 0; c < row.GetCellsCount(); c++) collect(row.GetCell(c).GetContent(), []).forEach(function (x) { of[x.p.GetInternalId()] = { block: blocks.length, row: r }; });
           }
           blocks.push(el);
         } else if (type === "blockLvlSdt") add(el.GetContent());
@@ -733,34 +743,42 @@ const VIEW_LOCATE = `function () {
       doc.GoToPage(k);
       doc.MoveCursorRight(1, true);
       var range = doc.GetRangeBySelect(), paras = range ? range.GetAllParagraphs() : [];
-      var at = paras.length ? of[paras[0].GetInternalId()] : undefined;
-      return at === undefined ? null : at;
+      return (paras.length && of[paras[0].GetInternalId()]) || null;
     };
-    var first = startOf(page - 1), last = page < pages ? startOf(page) : blocks.length - 1;
+    var first = startOf(page - 1), last = page < pages ? startOf(page) : { block: blocks.length - 1, row: -1 };
     doc.RemoveSelection();
-    if (first === null) first = 0;
-    if (last === null || last < first) last = last === null ? blocks.length - 1 : first;
+    if (first === null) first = { block: 0, row: -1 };
+    if (last === null || last.block < first.block) last = last === null ? { block: blocks.length - 1, row: -1 } : first;
+    // A table the page starts or ends in gives the rows from the one the page starts in to the one the next page starts
+    // in (a table can run over many pages); the text stops at MAX_SHOWN_TEXT, also inside a table or a paragraph.
     var shown = [], size = 0, truncated = false;
-    for (var b = first; b <= last; b++) {
-      if (size > ${MAX_SHOWN_TEXT}) { truncated = true; break; }
+    var room = function (t) {
+      if (size + t.length <= ${MAX_SHOWN_TEXT}) { size += t.length; return t; }
+      truncated = true;
+      t = t.slice(0, Math.max(0, ${MAX_SHOWN_TEXT} - size));
+      size = ${MAX_SHOWN_TEXT};
+      return t;
+    };
+    for (var b = first.block; b <= last.block && !truncated; b++) {
       var el = blocks[b];
       if (el.GetClassType() === "paragraph") {
         var style = "";
         try { var st = el.GetParaPr().GetStyle(); style = st ? st.GetName() : ""; } catch (e) { style = ""; }
-        var text = clean(el.GetText());
-        size += text.length;
+        var text = room(clean(el.GetText()));
         shown.push(style && style !== "Normal" ? { p: text, style: style } : { p: text });
       } else {
-        var rows = [];
-        for (var r2 = 0; r2 < el.GetRowsCount(); r2++) {
+        var count = el.GetRowsCount(), from = b === first.block && first.row > 0 ? first.row : 0, to = b === last.block && last.row >= from ? last.row : count - 1, rows = [];
+        for (var r2 = from; r2 <= to && !truncated; r2++) {
           var cells = [], tr = el.GetRow(r2);
-          for (var c2 = 0; c2 < tr.GetCellsCount(); c2++) { var t = cellText(tr.GetCell(c2)); size += t.length; cells.push(t); }
+          for (var c2 = 0; c2 < tr.GetCellsCount() && !truncated; c2++) cells.push(room(cellText(tr.GetCell(c2))));
           rows.push(cells);
         }
-        shown.push({ table: rows });
+        var table = { table: rows };
+        if (from > 0 || from + rows.length < count) { table.row = from + 1; table.of = count; }
+        shown.push(table);
       }
     }
-    return { page: page, pages: pages, first: first + 1, blocks: shown, truncated: truncated, view: { kind: "word", page: page, pages: pages } };
+    return { page: page, pages: pages, first: first.block + 1, blocks: shown, truncated: truncated, view: { kind: "word", page: page, pages: pages } };
   }
   function cell() {
     var all = Api.GetSheets(), book = all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }), at = -1;
@@ -795,10 +813,13 @@ const VIEW_LOCATE = `function () {
       var h = ws.GetRange("A" + (row + 1)).GetRowHeight();
       return typeof h === "number" ? Math.round(h * 4 / 3) : 19;
     };
-    // How many of n (from the one at "from" on) fit in room (px at 100 %); at most 2,000 are looked at.
-    var fitting = function (from, n, px, room) {
+    // The sizes (px at 100 %, 0 for a hidden one) of the range's columns and rows, as many as a picture takes at most.
+    var sizes = function (from, n, px, most) { var out = []; for (var k = 0; k < n && k < most; k++) out.push(px(from + k)); return out; };
+    var colW = sizes(r.col, r.cols, colPx, ${SHEET_MOST.cols}), rowH = sizes(r.row, r.rows, rowPx, ${SHEET_MOST.rows});
+    // How many of them fit in room (px at 100 %).
+    var fitting = function (px, room) {
       var sum = 0, k = 0;
-      for (; k < n && k < 2000; k++) { sum += px(from + k); if (sum > room) break; }
+      for (; k < px.length; k++) { sum += px[k]; if (sum > room) break; }
       return k;
     };
     var frozenOff = function (count, start, px) { var sum = 0; if (count && start >= count) for (var k = 0; k < count; k++) sum += px(k); return sum; };
@@ -806,33 +827,55 @@ const VIEW_LOCATE = `function () {
     var views = [[1, ${SHEET_VIEW.header[1][0]}, ${SHEET_VIEW.header[1][1]}], [0.75, ${SHEET_VIEW.header[0.75][0]}, ${SHEET_VIEW.header[0.75][1]}]];
     for (var v = 0; v < views.length && !zoom; v++) {
       var z = views[v][0];
-      cols = fitting(r.col, r.cols, colPx, (${SHEET_VIEW.width} - views[v][1]) / z - offW);
-      rows = fitting(r.row, r.rows, rowPx, (${SHEET_VIEW.height} - views[v][2]) / z - offH);
+      cols = fitting(colW, (${SHEET_VIEW.width} - views[v][1]) / z - offW);
+      rows = fitting(rowH, (${SHEET_VIEW.height} - views[v][2]) / z - offH);
       if (cols >= r.cols && rows >= r.rows) zoom = z;
     }
     var from = colName(r.col) + (r.row + 1);
     var largest = from + ":" + colName(r.col + Math.max(1, cols) - 1) + (r.row + Math.max(1, rows));
     if (!zoom) {
-      if (given) throw { code: "range_too_large", message: "the range " + from + ":" + colName(r.col + r.cols - 1) + (r.row + r.rows) + " is larger than the editor shows at 75 %: the largest range from " + from + " that fits is " + largest + "; take it in parts" };
+      var most = r.cols > ${SHEET_MOST.cols} || r.rows > ${SHEET_MOST.rows} ? " (a picture takes ${SHEET_MOST.cols} columns and ${SHEET_MOST.rows} rows at most, hidden ones counted)" : "";
+      if (given) throw { code: "range_too_large", message: "the range " + from + ":" + colName(r.col + r.cols - 1) + (r.row + r.rows) + " is larger than the editor shows at 75 %" + most + ": the largest range from " + from + " that fits is " + largest + "; take it in parts" };
       r = { col: r.col, row: r.row, cols: Math.max(1, cols), rows: Math.max(1, rows) };
       zoom = 0.75;
       cut = true;
     }
     var range = from + ":" + colName(r.col + r.cols - 1) + (r.row + r.rows);
-    var values = grid(ws.GetRange(range).GetValue()), formulas = grid(ws.GetRange(range).GetFormula()), shown = [];
-    for (var y = 0; y < values.length; y++) for (var x = 0; x < values[y].length; x++) {
-      var value = values[y][x], formula = formulas[y] ? formulas[y][x] : "";
-      if (value === "" && !(typeof formula === "string" && formula.charAt(0) === "=")) continue;
-      var one = { a: colName(r.col + x) + (r.row + y + 1), v: value };
-      if (typeof formula === "string" && formula.charAt(0) === "=") one.f = formula;
-      shown.push(one);
+    // The hidden columns and rows of the range: the picture leaves them out, and so does its text.
+    var hiddenCols = [], hiddenRows = [];
+    for (var hc = 0; hc < r.cols; hc++) if (!colW[hc]) hiddenCols.push(r.col + hc);
+    for (var hr = 0; hr < r.rows; hr++) if (!rowH[hr]) hiddenRows.push(r.row + hr);
+    if (hiddenCols.length === r.cols || hiddenRows.length === r.rows) throw { code: "range_hidden", message: "every " + (hiddenCols.length === r.cols ? "column" : "row") + " of the range " + range + " is hidden, so a picture shows nothing of it" };
+    var values = grid(ws.GetRange(range).GetValue()), formulas = grid(ws.GetRange(range).GetFormula()), shown = [], size = 0, truncated = false;
+    for (var y = 0; y < values.length && !truncated; y++) {
+      if (!rowH[y]) continue;
+      for (var x = 0; x < values[y].length; x++) {
+        if (!colW[x]) continue;
+        var value = values[y][x], formula = formulas[y] ? formulas[y][x] : "";
+        if (value === "" && !(typeof formula === "string" && formula.charAt(0) === "=")) continue;
+        if (size > ${MAX_SHOWN_TEXT}) { truncated = true; break; }
+        var one = { a: colName(r.col + x) + (r.row + y + 1), v: value };
+        if (typeof formula === "string" && formula.charAt(0) === "=") one.f = formula;
+        size += one.a.length + String(value).length + (one.f ? one.f.length : 0);
+        shown.push(one);
+      }
     }
     var c1 = r.col, r1 = r.row, c2 = r.col + r.cols - 1, r2 = r.row + r.rows - 1;
     var crosses = (fr > r1 && fr <= r2) || (fc > c1 && fc <= c2);
     var away = r2 + 300 < 1048576 ? [c1, r2 + 300] : [c1, 0];
-    var view = { kind: "cell", index: ws.GetIndex(), c1: c1, r1: r1, c2: c2, r2: r2, centre: [Math.floor((c1 + c2) / 2), Math.floor((r1 + r2) / 2)], away: away, zoom: zoom };
+    // The centre among the columns and rows that are shown (the editor does not scroll to a hidden one).
+    var middle = function (lo, hi, hidden) {
+      var showing = [];
+      for (var k = lo; k <= hi; k++) if (hidden.indexOf(k) === -1) showing.push(k);
+      return showing[Math.floor((showing.length - 1) / 2)];
+    };
+    var view = { kind: "cell", index: ws.GetIndex(), name: ws.GetName(), c1: c1, r1: r1, c2: c2, r2: r2, centre: [middle(c1, c2, hiddenCols), middle(r1, r2, hiddenRows)], away: away, zoom: zoom };
     if (crosses) view.frozen = [fc, fr];
-    return { sheet: ws.GetName(), range: range, used: used, cut: cut, zoom: zoom, cells: shown, view: view };
+    if (hiddenCols.length || hiddenRows.length) view.hidden = { cols: hiddenCols, rows: hiddenRows };
+    var out = { sheet: ws.GetName(), range: range, used: used, cut: cut, zoom: zoom, cells: shown, view: view };
+    if (truncated) out.truncated = true;
+    if (view.hidden) out.hidden = true;
+    return out;
   }
   try {
     return { result: a.kind === "word" ? word() : cell() };

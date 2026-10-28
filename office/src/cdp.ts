@@ -33,7 +33,7 @@ export const SHOT_MAX_BYTES = 1024 * 1024;
 /** What the locate command (seat-page.ts) says is to be shown, as the frame function takes it. */
 export type ShotTarget =
   | { kind: "word"; page: number; pages: number }
-  | { kind: "cell"; index: number; c1: number; r1: number; c2: number; r2: number; centre: [number, number]; away: [number, number]; zoom: number; frozen?: [number, number] };
+  | { kind: "cell"; index: number; name: string; c1: number; r1: number; c2: number; r2: number; centre: [number, number]; away: [number, number]; zoom: number; frozen?: [number, number]; hidden?: { cols: number[]; rows: number[] } };
 
 /** A picture: base64 JPEG and its size, and what the editor showed (a sheet's zoom, a document's settled pages). */
 export type ShotImage = { data: string; width: number; height: number; zoom?: number; pages?: number };
@@ -50,7 +50,8 @@ export type ShotImage = { data: string; width: number; height: number; zoom?: nu
  * in view down a line inside their left margin, the one drawn whole at the top (the last page's at the bottom: the
  * view does not scroll past the end), and its sides along a line just below its top (inside its top margin).
  * Co-authors' marks are switched off in the agent's editor first.
- * Sheets: the sheet shown, the zoom set, and the range made visible: as it is, or else with its centre cell found (the
+ * Sheets: the sheet shown (where it is still the one the locate named, and not hidden), the zoom set, and the range
+ * made visible, its hidden columns and rows skipped: as it is, or else with its centre cell found (the
  * editor centres a cell it scrolls to), from a cell far from it; both corners must then be inside the grid, and the
  * first corner where it was before the second was looked up. A range across frozen panes is looked at from the first
  * cell after them, where the panes and the rest join. The picture is the range with its column letters and row numbers:
@@ -140,7 +141,10 @@ export const FRAME_FN = `async function (t) {
   }
   async function cell() {
     var api = window.Asc && window.Asc.editor;
-    if (!api || typeof api.asc_findCell !== "function") return stop("not_ready", "the editor is not ready");
+    if (!api || typeof api.asc_findCell !== "function" || typeof api.asc_getWorksheetName !== "function" || typeof api.asc_isWorksheetHidden !== "function") return stop("not_ready", "the editor is not ready");
+    // The sheet the locate named, where it is still that one and not hidden: a person may have hidden, moved or renamed
+    // it since, and asc_showWorksheet of a hidden sheet unhides it (a change to the document, which co-editing sends).
+    if (!(t.index < api.asc_getWorksheetsCount()) || api.asc_getWorksheetName(t.index) !== t.name || api.asc_isWorksheetHidden(t.index)) return stop("sheet_changed", "the sheet " + JSON.stringify(t.name) + " was hidden, moved or renamed while the picture was taken; try again");
     if (api.asc_getActiveWorksheetIndex() !== t.index) {
       api.asc_showWorksheet(t.index);
       await drawn();
@@ -159,25 +163,30 @@ export const FRAME_FN = `async function (t) {
       return { x: q.asc_getX(), y: q.asc_getY(), w: q.asc_getWidth(), h: q.asc_getHeight() };
     };
     var near = function (a, b) { return Math.abs(a - b) <= 1; };
+    // The range's columns and rows that are shown: the editor draws a hidden one as nothing, and is not asked for one.
+    var hidden = t.hidden || { cols: [], rows: [] }, cs = [], rs = [];
+    for (var hc = t.c1; hc <= t.c2; hc++) if (hidden.cols.indexOf(hc) === -1) cs.push(hc);
+    for (var hr = t.r1; hr <= t.r2; hr++) if (hidden.rows.indexOf(hr) === -1) rs.push(hr);
+    if (!cs.length || !rs.length) return stop("range_hidden", "every column or row of the range is hidden");
     // The range's rectangle where all of it is in view at once, else null: along its first row and down its first
     // column each cell must start where the one before it ends (a cell looked up out of view would scroll it), and its
     // first cell must stay where it was between the two.
     var whole = function () {
-      var tl = at(t.c1, t.r1), last = tl;
-      for (var c = t.c1 + 1; c <= t.c2; c++) {
-        var k = at(c, t.r1);
+      var tl = at(cs[0], rs[0]), last = tl;
+      for (var c = 1; c < cs.length; c++) {
+        var k = at(cs[c], rs[0]);
         if (!near(k.x, last.x + last.w) || !near(k.y, tl.y)) return null;
         last = k;
       }
-      var right = last.x + last.w, again = at(t.c1, t.r1);
+      var right = last.x + last.w, again = at(cs[0], rs[0]);
       if (!near(again.x, tl.x) || !near(again.y, tl.y)) return null;
       last = tl;
-      for (var r = t.r1 + 1; r <= t.r2; r++) {
-        var k2 = at(t.c1, r);
+      for (var r = 1; r < rs.length; r++) {
+        var k2 = at(cs[0], rs[r]);
         if (!near(k2.y, last.y + last.h) || !near(k2.x, tl.x)) return null;
         last = k2;
       }
-      at(t.c1, t.r1);
+      at(cs[0], rs[0]);
       if (right > cv.width || last.y + last.h > cv.height) return null;
       return { x: tl.x, y: tl.y, w: right - tl.x, h: last.y + last.h - tl.y };
     };
@@ -201,7 +210,7 @@ export const FRAME_FN = `async function (t) {
           // place is answered as above the view, and the view stays). Near the sheet's start, the editor's centring
           // puts the view where the panes and the rest join.
           if (t.frozen) at(t.frozen[0] + 1, t.frozen[1] + 1);
-          else { at(t.away[0], t.away[1]); await drawn(); at(t.centre[0], t.centre[1]); }
+          else { at(cs[0], t.away[1]); await drawn(); at(t.centre[0], t.centre[1]); }
         }
         await drawn();
         alive();

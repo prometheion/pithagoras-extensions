@@ -1084,6 +1084,18 @@ test("office_screenshot: a spreadsheet range with its zoom and cells, and the de
   assert.match(cut.content[0].text, /^Sheet "Sheet1" A1:AD55 at 75 %, as your editor shows it now\. The sheet's used range is A1:BH120: this is the part that fits from A1; take the rest with range\. Its cells:\n\n\(empty\)$/);
 });
 
+test("office_screenshot: a page's part of a long table says which rows it is; text cut at the most a picture gives says so, as do a sheet's hidden rows and columns", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.shot = () => ({ located: { page: 10, pages: 48, first: 2, blocks: [{ table: [["r201a", "r201b"], ["r202a", "r202b"]], row: 201, of: 2000 }], truncated: true, view: { kind: "word", page: 10, pages: 48 } }, image: { data: "/9j/4AAQ", width: 724, height: 1024, pages: 48 } });
+  const word = (await tool(s, "office_screenshot").execute("c", { id: doc.docId, page: 10 })) as { content: any[] };
+  assert.equal(word.content[0].text, `Page 10 of 48 of "Report" (id ${doc.docId}), as your editor shows it now. Its text:\n\n[2] table, rows 201-202 of 2000\n| r201a | r201b |\n| r202a | r202b |\n(the text is cut here: a picture gives 20,000 characters of text at most; office_read gives all of it)`);
+  const sheet = await createDoc({ title: "Budget", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.shot = () => ({ located: { sheet: "S", range: "A1:Z200", used: "A1:Z2000", cut: false, zoom: 0.75, cells: [{ a: "A1", v: 1 }], hidden: true, truncated: true, view: { kind: "cell" } }, image: { data: "/9j/AAA=", width: 1024, height: 550, zoom: 0.75 } });
+  const cells = (await tool(s, "office_screenshot").execute("c", { id: sheet.docId, range: "A1:Z200" })) as { content: any[] };
+  assert.equal(cells.content[0].text, 'Sheet "S" A1:Z200 at 75 %, as your editor shows it now. Its hidden rows and columns are not in the picture, and their cells are not listed. Its cells:\n\nA1: 1\n(not all of the cells it shows are listed: a picture gives 20,000 characters of text at most; office_read gives them)');
+});
+
 test("office_screenshot: a model that cannot see pictures is error:no_images before anything is done; one whose input is not known is shown the picture", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);

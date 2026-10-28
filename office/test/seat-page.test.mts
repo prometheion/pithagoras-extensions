@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { setImmediate as tick } from "node:timers/promises";
-import { BRIDGE_JS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS, VIEW_SETTLE } from "../src/seat-page";
+import { BRIDGE_JS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, MAX_SHOWN_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS, SHEET_MOST, VIEW_SETTLE } from "../src/seat-page";
 
 /** The seat page running: its polls answered by `order`, what it posts as events, the editors it made, and the
  * scripts it loads (each loaded when the test says). */
@@ -796,11 +796,11 @@ test("a Word reply through the comment methods names the comment made anew by th
 /* ------------------------------------------------------------------ */
 
 /**
- * A Word document of `texts` (a nested list is a table of one row), laid out so that page k starts in paragraph
- * `starts[k]` (an index into the document's paragraphs in reading order, a table's cells among them); `hits` what the
- * editor's search finds of a quote, each on its page (from 0).
+ * A Word document of `texts` (a list is a table of one row, `{rows}` one of those rows), laid out so that page k starts
+ * in paragraph `starts[k]` (an index into the document's paragraphs in reading order, a table's cells among them);
+ * `hits` what the editor's search finds of a quote, each on its page (from 0).
  */
-function laidOut(texts: (string | string[])[], starts: number[], hits: Record<string, number[]> = {}) {
+function laidOut(texts: (string | string[] | { rows: string[][] })[], starts: number[], hits: Record<string, number[]> = {}) {
   let id = 0;
   const paras: { GetInternalId: () => string }[] = [];
   const para = (text: string) => {
@@ -813,8 +813,8 @@ function laidOut(texts: (string | string[])[], starts: number[], hits: Record<st
     typeof t === "string"
       ? para(t)
       : (() => {
-          const cells = t.map((c) => contentOf([para(c)])).map((content) => ({ GetContent: () => content }));
-          return { GetClassType: () => "table", GetRowsCount: () => 1, GetRow: () => ({ GetCellsCount: () => cells.length, GetCell: (i: number) => cells[i] }) };
+          const rows = (Array.isArray(t) ? [t] : t.rows).map((row) => row.map((c) => contentOf([para(c)])).map((content) => ({ GetContent: () => content })));
+          return { GetClassType: () => "table", GetRowsCount: () => rows.length, GetRow: (r: number) => ({ GetCellsCount: () => rows[r].length, GetCell: (i: number) => rows[r][i] }) };
         })(),
   );
   const did: string[] = [];
@@ -843,6 +843,36 @@ test("view.locate, Word: the page, the page count, and the page's blocks as offi
   assert.deepEqual(command("view.locate", doc.Api, { kind: "word", page: 4 }).error, { code: "no_page", message: "the document has 3 pages" });
 });
 
+test("view.locate, Word: a page in a long table gives the table's rows from the one the page starts in to the one the next page starts in, and says which", () => {
+  // Paragraphs: 0 a, then a table of 40 rows of 2 cells (1-80), then 81 z. Pages start at a, in row 3 (paragraph 5),
+  // in row 7 (paragraph 13), and at z.
+  const rows = Array.from({ length: 40 }, (_, r) => [`r${r + 1}a`, `r${r + 1}b`]);
+  const doc = laidOut(["a", { rows }, "z"], [0, 5, 13, 81]);
+  const two = command("view.locate", doc.Api, { kind: "word", page: 2 }).result;
+  assert.deepEqual(two.blocks, [{ table: rows.slice(2, 7), row: 3, of: 40 }], "rows 3 to 7: the next page starts in row 7");
+  assert.equal(two.first, 2);
+  assert.deepEqual(command("view.locate", doc.Api, { kind: "word", page: 1 }).result.blocks, [{ p: "a" }, { table: rows.slice(0, 3), row: 1, of: 40 }]);
+  assert.deepEqual(command("view.locate", doc.Api, { kind: "word", page: 3 }).result.blocks, [{ table: rows.slice(6), row: 7, of: 40 }, { p: "z" }]);
+});
+
+test("view.locate, Word: a page's text stops at the most a picture gives, also inside a table and inside one paragraph", () => {
+  // A table of 2,000 rows over pages 2 to 48 (each page starts 40 rows on), the text of one page far above the cap.
+  const rows = Array.from({ length: 2000 }, (_, r) => Array.from({ length: 5 }, (_, c) => `row ${r + 1} cell ${c + 1} `.padEnd(30, "x")));
+  const starts = [0, ...Array.from({ length: 47 }, (_, k) => 1 + 5 * 40 * k), 1 + 5 * 2000];
+  const doc = laidOut(["heading", { rows }, "end"], starts);
+  const page = command("view.locate", doc.Api, { kind: "word", page: 1 }).result;
+  const size = (blocks: { p?: string; table?: string[][] }[]) => blocks.reduce((n, b) => n + (b.p ?? "").length + (b.table ?? []).flat().join("").length, 0);
+  assert.equal(page.truncated, false, "a page of 40 rows is far below it");
+  const all = laidOut(["heading", { rows }, "end"], [0, 1 + 5 * 2000]);
+  const long = command("view.locate", all.Api, { kind: "word", page: 1 }).result;
+  assert.equal(long.truncated, true);
+  assert.ok(size(long.blocks) <= MAX_SHOWN_TEXT, `${size(long.blocks)} characters`);
+  assert.ok(long.blocks[1].table.length < 200 && long.blocks[1].row === 1 && long.blocks[1].of === 2000);
+  const one = laidOut(["y".repeat(50_000), "after"], [0]);
+  const cut = command("view.locate", one.Api, { kind: "word", page: 1 }).result;
+  assert.deepEqual([cut.truncated, cut.blocks.length, cut.blocks[0].p.length], [true, 1, MAX_SHOWN_TEXT]);
+});
+
 test("view.locate, Word: a quote's page, the nth time it is found; a quote found more than once needs nth; one not found is refused", () => {
   const doc = laidOut(["a", "b", "c"], [0, 1, 2], { once: [1], thrice: [0, 1, 2] });
   assert.equal(command("view.locate", doc.Api, { kind: "word", quote: "once" }).result.page, 2);
@@ -857,7 +887,7 @@ test("view.locate, Word: a quote's page, the nth time it is found; a quote found
  * characters by column (8.43 where not given), row heights in points (none given: the default), hidden columns and
  * rows, and frozen panes (`frozen`, the location the builder gives).
  */
-function viewBook(sheets: { name: string; hidden?: boolean; used: string; widths?: Record<string, number>; heights?: Record<number, number>; hiddenCols?: string[]; hiddenRows?: number[]; frozen?: string }[]) {
+function viewBook(sheets: { name: string; hidden?: boolean; used: string; widths?: Record<string, number>; heights?: Record<number, number>; hiddenCols?: string[]; hiddenRows?: number[]; frozen?: string; value?: (a: string) => string }[]) {
   const asked: string[] = [];
   const book = sheets.map((s, index) => ({
     GetName: () => s.name,
@@ -874,7 +904,7 @@ function viewBook(sheets: { name: string; hidden?: boolean; used: string; widths
         const [, c1, r1, c2 = c1, r2 = r1] = m!;
         const n = (l: string) => [...l].reduce((x, ch) => x * 26 + ch.charCodeAt(0) - 64, 0);
         const name = (k: number) => { let out = ""; for (; k > 0; k = Math.floor((k - 1) / 26)) out = String.fromCharCode(65 + ((k - 1) % 26)) + out; return out; };
-        return Array.from({ length: Number(r2) - Number(r1) + 1 }, (_, y) => Array.from({ length: n(c2) - n(c1) + 1 }, (_, x) => `${name(n(c1) + x)}${Number(r1) + y}`));
+        return Array.from({ length: Number(r2) - Number(r1) + 1 }, (_, y) => Array.from({ length: n(c2) - n(c1) + 1 }, (_, x) => (s.value ?? String)(`${name(n(c1) + x)}${Number(r1) + y}`)));
       };
       return {
         GetHidden: () => (col ? (s.hiddenCols ?? []).includes(col) : row ? (s.hiddenRows ?? []).includes(Number(row)) : false),
@@ -891,7 +921,7 @@ function viewBook(sheets: { name: string; hidden?: boolean; used: string; widths
 test("view.locate, sheets: the first visible sheet's used range from A1 at 100 % where it fits, with its cells; a hidden sheet is refused; a sheet by its name in any case", () => {
   const book = viewBook([{ name: "Hidden", hidden: true, used: "A1:B2" }, { name: "Data", used: "B2:C3" }]);
   const out = command("view.locate", book.Api, { kind: "cell" });
-  assert.deepEqual(out.result.view, { kind: "cell", index: 1, c1: 0, r1: 0, c2: 2, r2: 2, centre: [1, 1], away: [0, 302], zoom: 1 });
+  assert.deepEqual(out.result.view, { kind: "cell", index: 1, name: "Data", c1: 0, r1: 0, c2: 2, r2: 2, centre: [1, 1], away: [0, 302], zoom: 1 });
   assert.deepEqual([out.result.sheet, out.result.range, out.result.used, out.result.cut, out.result.zoom], ["Data", "A1:C3", "B2:C3", false, 1]);
   assert.equal(out.result.cells.length, 9);
   assert.deepEqual(out.result.cells[4], { a: "B2", v: "B2" });
@@ -917,6 +947,34 @@ test("view.locate, sheets: the fit from the columns' widths and the rows' height
   assert.match(command("view.locate", wide.Api, { kind: "cell", range: { col: 0, row: 0, cols: 6, rows: 3 } }).error.message, /the largest range from A1 that fits is A1:D1;/);
   const hidden = viewBook([{ name: "S", used: "A1:Z99", hiddenCols: ["B", "C", "D", "E", "F", "G", "H"] }]);
   assert.equal(command("view.locate", hidden.Api, { kind: "cell", range: { col: 0, row: 0, cols: 30, rows: 10 } }).result.zoom, 1);
+});
+
+test("view.locate, sheets: hidden rows and columns are left out of the cells, and the frame function is told which they are; a range spans so many rows and columns at most, hidden ones counted", () => {
+  // A filtered sheet: A1:Z2000 with rows 41-2000 hidden, and column C hidden.
+  const book = viewBook([{ name: "S", used: "A1:Z2000", hiddenRows: Array.from({ length: 1960 }, (_, k) => k + 41), hiddenCols: ["C"] }]);
+  const out = command("view.locate", book.Api, { kind: "cell" }).result;
+  assert.deepEqual([out.range, out.cut, out.zoom, out.hidden], [`A1:Z${SHEET_MOST.rows}`, true, 0.75, true]);
+  assert.equal(out.cells.length, 40 * 25, "the 40 rows shown, without column C");
+  assert.ok(!out.cells.some((c: { a: string }) => /^C\d/.test(c.a) || Number(c.a.replace(/^[A-Z]+/, "")) > 40));
+  assert.deepEqual(out.view.hidden.cols, [2]);
+  assert.deepEqual([out.view.hidden.rows.length, out.view.hidden.rows[0], out.view.hidden.rows.at(-1)], [SHEET_MOST.rows - 40, 40, SHEET_MOST.rows - 1]);
+  assert.deepEqual(out.view.centre, [13, 19], "the centre among the columns and rows shown");
+  const given = command("view.locate", book.Api, { kind: "cell", range: { col: 0, row: 0, cols: 26, rows: 2000 } });
+  assert.deepEqual(given.error, { code: "range_too_large", message: `the range A1:Z2000 is larger than the editor shows at 75 % (a picture takes ${SHEET_MOST.cols} columns and ${SHEET_MOST.rows} rows at most, hidden ones counted): the largest range from A1 that fits is A1:Z${SHEET_MOST.rows}; take it in parts` });
+  // A range of hidden rows alone shows nothing.
+  assert.equal(command("view.locate", book.Api, { kind: "cell", range: { col: 0, row: 100, cols: 3, rows: 5 } }).error.code, "range_hidden");
+  // No hidden ones: nothing said of them.
+  const plain = command("view.locate", viewBook([{ name: "S", used: "A1:B2" }]).Api, { kind: "cell" }).result;
+  assert.deepEqual([plain.hidden, plain.truncated, plain.view.hidden], [undefined, undefined, undefined]);
+});
+
+test("view.locate, sheets: the cells listed stop at the most text a picture gives", () => {
+  const book = viewBook([{ name: "S", used: "A1:Z40", value: (a) => `${a} `.padEnd(30, "x") }]);
+  const out = command("view.locate", book.Api, { kind: "cell" }).result;
+  assert.equal(out.range, "A1:Z40");
+  assert.equal(out.truncated, true);
+  const size = out.cells.reduce((n: number, c: { a: string; v: string }) => n + c.a.length + c.v.length, 0);
+  assert.ok(size <= MAX_SHOWN_TEXT + 40 && out.cells.length < 26 * 40, `${out.cells.length} cells, ${size} characters`);
 });
 
 test("view.locate, sheets: frozen panes take their part of the view from a range beyond them; a range across them is looked at from the first cell after them", () => {

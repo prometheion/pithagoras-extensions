@@ -42,6 +42,7 @@ import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
 import { editJob, OpError, viewJob, type EditJob } from "./ops";
 import * as seat from "./seat";
+import { MAX_SHOWN_TEXT } from "./seat-page";
 import * as docchat from "./docchat";
 
 /** Marks a text to be translated where it is shown: a label kept in a table (de.ts has its German). */
@@ -355,11 +356,13 @@ function assertMayRead(doc: DocMeta, chatId: string, home: string): void {
 const people = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
 
 /** Word blocks as the agent reads them: `[n] text`, a style in brackets, a table as its rows. */
-type WordBlocks = { blocks: ({ p: string; style?: string } | { table: string[][] })[]; truncated?: boolean };
-/** `first`: the number of the first block (a page's blocks are numbered as office_read numbers the document's). */
+type WordBlocks = { blocks: ({ p: string; style?: string } | { table: string[][]; row?: number; of?: number })[]; truncated?: boolean };
+/** `first`: the number of the first block (a page's blocks are numbered as office_read numbers the document's). A
+ * table of which only some rows are given (a page's) says which. */
 function wordText(read: WordBlocks, first = 1): string {
   if (!read.blocks.length) return "(empty document)";
-  return read.blocks.map((b, i) => ("table" in b ? `[${i + first}] table\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}` : `[${i + first}]${b.style ? ` (${b.style})` : ""} ${b.p}`)).join("\n");
+  const rows = (b: { table: string[][]; row?: number; of?: number }) => (b.row ? `, rows ${b.row}-${b.row + b.table.length - 1} of ${b.of}` : "");
+  return read.blocks.map((b, i) => ("table" in b ? `[${i + first}] table${rows(b)}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}` : `[${i + first}]${b.style ? ` (${b.style})` : ""} ${b.p}`)).join("\n");
 }
 
 /** A spreadsheet's cells as the agent reads them: every sheet of the workbook first, by its position (from 1) and
@@ -735,13 +738,15 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const page = Number(located.page);
         const pages = image.pages ?? Number(located.pages);
         const blocks = located as unknown as WordBlocks & { first?: number };
-        said = `Page ${page} of ${pages} of "${doc.title}" (id ${doc.docId}), as your editor shows it now. Its text:\n\n${wordText(blocks, blocks.first ?? 1)}${blocks.truncated ? "\n(more text than this is around the page's start)" : ""}`;
+        said = `Page ${page} of ${pages} of "${doc.title}" (id ${doc.docId}), as your editor shows it now. Its text:\n\n${wordText(blocks, blocks.first ?? 1)}${blocks.truncated ? `\n(the text is cut here: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives all of it)` : ""}`;
         shown = { page, pages };
       } else {
         const zoom = Math.round((image.zoom ?? Number(located.zoom)) * 100);
         const cells = Array.isArray(located.cells) ? (located.cells as { a: string; v: unknown; f?: string }[]) : [];
         const cut = located.cut === true ? ` The sheet's used range is ${located.used}: this is the part that fits from A1; take the rest with range.` : "";
-        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${cut} Its cells:\n\n${cellLines(cells) || "(empty)"}`;
+        const hidden = located.hidden === true ? " Its hidden rows and columns are not in the picture, and their cells are not listed." : "";
+        const more = located.truncated === true ? `\n(not all of the cells it shows are listed: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives them)` : "";
+        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${cut}${hidden} Its cells:\n\n${cellLines(cells) || "(empty)"}${more}`;
         shown = { sheet: located.sheet, range: located.range, zoom };
       }
       return {

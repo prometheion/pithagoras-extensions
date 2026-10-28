@@ -41,7 +41,7 @@ export const de: Record<string, string | Plural> = {
   "Agents' editor: {error}": "Editor der Agenten: {error}",
   "Remove Office?": "Office entfernen?",
   "Its containers, networks and volumes go, with any save not handed over yet. Documents and images stay.": "Seine Container, Netzwerke und Volumes werden entfernt, samt noch nicht übergebener Speicherungen. Dokumente und Images bleiben.",
-  "At least 1 GB of RAM, more with each person and agent in a document.": "Mindestens 1 GB RAM, mehr mit jeder Person und jedem Agenten in einem Dokument.",
+  "Recommended: 1 GB of RAM.": "Empfohlen: 1 GB RAM.",
   "Running": "Läuft",
   "Starting": "Startet",
   "Starting…": "Startet…",

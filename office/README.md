@@ -15,11 +15,11 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
-- At least 1 GB of RAM, more with each person and agent working in a document (about 700 MiB measured while one document
-  is edited). The settings page says so, and shows the memory all of Office uses while it runs: the Document Server's
-  and, while it runs, the agents' browser's. That browser starts on demand, stops 10 minutes after its last editor
-  closed, and is capped at 3 GB. The figure is what `docker stats` shows: the containers' memory less
-  the file cache the kernel can drop again.
+- Recommended: 1 GB of RAM.
+  About 700 MiB were measured while one document is edited. The settings page shows the memory all of Office uses
+  while it runs: the Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
+  10 minutes after its last editor closed, and is capped at 3 GB. The figure is what `docker stats` shows: the
+  containers' memory less the file cache the kernel can drop again.
 - Disk for the images (`onlyoffice/documentserver`, several GB, Node's `node:22.23.4-alpine3.23`, about 50 MB, for the
   relay below, and for the agents' editor `chromedp/headless-shell:157.0.8103.15`, Chromium's headless shell, about
   540 MB), which the portal pulls on the first start, all at once, with the progress of each shown in Settings.

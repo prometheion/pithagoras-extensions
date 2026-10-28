@@ -809,6 +809,41 @@ test("an edit of the editor asked for while its picture is taken waits until the
   }
 });
 
+test("a job that waits while a picture holds the editor counts its time from when it is handed: a picture longer than a job's time closes nothing", async () => {
+  // A job may take 1.5 s; the picture takes 2.5 s, and a post is asked for 0.2 s into it.
+  const s = await setup((job) => (job.kind === "view.locate" ? { view: { kind: "word", page: 1, pages: 1 } } : { kind: job.kind }), { jobMs: 1500 }, { capture: async () => (await delay(2500), { data: "/9j/", width: 1, height: 1 }) });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    const picture = shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: { kind: "word" } });
+    await delay(200);
+    const post = run("/homes/a", "doc-1", "edit", { kind: "word.comments", args: {} }, { post: true });
+    assert.equal((await picture).image.width, 1);
+    assert.deepEqual(await post, { kind: "word.comments" });
+    assert.equal(seats().length, 1, "the editor is still open");
+    assert.equal(s.b.closed.length, 0);
+  } finally {
+    await s.done();
+  }
+});
+
+test("a job queued behind one handed before it counts its time from when it is handed", async () => {
+  const s = await setup(async (job) => {
+    await delay(1000);
+    return { kind: job.kind };
+  }, { jobMs: 1500 });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.comments", args: {} });
+    // The second is asked for 0.1 s after the first, which runs 1 s; it then runs 1 s of its own: 1.9 s after it was asked.
+    const first = run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    await delay(100);
+    const second = run("/homes/a", "doc-1", "edit", { kind: "word.comments", args: {} });
+    assert.deepEqual(await Promise.all([first, second]), [{ kind: "word.read" }, { kind: "word.comments" }]);
+    assert.equal(seats().length, 1);
+  } finally {
+    await s.done();
+  }
+});
+
 test("a picture's refusals: the locate's own code, the capture's code; without a capture the seats take no picture; the editor goes on after a failed one", async () => {
   let fail: "locate" | "capture" | "" = "locate";
   const s = await setup((job) => {

@@ -100,6 +100,8 @@ type Job = {
   unsentAtHand: boolean;
   /** A picture's locate: once it is handed, the editor takes no other job until the picture is taken (`Editor.held`). */
   hold?: string;
+  /** Called as it is handed: its time starts then. */
+  onHand?: () => void;
 };
 
 type Editor = {
@@ -514,11 +516,14 @@ function waitFor(listen: (wake: () => void) => void, done: () => boolean, ms: nu
 }
 
 /** The job handed to the editor's plugin (now, where it waits, or at its next poll) and its outcome waited for. A job
- * with no outcome in time closes the editor: what it did is unknown. */
+ * with no outcome in time closes the editor: what it did is unknown. Its time counts from when it is handed; while it
+ * waits behind a job handed before it, or a picture that holds the editor, it waits as long as they take (each ends
+ * within its own time, or closes the editor). */
 function handOver(editor: Editor, job: SeatJob & { hold?: string }, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<Outcome & { handedAt?: number; unsentAtHand?: boolean }> {
   const ms = options.timeoutMs ?? limits.jobMs;
   return new Promise((resolve, reject) => {
     let over = false;
+    let timer: ReturnType<typeof setTimeout>;
     const queued: Job = {
       id: randomUUID(),
       kind: job.kind,
@@ -535,13 +540,22 @@ function handOver(editor: Editor, job: SeatJob & { hold?: string }, options: { s
         resolve({ ...outcome, handedAt: queued.handedAt, unsentAtHand: queued.unsentAtHand });
       },
     };
-    const timer = setTimeout(() => {
+    const expire = () => {
       if (over) return;
+      if (!queued.handed && (editor.holding !== undefined || editor.queue.some((j) => j.handed))) {
+        timer = setTimeout(expire, ms);
+        return;
+      }
       over = true;
       options.signal?.removeEventListener("abort", aborted);
       close(editor, "a job of it timed out");
       reject(new SeatError("timeout", `the agent's editor gave no result within ${ms / 1000} s; what the call did is unknown: read the document again before you go on`, undefined, queued.handed));
-    }, ms);
+    };
+    timer = setTimeout(expire, ms);
+    queued.onHand = () => {
+      clearTimeout(timer);
+      timer = setTimeout(expire, ms);
+    };
     const aborted = () => {
       if (over) return;
       over = true;
@@ -569,6 +583,7 @@ function feed(editor: Editor): void {
   job.handed = true;
   job.handedAt = Date.now();
   job.unsentAtHand = editor.unsentSeq > editor.sentSeq;
+  job.onHand?.();
   json(res, 200, { jobId: job.id, kind: job.kind, args: job.args });
 }
 

@@ -13,7 +13,9 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - Pithagoras 0.3.0 or later. For agents to answer comments and the editor's chat, a portal whose extension API has
   `chats.start`, `chats.lastAnswer`, `chats.owner` and `http.person`
   ([thecodacus/pithagoras#339](https://github.com/thecodacus/pithagoras/pull/339)); on an older one the rest of Office
-  works, and the Office page, the editor's bar and the agents' office tools say that agents do not answer there.
+  works, and the Office page, the editor's bar and the agents' office tools say that agents do not answer there. Such
+  a portal cannot say whose a chat is, so there a chat's panel lists documents, and its agent has office tools, only
+  where the chat works in an agent's home or a project's folder itself, not in a folder inside one.
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
@@ -70,7 +72,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   chat for each call of the agent's tools that names its document opens that document in the same panel (a call that
   lists the documents opens the list). The same document open in the panel and in the Office tab (or in two browser
   tabs) is one editing session seen twice.
-- **The agent's tools**, in the chats of agents and projects: `office_list`, `office_create`, `office_read`,
+- **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
+  as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`, `office_read`,
   `office_edit` and `office_comments`. An agent sees the documents in its own folder (its home, or its project's) and
   the ones it was granted by a mention; another agent's, and the files in another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
@@ -240,9 +243,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   that reads like an order and is read that way can mark the chat; an answer of a marked chat is not posted in the
   document, also one that ended while Office restarted (the portal keeps the mark with the chat).
 - **Who can make an agent act through a comment**: the portal's primary person. Every route asks the portal who is
-  behind the request: nobody signed in is refused, and a person in another role may look at the documents but not
-  change them, nor talk to the agents through comments or the editor's chat (what they write would reach an agent as
-  the primary person's words). Today every login to the portal is its primary person. The mention gives that agent the
+  behind the request: nobody signed in is refused, and a person in another role may list the documents and download
+  them but not open them in the editor (an editor is opened for changes), change them, nor talk to the agents through
+  comments or the editor's chat (what they write would reach an agent as the primary person's words). Today every login to the portal is its primary person. The mention gives that agent the
   document.
 - **Every post into a document is in the audit log**, with its document, thread and chat: each answer, each time it
   was posted again, a post whose outcome is not known (its editor closed or timed out while it ran), and a message of
@@ -292,11 +295,8 @@ agents' editor.
 ## Limits
 
 - Only `.docx` and `.xlsx`. `.pptx` is not supported.
-- The chats of comments and the editor's chat hang under one of the agent's own task chats (the one whose Office
-  panel the editor is in, else the one the document's other comment chats use, else its first in the sidebar): the
-  extension API makes chats only as children of a chat. An agent with no task chat answers no comment until you start
-  one with it. A comment made while the page could not report it (the tab closed at once, the server half away) starts
-  nothing; reply to it again.
+- A comment made while the page could not report it (the tab closed at once, the server half away) starts nothing;
+  reply to it again.
 - In Word, an agent that may only comment changes the comment through the editor's comment methods, which give it a
   new id: its thread follows. Every person in the editor is "Portal". Such an agent's reads and posts share one
   editor that may only comment.

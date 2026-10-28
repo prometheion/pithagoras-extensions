@@ -662,7 +662,8 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
 
   keySaves.set(key, { mtimeMs: newMtimeMs, digest, sha });
 
-  // Wake hooks (ping.ts comment mentions register here): exact saved bytes; one bad hook must not kill the rest.
+  // Persisted hooks (docchat.ts reconciles a save's comment threads here): exact saved bytes; one bad hook must not
+  // kill the rest.
   for (const hook of persistedHooks) {
     try {
       hook(docId, bytes);

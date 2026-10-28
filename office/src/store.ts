@@ -22,7 +22,6 @@ import path from "node:path";
 import { randomInt } from "node:crypto";
 import { jsZip } from "./jszip";
 import { dataDir } from "./host";
-import { commentKeys, parseDocx } from "./ooxml"; // importFile + scanWorkspace baseline the source file's comment ids at import/index time (ping.ts first-save rule)
 
 /** A mention that opened a document to an agent's or project's folder (its path, as `owner`). */
 export type Grant = { folder: string; commentId: string; at: number };
@@ -40,12 +39,9 @@ export type DocMeta = {
   owner: string | null;
   grants: Grant[];
   createdBy?: string;
-  /** Set for workspace-scanned docs only (importFile stamps it too, for its copy flow). ping.ts uses it as the first-save rule: a scanned doc's pre-existing comments are baselined without wakes; a created (blank) doc gets no such baseline. */
+  /** Set for workspace-scanned and imported docs, and conflict copies: the file came from elsewhere, not made blank here.
+   * (An `importedKeys` field older index files hold is the comment wake's baseline, which is gone: nothing reads it.) */
   imported?: boolean;
-  /** The keys (ooxml.commentKeys) of the comments in the file at INDEX time (stamped by scanWorkspace). The first-save
-   * baseline for scanned docs: a comment NOT listed here appeared after indexing and is still processed normally.
-   * Absent when the source did not parse as docx. */
-  importedKeys?: string[];
   /** A workspace-scanned doc lives in PLACE: its real, absolute file path (realpathSync'd at index time). ABSENT for library-created docs, whose bytes are docs/<docId>/<title>.<ext> under the library root -- docPath() prefers this field when present. */
   path?: string;
   /** Since when its file has been gone (pruneMissingDocs): kept meanwhile, in case it comes back. */
@@ -61,8 +57,7 @@ type IndexFile = { version: 1; docs: DocMeta[] };
 
 const TRASH_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sweepTrash removes .trash entries older than this
 // importFile caps: the sync copy must not commit an unbounded file into the library (and any xlsx/docx in it
-// is parsed later against ooxml.ts' 256 MiB / 1 GiB zip envelope). Above MAX_BASELINE_BYTES the docx comment
-// baseline is skipped (ping.ts "unparseable source" fallback) instead of reading a huge file inline.
+// is parsed later against ooxml.ts' 256 MiB / 1 GiB zip envelope).
 // The same cap holds for every later read of a file whole (readDoc, the tools' read as the agent): an indexed file
 // that grew since is refused, not read into the portal's memory.
 export const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
@@ -71,7 +66,6 @@ export const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
 export function tooLarge(file: string, size: number): Error {
   return Object.assign(new Error(`${file} is ${size} bytes: files above ${MAX_IMPORT_BYTES / (1024 * 1024)} MiB are not read`), { code: "too_large" });
 }
-const MAX_BASELINE_BYTES = 32 * 1024 * 1024;
 
 /* ------------------------------------------------------------------ */
 /* index I/O                                                           */
@@ -270,7 +264,7 @@ export function refreshAll(root = dataDir()): DocMeta[] {
   return [...index.docs].sort((a, b) => a.title.localeCompare(b.title));
 }
 
-/** The ONE index writer for mention grants (ping.ts used to read-modify-write index.json on its own): fresh
+/** The ONE index writer for mention grants: fresh
  * read, dedupe by (folder, commentId) -- a re-sent comment never adds a second row -- atomic tmp+rename through
  * the store's writeIndex. Sync like everything here and no logging. Returns "added",
  * "duplicate" (already granted: nothing written), or null when the doc is not in the index any more.
@@ -595,18 +589,6 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
   } catch {
     return null;
   }
-  // Baseline AT INDEX TIME (the importFile rule, carried over): record which comment ids this file carries NOW, so
-  // pre-existing @mentions do not fire wakes at index time and the first save baselines exactly this history. Only
-  // for files up to MAX_BASELINE_BYTES -- above it the field stays undefined and ping.ts applies its documented
-  // "unparseable source" fallback; a docx that does not parse leaves it undefined too.
-  let importedKeys: string[] | undefined;
-  if (extRaw === "docx" && st.size <= MAX_BASELINE_BYTES) {
-    try {
-      importedKeys = commentKeys(parseDocx(fs.readFileSync(real)).comments);
-    } catch {
-      // does not parse as docx: baseline unknown, ping.ts' fallback applies
-    }
-  }
   const now = Date.now();
   const index = readIndex(rootDir);
   if (index.docs.some((d) => d.path === real || (d.title === title && d.ext === extRaw))) {
@@ -622,10 +604,9 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
     mtimeMs: st.mtimeMs, // the file's OWN mtime IS its revision from day one -- the mtime-gated flow edits it in place
     owner: null, // nobody made it here: the agent or project whose folder it is in sees it (visibleTo), and the person
     grants: [],
-    imported: true, // ping.ts first-save rule for the stamped baseline above
+    imported: true,
     path: real, // IN PLACE: the scanned file IS the document; nothing is copied into the library
   };
-  if (importedKeys !== undefined) doc.importedKeys = importedKeys;
   if (workspace !== undefined) doc.workspace = workspace; // the "workspace" sort label of the UI (scanWorkspace)
   index.docs.push(doc);
   writeIndex(rootDir, index);
@@ -641,7 +622,7 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
  * reaching the same file through a symlink or bind mount produce ONE entry. Already-indexed files get their
  * mtimeMs/sizeBytes REFRESHED from disk (a rescan after something wrote the file straight to disk keeps the list
  * honest) and count as `updated` only when something actually changed; new files go through indexOne -- in place,
- * owner null, with the importedKeys stamp so pre-existing @mentions do not fire wakes at index time. A file
+ * owner null. A file
  * that cannot be indexed (oversized, unsafe title, already titled, unreadable) is skipped: one bad file must
  * never fail the whole sweep.
  *
@@ -776,13 +757,11 @@ export function scanWorkspace(roots: string[], root = dataDir()): { added: numbe
   return { added, updated };
 }
 
-/** Import an existing .docx/.xlsx from an absolute path into the library (copy, never move -- the source stays). SUPERSEDED for the UI flow by scanWorkspace (in-place indexing); retained because ping.test exercises its copy-into-library shape.
+/** Import an existing .docx/.xlsx from an absolute path into the library (copy, never move -- the source stays). SUPERSEDED for the UI flow by scanWorkspace (in-place indexing).
  * The extension comes from the basename (case-insensitive) and anything else throws {code:"unsupported_format"};
  * a missing/unreadable source throws {code:"not_found"}; a file above 512 MiB throws {code:"too_large"} before
  * anything is copied. title defaults to the basename without its extension; owner is set by the caller (an
- * agent/project context passes its home chat, human imports stay ownerless). For docx sources up to 32 MiB the
- * comment keys are baselined into importedKeys at import time; above that the field stays undefined and
- * ping.ts applies its "unparseable source" first-save fallback. */
+ * agent/project context passes its home chat, human imports stay ownerless). */
 export function importFile(absPath: string, meta: { title?: string; owner?: string | null }, root = dataDir()): DocMeta {
   const rootDir = root ?? dataDir();
   const base = path.basename(absPath);
@@ -803,20 +782,6 @@ export function importFile(absPath: string, meta: { title?: string; owner?: stri
   if (st.size > MAX_IMPORT_BYTES) throw Object.assign(new Error(`${absPath} is ${st.size} bytes: imports are capped at ${MAX_IMPORT_BYTES / (1024 * 1024)} MiB`), { code: "too_large" });
   const title = meta.title ?? base.slice(0, dot);
   assertSafeTitle(title); // the imported file lands in the library as <title>.<ext> -- same rules as created titles
-  // Baseline AT IMPORT TIME (review 4364810146): record which comment ids this file carries NOW, so a mention added to it
-  // before its first save is still NEW at first save and can wake; only the history that came in WITH the file baselines.
-  // scanWorkspace stamps the same baseline IN PLACE via indexOne -- keep the two stampings in step.
-  // Only for files up to MAX_BASELINE_BYTES: reading a multi-hundred-MiB docx inline just to stamp a baseline is not worth
-  // the sync stall -- above the cap leave it undefined so ping.ts applies its documented "unparseable source" fallback
-  // (baseline everything the first save holds) and first-save wake semantics are preserved.
-  let importedKeys: string[] | undefined;
-  if (extRaw === "docx" && st.size <= MAX_BASELINE_BYTES) {
-    try {
-      importedKeys = commentKeys(parseDocx(fs.readFileSync(absPath)).comments);
-    } catch {
-      // source does not parse as docx: leave the baseline unknown -- ping.ts then falls back to baselining whatever the first save holds
-    }
-  }
   const index = readIndex(rootDir);
   const now = Date.now();
   const doc: DocMeta = {
@@ -829,8 +794,7 @@ export function importFile(absPath: string, meta: { title?: string; owner?: stri
     mtimeMs: 0,
     owner: meta.owner ?? null,
     grants: [],
-    imported: true, // ping.ts first-save rule: the import-time baseline below is what gets baselined, never woken
-    importedKeys,
+    imported: true,
   };
   const dir = path.join(rootDir, "docs", doc.docId);
   fs.mkdirSync(dir, { recursive: true });
@@ -944,8 +908,7 @@ function writeNewKeeping(file: string, bytes: Buffer, was?: fs.Stats, newer = fa
 /**
  * A save the revision gate refused, kept as a document of its own rather than lost: "<title> (conflict <date time>)",
  * beside a scanned document in its folder (as its file is: owner, group and mode) and in the library for a library
- * document, with the original's owner and grants, so the same agents see it. Its comments are taken as seen
- * (`importedKeys`): they were in the document already and must not wake anyone again.
+ * document, with the original's owner and grants, so the same agents see it.
  */
 export function saveConflictCopy(doc: DocMeta, bytes: Buffer, root = dataDir()): DocMeta {
   const index = readIndex(root);
@@ -960,11 +923,6 @@ export function saveConflictCopy(doc: DocMeta, bytes: Buffer, root = dataDir()):
   }
   const now = Date.now();
   const copy: DocMeta = { docId: freshDocId(index.docs, title), title, ext: doc.ext, createdAt: now, updatedAt: now, sizeBytes: 0, mtimeMs: 0, owner: doc.owner, grants: doc.grants.map((g) => ({ ...g })), imported: true };
-  try {
-    if (doc.ext === "docx") copy.importedKeys = commentKeys(parseDocx(bytes).comments);
-  } catch {
-    // not a docx that parses: ping.ts baselines what its first save holds
-  }
   if (doc.path && folder !== null) {
     const was = plainFile(doc, doc.path);
     const file = path.join(folder, `${title}.${doc.ext}`);

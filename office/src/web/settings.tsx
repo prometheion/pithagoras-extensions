@@ -97,15 +97,23 @@ export function OfficeSettings() {
     ["docchatChatMessages", t("Messages per answer in the editor's chat")],
     ["docchatRemoveAfterS", t("Seconds before a deleted comment's chat goes")],
     ["docchatChatEndS", t("Seconds the editor's chat stays after the last person left")],
+    ["docchatQueued", t("Messages waiting for one chat while it answers")],
+    ["docchatMessageChars", t("Longest comment or chat message taken, in characters")],
+    ["docchatReportsPer10S", t("Reports per editing session in 10 seconds")],
+    ["docchatSaveEveryS", t("Seconds between saves after answers")],
   ];
   const saveLimits = () =>
     act("settings", async () => {
       const patch: Partial<DocchatLimits> = {};
-      for (const [key] of LIMIT_FIELDS) {
+      for (const [key, label] of LIMIT_FIELDS) {
         const value = typed[key];
         if (value === undefined) continue;
         if (!/^\d+$/.test(value.trim())) throw new Error(t("A limit is a whole number."));
-        patch[key] = Number(value.trim());
+        // The bounds the server holds it to, said here first in the person's language.
+        const bounds = state.limitBounds?.[key];
+        const n = Number(value.trim());
+        if (bounds && (n < bounds[0] || n > bounds[1])) throw new Error(t("{label}: a whole number from {min} to {max}.", { label, min: bounds[0], max: bounds[1] }));
+        patch[key] = n;
       }
       await api.saveSettings(patch);
       setTyped({});
@@ -200,8 +208,9 @@ export function OfficeSettings() {
                 <input
                   className={`${portal.ui.classes.input} font-mono text-xs`}
                   inputMode="numeric"
-                  value={typed[key] ?? String(limits[key])}
+                  value={typed[key] ?? String(limits[key] ?? "")}
                   aria-label={label}
+                  title={state.limitBounds?.[key] ? `${state.limitBounds[key]![0]}–${state.limitBounds[key]![1]}` : undefined}
                   disabled={busy !== null}
                   onChange={(e) => setTyped((now) => ({ ...now, [key]: e.target.value }))}
                 />

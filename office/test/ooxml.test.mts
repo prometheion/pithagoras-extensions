@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import JSZip from "jszip";
-import { parseDocx, parseXlsx, rewriteZip, diffComments, docxThreads, xlsxThreads, type Comment } from "../src/ooxml";
+import { parseDocx, parseXlsx, rewriteZip, docxThreads, xlsxThreads } from "../src/ooxml";
 
 /* ---------------- fixture building (jszip) ---------------- */
 
@@ -203,19 +203,6 @@ test("rewriteZip matches part names case-insensitively (no shadow duplicate) and
   const out2 = rewriteZip(original, { "word/document.xml": edited, "WORD/DOCUMENT.XML": other });
   assert.equal(parseDocx(out2).paragraphs[3], "Last wins and gamma two");
   assert.deepEqual(Object.keys(await entryBytes(out2)).sort(), beforeNames);
-});
-
-/* ---------------- diffComments ---------------- */
-
-test("diffComments reports only ids that are new", () => {
-  const prev: Comment[] = [{ id: "1", author: "A", text: "old" }];
-  const next: Comment[] = [
-    { id: "1", author: "A", text: "changed wording" }, // same id, changed text: update, NOT added
-    { id: "2", author: "B", text: "brand new" }, // added
-  ];
-  assert.deepEqual(diffComments(prev, next).added, [{ id: "2", author: "B", text: "brand new" }]);
-  assert.deepEqual(diffComments(next, prev).added, []);
-  assert.deepEqual(diffComments([], []).added, []);
 });
 
 /* ---------------- CRC validation on read ---------------- */

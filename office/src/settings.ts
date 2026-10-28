@@ -25,16 +25,32 @@ export type OfficeSettings = {
   docchatRemoveAfterS: number;
   /** Seconds after the last person left an editing session before its chat goes. */
   docchatChatEndS: number;
+  /** Reports the people's editors of one editing session may send in 10 seconds (POST /docchat/*). */
+  docchatReportsPer10S: number;
+  /** The longest comment, reply or chat message taken from a report, in characters (the rest is cut). */
+  docchatMessageChars: number;
+  /** Seconds between saves of a document after answers were posted in it. */
+  docchatSaveEveryS: number;
+  /** Messages kept for one chat while it answers (the oldest go beyond it). */
+  docchatQueued: number;
 };
 
 /** What each limit may be set to: whole numbers in these bounds (POST /settings refuses others). */
-export const LIMIT_BOUNDS: Record<"docchatRuns" | "docchatThreads" | "docchatReplyChars" | "docchatChatMessages" | "docchatRemoveAfterS" | "docchatChatEndS", [number, number]> = {
+export type LimitKey = "docchatRuns" | "docchatThreads" | "docchatReplyChars" | "docchatChatMessages" | "docchatRemoveAfterS" | "docchatChatEndS" | "docchatReportsPer10S" | "docchatMessageChars" | "docchatSaveEveryS" | "docchatQueued";
+export const LIMIT_BOUNDS: Record<LimitKey, [number, number]> = {
   docchatRuns: [1, 20],
   docchatThreads: [1, 1000],
-  docchatReplyChars: [200, 20_000],
+  // An answer cut at the limit ends in " (…)", and a reply read back is cut at 20,000 characters (seat-page.ts): the
+  // longest must still read back whole.
+  docchatReplyChars: [200, 19_990],
   docchatChatMessages: [1, 20],
   docchatRemoveAfterS: [0, 86_400],
   docchatChatEndS: [0, 86_400],
+  docchatReportsPer10S: [10, 1000],
+  // The page cuts what it reports at 20,000 characters.
+  docchatMessageChars: [200, 20_000],
+  docchatSaveEveryS: [1, 600],
+  docchatQueued: [1, 200],
 };
 
 /** The image by the full tag of the build it was tested with (DocService 10.0.0 build 169): `10.0` and `10.0.0` move
@@ -49,6 +65,10 @@ export const DEFAULT_SETTINGS: OfficeSettings = {
   docchatChatMessages: 4,
   docchatRemoveAfterS: 120,
   docchatChatEndS: 60,
+  docchatReportsPer10S: 50,
+  docchatMessageChars: 20_000,
+  docchatSaveEveryS: 3,
+  docchatQueued: 20,
 };
 
 const FILE = "settings.json";

@@ -392,7 +392,7 @@ test("importFile: copies a real docx in (title from basename by default), record
   const stored = fs.readFileSync(docFile(root, meta));
   assert.deepEqual(stored, template);
   assert.equal(parseDocx(stored).text, "New document");
-  assert.deepEqual(meta.importedKeys, []); // parseable source without comments -> empty baseline stamped at import time
+  assert.equal("importedKeys" in meta, false, "no comment baseline: the wake it was for is gone");
   assert.equal(meta.sizeBytes, template.length);
 
   // explicit title + owner override the defaults
@@ -430,29 +430,6 @@ test("importFile: a file above 512 MiB is rejected with too_large before anythin
   }
   await assert.rejects(async () => importFile(big, {}, root), (err: NodeJS.ErrnoException) => err.code === "too_large" && /512 MiB/.test(err.message));
   assert.equal(listDocs(root).length, 0, "nothing landed in the library");
-});
-
-test("importFile: docx at/under 32 MiB stamps importedKeys; above it leaves it undefined (ping fallback)", async () => {
-  const root = tmpRoot();
-  const srcRoot = tmpRoot();
-
-  // under the cap: a real parseable docx with one comment -> baseline of its ids (the existing rule)
-  const small = path.join(srcRoot, "small.docx");
-  fs.writeFileSync(small, await templateDocx());
-  const metaSmall = importFile(small, {}, root);
-  assert.deepEqual(metaSmall.importedKeys, [], "under-cap docx still parses and baselines (no comments in the template)");
-
-  // above the cap: a sparse 33 MiB .docx -- no parsing happens at all, baseline unknown, first-save fallback applies
-  const big = path.join(srcRoot, "big.docx");
-  const fd = fs.openSync(big, "w");
-  try {
-    fs.ftruncateSync(fd, 33 * 1024 * 1024);
-  } finally {
-    fs.closeSync(fd);
-  }
-  const metaBig = importFile(big, {}, root);
-  assert.equal(metaBig.importedKeys, undefined, "above-cap docx skips the baseline; ping.ts baselines everything at first save");
-  assert.ok(metaBig.sizeBytes > 32 * 1024 * 1024);
 });
 
 test("exportDoc: writes <title>.<ext> into a created dest dir and returns the absolute path", async () => {

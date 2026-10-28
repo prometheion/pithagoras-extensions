@@ -109,7 +109,7 @@ export type ToolsDeps = {
   save?: (key: string) => Promise<SaveAfterEdit>;
   /** Whether Office runs (server.ts gives it from container.ts). Default: "running". */
   officeState?: () => Promise<OfficeState> | OfficeState;
-  /** The audit sink for mutating ops. Default: a one-line log via the log seam (ping.ts pattern). */
+  /** The audit sink for mutating ops. Default: a one-line log via the log seam. */
   record?: (entry: OfficeAuditEntry) => void;
   /** Log line. Default: lazy portal().log. */
   log?: (line: string) => void;

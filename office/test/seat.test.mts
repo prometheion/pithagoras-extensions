@@ -714,3 +714,25 @@ test("closeEditor closes the one editor of a home and a document, and the next c
     await s.done();
   }
 });
+
+test("an editor that may only comment serves a read asked in view mode; a change of mode waits for the job its editor runs instead of closing it under that job", async () => {
+  const s = await setup(async (job) => {
+    if (job.kind === "word.read") await delay(300);
+    return { kind: job.kind };
+  });
+  try {
+    await run("/homes/a", "doc-1", "comment", { kind: "word.comments", args: {} });
+    assert.deepEqual(await run("/homes/a", "doc-1", "view", { kind: "word.comments", args: {} }), { kind: "word.comments" });
+    assert.equal(s.calls.filter((c) => c.startsWith("mint /homes/a doc-1")).length, 1, "no editor opened anew for the read");
+    // A read in edit mode runs; a post in comment mode comes meanwhile: the read ends as it should, then the editor
+    // opens anew in comment mode.
+    const read = run("/homes/b", "doc-1", "edit", { kind: "word.read", args: {} });
+    await delay(100);
+    const post = run("/homes/b", "doc-1", "comment", { kind: "word.comments", args: {} });
+    assert.deepEqual(await read, { kind: "word.read" });
+    assert.deepEqual(await post, { kind: "word.comments" });
+    assert.deepEqual(seats().filter((x) => x.home === "/homes/b").map((x) => x.mode), ["comment"]);
+  } finally {
+    await s.done();
+  }
+});

@@ -22,9 +22,13 @@ export const PROTOCOL = 1;
 /** How long a ui report waits for its own event before it is dropped, and how often reports go out. */
 export const pageTimings = { confirmMs: 10_000, batchMs: 300, frameMs: 30_000 };
 
+/** A request's events and size at most, below the server's (64 events, 256 KB): a batch is cut by both, and a comment's
+ * state larger than `event` keeps its latest replies only. */
+export const pageCaps = { events: 64, bytes: 200 * 1024, event: 96 * 1024 };
+
 type Reply = { userId?: string; author?: string; text: string };
-type Comment = { guid: string; sessionId: string; userId?: string; author?: string; text: string; solved?: boolean; quote?: string; replies: Reply[] };
-type Ui = { type: "ui"; id: string; kind: "comment" | "reply" | "edit" | "editReply" | "resolve" | "chat"; guid?: string; text?: string; solved?: boolean };
+type Comment = { guid: string; sessionId: string; userId?: string; author?: string; text: string; time?: number; solved?: boolean; quote?: string; replies: Reply[]; repliesCut?: number };
+type Ui = { type: "ui"; id: string; kind: "comment" | "reply" | "edit" | "editReply" | "resolve" | "chat"; guid?: string; text?: string; solved?: boolean; before?: string };
 type Event = Ui | ({ type: "comment" } & Comment) | { type: "removed"; guids: string[] };
 
 /** The bits of an editor's comment data (asc_CCommentData) the page reads. */
@@ -38,6 +42,8 @@ type Data = {
   asc_getRepliesCount?: () => number;
   asc_getReply?: (i: number) => Data;
   asc_getId?: () => string;
+  /** The comment's time in UTC, in ms as text (asc_getTime is the editor's local time). */
+  asc_getOnlyOfficeTime?: () => string;
 };
 
 type EditorApi = Record<string, any> & { asc_registerCallback(name: string, fn: (...args: any[]) => void): void };
@@ -82,6 +88,8 @@ function describe(sessionId: string, d: Data): Comment {
     userId: str(call(d, "asc_getUserId", "")),
     author: str(call(d, "asc_getUserName", "")),
     text: str(call(d, "asc_getText", "")).slice(0, 20_000),
+    // What tells two comments of the same author and text apart where a spreadsheet's reply has no session id to go by.
+    ...(Number(call(d, "asc_getOnlyOfficeTime", "")) > 0 ? { time: Number(call(d, "asc_getOnlyOfficeTime", "")) } : {}),
     solved: Boolean(call(d, "asc_getSolved", false)),
     quote: str(call(d, "asc_getQuoteText", "")).slice(0, 2000),
     replies,
@@ -122,32 +130,59 @@ export function hookDocchat(options: {
 
   const id = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
+  const size = (e: unknown) => JSON.stringify(e).length;
+
   function enqueue(e: Event): void {
     if (stopped || gone) return;
+    // A thread of many long replies: its state keeps its latest replies, as many as fit (the rest are counted).
+    if (e.type === "comment" && size(e) > pageCaps.event) {
+      const all = e.replies;
+      let keep = all.length;
+      while (keep > 0 && size({ ...e, replies: all.slice(all.length - keep) }) > pageCaps.event) keep = Math.max(0, Math.floor(keep / 2));
+      e = { ...e, replies: all.slice(all.length - keep), repliesCut: all.length - keep };
+    }
     queue.push(e);
     if (flushing === undefined) flushing = setTimeout(() => void flush(), pageTimings.batchMs);
   }
 
-  async function flush(keepalive = false): Promise<void> {
-    flushing = undefined;
-    if (!queue.length || gone) return;
-    const events = queue.splice(0, 64);
+  /** Sends `events`; the answer's status, or 0 where every try failed. */
+  async function send(events: Event[], keepalive: boolean): Promise<number> {
     const body = { v: PROTOCOL, docId, key: options.key(), ...(options.panelChat ? { panelChat: options.panelChat } : {}), events };
+    let status = 0;
     for (let i = 0; i < 3; i++) {
       try {
         const r = await options.post("/docchat/events", body, keepalive);
-        if (r.status === 409) {
-          // Office was updated (another protocol), or the session is not open: nothing more is taken from this page.
-          log(`docchat reports refused (${r.status}): reload the page`);
-          gone = true;
-          return;
-        }
-        if (r.ok || r.status === 400 || r.status === 413) break;
+        status = r.status;
+        if (r.ok || r.status === 400 || r.status === 409 || r.status === 413) return r.status;
       } catch {
         // tried again
       }
       if (keepalive) break;
       await new Promise((resolve) => setTimeout(resolve, 500 * (i + 1)));
+    }
+    return status;
+  }
+
+  async function flush(keepalive = false): Promise<void> {
+    flushing = undefined;
+    if (!queue.length || gone) return;
+    // As many as fit in one request, by count and by size (one at least).
+    let n = 0;
+    let bytes = 0;
+    while (n < queue.length && n < pageCaps.events && (n === 0 || bytes + size(queue[n]) <= pageCaps.bytes)) bytes += size(queue[n++]);
+    const events = queue.splice(0, n);
+    let status = await send(events, keepalive);
+    // Refused as too large all the same: what a person did goes alone, rather than with what the editor heard.
+    if (status === 413) {
+      const ui = events.filter((e) => e.type === "ui");
+      if (ui.length && ui.length < events.length) status = await send(ui, keepalive);
+      if (status === 413) log(`docchat reports refused as too large: ${events.length} dropped`);
+    }
+    if (status === 409) {
+      // Office was updated (another protocol), or the session is not open: nothing more is taken from this page.
+      log(`docchat reports refused (${status}): reload the page`);
+      gone = true;
+      return;
     }
     if (queue.length && flushing === undefined) flushing = setTimeout(() => void flush(), pageTimings.batchMs);
   }
@@ -214,7 +249,7 @@ export function hookDocchat(options: {
         if (before && guid) {
           const last = after.replies[after.replies.length - 1];
           if (after.replies.length === before.replies.length + 1 && last && (!last.userId || last.userId === user)) ui = { type: "ui", id: id(), kind: "reply", guid, text: last.text };
-          else if (after.text !== before.text) ui = { type: "ui", id: id(), kind: "edit", guid, text: after.text };
+          else if (after.text !== before.text) ui = { type: "ui", id: id(), kind: "edit", guid, text: after.text, before: before.text };
           else if (after.replies.length === before.replies.length && after.replies.some((r, i) => r.text !== before.replies[i]?.text)) ui = { type: "ui", id: id(), kind: "editReply", guid, text: after.replies.find((r, i) => r.text !== before.replies[i]?.text)!.text };
           else if (Boolean(after.solved) !== Boolean(before.solved)) ui = { type: "ui", id: id(), kind: "resolve", guid, solved: Boolean(after.solved) };
         }
@@ -351,7 +386,12 @@ export function hookDocchat(options: {
         } catch {
           // the panel's internals of another version: the events alone
         }
-        const comments = [...known.values()].filter((c) => c.guid);
+        let comments: Comment[] = [...known.values()].filter((c) => c.guid);
+        // Every comment must be in the list (one it lacks starts its thread's removal): where all of them do not fit,
+        // they go without their replies, and with their texts cut at last, which the events bring in full.
+        const body = (list: Comment[]) => size({ v: PROTOCOL, docId, key: options.key(), comments: list });
+        if (body(comments) > pageCaps.bytes) comments = comments.map((c) => ({ ...c, replies: [], repliesCut: c.replies.length }));
+        if (body(comments) > pageCaps.bytes) comments = comments.map((c) => ({ ...c, text: c.text.slice(0, 200), quote: "" }));
         void options.post("/docchat/ready", { v: PROTOCOL, docId, key: options.key(), ...(options.panelChat ? { panelChat: options.panelChat } : {}), comments }).catch(() => {});
       }, 1500);
     },

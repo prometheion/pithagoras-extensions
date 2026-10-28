@@ -290,9 +290,12 @@ async function editorFor(home: string, docId: string, mode: SeatMode, signal?: A
       if (standing !== "behind") throw new SeatError("not_found", "the document is gone");
       if (!reopenBehind) throw new SeatError("behind", "the document's file changed outside the editor while the agent's editor had it open; that editor is closed, and the next call opens the file as it is now");
       editor = undefined;
-    } else if (editor.mode !== mode) {
-      close(editor, `it opens in ${mode} mode now`);
-      editor = undefined;
+    } else if (editor.mode !== mode && !(editor.mode === "comment" && mode === "view")) {
+      // Another mode (an editor that may only comment also serves a read asked in view mode): it opens anew, once the
+      // jobs it runs ended; closed under a job, that job would end as "may have run" (a post then made twice).
+      await idle(editor, signal);
+      if (editors.has(editor.id)) close(editor, `it opens in ${mode} mode now`);
+      return editorFor(home, docId, mode, signal, reopenBehind);
     } else if (editor.ready && !editor.held && Date.now() - editor.lastPoll > limits.deadMs) {
       // Its plugin stopped polling (a crashed frame, a reload of the browser): opened anew, once.
       if (editor.reopened) {
@@ -309,6 +312,16 @@ async function editorFor(home: string, docId: string, mode: SeatMode, signal?: A
   editor.busy = true;
   editor.lastUsed = Date.now();
   return editor;
+}
+
+/** Waits until `editor` runs no job (none queued, none handed, no call using it), at most as long as a job and its
+ * send may take; an abort ends the wait. */
+async function idle(editor: Editor, signal?: AbortSignal): Promise<void> {
+  const until = Date.now() + limits.jobMs + limits.sentMs;
+  while (editors.has(editor.id) && (editor.busy || editor.queue.length) && Date.now() < until) {
+    if (signal?.aborted) throw new SeatError("aborted", "the call was aborted");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 /** Opens an editor: the browser and its page first, room made under the limit, the config minted, the page told, and

@@ -40,7 +40,9 @@ import { DEFAULT_SETTINGS, loadSettings } from "./settings";
 export type ChatState = "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "nobody" | "interrupted" | "limit" | "idle";
 
 type Pending = { since: number; pid: number; asked?: string };
-type ToPost = { text: string; at: number };
+/** An answer waiting to be posted. `sent`: the chunks of an editor's chat answer posted already; `check`: a post of it
+ * may have run (its editor closed or timed out while it ran), so a thread reads back before it posts it again. */
+type ToPost = { text: string; at: number; sent?: number; check?: true };
 
 /** One agent or project in a thread. */
 type AgentEntry = {
@@ -51,14 +53,18 @@ type AgentEntry = {
   /** Messages for its chat not given to it yet: a run is going, or it waits for its turn. */
   queue: string[];
   pending?: Pending;
-  toPost?: ToPost;
+  /** Answers waiting to be posted, oldest first: each is posted, in turn. */
+  toPost?: ToPost[];
   /** It had a chat before, which was deleted: the next one is told the thread had an earlier conversation. */
   earlier?: boolean;
+  /** Messages dropped from the queue (more came than the limit keeps): the next prompt says how many. */
+  dropped?: number;
 };
 
 type Thread = {
   createdAt: number;
-  /** The comment's text, as the person last wrote it. */
+  /** The comment's text, as it was last known: what a save's comment and a cell comment's reply are matched by. It is the
+   * person's words only where they made the comment here (DocRecord.made). */
   text: string;
   /** An earlier saved file of the document had it (only then can a save that lacks it remove it). */
   inFile: boolean;
@@ -71,7 +77,10 @@ type Thread = {
   removing?: { at: number; reason: string };
 };
 
-type DocRecord = { version: 1; threads: Record<string, Thread>; uiSeen: string[] };
+/** `made`: the GUIDs of the comments people made through this portal's editor (ui reports of kind `comment`): only
+ * their text is a person's words, which a prompt may give as theirs. Any other comment (the file's own, another tool's)
+ * is the document's content, read through office_comments. */
+type DocRecord = { version: 1; threads: Record<string, Thread>; uiSeen: string[]; made: string[] };
 
 type SessionRecord = {
   docId: string;
@@ -84,8 +93,9 @@ type SessionRecord = {
    * first one was lost. */
   people: { text: string; at: number }[];
   queue: string[];
+  dropped?: number;
   pending?: Pending;
-  toPost?: ToPost;
+  toPost?: ToPost[];
   ending?: number;
 };
 
@@ -95,7 +105,7 @@ export type PageComment = { guid: string; sessionId?: string; userId?: string; a
 /** What a page reports: what a person did in the editor's own UI (`ui`), or what its editor heard (a comment's state,
  * comments removed). */
 export type PageEvent =
-  | { type: "ui"; id: string; kind: "comment" | "reply" | "edit" | "editReply" | "resolve" | "chat"; guid?: string; text?: string; solved?: boolean }
+  | { type: "ui"; id: string; kind: "comment" | "reply" | "edit" | "editReply" | "resolve" | "chat"; guid?: string; text?: string; solved?: boolean; before?: string }
   | ({ type: "comment" } & PageComment)
   | { type: "removed"; guids: string[] };
 
@@ -113,6 +123,14 @@ export type DocchatLimits = {
   removeAfterS: number;
   /** Seconds after the last person left an editing session before its chat goes. */
   chatEndS: number;
+  /** Reports of one editing session in 10 s. */
+  reportsPer10S: number;
+  /** The longest comment, reply or chat message taken from a report. */
+  messageChars: number;
+  /** Seconds between saves of a document after posts. */
+  saveEveryS: number;
+  /** Messages kept for one chat while it answers. */
+  queued: number;
 };
 
 export type DocchatChat = { id: string; title?: string; workspace?: string; kind?: string; parent?: string; status?: string };
@@ -125,7 +143,7 @@ export type DocchatDeps = {
     get(id: string): DocchatChat | undefined;
     list(): DocchatChat[];
     folder(id: string): string;
-    create(options: { parent: string; title: string; listed?: boolean }): DocchatChat;
+    create(options: { parent: string; title: string; listed?: boolean; mode?: string }): DocchatChat;
     prompt(id: string, message: string): Promise<ChildRun>;
     abort(id: string): Promise<void>;
     remove(id: string): Promise<void>;
@@ -160,18 +178,27 @@ export type DocchatDeps = {
 export const PROTOCOL = 1;
 /** One message of the editor's chat at most, as its panel splits them. */
 export const CHAT_CHUNK = 2048;
-/** The page's reports: events in one request, its size, a text, requests per page in 10 s. */
-/** (The rate is per editing session: every page in it shares its key, each reporting at most every 300 ms.) */
-export const CAPS = { events: 64, bytes: 256 * 1024, text: 20_000, perTenSeconds: 50 };
+/** The page's reports: events in one request and its size. These are the route's protocol, not a person's use (that is
+ * held by the settings: the reports per session in 10 s, the longest message), so they are no setting: the page sends
+ * at most 64 events and splits its batches below 256 KB (docchat-page.ts). */
+export const CAPS = { events: 64, bytes: 256 * 1024 };
+/** Reports of one document in 10 s, from all its sessions together, as a multiple of the per-session setting: a key
+ * made up for each request gets a bucket of its own, the document's holds them all. */
+const DOC_RATE_FACTOR = 4;
 /** Report ids kept per document against a retried request. */
 const UI_SEEN = 2000;
-/** A session's people's messages kept for a chat made anew. */
+/** A session's people's messages kept for a chat made anew (only what a lost chat is given again; bounded, not a
+ * person's limit). */
 const PEOPLE_KEPT = 50;
 const PEOPLE_CHARS = 20_000;
 /** A thread's chat title: the first characters of the comment. */
 const TITLE_CHARS = 60;
-/** Saves after posts: at most one per document in this time. */
-const SAVE_EVERY_MS = 3_000;
+/** Mention marks (`@`, `+`) looked at in one text: a text of thousands of them is no list of people to ask. */
+const MENTION_MARKS = 200;
+/** A thread's GUID as the editors name it: Word's durableId in hex, a spreadsheet's threaded comment id. Anything else
+ * (a forged report, "__proto__") is no thread. */
+const GUID = /^(\{[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}\}|[0-9A-F]{1,8})$/i;
+export const guidOk = (guid: unknown): guid is string => typeof guid === "string" && GUID.test(guid);
 /** A reply lost to a person's change at the same moment is posted again this often, this far apart; a post that
  * failed (the agents' browser starting, Docker slow) is tried again this often, further apart each time. Tests make
  * them shorter. */
@@ -184,6 +211,10 @@ export const DEFAULT_LIMITS: DocchatLimits = {
   chatMessages: DEFAULT_SETTINGS.docchatChatMessages,
   removeAfterS: DEFAULT_SETTINGS.docchatRemoveAfterS,
   chatEndS: DEFAULT_SETTINGS.docchatChatEndS,
+  reportsPer10S: DEFAULT_SETTINGS.docchatReportsPer10S,
+  messageChars: DEFAULT_SETTINGS.docchatMessageChars,
+  saveEveryS: DEFAULT_SETTINGS.docchatSaveEveryS,
+  queued: DEFAULT_SETTINGS.docchatQueued,
 };
 
 /** What an agent in one of these chats is told about the people it cannot ask. */
@@ -192,6 +223,11 @@ const NOBODY_TO_ASK =
 
 /** The dialogs of pi's UI requests: what waits for somebody (ui-requests.ts of the portal). */
 const DIALOGS = new Set(["select", "confirm", "input", "editor", "questions"]);
+
+/** The mode these chats are made in: none ("standard"), whatever mode the person chose for the parent chat; what the
+ * parent's mode took away stays off (ChildChatOptions.mode). Nobody watches them, so a mode chosen for one conversation
+ * must not carry over to every comment. */
+const CHILD_MODE = "standard";
 
 /** The question tool the portal gives a chat with a person, which these chats must not have. */
 export const QUESTION_TOOL = "ask_question";
@@ -236,7 +272,18 @@ export function limits(): DocchatLimits {
   if (cfg.limits) return cfg.limits();
   try {
     const s = loadSettings(root());
-    return { runs: s.docchatRuns, threads: s.docchatThreads, replyChars: s.docchatReplyChars, chatMessages: s.docchatChatMessages, removeAfterS: s.docchatRemoveAfterS, chatEndS: s.docchatChatEndS };
+    return {
+      runs: s.docchatRuns,
+      threads: s.docchatThreads,
+      replyChars: s.docchatReplyChars,
+      chatMessages: s.docchatChatMessages,
+      removeAfterS: s.docchatRemoveAfterS,
+      chatEndS: s.docchatChatEndS,
+      reportsPer10S: s.docchatReportsPer10S,
+      messageChars: s.docchatMessageChars,
+      saveEveryS: s.docchatSaveEveryS,
+      queued: s.docchatQueued,
+    };
   } catch {
     return DEFAULT_LIMITS;
   }
@@ -259,16 +306,35 @@ function writeWhole(file: string, value: unknown): void {
 const threadsFile = (docId: string) => path.join(root(), "state", "threads", `${docId}.json`);
 const sessionsFile = () => path.join(root(), "state", "sessions.json");
 
+/** A map by a key a page or a file named (a GUID, a folder): no prototype, so no key reaches Object.prototype. */
+const bare = <T>(from?: Record<string, T>): Record<string, T> => Object.assign(Object.create(null) as Record<string, T>, from ?? {});
+
+/** Answers waiting, as a record holds them (one answer, as an earlier version kept it, is a list of one). */
+const waitingOf = (v: unknown): ToPost[] | undefined => (Array.isArray(v) ? v : v && typeof v === "object" ? [v as ToPost] : undefined);
+
 function docRecord(docId: string): DocRecord {
   let rec = docs.get(docId);
   if (rec) return rec;
   try {
     const raw = JSON.parse(fs.readFileSync(threadsFile(docId), "utf8"));
-    if (raw?.version === 1 && raw.threads && typeof raw.threads === "object") rec = { version: 1, threads: raw.threads, uiSeen: Array.isArray(raw.uiSeen) ? raw.uiSeen : [] };
+    if (raw?.version === 1 && raw.threads && typeof raw.threads === "object") {
+      const threads = bare<Thread>();
+      for (const [guid, t] of Object.entries(raw.threads as Record<string, Thread>)) {
+        if (!guidOk(guid) || !t || typeof t !== "object") continue;
+        const agents = bare<AgentEntry>();
+        for (const [folder, a] of Object.entries(t.agents ?? {})) {
+          const toPost = waitingOf(a.toPost);
+          agents[folder] = { ...a, queue: Array.isArray(a.queue) ? a.queue : [], ...(toPost ? { toPost } : {}) };
+          if (!toPost) delete agents[folder].toPost;
+        }
+        threads[guid] = { ...t, agents };
+      }
+      rec = { version: 1, threads, uiSeen: Array.isArray(raw.uiSeen) ? raw.uiSeen : [], made: Array.isArray(raw.made) ? raw.made.filter(guidOk) : [] };
+    }
   } catch {
     // none yet, or unreadable: a new one
   }
-  rec ??= { version: 1, threads: {}, uiSeen: [] };
+  rec ??= { version: 1, threads: bare(), uiSeen: [], made: [] };
   docs.set(docId, rec);
   return rec;
 }
@@ -277,7 +343,7 @@ function saveDoc(docId: string): void {
   const rec = docs.get(docId);
   if (!rec) return;
   try {
-    if (!Object.keys(rec.threads).length && !rec.uiSeen.length) fs.rmSync(threadsFile(docId), { force: true });
+    if (!Object.keys(rec.threads).length && !rec.uiSeen.length && !rec.made.length) fs.rmSync(threadsFile(docId), { force: true });
     else writeWhole(threadsFile(docId), rec);
   } catch (e) {
     log(`the threads of ${docId} could not be written: ${(e as Error).message}`);
@@ -288,9 +354,16 @@ function sessionRecords(): Record<string, SessionRecord> {
   if (sessions) return sessions;
   try {
     const raw = JSON.parse(fs.readFileSync(sessionsFile(), "utf8"));
-    sessions = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    sessions = bare<SessionRecord>();
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [key, s] of Object.entries(raw as Record<string, SessionRecord>)) {
+        const toPost = waitingOf(s.toPost);
+        sessions[key] = { ...s, queue: Array.isArray(s.queue) ? s.queue : [], ...(toPost ? { toPost } : {}) };
+        if (!toPost) delete sessions[key].toPost;
+      }
+    }
   } catch {
-    sessions = {};
+    sessions = bare();
   }
   return sessions!;
 }
@@ -402,26 +475,31 @@ export function ownerOf(doc: Pick<DocMeta, "owner" | "path">): string | null {
  * skipped (logged), as is one that matches nothing.
  */
 export function parseMentions(text: string, doc?: Pick<DocMeta, "owner" | "path">): string[] {
-  const all = mentionable();
+  // Each name lower-cased once, and each mark compared over a window as long as the longest name: a long text of many
+  // marks costs no more than its length (a copy of the rest of the text per mark would cost its square).
+  const all = mentionable().map((f) => ({ ...f, lower: f.name.toLowerCase() }));
   const agents = all.filter((f) => f.kind === "agent").sort((a, b) => b.name.length - a.name.length);
   const projects = all.filter((f) => f.kind === "project").sort((a, b) => b.name.length - a.name.length);
+  const longest = all.reduce((n, f) => Math.max(n, f.name.length), 5);
   const out: string[] = [];
   const add = (folder: string | null) => {
     if (folder && !out.includes(folder)) out.push(folder);
   };
-  const ends = (rest: string, name: string) => rest.toLowerCase().startsWith(name.toLowerCase()) && !/^[\p{L}\p{N}_]/u.test(rest.slice(name.length));
-  const pick = (rest: string, among: Folder[]): string | null | undefined => {
-    const hit = among.find((f) => ends(rest, f.name));
+  const ends = (rest: string, lower: string) => rest.slice(0, lower.length).toLowerCase() === lower && !/^[\p{L}\p{N}_]/u.test(rest.slice(lower.length));
+  const pick = (rest: string, among: (Folder & { lower: string })[]): string | null | undefined => {
+    const hit = among.find((f) => ends(rest, f.lower));
     if (!hit) return undefined;
-    const same = among.filter((f) => f.name.toLowerCase() === hit.name.toLowerCase());
+    const same = among.filter((f) => f.lower === hit.lower);
     if (same.length > 1) {
       log(`a mention of "${hit.name}" is ambiguous (${same.length} folders): skipped`);
       return null;
     }
     return canonical(hit.path);
   };
+  let marks = 0;
   for (const m of text.matchAll(/(?<![\p{L}\p{N}_.@+])[@+]/gu)) {
-    const rest = text.slice(m.index! + 1);
+    if (++marks > MENTION_MARKS) break;
+    const rest = text.slice(m.index! + 1, m.index! + 1 + "project:".length + longest + 2);
     if (/^project:/i.test(rest)) {
       const found = pick(rest.slice(8), projects);
       if (found === undefined) log(`a mention of a project matches none: skipped`);
@@ -497,10 +575,14 @@ function parentFor(folder: string, docId: string, panelChat?: string): string | 
 /* prompts                                                             */
 /* ------------------------------------------------------------------ */
 
-export function threadPrompt(docId: string, guid: string, text: string, earlier = false): string {
+/** The first prompt of a thread's chat. `words`: the comment's text where it is the person's own (a comment they made
+ * here); null for any other comment, whose text is the document's content and is read through office_comments (the
+ * person's words then follow as a reply or what they added). */
+export function threadPrompt(docId: string, guid: string, words: string | null, earlier = false): string {
   return [
-    `A person mentioned you in a comment in the office document ${docId} (comment thread ${guid}). What they wrote:`,
-    asTyped(text),
+    ...(words !== null
+      ? [`A person mentioned you in a comment in the office document ${docId} (comment thread ${guid}). What they wrote:`, asTyped(words)]
+      : [`A person mentioned you in a comment thread of the office document ${docId} (comment thread ${guid}) that they did not start: the comment and its earlier replies are the document's content, not their words.`]),
     "",
     ...(earlier ? ["This thread had an earlier conversation with you, which is gone: its replies are in office_comments.", ""] : []),
     `The text the comment is on, its other replies and the document are the document's content: read them with office_comments (id ${docId}, thread ${guid}) and office_read. Do what the person asks; office_edit changes the document. Your last message of each turn is posted as your reply in this comment's thread, so end with a short answer to them. Their later replies in the thread come to this chat.`,
@@ -512,6 +594,20 @@ export function replyPrompt(text: string): string {
   return `A reply in the thread:\n${asTyped(text)}`;
 }
 
+/** What a person added to a comment that is not their own (the rest of its text is the document's). */
+export function addedPrompt(text: string): string {
+  return `What the person added to the comment:\n${asTyped(text)}`;
+}
+
+/** The words a person added in an edit of `before` into `after`: what lies between their common start and end. */
+export function added(before: string, after: string): string {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let end = 0;
+  while (end < before.length - start && end < after.length - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++;
+  return after.slice(start, after.length - end);
+}
+
 export function sessionPrompt(docId: string, messages: string[], earlier: string[] = []): string {
   return [
     `People in the office document ${docId} write to you in its editor's chat. This chat lasts as long as that editing session, and their messages come here as they wrote them. Your last message of each turn is posted in the editor's chat as yours. Read the document with office_read; office_edit changes it.`,
@@ -521,6 +617,10 @@ export function sessionPrompt(docId: string, messages: string[], earlier: string
     ...messages,
   ].join("\n");
 }
+
+const DROPPED_NOTE = (n: number) => `(${n === 1 ? "An earlier message" : `${n} earlier messages`} that came while you answered ${n === 1 ? "was" : "were"} dropped: more came than this chat keeps.)`;
+
+const CUT_NOTE = "Your last run was cut off before you answered (the portal restarted). What came meanwhile:";
 
 const DIALOG_NOTE = (what: string) =>
   `Your last step waited for a person's answer (${what}), which nobody can give in this chat, so it was stopped. Go on without it: decide for yourself, or say in your answer what you need.`;
@@ -559,6 +659,12 @@ function deliver(t: Target, message: string): void {
   const entry = entryOf(t);
   if (!entry) return;
   entry.queue.push(message);
+  // At most the limit waits; the oldest go, and the next prompt says so.
+  const over = entry.queue.length - limits().queued;
+  if (over > 0) {
+    entry.queue.splice(0, over);
+    entry.dropped = (entry.dropped ?? 0) + over;
+  }
   persist(t);
   next(t);
 }
@@ -575,8 +681,9 @@ function next(t: Target): void {
     persist(t);
     return;
   }
-  const message = entry.queue.join("\n\n");
+  const message = [...(entry.dropped ? [DROPPED_NOTE(entry.dropped)] : []), ...entry.queue].join("\n\n");
   entry.queue = [];
+  delete entry.dropped;
   start(t, entry, message);
 }
 
@@ -600,7 +707,11 @@ function start(t: Target, entry: AgentEntry | SessionRecord, message: string): v
   );
 }
 
-function ended(t: Target, chatId: string, r: ChildRun): void {
+/** How a run ended. `unchecked`: its end was heard on the chat's events (the half restarted while it ran), which do not
+ * say whether it read a suspected prompt injection. */
+type RunEnd = ChildRun & { unchecked?: true };
+
+function ended(t: Target, chatId: string, r: RunEnd): void {
   const id = targetId(t);
   running.delete(id);
   const entry = entryOf(t);
@@ -630,7 +741,7 @@ function ended(t: Target, chatId: string, r: ChildRun): void {
 }
 
 /** What a run's end comes to: an answer posted, not posted, an error said, or nothing (stopped). */
-function answered(t: Target, entry: AgentEntry | SessionRecord, r: ChildRun): void {
+function answered(t: Target, entry: AgentEntry | SessionRecord, r: RunEnd): void {
   const who = t.kind === "thread" ? labelOf(t.folder) : labelOf((entry as SessionRecord).folder);
   if (r.status === "stopped") {
     entry.state = "idle";
@@ -639,7 +750,8 @@ function answered(t: Target, entry: AgentEntry | SessionRecord, r: ChildRun): vo
   if (r.status === "error") {
     entry.state = "failed";
     entry.error = (r.error ?? "the run failed").slice(0, 200);
-    if (t.kind === "thread") post(t, `${who} could not answer: ${entry.error}. Reply to try again.`);
+    // Said where the person wrote: the thread, or the editor's chat.
+    post(t, `${who} could not answer: ${entry.error}. ${again(t)}`);
     return;
   }
   if (!r.answer.trim()) {
@@ -651,9 +763,18 @@ function answered(t: Target, entry: AgentEntry | SessionRecord, r: ChildRun): vo
     record({ subject: subjectOf(t), reason: "an answer was not posted: its chat had read a suspected prompt injection", chatId: entry.chatId ?? undefined });
     return;
   }
+  if (r.unchecked) {
+    // Whether the run read a suspected injection is not known: not posted (fail closed).
+    entry.state = "not_posted";
+    record({ subject: subjectOf(t), reason: "an answer was not posted: its run ended while Office restarted, so whether it had read a suspected prompt injection is not known", chatId: entry.chatId ?? undefined });
+    post(t, `${who} answered while Office restarted; that answer could not be checked, so it is not posted. ${again(t)}`);
+    return;
+  }
   entry.state = "answered";
   post(t, r.answer);
 }
+
+const again = (t: Target) => (t.kind === "thread" ? "Reply to try again." : "Write again to try again.");
 
 const subjectOf = (t: Target) => {
   const docId = t.kind === "thread" ? t.docId : sessionRecords()[t.key]?.docId ?? "";
@@ -666,64 +787,102 @@ const subjectOf = (t: Target) => {
 
 const lastSave = new Map<string, number>();
 
-/** Keeps `text` to post for the target, and posts it now where Office runs. */
+/** Keeps `text` to post for the target, after what waits already, and posts now where Office runs. */
 function post(t: Target, text: string): void {
   const entry = entryOf(t);
   if (!entry) return;
-  entry.toPost = { text, at: now() };
+  (entry.toPost ??= []).push({ text, at: now() });
   persist(t);
   void postNow(t);
 }
 
 /** The mode the agent's editor of the document opens in for a post: edit where its agent may change the file, else
- * comment-only for a thread (it still answers there) and view for the editor's chat. */
-function modeFor(doc: DocMeta, folder: string, thread: boolean, chatId: string | null): "edit" | "view" | "comment" {
+ * one that may only comment, for a thread and the editor's chat alike: the agent's own reads take that editor too
+ * (seat.ts), so its reads and the posts never close each other's editor. */
+function modeFor(doc: DocMeta, folder: string, chatId: string | null): "edit" | "comment" {
   const may = cfg.mayWrite ? cfg.mayWrite(doc, folder, chatId) : true;
-  return may ? "edit" : thread ? "comment" : "view";
+  return may ? "edit" : "comment";
 }
 
 const posting = new Set<string>();
 
+/** Posts what waits for the target, oldest first, each removed once it is posted (or can never be); a post that fails
+ * keeps its place and is tried again later. One at a time per target. */
 async function postNow(t: Target): Promise<void> {
   const id = targetId(t);
   if (posting.has(id)) return;
-  const entry = entryOf(t);
-  if (!entry?.toPost) return;
+  if (!entryOf(t)?.toPost?.length) return;
   posting.add(id);
+  try {
+    for (;;) {
+      const entry = entryOf(t);
+      const item = entry?.toPost?.[0];
+      if (!entry || !item) return;
+      if (!(await postOne(t, entry, item))) return;
+      const at = entry.toPost?.indexOf(item) ?? -1;
+      if (at !== -1) entry.toPost!.splice(at, 1);
+      if (!entry.toPost?.length) delete entry.toPost;
+      retries.delete(id);
+      persist(t);
+    }
+  } finally {
+    posting.delete(id);
+  }
+}
+
+/** A seat's failure after its plugin took the job (`ran`), or a wait that ended while it may have run: what the post did
+ * is not known. */
+const mayHaveRun = (e: unknown) => Boolean((e as { ran?: boolean })?.ran) || (e as { code?: string })?.code === "timeout";
+
+/** Posts one answer. True where it is done with (posted, or there is nothing left to post it to); false where it waits
+ * (Office not running, or a failure tried again later). Every job handed to the agent's editor is in the audit log. */
+async function postOne(t: Target, entry: AgentEntry | SessionRecord, item: ToPost): Promise<boolean> {
+  const id = targetId(t);
+  const docId = t.kind === "thread" ? t.docId : (entry as SessionRecord).docId;
+  const folder = t.kind === "thread" ? t.folder : (entry as SessionRecord).folder;
+  const where = t.kind === "thread" ? `comment thread ${t.guid}` : "the editor's chat";
+  const doc = getDoc(docId, root());
+  const chatId = entry.chatId ?? undefined;
   try {
     const state = (await cfg.officeState?.()) ?? "running";
     if (state !== "running") {
       entry.error = state === "starting" ? "Office is starting; the answer is posted once it runs" : "Office is stopped; the answer is posted once it runs again";
       persist(t);
-      return;
+      return false;
     }
+    if (!doc) return true;
     const run = cfg.seatRun ?? (async () => Promise.reject(new Error("no seats")));
-    const docId = t.kind === "thread" ? t.docId : (entry as SessionRecord).docId;
-    const folder = t.kind === "thread" ? t.folder : (entry as SessionRecord).folder;
-    const doc = getDoc(docId, root());
-    if (!doc) {
-      delete entry.toPost;
-      persist(t);
-      return;
-    }
     const author = `${labelOf(folder)} (agent)`;
     const userId = `agent:${keyIdOf(folder)}`;
-    const text = entry.toPost.text;
+    const text = item.text;
+    const mode = modeFor(doc, folder, entry.chatId);
     if (t.kind === "session") {
-      const mode = modeFor(doc, folder, false, entry.chatId);
       const chunks: string[] = [];
       for (let i = 0; i < text.length && chunks.length < limits().chatMessages; i += CHAT_CHUNK) chunks.push(text.slice(i, i + CHAT_CHUNK));
       if (text.length > CHAT_CHUNK * limits().chatMessages) chunks[chunks.length - 1] = `${chunks[chunks.length - 1].slice(0, CHAT_CHUNK - 4)} (…)`;
-      for (const chunk of chunks) await run(folder, docId, mode, { kind: "chat.send", args: { text: chunk } }, { post: true });
-      record({ subject: doc.title, reason: `posted an answer of ${text.length} characters in the editor's chat for ${folder}`, chatId: entry.chatId ?? undefined });
+      // A chunk whose post may have run is taken as posted: the editor's chat cannot be read back, and twice is worse.
+      if (item.check) {
+        item.sent = (item.sent ?? 0) + 1;
+        delete item.check;
+      }
+      for (let i = item.sent ?? 0; i < chunks.length; i++) {
+        try {
+          await run(folder, docId, mode, { kind: "chat.send", args: { text: chunks[i] } }, { post: true });
+        } catch (e) {
+          const of = `message ${i + 1} of ${chunks.length} of an answer of ${text.length} characters in the editor's chat for ${folder}`;
+          if (mayHaveRun(e)) {
+            item.check = true;
+            record({ subject: doc.title, reason: `${of}: may have been posted, the outcome is not known (${(e as Error).message})`, chatId });
+          } else if (i > 0) record({ subject: doc.title, reason: `${of}: not posted (${(e as Error).message}); the ones before it were`, chatId });
+          throw e;
+        }
+        item.sent = i + 1;
+        persist(t);
+      }
+      record({ subject: doc.title, reason: `posted an answer of ${text.length} characters in the editor's chat for ${folder}`, chatId });
     } else {
       const thread = docRecord(docId).threads[t.guid];
-      if (!thread) {
-        delete entry.toPost;
-        persist(t);
-        return;
-      }
-      const mode = modeFor(doc, folder, true, entry.chatId);
+      if (!thread) return true;
       // A cell comment just made is held by its author's editor a moment longer (its lock comes back with its save):
       // a reply in that moment is turned back.
       if (doc.ext === "xlsx") {
@@ -732,65 +891,87 @@ async function postNow(t: Target): Promise<void> {
       }
       const max = limits().replyChars;
       const reply = text.length > max ? `${text.slice(0, max)} (…)` : text;
+      let sessionId: string | undefined;
+      // An earlier post of it may have run: read back first.
+      if (item.check) {
+        delete item.check;
+        if (await replyThere(folder, docId, mode, t.guid, thread, reply)) {
+          record({ subject: doc.title, reason: `an answer of ${reply.length} characters in ${where} for ${folder} was found posted on reading back`, chatId });
+          return true;
+        }
+      }
       // An editor that may only comment: Word rolls a builder command's reply back there, and takes it through its
       // comment methods (`how: "method"`); the spreadsheet editor takes the builder's reply in either mode.
-      const job =
+      const job = () =>
         doc.ext === "docx"
           ? { kind: "word.reply", args: { guid: t.guid, text: reply, author, userId, ...(mode === "comment" ? { how: "method" } : {}) } }
           : { kind: "cell.reply", args: { sessionId: thread.sessionId, match: { userId: thread.userId ?? "", author: thread.author ?? "", text: thread.text, time: thread.time ?? 0 }, text: reply, author, userId } };
-      const made = (await run(folder, docId, mode, job, { post: true })) as { guid?: unknown } | null;
-      // A Word comment answered through the comment methods comes back under a GUID of its own: the thread follows it.
-      if (typeof made?.guid === "string" && made.guid !== t.guid) {
-        moved(docId, [[t.guid, made.guid]]);
-        t.guid = made.guid;
-        (job.args as { guid?: string }).guid = made.guid;
-      }
+      const once = async (again: number) => {
+        let made: { guid?: unknown; sessionId?: unknown } | null;
+        try {
+          made = (await run(folder, docId, mode, job(), { post: true })) as typeof made;
+        } catch (e) {
+          if (mayHaveRun(e)) {
+            item.check = true;
+            record({ subject: doc.title, reason: `an answer of ${reply.length} characters in ${where} for ${folder}${again ? ` (posted again, ${again})` : ""}: may have been posted, the outcome is not known (${(e as Error).message})`, chatId });
+          }
+          throw e;
+        }
+        record({ subject: doc.title, reason: again ? `posted again an answer of ${reply.length} characters in ${where} for ${folder} (${again}): the one before was not found on reading back` : `posted an answer of ${reply.length} characters in ${where} for ${folder}`, chatId });
+        // A Word comment answered through the comment methods comes back under a GUID of its own, each time: the
+        // thread follows it.
+        if (guidOk(made?.guid) && made.guid !== t.guid) moved(docId, [[t.guid, made.guid]], t);
+        // A cell comment's reply names the comment it went on, by which it is read back.
+        if (typeof made?.sessionId === "string") sessionId = made.sessionId;
+      };
+      await once(0);
       await saveSoon(folder, docId);
       // Each change of a thread rewrites it whole from the changing page's view, and a spreadsheet's comment is locked
       // while a person changes it: a reply at that moment can be lost. Read back, and posted again where it is not
       // there, a few seconds apart, a few times.
-      for (let again = 1; !(await replyThere(folder, docId, mode, t.guid, thread, reply)); again++) {
-        if (again > postTimings.reposts) throw Object.assign(new Error("the comment was busy each time the answer was posted"), { code: "comment_busy" });
+      for (let again = 1; !(await replyThere(folder, docId, mode, t.guid, thread, reply, sessionId)); again++) {
+        if (again > postTimings.reposts) {
+          record({ subject: doc.title, reason: `an answer of ${reply.length} characters in ${where} for ${folder} was not found on reading back after ${again} posts: given up`, chatId });
+          throw Object.assign(new Error("the comment was busy each time the answer was posted"), { code: "comment_busy" });
+        }
         log(`the answer in thread ${t.guid} of ${docId} was lost to a change at the same time: posted again (${again})`);
         // From an editor opened anew: one whose reply was turned back can keep a stale view of the comment's lock.
         cfg.closeEditor?.(folder, docId, "its reply on a comment did not reach the document");
         await new Promise((resolve) => setTimeout(resolve, postTimings.repostMs));
-        await run(folder, docId, mode, job, { post: true });
+        await once(again);
         await saveSoon(folder, docId);
       }
-      record({ subject: doc.title, reason: `posted an answer of ${reply.length} characters in comment thread ${t.guid} for ${folder}`, chatId: entry.chatId ?? undefined });
     }
-    delete entry.toPost;
     delete entry.error;
-    persist(t);
+    return true;
   } catch (e) {
     const err = e as { code?: string; message?: string };
     entry.state = "failed";
     entry.error = err.code === "comment_gone" ? "the comment is gone" : err.code === "office_stopped" ? "Office is stopped; the answer is posted once it runs again" : err.code === "agent_editor_missing" ? "the agents' editor is not downloaded: Start in Settings → Office downloads it" : String(err.message ?? e).slice(0, 200);
-    // Gone for good: nothing left to post it to.
-    if (err.code === "comment_gone" || err.code === "comment_ambiguous" || err.code === "not_found" || err.code === "comment_busy") delete entry.toPost;
     log(`an answer could not be posted (${t.kind === "thread" ? `thread ${t.guid}` : `session ${t.key}`}): ${err.code ?? ""} ${err.message ?? e}`);
     persist(t);
+    // Gone for good: nothing left to post it to.
+    if (err.code === "comment_gone" || err.code === "comment_ambiguous" || err.code === "not_found" || err.code === "comment_busy") return true;
     // Anything else may pass in a moment (the agents' browser starting, Docker slow): tried again, a few times.
     const tries = (retries.get(id) ?? 0) + 1;
-    if (entry.toPost && tries <= postTimings.retries) {
+    if (tries <= postTimings.retries) {
       retries.set(id, tries);
       timer(`post:${id}`, postTimings.retryMs * tries, () => void postNow(t));
+      return false;
     }
-    return;
-  } finally {
-    posting.delete(id);
+    // Given up for now: kept, and tried again at the next ready, boot or start of the Document Server.
+    retries.delete(id);
+    return false;
   }
-  retries.delete(id);
 }
 
 /** Posts tried again after they failed, by target. */
 const retries = new Map<string, number>();
 
-/** A save of the session the agent's editor of the document is in, at most once per document in SAVE_EVERY_MS: the
- * reply is in the file also when nobody is in the document. */
+/** A save of the session the agent's editor of the document is in, at most once per document in the setting's time:
+ * the reply is in the file also when nobody is in the document. */
 async function saveSoon(folder: string, docId: string): Promise<void> {
-  if (now() - (lastSave.get(docId) ?? 0) < SAVE_EVERY_MS) return;
+  if (now() - (lastSave.get(docId) ?? 0) < limits().saveEveryS * 1000) return;
   lastSave.set(docId, now());
   const key = cfg.keyOf?.(folder, docId);
   if (!key || !cfg.save) return;
@@ -801,12 +982,15 @@ async function saveSoon(folder: string, docId: string): Promise<void> {
   }
 }
 
-async function replyThere(folder: string, docId: string, mode: "edit" | "view" | "comment", guid: string, thread: Thread, reply: string): Promise<boolean> {
+/** Whether `reply` is in the thread now, as the agent's editor reads it: a Word thread by its GUID, a cell comment by
+ * the session id its reply named (else by its author and text). Not known (the read failed): taken as there. */
+async function replyThere(folder: string, docId: string, mode: "edit" | "view" | "comment", guid: string, thread: Thread, reply: string, sessionId?: string): Promise<boolean> {
   try {
     const doc = getDoc(docId, root());
-    const listed = (await cfg.seatRun!(folder, docId, mode === "comment" ? "comment" : mode, { kind: doc?.ext === "xlsx" ? "cell.comments" : "word.comments", args: {} }, { post: true })) as { comments?: { guid?: string; userId: string; text: string; replies: { text: string }[] }[] };
+    const listed = (await cfg.seatRun!(folder, docId, mode, { kind: doc?.ext === "xlsx" ? "cell.comments" : "word.comments", args: {} }, { post: true })) as { comments?: { guid?: string; sessionId?: string; userId: string; text: string; replies: { text: string }[] }[] };
     const plain = (text: string) => text.replace(/\s+/g, " ").trim();
-    const comment = (listed.comments ?? []).find((c) => (c.guid ? c.guid === guid : c.userId === (thread.userId ?? "") && plain(c.text) === plain(thread.text)));
+    const all = listed.comments ?? [];
+    const comment = all.find((c) => (c.guid ? c.guid === guid : sessionId ? c.sessionId === sessionId : c.userId === (thread.userId ?? "") && plain(c.text) === plain(thread.text)));
     return !comment || comment.replies.some((r) => plain(r.text) === plain(reply));
   } catch {
     // Not known: taken as there, rather than posted twice.
@@ -817,9 +1001,9 @@ async function replyThere(folder: string, docId: string, mode: "edit" | "view" |
 /** Everything kept to post, posted where it can be: at boot, at a page's ready, after the Document Server started. */
 export function postWaiting(): void {
   for (const docId of new Set([...docsWithThreads(), ...docs.keys()])) {
-    for (const [guid, thread] of Object.entries(docRecord(docId).threads)) for (const [folder, a] of Object.entries(thread.agents)) if (a.toPost) void postNow({ kind: "thread", docId, guid, folder });
+    for (const [guid, thread] of Object.entries(docRecord(docId).threads)) for (const [folder, a] of Object.entries(thread.agents)) if (a.toPost?.length) void postNow({ kind: "thread", docId, guid, folder });
   }
-  for (const [key, s] of Object.entries(sessionRecords())) if (s.toPost) void postNow({ kind: "session", key });
+  for (const [key, s] of Object.entries(sessionRecords())) if (s.toPost?.length) void postNow({ kind: "session", key });
 }
 
 /* ------------------------------------------------------------------ */
@@ -828,19 +1012,28 @@ export function postWaiting(): void {
 
 /** Live state the pages report, per document: each comment as they last saw it (for office_comments and a sheet's
  * reply), and which pages (by key) reported. Kept in memory: it is the open session's. */
-const live = new Map<string, { comments: Map<string, PageComment>; at: number }>();
+const live = new Map<string, { comments: Map<string, PageComment>; from: Map<string, string>; at: number }>();
+/** How long the pages' view of a document is kept after its last report. */
+const LIVE_MS = 10 * 60_000;
 
 /** The comments the people's pages last reported for `docId`, while a page reported in the last `withinMs`. */
-export function liveComments(docId: string, withinMs = 10 * 60_000): PageComment[] | null {
+export function liveComments(docId: string, withinMs = LIVE_MS): PageComment[] | null {
   const l = live.get(docId);
   if (!l || now() - l.at > withinMs) return null;
   return [...l.comments.values()];
 }
 
-function seen(docId: string, c: PageComment): void {
-  const l = live.get(docId) ?? { comments: new Map(), at: now() };
+/** A comment as a page of the session `key` reports it now. */
+function seen(docId: string, key: string, c: PageComment): void {
+  if (!guidOk(c.guid)) return;
+  for (const [d, x] of live) if (now() - x.at > LIVE_MS) live.delete(d);
+  const l = live.get(docId) ?? { comments: new Map(), from: new Map(), at: now() };
   l.at = now();
+  // A comment that changed its GUID (one an agent's edit made again goes to its lasting GUID) is the same comment of
+  // that session: its entry under the earlier GUID goes.
+  if (c.sessionId) for (const [guid, o] of l.comments) if (guid !== c.guid && o.sessionId === c.sessionId && l.from.get(guid) === key) (l.comments.delete(guid), l.from.delete(guid));
   l.comments.set(c.guid, c);
+  l.from.set(c.guid, key);
   live.set(docId, l);
   const thread = docRecord(docId).threads[c.guid];
   if (!thread) return;
@@ -886,23 +1079,34 @@ function chatFor(docId: string, guid: string, folder: string, entry: AgentEntry,
     return null;
   }
   const title = `Comment: ${asTyped(text).replace(/\s+/g, " ").trim().slice(0, TITLE_CHARS)}`;
-  const chat = chats().create({ parent, title, listed: false });
+  const chat = chats().create({ parent, title, listed: false, mode: CHILD_MODE });
   internal.add(chat.id);
   entry.chatId = chat.id;
   entry.parent = parent;
   return chat.id;
 }
 
-/** An agent or project mentioned in a thread: its entry made (within the document's limit) and its chat given `first`
- * where it is new, else `later`. */
-function mention(docId: string, guid: string, folder: string, text: string, panelChat: string | undefined, later?: string): void {
+/** Whether a thread counts toward the document's limit: it has an agent that was not refused for the limit. */
+const counted = (t: Thread) => Object.values(t.agents).some((a) => a.state !== "limit");
+
+/** Whether the comment `guid` was made by a person through this portal's editor: only then is its text their words. */
+const ownComment = (rec: DocRecord, guid: string) => rec.made.includes(guid);
+
+/** What a person said that follows a thread's first prompt (a reply, or what they added to a comment not theirs), and
+ * the text a chat's title takes where the comment is not theirs. */
+type Said = { text: string; prompt: string };
+
+/** An agent or project mentioned in a thread: its entry made (within the document's limit) and its chat given its first
+ * prompt where it is new, else what the person said (`said`). One refused for the limit before tries again: there may
+ * be room now. */
+function mention(docId: string, guid: string, folder: string, panelChat: string | undefined, said?: Said): void {
   const rec = docRecord(docId);
   const thread = rec.threads[guid];
   let entry = thread.agents[folder];
-  const fresh = !entry;
-  if (!entry) {
-    const withAgents = Object.values(rec.threads).filter((t) => Object.keys(t.agents).length).length;
-    if (!Object.keys(thread.agents).length && withAgents >= limits().threads) {
+  const fresh = !entry || entry.state === "limit";
+  if (fresh) {
+    const withAgents = Object.values(rec.threads).filter((t) => t !== thread && counted(t)).length;
+    if (!counted(thread) && withAgents >= limits().threads) {
       thread.agents[folder] = { chatId: null, parent: null, state: "limit", error: "Too many comment chats in this document: delete some comments", queue: [] };
       saveDoc(docId);
       return;
@@ -912,11 +1116,12 @@ function mention(docId: string, guid: string, folder: string, text: string, pane
     addGrant(docId, folder, guid, now(), root());
     record({ subject: getDoc(docId, root())?.title ?? docId, reason: `comment thread ${guid}: ${folder} mentioned, given access to the document` });
   }
-  if (entry.state === "limit") return;
+  // The comment's text is the person's words only where they made it here; any other comment is the document's.
+  const words = ownComment(rec, guid) ? thread.text : null;
   const hadChat = Boolean(entry.chatId && chats().get(entry.chatId));
   let chatId: string | null;
   try {
-    chatId = chatFor(docId, guid, folder, entry, text, panelChat);
+    chatId = chatFor(docId, guid, folder, entry, words ?? said?.text ?? "", panelChat);
   } catch (e) {
     entry.state = "failed";
     entry.error = `its chat could not be made: ${(e as Error).message}`.slice(0, 200);
@@ -927,58 +1132,78 @@ function mention(docId: string, guid: string, folder: string, text: string, pane
   if (!chatId) return;
   const target: Target = { kind: "thread", docId, guid, folder };
   // A new chat is given the comment; one added by a reply, or made anew after its chat was lost, the reply too.
-  if (fresh || !hadChat) deliver(target, `${threadPrompt(docId, guid, text, entry.earlier)}${later ? `\n\n${replyPrompt(later)}` : ""}`);
-  else if (later) deliver(target, replyPrompt(later));
+  if (fresh || !hadChat) deliver(target, `${threadPrompt(docId, guid, words, entry.earlier)}${said ? `\n\n${said.prompt}` : ""}`);
+  else if (said) deliver(target, said.prompt);
 }
 
 /** A person's own act in the editor (a ui report): what it starts or tells. */
 function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>, panelChat?: string): void {
   const doc = getDoc(docId, root());
   if (!doc) return;
-  const text = String(e.text ?? "").slice(0, CAPS.text);
+  const text = String(e.text ?? "").slice(0, limits().messageChars);
   if (e.kind === "chat") return onChat(doc, key, text, panelChat);
-  const guid = typeof e.guid === "string" ? e.guid : "";
-  if (!guid) return;
+  if (!guidOk(e.guid)) return;
+  const guid = e.guid;
   const rec = docRecord(docId);
   if (e.kind === "comment") {
+    // Made by a person here: its text is theirs (kept for the comments people make, as many as the report ids).
+    if (!rec.made.includes(guid)) {
+      rec.made.push(guid);
+      if (rec.made.length > UI_SEEN) rec.made.splice(0, rec.made.length - UI_SEEN);
+    }
     const folders = parseMentions(text, doc);
-    if (!folders.length) return;
-    rec.threads[guid] ??= { createdAt: now(), text, inFile: false, agents: {} };
+    if (!folders.length) return saveDoc(docId);
+    rec.threads[guid] ??= { createdAt: now(), text, inFile: false, agents: bare() };
     rec.threads[guid].text = text;
     const c = live.get(docId)?.comments.get(guid);
-    if (c) seen(docId, c);
-    for (const folder of folders) mention(docId, guid, folder, text, panelChat);
+    if (c) seen(docId, key, c);
+    for (const folder of folders) mention(docId, guid, folder, panelChat);
     return;
   }
   if (e.kind === "edit") {
     const thread = rec.threads[guid];
+    const own = ownComment(rec, guid);
+    // Only the mentions this edit added count: what the comment said before is the person's own last text where they
+    // made it, else what their page had before the change. Not known: nobody is prompted.
+    const before = own && thread ? thread.text : typeof e.before === "string" ? e.before.slice(0, limits().messageChars) : null;
     if (thread) thread.text = text;
-    const folders = parseMentions(text, doc).filter((f) => !thread?.agents[f]);
+    if (before === null) {
+      saveDoc(docId);
+      return;
+    }
+    const had = parseMentions(before, doc);
+    const folders = parseMentions(text, doc).filter((f) => !had.includes(f) && (!thread?.agents[f] || thread.agents[f].state === "limit"));
     if (!folders.length) return saveDoc(docId);
-    rec.threads[guid] ??= { createdAt: now(), text, inFile: false, agents: {} };
-    for (const folder of folders) mention(docId, guid, folder, text, panelChat);
+    rec.threads[guid] ??= { createdAt: now(), text, inFile: false, agents: bare() };
+    // A comment not theirs: only what they added is their words.
+    const words = added(before, text);
+    const said = own ? undefined : { text: words, prompt: addedPrompt(words) };
+    for (const folder of folders) mention(docId, guid, folder, panelChat, said);
     return;
   }
   if (e.kind === "reply") {
     const thread = rec.threads[guid];
     const named = parseMentions(text, doc);
+    const said = { text, prompt: replyPrompt(text) };
     if (!thread) {
       // A thread with no record (an undo after its grace, a comment that mentioned nobody): a reply that mentions
-      // someone starts it; any other does nothing.
+      // someone starts it; any other does nothing. The comment's text is kept to know it by in a save, never given as
+      // the person's words unless they made it here.
       if (!named.length) return;
       const original = live.get(docId)?.comments.get(guid)?.text ?? "";
-      rec.threads[guid] = { createdAt: now(), text: original, inFile: false, agents: {} };
-      for (const folder of named) mention(docId, guid, folder, original || text, panelChat, original ? text : undefined);
+      rec.threads[guid] = { createdAt: now(), text: original, inFile: false, agents: bare() };
+      for (const folder of named) mention(docId, guid, folder, panelChat, said);
       return;
     }
-    const newcomers = named.filter((f) => !thread.agents[f]);
-    for (const folder of newcomers) mention(docId, guid, folder, thread.text, panelChat, text);
+    // Newcomers, and those the thread refused for the limit that the reply names again.
+    const newcomers = named.filter((f) => !thread.agents[f] || thread.agents[f].state === "limit");
+    for (const folder of newcomers) mention(docId, guid, folder, panelChat, said);
     // The reply goes to every chat of the thread, or to the ones it names where it names any.
     const to = Object.keys(thread.agents).filter((f) => !newcomers.includes(f) && (!named.length || named.includes(f)));
     for (const folder of to) {
       const entry = thread.agents[folder];
       if (entry.state === "limit") continue;
-      if (!entry.chatId || !chats().get(entry.chatId)) mention(docId, guid, folder, thread.text, panelChat, text);
+      if (!entry.chatId || !chats().get(entry.chatId)) mention(docId, guid, folder, panelChat, said);
       else deliver({ kind: "thread", docId, guid, folder }, replyPrompt(text));
     }
     return;
@@ -1000,7 +1225,9 @@ function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): vo
   const all = sessionRecords();
   let s = all[key];
   if (!s || s.docId !== doc.docId) s = all[key] = { docId: doc.docId, folder, chatId: null, parent: null, state: "idle", people: [], queue: [] };
+  // A person writes: the session goes on, and its end under way with it.
   delete s.ending;
+  clearTimer(`end:${key}`);
   const earlier = s.people.map((p) => p.text);
   s.people.push({ text, at: now() });
   while (s.people.length > PEOPLE_KEPT || s.people.reduce((n, p) => n + p.text.length, 0) > PEOPLE_CHARS) s.people.shift();
@@ -1016,7 +1243,7 @@ function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): vo
       return;
     }
     try {
-      const chat = chats().create({ parent, title: "Office chat", listed: false });
+      const chat = chats().create({ parent, title: "Office chat", listed: false, mode: CHILD_MODE });
       internal.add(chat.id);
       fresh = true;
       s.chatId = chat.id;
@@ -1047,7 +1274,12 @@ export function sessionUsers(key: string, users: string[] | null): void {
     }
     return;
   }
-  if (s.ending) return;
+  // An end under way goes on; one the record holds without its timer (the half restarted meanwhile) is armed again
+  // for what is left of it.
+  if (s.ending) {
+    if (!timers.has(`end:${key}`)) timer(`end:${key}`, s.ending - now(), () => void endSession(key));
+    return;
+  }
   s.ending = now() + limits().chatEndS * 1000;
   saveSessions();
   timer(`end:${key}`, limits().chatEndS * 1000, () => void endSession(key));
@@ -1125,11 +1357,19 @@ async function removeThread(docId: string, guid: string): Promise<void> {
   }
 }
 
-/** The agent's edit moved comments onto its new text (office_edit's `moved`): their threads go on under the new GUID. */
-export function moved(docId: string, pairs: [string, string][]): void {
+/** The agent's edit moved comments onto its new text (office_edit's `moved`): their threads go on under the new GUID.
+ * `also`: targets of the thread held elsewhere (a post under way), which follow it too. */
+export function moved(docId: string, pairs: [string, string][], ...also: Target[]): void {
   const rec = docRecord(docId);
   let changed = false;
-  for (const [from, to] of pairs) {
+  for (const [from, to] of Array.isArray(pairs) ? pairs : []) {
+    if (!guidOk(from) || !guidOk(to)) {
+      log(`a moved comment of ${docId} names no thread GUID: skipped`);
+      continue;
+    }
+    // A comment a person made here stays theirs under its new GUID.
+    const own = rec.made.indexOf(from);
+    if (own !== -1 && !rec.made.includes(to)) (rec.made[own] = to), (changed = true);
     const thread = rec.threads[from];
     if (!thread || rec.threads[to]) continue;
     delete rec.threads[from];
@@ -1146,6 +1386,7 @@ export function moved(docId: string, pairs: [string, string][]): void {
       running.set(targetId(t), t);
     }
     for (const line of waiting.values()) for (const t of line) if (t.kind === "thread" && t.docId === docId && t.guid === from) t.guid = to;
+    for (const t of also) if (t.kind === "thread" && t.docId === docId && t.guid === from) t.guid = to;
     changed = true;
   }
   if (changed) saveDoc(docId);
@@ -1282,7 +1523,9 @@ export function chatEvent(chatId: string, event: Record<string, unknown>): void 
     listening.delete(chatId);
     const answer = lastSaid.get(chatId) ?? "";
     lastSaid.delete(chatId);
-    ended(t, chatId, { status: "done", answer });
+    // Its run's promise is gone with the half that waited for it, and with it the mark of a suspected injection: the
+    // answer is not posted (fail closed).
+    ended(t, chatId, { status: "done", answer, unchecked: true });
   }
 }
 const lastSaid = new Map<string, string>();
@@ -1293,17 +1536,21 @@ const lastSaid = new Map<string, string>();
 
 const rates = new Map<string, number[]>();
 
-/** Whether a page (by its key) may report once more now: CAPS.perTenSeconds requests in 10 s. */
-export function rateOk(page: string): boolean {
+/** Whether a page may report once more now: at most the setting's reports in 10 s per editing session (`key`), and
+ * a few times that per document (`docId`), so that keys made up for each request share one bucket. Buckets past their
+ * window go. */
+export function rateOk(key: string, docId?: string): boolean {
   const t = now();
-  const list = (rates.get(page) ?? []).filter((at) => t - at < 10_000);
-  if (list.length >= CAPS.perTenSeconds) {
-    rates.set(page, list);
-    return false;
-  }
-  list.push(t);
-  rates.set(page, list);
-  return true;
+  const per = limits().reportsPer10S;
+  if (rates.size > 1000) for (const [k, list] of rates) if (!list.some((at) => t - at < 10_000)) rates.delete(k);
+  const buckets: [string, number][] = [[`key:${key}`, per], ...(docId ? ([[`doc:${docId}`, per * DOC_RATE_FACTOR]] as [string, number][]) : [])];
+  const lists = buckets.map(([k]) => (rates.get(k) ?? []).filter((at) => t - at < 10_000));
+  const ok = buckets.every(([, cap], i) => lists[i].length < cap);
+  buckets.forEach(([k], i) => {
+    if (ok) lists[i].push(t);
+    rates.set(k, lists[i]);
+  });
+  return ok;
 }
 
 /** A page's batch of events for `docId` in the session of `key`. A ui report whose id was taken already is taken
@@ -1319,11 +1566,13 @@ export function report(docId: string, key: string, events: PageEvent[], panelCha
         saveDoc(docId);
         onUi(docId, key, e, panelChat);
       } else if (e.type === "comment") {
-        if (typeof e.guid === "string" && e.guid) seen(docId, e);
+        if (guidOk(e.guid)) seen(docId, key, e);
       } else if (e.type === "removed") {
         for (const guid of Array.isArray(e.guids) ? e.guids : []) {
+          if (!guidOk(guid)) continue;
           live.get(docId)?.comments.delete(guid);
-          startRemoval(docId, String(guid), "deleted in the editor");
+          live.get(docId)?.from.delete(guid);
+          startRemoval(docId, guid, "deleted in the editor");
         }
       }
     } catch (err) {
@@ -1338,12 +1587,14 @@ export function ready(docId: string, key: string, comments: PageComment[]): void
   const rec = docRecord(docId);
   const there = new Set<string>();
   for (const c of comments) {
-    if (typeof c.guid !== "string" || !c.guid) continue;
+    if (!c || !guidOk(c.guid)) continue;
     there.add(c.guid);
-    seen(docId, c);
+    seen(docId, key, c);
   }
+  // The page's list is its session's view: what that session reported before and the list lacks is gone from it.
+  const l = live.get(docId);
+  if (l) for (const [guid, from] of [...l.from]) if (from === key && !there.has(guid)) (l.comments.delete(guid), l.from.delete(guid));
   for (const guid of Object.keys(rec.threads)) if (!there.has(guid)) startRemoval(docId, guid, "not in an editor that opened");
-  void key;
   postWaiting();
 }
 
@@ -1425,7 +1676,13 @@ function resume(t: Target, entry: AgentEntry | SessionRecord): void {
   delete entry.pending;
   entry.state = "interrupted";
   const who = labelOf(t.kind === "thread" ? t.folder : (entry as SessionRecord).folder);
-  if (t.kind === "thread") post(t, `${who} was interrupted before it answered. Reply to try again.`);
+  // Said where the person wrote: the thread, or the editor's chat.
+  post(t, `${who} was interrupted before it answered. ${again(t)}`);
+  // What came while it ran is given now, with a word of the cut.
+  if (entry.queue.length) {
+    entry.queue.unshift(CUT_NOTE);
+    next(t);
+  }
 }
 
 /** The thread a chat of ours was made for: what office_comments marks as the comment the agent was asked in. */

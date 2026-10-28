@@ -112,3 +112,15 @@ test("the limits of comments and the editor's chat: defaults, kept when set, a v
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("every limit of comments and the editor's chat is a setting: the reports, the longest message taken, the saves after answers and the messages waiting too; the longest answer still reads back whole", () => {
+  assert.deepEqual(
+    [DEFAULT_SETTINGS.docchatReportsPer10S, DEFAULT_SETTINGS.docchatMessageChars, DEFAULT_SETTINGS.docchatSaveEveryS, DEFAULT_SETTINGS.docchatQueued],
+    [50, 20_000, 3, 20],
+  );
+  assert.equal(limitOk("docchatQueued", 0), false);
+  assert.equal(limitOk("docchatReportsPer10S", 5), false);
+  // An answer cut at the limit gets " (…)", and a reply is read back cut at 20,000 characters.
+  assert.equal(limitOk("docchatReplyChars", 19_990), true);
+  assert.equal(limitOk("docchatReplyChars", 19_997), false);
+});

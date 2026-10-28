@@ -805,11 +805,14 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
   // may only comment can do (a builder command's change is rolled back there). The comment is found by its author's
   // user id, its text and its time (a Word thread's from its GUID, through word.comments), as the methods name no GUID.
   function methodReply(job) {
-    var a = job.args;
+    var a = job.args, before = {};
     function find(then) {
       if (!a.guid) return then(a.match);
       call(commands["word.comments"].run, {}, false, function (out) {
-        var c = out.result && (out.result.comments || []).filter(function (c) { return c.guid === a.guid; })[0];
+        var all = out.result && out.result.comments || [];
+        // The GUIDs there are before the change: the comment made anew is the one whose GUID is new after it.
+        all.forEach(function (c) { before[c.guid] = true; });
+        var c = all.filter(function (c) { return c.guid === a.guid; })[0];
         then(c ? { userId: c.userId, author: c.author, text: c.text, time: c.time } : null);
       });
     }
@@ -840,7 +843,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
           // A Word comment changed through the methods is made anew, with a GUID of its own: its thread goes on under
           // that one, which the answer names.
           call(commands["word.comments"].run, {}, false, function (out) {
-            var now = (out.result && out.result.comments || []).filter(function (c) { return c.userId === match.userId && plain(c.text) === plain(match.text); });
+            var now = (out.result && out.result.comments || []).filter(function (c) { return !before[c.guid] && c.userId === match.userId && plain(c.text) === plain(match.text); });
             done(job, { result: now.length === 1 && now[0].guid !== a.guid ? { replies: replies.length, guid: now[0].guid } : { replies: replies.length } });
           });
         });

@@ -346,6 +346,7 @@ async function liveKey(docId: string, key: string): Promise<boolean> {
     const users = info.error === 0 && Array.isArray(info.users) ? (info.users as unknown[]).map(String) : [];
     if (!users.some((u) => !live.isAgentId(u))) return false;
     live.setSession(docId, key, users);
+    for (const [k, when] of confirmedKeys) if (Date.now() - when >= 10 * 60_000) confirmedKeys.delete(k);
     confirmedKeys.set(key, Date.now());
     return true;
   } catch {
@@ -384,7 +385,7 @@ function registerRoutes(dd: string, secret: string): void {
     }
     const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG, browser: seat.health() };
     const limits = Object.fromEntries(Object.keys(LIMIT_BOUNDS).map((k) => [k, s[k as keyof typeof LIMIT_BOUNDS]]));
-    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, container: c, agent, docs, locks });
+    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, limitBounds: LIMIT_BOUNDS, container: c, agent, docs, locks });
   });
 
   /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat's folder sees (store.docsForHome, the
@@ -677,7 +678,9 @@ function registerRoutes(dd: string, secret: string): void {
       res.status(400).json({ error: "the report needs { docId, key } of an editor opened on that document", code: "invalid" });
       return null;
     }
-    if (!docchat.rateOk(key)) {
+    // Per session and per document: a key made up for each request still shares its document's bucket, and the
+    // command service is asked of no more keys than that lets through.
+    if (!docchat.rateOk(key, docId)) {
       res.status(429).json({ error: "too many reports: slow down", code: "rate" });
       return null;
     }

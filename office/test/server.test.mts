@@ -21,7 +21,7 @@ import * as seat from "../src/seat";
 import { PLUGIN_GUID } from "../src/seat-page";
 import { browser } from "./seat-browser.mts";
 import * as store from "../src/store";
-import { commentKeys, rewriteZip } from "../src/ooxml";
+import { rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
 import { signJwt, verifyJwt } from "../src/jwt";
@@ -588,7 +588,7 @@ test("/state: settings + container status + docs list + locks for EVERY doc", as
   const res = await b.router.dispatch("GET", "/state");
   assert.equal(res.statusCode, 200);
   const body = res.body as Record<string, unknown>;
-  assert.deepEqual(Object.keys(body).sort(), ["agent", "container", "docs", "enabled", "imageTag", "limits", "locks"]);
+  assert.deepEqual(Object.keys(body).sort(), ["agent", "container", "docs", "enabled", "imageTag", "limitBounds", "limits", "locks"]);
   assert.deepEqual(
     body.agent,
     { present: false, pull: null, tag: container.AGENT_IMAGE_TAG, browser: { running: false, starting: false, editors: 0 } },
@@ -731,7 +731,7 @@ fs.mkdirSync(path.join(ws, "node_modules", "pkg"), { recursive: true });
   await b.cleanup();
 });
 
-test("/documents/rescan: a docx with pre-existing comments is stamped with their keys at index time", async () => {
+test("/documents/rescan: a docx with pre-existing comments is indexed without reading them (no comment baseline)", async () => {
   const b = await boot();
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-baseline-"));
   const docBytes = rewriteZip(await store.templateDocx(), { "word/comments.xml": commentsXmlWith([
@@ -743,7 +743,7 @@ test("/documents/rescan: a docx with pre-existing comments is stamped with their
   const res = await b.router.dispatch("POST", "/documents/rescan");
   assert.equal(res.statusCode, 200);
   const doc = store.listDocs(b.root).find((d) => d.title === "legacy")!;
-  assert.deepEqual(doc.importedKeys, commentKeys([{ id: "1", author: "Cara", text: "a mention from before the library existed" }]), "the file's own comment history is the first-save baseline -- index time must not wake anyone");
+  assert.equal("importedKeys" in doc, false, "indexing reads no comments of the file: nothing wakes on them any more");
   fs.rmSync(ws, { recursive: true, force: true });
   await b.cleanup();
 });
@@ -1487,8 +1487,9 @@ test("the agents' seats, wired: the agents' editors reach the Document Server th
 
 test("the limits of comments and the editor's chat are settings: GET /state gives them with their defaults, POST /settings takes whole numbers in their bounds and refuses others", async () => {
   const b = await boot();
-  const state = (await b.router.dispatch("GET", "/state")).body as { limits: Record<string, number> };
-  assert.deepEqual(state.limits, { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60 });
+  const state = (await b.router.dispatch("GET", "/state")).body as { limits: Record<string, number>; limitBounds: Record<string, [number, number]> };
+  assert.deepEqual(state.limits, { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60, docchatReportsPer10S: 50, docchatMessageChars: 20_000, docchatSaveEveryS: 3, docchatQueued: 20 });
+  assert.deepEqual(state.limitBounds.docchatRuns, [1, 20], "the bounds, for the page to say them");
   const saved = await b.router.dispatch("POST", "/settings", { docchatRuns: 3, docchatChatEndS: 0 });
   assert.equal(saved.statusCode, 200);
   assert.equal((saved.body as { settings: { docchatRuns: number; docchatChatEndS: number } }).settings.docchatRuns, 3);

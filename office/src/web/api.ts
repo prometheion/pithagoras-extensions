@@ -58,6 +58,8 @@ export interface OfficeState {
   enabled: boolean;
   imageTag: string;
   limits?: DocchatLimits;
+  /** What each limit may be set to: [least, most]. */
+  limitBounds?: Partial<Record<keyof DocchatLimits, [number, number]>>;
   container: OfficeContainer;
   agent: OfficeAgentImage;
   docs: OfficeDoc[];
@@ -87,6 +89,10 @@ export interface DocchatLimits {
   docchatChatMessages: number;
   docchatRemoveAfterS: number;
   docchatChatEndS: number;
+  docchatReportsPer10S: number;
+  docchatMessageChars: number;
+  docchatSaveEveryS: number;
+  docchatQueued: number;
 }
 
 export type SettingsPatch = { enabled?: boolean; imageTag?: string } & Partial<DocchatLimits>;

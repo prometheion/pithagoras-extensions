@@ -26,7 +26,8 @@ type Pull = null | { active: boolean; line: string; error?: string };
 const now = {
   container: { state: "running", version: "10.0.0-169" } as { state: string; version?: string; pull?: Pull; error?: string },
   agent: { present: false, pull: null as Pull, tag: TAG, browser: { running: false, starting: false, editors: 0 } as { running: boolean; starting: boolean; editors: number; error?: string } },
-  limits: { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60 } as Record<string, number>,
+  limits: { docchatRuns: 2, docchatThreads: 50, docchatReplyChars: 4000, docchatChatMessages: 4, docchatRemoveAfterS: 120, docchatChatEndS: 60, docchatReportsPer10S: 50, docchatMessageChars: 20_000, docchatSaveEveryS: 3, docchatQueued: 20 } as Record<string, number>,
+  limitBounds: { docchatRuns: [1, 20], docchatThreads: [1, 1000], docchatReplyChars: [200, 19_990], docchatChatMessages: [1, 20], docchatRemoveAfterS: [0, 86_400], docchatChatEndS: [0, 86_400], docchatReportsPer10S: [10, 1000], docchatMessageChars: [200, 20_000], docchatSaveEveryS: [1, 600], docchatQueued: [1, 200] } as Record<string, [number, number]>,
 };
 const asked: string[] = [];
 const saved: Record<string, unknown>[] = [];
@@ -39,7 +40,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/settings.html") return send(200, "text/html", SETTINGS_HTML);
   if (url.pathname === "/settings-page.js") return send(200, "text/javascript", pageJs);
   if (url.pathname === `${BASE}/state`) {
-    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0.0.1", limits: now.limits, container: now.container, agent: now.agent, docs: [], locks: {} }));
+    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "onlyoffice/documentserver:10.0.0.1", limits: now.limits, limitBounds: now.limitBounds, container: now.container, agent: now.agent, docs: [], locks: {} }));
   }
   if (req.method === "POST") asked.push(url.pathname.slice(BASE.length));
   if (url.pathname === `${BASE}/settings` && req.method === "POST") {
@@ -225,5 +226,18 @@ test("the limits of comments and the editor's chat with agents: each a labelled 
   await page.getByRole("region", { name: "Comments and chat with agents" }).getByRole("button", { name: "Save" }).click();
   await page.getByRole("alert").getByText("A limit is a whole number.").waitFor({ timeout: 5000 });
   assert.equal(saved.length, 1, "not sent");
+  await page.context().close();
+});
+
+test("a limit out of its bounds is said on the page, with the field and its bounds, and not sent; the four limits of floods and saves are there too", async () => {
+  saved.length = 0;
+  const page = await opened();
+  for (const label of ["Messages waiting for one chat while it answers", "Longest comment or chat message taken, in characters", "Reports per editing session in 10 seconds", "Seconds between saves after answers"]) {
+    await page.getByRole("textbox", { name: label }).waitFor({ timeout: 5000 });
+  }
+  await page.getByRole("textbox", { name: "Comment chats running at once, per agent or project" }).fill("21");
+  await page.getByRole("region", { name: "Comments and chat with agents" }).getByRole("button", { name: "Save" }).click();
+  await page.getByRole("alert").getByText("Comment chats running at once, per agent or project: a whole number from 1 to 20.").waitFor({ timeout: 5000 });
+  assert.deepEqual(saved, [], "not sent");
   await page.context().close();
 });

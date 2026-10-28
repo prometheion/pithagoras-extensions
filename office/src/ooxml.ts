@@ -1,11 +1,11 @@
 /**
- * OOXML primitives for @pithagoras/office: parse docx/xlsx into text and comments (the comment wake, office_comments,
- * and office_read while Office is stopped), and write or rewrite a zip (the fixtures, and the tests that build
+ * OOXML primitives for @pithagoras/office: parse docx/xlsx into text and comments (office_comments, a save's comment
+ * threads, and office_read while Office is stopped), and write or rewrite a zip (the fixtures, and the tests that build
  * documents). The agent's edits are made in the editor, not here (seat-page.ts). All functions here are pure over
  * Buffers/strings (no fs, no settings, no network); store.ts owns disk, tools.ts owns the tool surface.
  *
  * ZIP I/O is a small synchronous reader/writer on node:zlib rather than jszip: parseDocx/parseXlsx/rewriteZip
- * are synchronous (the ping diff and the office_* tools run
+ * are synchronous (a save's comment threads and the office_* tools run
  * them inline), and jszip only exposes async load/generate. The writer keeps entry order and is
  * content-preserving -- every untouched entry re-extracts byte-identical -- but recompresses, so an
  * output zip is NOT compression-byte-identical to its input. node builtins only; jszip stays for templates.
@@ -312,21 +312,6 @@ function commentParts(parts: Record<string, Buffer>): string[] {
   }
   if (parts["word/commentsDocument.xml"]) found.add("word/commentsDocument.xml");
   return [...found];
-}
-
-/**
- * What tells one comment from another across saves: its author and its text (spaces folded), hashed, with the
- * number of the same before it for a second one alike. Not its id: the Document Server numbers the comments anew from
- * 0 at every save, so an id says nothing of which comment it is, and a new comment can get the id an old one had.
- */
-export function commentKeys(comments: Comment[]): string[] {
-  const seen = new Map<string, number>();
-  return comments.map((c) => {
-    const base = createHash("sha256").update(`${c.author.trim()}\n${c.text.replace(/\s+/g, " ").trim()}`).digest("hex").slice(0, 16);
-    const n = (seen.get(base) ?? 0) + 1;
-    seen.set(base, n);
-    return n === 1 ? base : `${base}#${n}`;
-  });
 }
 
 /** The w:comment elements of a comments.xml; each comment's text is its w:p/w:r/w:t runs joined in order. */
@@ -689,12 +674,3 @@ export function rewriteZip(buf: Buffer, changes: Record<string, string | Buffer>
   return writeZip(out);
 }
 
-/**
- * Comments that `next` has which `prev` does not, by id -- an id only in `next` is added. The same id with
- * changed text or author is an UPDATE and deliberately NOT reported as added (the wake diff wants new threads,
- * not reworded ones). Order of `next` is kept.
- */
-export function diffComments(prev: Comment[], next: Comment[]): { added: Comment[] } {
-  const known = new Set(prev.map((c) => c.id));
-  return { added: next.filter((c) => !known.has(c.id)) };
-}

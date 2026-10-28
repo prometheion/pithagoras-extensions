@@ -107,10 +107,11 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   inserts), and typing `@Aegis` or `@project:Report` by hand does the same (in the Comments panel on the left, which has
   no list, too; a name with spaces is matched as a whole, `@My Agent`). Each comment that mentions an agent or project
   starts a chat of its own with it, which shows nowhere in the chat lists, given only that comment: the document's id,
-  the thread, and what you wrote. The agent reads the comment's text and the document with its tools, does what you
+  the thread, and what you wrote. A reply or an edit that mentions an agent on a comment you did not make here (the
+  file's own, another tool's) gives it your reply or what you added, never the comment's text as yours. The agent reads the comment's text and the document with its tools, does what you
   asked (`office_edit` changes the document), and its answer appears as its reply in the comment's thread. A reply you
   write in the thread goes to the same chat (only to the ones it mentions, where a thread has several); a reply or an
-  edit that mentions another agent adds that one. Resolving and reopening keep the chat; deleting the comment removes
+  edit that mentions another agent adds that one (an edit counts only the mentions it adds). Resolving and reopening keep the chat; deleting the comment removes
   it, two minutes later by default (an undo in that time keeps it). The agent gets access to the document with the
   mention. Word and spreadsheets alike.
   An agent that may only read the document (a file in a folder it cannot write) still answers in the thread, through an
@@ -122,7 +123,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   for the editing session; its answers come in the editor's chat as the agent's. Messages written while it is still
   answering reach it together as its next message. The chat goes a minute after the last person left the document
   (a reload in that time keeps it), and when the Document Server starts again. A document nobody owns has nobody to
-  answer in its chat; the editor's bar says so.
+  answer in its chat; the editor's bar says so. An answer that fails, or a run cut off by a restart, says so in the
+  chat, as a comment's does in its thread.
 - **Nobody is asked from these chats**: they have no question tool, and a confirmation the agent's tools or the guard
   would ask for stops that step at once; the agent is told that nobody can answer there and goes on without it (a
   second time, its answer says it could not finish). The editor's bar shows how the agents stand in the document:
@@ -130,9 +132,15 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 - **What counts as your words**: only what you did through the editor's own comment box, reply box and chat, on your
   page. A comment pasted in, brought back by undo, made by someone else, or already in the file starts nothing.
 - **Limits, on the Office page in Settings**: comment chats running at once per agent or project (2; more wait their
-  turn), comment chats per document (50), the longest answer in a comment (4,000 characters), messages per answer in
-  the editor's chat (4 of 2,048 characters), the seconds before a deleted comment's chat goes (120), and the seconds
-  the editor's chat stays after the last person left (60).
+  turn), comment chats per document (50; a comment refused for it gets its chat when a reply names the agent again
+  once there is room), the longest answer in a comment (4,000 characters), messages per answer in the editor's chat
+  (4 of 2,048 characters), the seconds before a deleted comment's chat goes (120), the seconds the editor's chat stays
+  after the last person left (60), the messages kept for one chat while it answers (20; the oldest go, and it is told
+  how many), the longest comment or chat message taken (20,000 characters), the reports of one editing session in
+  10 seconds (50; a document takes four times that from all its sessions), and the seconds between saves after
+  answers (3). Fixed, as the protocol of the reports and not a limit on your use: 64 events and 256 KB per report
+  (the page splits its reports below that, and a long thread's report keeps its latest replies), and the 50 messages
+  (20,000 characters) of a session a chat made anew is given again.
 
 ## Security
 
@@ -212,15 +220,20 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   comes from the portal's own pages: the portal's cookie is SameSite=Lax, which a page on another port or another
   name of the same site is still sent.
 - **What the tools return is outside content to the guard**: the text, comments and file names of documents anybody
-  may have written. A comment's chat is given the words of the comment it was made for as yours (your page saw you
-  write it); the text it is on, the thread's other replies and the document are read with `office_comments` and
-  `office_read`, as outside content. A comment that reads like an order and is read that way can mark the chat, and
+  may have written. A comment's chat is given the words of the comment it was made for as yours only where you made
+  that comment in this portal's editor (your page saw you write it); on any other comment only your reply, or what
+  your edit added, is yours. The comment's text, the text it is on, the thread's other replies and the document are
+  read with `office_comments` and `office_read`, as outside content. These chats are made in no mode, whatever mode
+  their parent chat is in (they take its tool switches, which the extension API cannot leave out). An answer that
+  ends while Office restarts is not posted: whether its chat read a suspected injection is not known then. A comment that reads like an order and is read that way can mark the chat, and
   with it the task chat it hangs under; an answer of a marked chat is not posted in the document.
 - **Who can make an agent act through a comment**: anyone signed in to the portal (every login is the portal's
   person), on any document they can open, and the mention gives that agent the document. Before the portal has logins
   with fewer rights, the routes of comments and the editor's chat need a check per login, which the extension API
   does not offer yet.
-- **Every answer posted in a document is in the audit log**, with its document, thread and chat.
+- **Every post into a document is in the audit log**, with its document, thread and chat: each answer, each time it
+  was posted again, a post whose outcome is not known (its editor closed or timed out while it ran), and a message of
+  the editor's chat that failed after the ones before it went.
 - **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
   document-changing call is recorded in the portal's audit log with the chat that made it, its ops and the revision
   it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
@@ -268,7 +281,8 @@ agents' editor.
   one with it. A comment made while the page could not report it (the tab closed at once, the server half away) starts
   nothing; reply to it again.
 - In Word, an agent that may only comment changes the comment through the editor's comment methods, which give it a
-  new id: its thread follows. Every person in the editor is "Portal".
+  new id: its thread follows. Every person in the editor is "Portal". Such an agent's reads and posts share one
+  editor that may only comment.
 - A cell comment's answer is posted once the comment is five seconds old: a reply on a cell comment made a moment ago
   was now and then lost. A reply that does not reach the thread is posted again, a few times.
 - The agents' browser opens for an answer as it does for the tools (about 0.3-0.45 GB while it runs), and an editor

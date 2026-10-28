@@ -123,5 +123,10 @@ export const de: Record<string, string | Plural> = {
   "Seconds before a deleted comment's chat goes": "Sekunden, bis der Chat eines gelöschten Kommentars geht",
   "Seconds the editor's chat stays after the last person left": "Sekunden, die der Chat des Editors bleibt, nachdem die letzte Person ging",
   "A limit is a whole number.": "Ein Limit ist eine ganze Zahl.",
+  "Messages waiting for one chat while it answers": "Wartende Nachrichten je Chat, während er antwortet",
+  "Longest comment or chat message taken, in characters": "Längster übernommener Kommentar oder Chat-Text, in Zeichen",
+  "Reports per editing session in 10 seconds": "Meldungen je Bearbeitungssitzung in 10 Sekunden",
+  "Seconds between saves after answers": "Sekunden zwischen Speicherungen nach Antworten",
+  "{label}: a whole number from {min} to {max}.": "{label}: eine ganze Zahl von {min} bis {max}.",
   "Comments and chat with agents": "Kommentare und Chat mit Agenten",
 };

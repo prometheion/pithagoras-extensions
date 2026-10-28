@@ -31,6 +31,7 @@ window.__data = function (f) {
     asc_getText: () => f.text || "", asc_getGuid: () => f.guid || "", asc_getUserId: () => f.userId || "", asc_getUserName: () => f.userName || "",
     asc_getSolved: () => Boolean(f.solved), asc_getQuoteText: () => f.quote || "", asc_getId: () => f.id || "",
     asc_getRepliesCount: () => (f.replies || []).length, asc_getReply: (i) => window.__data(f.replies[i]),
+    asc_getOnlyOfficeTime: () => f.ooTime || "",
   };
 };
 window.DocsAPI = { DocEditor: function (id, config) {
@@ -76,6 +77,8 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith(`${BASE}/docchat/`) && req.method === "POST") {
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
+    // The route's body limit (docchat.CAPS.bytes): a larger request is refused whole.
+    if (Buffer.concat(chunks).length > 256 * 1024) return send(413, "application/json", JSON.stringify({ error: "too large" }));
     routes.reports.push({ path: url.pathname.slice(BASE.length), body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
     if (routes.refuse) {
       routes.refuse--;
@@ -241,5 +244,29 @@ test("the chip follows how the comments and the chat with agents stand: the most
   assert.match((await chip.getAttribute("title")) ?? "", /the model is down/);
   routes.docchat = [{ kind: "thread", label: "Aegis", state: "answered" }];
   await chip.waitFor({ state: "detached", timeout: 5000 });
+  await page.context().close();
+});
+
+test("a long thread: its state keeps its latest replies within a request's size, batches are cut by size, and a person's reply in it gets through; a comment's UTC time and an edit's text before it are reported", async () => {
+  const page = await opened("word");
+  const long = Array.from({ length: 70 }, (_, i) => ({ text: `${i} ${"x".repeat(4000)}`, userId: "agent:a", userName: "Aegis (agent)" }));
+  await page.evaluate((replies) => {
+    const w = window as any;
+    w.__emit("asc_onAddComment", "1_1", w.__data({ guid: "0000000a", text: "+Aegis bitte", userId: "portal-user", replies, ooTime: "1793108364144" }));
+    w.__api.asc_changeComment("1_1", w.__data({ guid: "0000000a", text: "+Aegis bitte", userId: "portal-user", replies: [...replies, { text: "Und?", userId: "portal-user" }], ooTime: "1793108364144" }));
+  }, long);
+  assert.ok(await until(() => ui().some((e) => e.kind === "reply" && e.text === "Und?")), "the reply got through");
+  const states = events().filter((e) => e.type === "comment");
+  assert.ok(states.length >= 2);
+  assert.ok(states.every((e) => JSON.stringify(e).length < 128 * 1024), "each state within its size");
+  assert.equal(states.at(-1).time, 1793108364144);
+  assert.ok(states.at(-1).repliesCut > 0);
+  assert.equal(states.at(-1).replies.at(-1).text, "Und?", "the latest replies kept");
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__api.asc_changeComment("1_1", w.__data({ guid: "0000000a", text: "+Aegis bitte, und +Report", userId: "portal-user", replies: [], ooTime: "1793108364144" }));
+  });
+  assert.ok(await until(() => ui().some((e) => e.kind === "edit")));
+  assert.equal(ui().find((e) => e.kind === "edit").before, "+Aegis bitte");
   await page.context().close();
 });

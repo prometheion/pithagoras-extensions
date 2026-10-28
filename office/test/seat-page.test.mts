@@ -761,3 +761,16 @@ test("a reply through the editor's comment methods (an editor that may only comm
   const gone = await bridge({ kind: "cell.reply", args: { how: "method", match: { userId: "portal-user", text: "Nicht da", time: 1 }, text: "x", author: "a", userId: "u" } }, () => null, (name) => (name === "GetAllComments" ? [] : undefined));
   assert.equal(gone.error.code, "comment_gone");
 });
+
+test("a Word reply through the comment methods names the comment made anew by the GUID that is new after it, also where another comment has the same author and text", async () => {
+  const c = apiComment(0x626360df, { author: "Portal", userId: "portal-user", time: 1793131668923, text: "Bitte +Beta" });
+  const twin = apiComment(0x11, { author: "Portal", userId: "portal-user", time: 1793100000000, text: "Bitte +Beta" });
+  const remade = apiComment(0x7000, { author: "Portal", userId: "portal-user", time: 1793131668923, text: "Bitte +Beta" });
+  let listed = 0;
+  const out = await bridge(
+    { kind: "word.reply", args: { how: "method", guid: "626360df", text: "Gern.", author: "Beta (agent)", userId: "agent:b" } },
+    (source, args) => vm.runInNewContext(`(${source})()`, { Api: { GetDocument: () => ({ GetAllComments: () => (listed++ === 0 ? [twin, c] : [twin, remade]) }) }, Asc: { scope: { args } } }),
+    (name) => (name === "GetAllComments" ? [{ Id: "1_1", Data: { Text: "Bitte +Beta", UserId: "portal-user", Time: "1793135268923", Replies: [] } }, { Id: "1_2", Data: { Text: "Bitte +Beta", UserId: "portal-user", Time: "1793103600000", Replies: [] } }] : undefined),
+  );
+  assert.deepEqual(out.result, { replies: 1, guid: "00007000" });
+});

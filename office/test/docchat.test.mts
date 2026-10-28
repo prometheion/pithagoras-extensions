@@ -12,6 +12,7 @@ import { setImmediate as tick, setTimeout as delay } from "node:timers/promises"
 import * as docchat from "../src/docchat";
 import { createDoc, getDoc, rewriteZipFor } from "./docchat-helpers.mts";
 import { fakePlaces } from "./homes.mts";
+import { migrateLibrary } from "../src/store";
 
 const FOLDERS = [
   { path: "/f/aegis", name: "Aegis", kind: "agent" as const },
@@ -381,6 +382,20 @@ test("the editor's chat: the first message makes one internal chat of the docume
   assert.equal(sent.length, 2);
   assert.equal(sent[0].job.args.text.length, 2048);
   assert.match(sent[1].job.args.text, / \(…\)$/);
+});
+
+test("a document the person made in an earlier version's own docs folder belongs to the default agent once moved: its editor's chat goes to that agent, and nothing says nobody answers", async () => {
+  // As an earlier version left it: made on the Office tab, owned by nobody, in docs/<id>/.
+  fs.mkdirSync(path.join(root, "docs", "minutes-aaaaaa"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs", "minutes-aaaaaa", "Minutes.docx"), await rewriteZipFor([]));
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify({ version: 1, docs: [{ docId: "minutes-aaaaaa", title: "Minutes", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] }] }));
+  migrateLibrary(["/f/aegis", "/f/report"], "/f/aegis", root); // the default agent's home: Aegis's
+  assert.equal(getDoc("minutes-aaaaaa", root)!.owner, "/f/aegis");
+  docchat.report("minutes-aaaaaa", "key-m", [ui("c1", "chat", undefined, "Fasse zusammen")]);
+  await settle();
+  assert.equal(prompts.length, 1, "the default agent answers");
+  assert.equal(chats.find((c) => c.id === prompts[0].chatId)!.folder, "/f/aegis");
+  assert.ok(!docchat.statesOf("minutes-aaaaaa").some((x) => (x.state as string) === "nobody"));
 });
 
 test("the editor's chat ends after the last person left (only agents in its session, or its end), unless a person comes back in time; a Document Server started again ends it at once", async () => {

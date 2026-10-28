@@ -1197,8 +1197,10 @@ function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>,
 
 function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): void {
   if (!text.trim()) return;
-  // The agent or project the document belongs to: every document has one.
+  // The agent or project the document belongs to: every document has one (an entry of an earlier version that has
+  // none yet gets it at the next scan).
   const folder = doc.owner;
+  if (!folder) return void log(`the editor's chat of ${doc.docId}: the document has no owner yet`);
   const all = sessionRecords();
   let s = all[key];
   if (!s || s.docId !== doc.docId) s = all[key] = { docId: doc.docId, folder, chatId: null, parent: null, state: "idle", people: [], queue: [] };

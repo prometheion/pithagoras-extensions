@@ -238,7 +238,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const lines = (await own.innerText()).split("\n").map((l) => l.trim()).filter(Boolean);
     console.log(`setup: the page before Start: ${JSON.stringify(lines)}`);
     for (const line of lines) assert.ok(line.length <= 80, `no prose on the page: ${JSON.stringify(line)}`);
-    for (const gone of [/Made documents keep/, /through this portal's own proxy/, /runs in a browser of its own/, /each person|each agent|jede Person|jeden Agenten/]) assert.doesNotMatch(lines.join("\n"), gone);
+    for (const gone of [/Made documents keep/, /through this portal's own proxy/, /runs in a browser of its own/, /each person|each agent|jede[rm]? (Person|Agenten?)\b/]) assert.doesNotMatch(lines.join("\n"), gone);
     // The memory it needs, said plainly: one line, nothing about how it grows.
     assert.ok(lines.some((l) => /^(Recommended: 1 GB of RAM\.|Empfohlen: 1 GB RAM\.)$/.test(l)), `the plain RAM line: ${JSON.stringify(lines)}`);
     assert.equal(lines.filter((l) => /\bRAM\b/.test(l)).length, 1, "and only that line speaks of RAM");

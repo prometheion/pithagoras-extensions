@@ -20,6 +20,7 @@ import {
   CallbackState, configure, createCallbackHandler, docIdOf, handleCallback, keyIdOf, makeKey, onDocumentServer, onPersisted, parseKey, recoverForgotten, revHashOf,
 } from "../src/callback";
 import { createDoc, getDoc, listDocs, scanWorkspace } from "../src/store";
+import { homeIn } from "./homes.mts";
 import * as live from "../src/live";
 
 const SECRET = "unit-test-secret-0123456789abcdef";
@@ -34,8 +35,8 @@ function tmpRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "office-callback-"));
 }
 
-const docFile = (root: string, meta: { docId: string; title: string; ext: string }): string =>
-  path.join(root, "docs", meta.docId, `${meta.title}.${meta.ext}`);
+/** A document's file: in its folder (`root` is the test's data root, kept for the calls' shape). */
+const docFile = (_root: string, meta: { path: string }): string => meta.path;
 
 /* ------------------------------------------------------------------ */
 /* synthetic req/res + the local "DS" file server                      */
@@ -164,7 +165,7 @@ test("makeKey/parseKey: the document's id hash and the revision hash, round-trip
 test("makeKey: every key is one the Document Server takes (its alphabet, at most 128), for the longest title too", async () => {
   const root = tmpRoot();
   const title = "Ä long title with spaces, punctuation | pipes & ümlauts ".repeat(4).slice(0, 200);
-  const doc = await createDoc({ title, type: "word" }, root);
+  const doc = await createDoc({ title, type: "word", folder: homeIn(root) }, root);
   assert.ok(doc.docId.length > 128, "a docId alone can be longer than a key may be");
   for (const key of [makeKey(doc.docId, doc.mtimeMs), makeKey("a", 0), makeKey("x|y", 1.5)]) {
     assert.match(key, /^[0-9a-zA-Z_.=-]{1,128}$/, key);
@@ -196,7 +197,7 @@ onPersisted((docId, buffer) => hookLog.push({ docId, buffer })); // single modul
 test("status 2 happy path: persists bytes, bumps index, fires onPersisted, unlocks; the changes archive, which nothing reads, is not kept", async () => {
   const root = tmpRoot();
   const sink: string[] = [];
-  const doc = await createDoc({ title: "Quarterly Report", type: "word" }, root);
+  const doc = await createDoc({ title: "Quarterly Report", type: "word", folder: homeIn(root) }, root);
   const before = getDoc(doc.docId, root)!;
   hookLog.length = 0;
 
@@ -246,7 +247,7 @@ test("stale key (revHash of an older mtime): the document is NOT overwritten, th
   const root = tmpRoot();
   const sink: string[] = [];
   const records: { subject: string; reason: string }[] = [];
-  const doc = await createDoc({ title: "Stale Doc", type: "word", owner: "/homes/a" }, root);
+  const doc = await createDoc({ title: "Stale Doc", type: "word", folder: homeIn(root, "a") }, root);
   const before = getDoc(doc.docId, root)!;
   const original = fs.readFileSync(docFile(root, doc));
   hookLog.length = 0;
@@ -266,7 +267,8 @@ test("stale key (revHash of an older mtime): the document is NOT overwritten, th
   assert.equal(hookLog.filter((h) => h.docId === doc.docId).length, 0, "no wake from a save that was not taken");
   const copy = listDocs(root).find((d) => d.docId !== doc.docId)!;
   assert.match(copy.title, /^Stale Doc \(conflict \d{4}-\d\d-\d\d \d\d\.\d\d\)$/);
-  assert.equal(copy.owner, "/homes/a", "the same agents see it");
+  assert.equal(copy.owner, doc.owner, "the same agents see it");
+  assert.equal(path.dirname(copy.path), path.dirname(doc.path), "beside it, in its folder");
   assert.ok(fs.readFileSync(docFile(root, copy)).equals(typed), "what was typed is all there");
   assert.ok(sink.some((l) => l.includes("stale key") && l.includes(copy.title)));
   assert.ok(records.some((r) => r.subject === "Stale Doc" && r.reason.includes(copy.docId)), "recorded where the person looks");
@@ -295,7 +297,7 @@ test("a save refused beside a scanned document is kept in its folder, as its fil
 test("duplicate force-save pass (same url + our revision): treated as done, no second write", async () => {
   const root = tmpRoot();
   const sink: string[] = [];
-  const doc = await createDoc({ title: "Forced Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Forced Doc", type: "word", folder: homeIn(root) }, root);
   const before = getDoc(doc.docId, root)!;
   hookLog.length = 0;
 
@@ -336,7 +338,7 @@ test("duplicate force-save pass (same url + our revision): treated as done, no s
 
 test("a session's later save lands on top of its own forcesave (its key pins the revision it opened, not the one it wrote); another's is kept as a copy", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Goes On", type: "word" }, root);
+  const doc = await createDoc({ title: "Goes On", type: "word", folder: homeIn(root) }, root);
   const opened = getDoc(doc.docId, root)!;
   let bytes = Buffer.from("forcesaved");
   const server = await startFileServer(() => ({ status: 200, bytes }), null);
@@ -365,7 +367,7 @@ const freshCallback = async (n: number): Promise<typeof import("../src/callback"
 
 test("after a restart of the half, a session's close that holds what its forcesave of the run before wrote is no conflict; one with more in it still is", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Agent Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Agent Doc", type: "word", folder: homeIn(root) }, root);
   const opened = getDoc(doc.docId, root)!;
   let bytes = Buffer.from("the agent's edit, forcesaved");
   const server = await startFileServer(() => ({ status: 200, bytes }), null);
@@ -396,7 +398,7 @@ test("after a restart of the half, a session's close that holds what its forcesa
 
 test("status 6 in a session only agents' editors are in: saved, and the document is not locked; with a person in it, it is", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Agent forcesave", type: "word" }, root);
+  const doc = await createDoc({ title: "Agent forcesave", type: "word", folder: homeIn(root) }, root);
   const bytes = Buffer.from("the agent's edit");
   const server = await startFileServer(() => ({ status: 200, bytes }), null);
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
@@ -423,7 +425,7 @@ test("status 6 in a session only agents' editors are in: saved, and the document
 test("two sessions of one document (an editor that loaded a newer revision while the old one closes): the old one's close keeps the new one's users and lock", async () => {
   live.resetLive();
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Two Keys", type: "word" }, root);
+  const doc = await createDoc({ title: "Two Keys", type: "word", folder: homeIn(root) }, root);
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   const oldKey = makeKey(doc.docId, doc.mtimeMs - 1000);
   const newKey = makeKey(doc.docId, doc.mtimeMs);
@@ -450,7 +452,7 @@ test("two sessions of one document (an editor that loaded a newer revision while
 
 test("JWT: garbage token -> 401 {error:1} without touching disk", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Jwt Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Jwt Doc", type: "word", folder: homeIn(root) }, root);
   const original = fs.readFileSync(docFile(root, doc));
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("nope") }), null);
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
@@ -470,7 +472,7 @@ test("JWT: garbage token -> 401 {error:1} without touching disk", async () => {
 
 test("JWT: RS256-alg token with a valid HMAC signature is still rejected (alg pinned to HS256)", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Alg Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Alg Doc", type: "word", folder: homeIn(root) }, root);
   const original = fs.readFileSync(docFile(root, doc));
 
   // Forge a token whose header says RS256 but whose signature is the HS256 MAC over that exact pair.
@@ -503,7 +505,7 @@ test("JWT: expired token -> 401; missing token entirely -> 401", async () => {
 test("JWT: the Document Server's own header, \"Bearer <jwt>\" over {payload, operation}, is taken; the bare form too; another operation is refused", async () => {
   const root = tmpRoot();
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
-  const doc = await createDoc({ title: "Bearer", type: "word" }, root);
+  const doc = await createDoc({ title: "Bearer", type: "word", folder: homeIn(root) }, root);
   const envelope = { key: makeKey(doc.docId, doc.mtimeMs), status: 4 };
   for (const token of [dsToken(envelope), `bearer   ${signJwt(envelope, 60_000, SECRET)}`, signJwt({ payload: envelope }, 60_000, SECRET)]) {
     live.setLocked(doc.docId, true);
@@ -518,7 +520,7 @@ test("JWT: the Document Server's own header, \"Bearer <jwt>\" over {payload, ope
 test("JWT: embedded body.token is accepted as a defensive fallback (header path stays canonical)", async () => {
   const root = tmpRoot();
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
-  const doc = await createDoc({ title: "Fallback", type: "word" }, root);
+  const doc = await createDoc({ title: "Fallback", type: "word", folder: homeIn(root) }, root);
   live.setLocked(doc.docId, true);
 
   const res = await post(handler, {
@@ -534,7 +536,7 @@ test("JWT: embedded body.token is accepted as a defensive fallback (header path 
 
 test("envelope binding: valid token without signed key/status cannot drive a hostile body", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Bind Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Bind Doc", type: "word", folder: homeIn(root) }, root);
   const original = fs.readFileSync(docFile(root, doc));
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("attacker-bytes") }), null);
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
@@ -560,7 +562,7 @@ test("envelope binding: valid token without signed key/status cannot drive a hos
 
 test("status 1 join then leave mutates live.usersOf; status 4 unlocks without any disk write", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Presence Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Presence Doc", type: "word", folder: homeIn(root) }, root);
   const before = getDoc(doc.docId, root)!;
   const original = fs.readFileSync(docFile(root, doc));
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
@@ -596,7 +598,7 @@ test("status 1 join then leave mutates live.usersOf; status 4 unlocks without an
 
 test("status 1 as the Document Server sends it: users by id strings keep the minted seat, its name, past the TTL; a leave and a close end it", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Seat", type: "word" }, root);
+  const doc = await createDoc({ title: "Seat", type: "word", folder: homeIn(root) }, root);
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   live.resetLive();
   live.setPresenceTtl(40);
@@ -625,7 +627,7 @@ test("status 1 as the Document Server sends it: users by id strings keep the min
 
 test("status 1 with an agent's editor in the session: its key is a session of the document, the agent is among agentsOf, but no person editing, no lock", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Agent seat", type: "word" }, root);
+  const doc = await createDoc({ title: "Agent seat", type: "word", folder: homeIn(root) }, root);
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
   live.resetLive();
   live.nameAgent("agent:abc", "Research (agent)");
@@ -652,7 +654,7 @@ test("status 1 with an agent's editor in the session: its key is a session of th
 
 test("status 1: the last person leaves a session only agents' editors are left in: the Document Server is asked to save it now", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Left to agents", type: "word" }, root);
+  const doc = await createDoc({ title: "Left to agents", type: "word", folder: homeIn(root) }, root);
   const asked: Record<string, unknown>[] = [];
   const ds = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -692,7 +694,7 @@ test("status 1: the last person leaves a session only agents' editors are left i
 test("statuses 3 and 7: one log line each, zero file changes, zero downloads", async () => {
   const root = tmpRoot();
   const sink: string[] = [];
-  const doc = await createDoc({ title: "Errors Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Errors Doc", type: "word", folder: homeIn(root) }, root);
   const before = getDoc(doc.docId, root)!;
   const original = fs.readFileSync(docFile(root, doc));
 
@@ -723,7 +725,7 @@ test("statuses 3 and 7: one log line each, zero file changes, zero downloads", a
 
 test("retry: two failed downloads then success -> persisted", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Flaky Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Flaky Doc", type: "word", folder: homeIn(root) }, root);
   const before = getDoc(doc.docId, root)!;
   hookLog.length = 0;
 
@@ -748,7 +750,7 @@ test("retry: two failed downloads then success -> persisted", async () => {
 test("retry: all attempts fail -> JSON error, doc untouched, lock left as-is", async () => {
   const root = tmpRoot();
   const sink: string[] = [];
-  const doc = await createDoc({ title: "Dead Doc", type: "word" }, root);
+  const doc = await createDoc({ title: "Dead Doc", type: "word", folder: homeIn(root) }, root);
   const before = getDoc(doc.docId, root)!;
   const original = fs.readFileSync(docFile(root, doc));
 
@@ -781,7 +783,7 @@ test("retry: all attempts fail -> JSON error, doc untouched, lock left as-is", a
 test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key -> 400", async () => {
   const root = tmpRoot();
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, log: () => {} });
-  const key = makeKey((await createDoc({ title: "Route", type: "word" }, root)).docId, 1);
+  const key = makeKey((await createDoc({ title: "Route", type: "word", folder: homeIn(root) }, root)).docId, 1);
   // Envelopes are signed into the token claims; each post below signs its own envelope.
   const tokenFor = (env: Record<string, unknown>) => ({ "x-auth-token": signJwt(env, 60_000, SECRET) });
 
@@ -820,7 +822,7 @@ test("route + envelope: GET -> 405, bad path -> 404, unknown status / bad key ->
 
 test("status 2: the save the Document Server names at the browser's address is downloaded from the Document Server itself, its query intact", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Mapped", type: "word" }, root);
+  const doc = await createDoc({ title: "Mapped", type: "word", folder: homeIn(root) }, root);
   const saved = Buffer.from("saved through the relay");
   const server = await startFileServer(() => ({ status: 200, bytes: saved }), Buffer.from("zip"));
   const handler = createCallbackHandler(() => DS_STATE, () => SECRET, dsOrigin, { root, retryDelaysMs: [], log: () => {} });
@@ -840,7 +842,7 @@ test("status 2: the save the Document Server names at the browser's address is d
 
 test("status 2: an address outside the Document Server's files is refused without a fetch", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Elsewhere", type: "word" }, root);
+  const doc = await createDoc({ title: "Elsewhere", type: "word", folder: homeIn(root) }, root);
   const original = fs.readFileSync(docFile(root, doc));
   const server = await startFileServer(() => ({ status: 200, bytes: Buffer.from("x") }), null);
   const sink: string[] = [];
@@ -896,8 +898,8 @@ async function startForgetfulDs(forgotten: Record<string, Buffer>) {
 
 test("recoverForgotten: a save the Document Server kept as forgotten (the portal was away) is taken back and let go; one over a newer revision is kept as a copy; another's key is left alone", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Away", type: "word" }, root);
-  const moved = await createDoc({ title: "Moved on", type: "word" }, root);
+  const doc = await createDoc({ title: "Away", type: "word", folder: homeIn(root) }, root);
+  const moved = await createDoc({ title: "Moved on", type: "word", folder: homeIn(root) }, root);
   const forgotten = {
     [makeKey(doc.docId, doc.mtimeMs)]: Buffer.from("typed while the portal was away"),
     [makeKey(moved.docId, moved.mtimeMs - 1000)]: Buffer.from("typed on an older revision"),
@@ -920,7 +922,7 @@ test("recoverForgotten: a save the Document Server kept as forgotten (the portal
 
 test("bare handleCallback: 503 until configure; after configure it serves requests", async () => {
   const root = tmpRoot();
-  const wire = (await createDoc({ title: "Wire", type: "word" }, root)).docId;
+  const wire = (await createDoc({ title: "Wire", type: "word", folder: homeIn(root) }, root)).docId;
 
   // Not configured yet (no test before this one called configure).
   const notYet = await post(handleCallback, { key: makeKey(wire, 1), status: 4 });

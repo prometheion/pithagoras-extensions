@@ -16,14 +16,16 @@ export interface OfficeDoc {
   sizeBytes: number;
   /** The document's current revision: its file's mtimeMs. */
   mtimeMs: number;
-  /** The folder of the agent or project that made it, or null for one made from the library page or scanned. */
-  owner: string | null;
+  /** The folder of the agent or project it belongs to: the agent's home or the project folder its file is in. */
+  owner: string;
+  /** What the person calls that agent or project (/state gives it). */
+  ownerName?: string;
   /** Mentions in its comments that opened it to those agents' or projects' folders. */
   grants: { folder: string; commentId: string; at: number }[];
   createdBy?: string;
   /** Since when its file has been gone: it stays listed a week, in case it comes back. */
   missingSince?: number;
-  /** Which workspace dir the doc lives in, stamped by the scan (store.ts); ABSENT for library-made docs -- the UI shows "library". */
+  /** Which workspace dir the doc lives in, stamped by the scan (store.ts); its owner's folder name where not stamped yet. */
   workspace?: string;
 }
 
@@ -77,7 +79,7 @@ export interface EditorConfig extends Record<string, unknown> {
 export interface DocchatItem {
   kind: "thread" | "chat";
   label: string;
-  state: "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "nobody" | "interrupted" | "limit" | "idle";
+  state: "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "interrupted" | "limit" | "idle";
   error?: string;
 }
 
@@ -111,7 +113,8 @@ export const api = {
   state: () => call<OfficeState>("/state"),
   /** The documents the agent or project of a chat sees: the panel beside it shows those. */
   scope: (chatId: string) => call<{ docIds: string[] }>(`/scope?chat=${encodeURIComponent(chatId)}`),
-  createDocument: (body: { title: string; type: "word" | "cell"; owner?: string }) =>
+  /** A new document: in the chat's agent home or project folder with `chat`, else in the default agent's home. */
+  createDocument: (body: { title: string; type: "word" | "cell"; chat?: string }) =>
     call<OfficeDoc>("/documents", { method: "POST", body: JSON.stringify(body) }),
   renameDocument: (id: string, title: string) =>
     call<OfficeDoc>(`/documents/${encodeURIComponent(id)}/rename`, { method: "POST", body: JSON.stringify({ title }) }),

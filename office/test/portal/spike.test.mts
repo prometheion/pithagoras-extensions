@@ -107,7 +107,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   const tools: Record<string, Tool> = {};
   const docFile = async (docId: string, ext: "docx" | "xlsx") => {
     const file = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === docId);
-    return readFileSync(path.join(data, "docs", docId, `${file.title}.${ext}`));
+    return readFileSync(file.path); // in its folder (the project's, where the agent made it)
   };
 
   test("the Document Server, its relay and its network come up", { timeout: 600_000 }, async () => {

@@ -26,9 +26,9 @@ export function saveSort(s: SortChoice): void {
   }
 }
 
-/** The label the UI shows for a doc's workspace: its scan stamp (the first path segment under its scan root), or
- * "library" for docs made in the office library itself -- they have no scan root, so the stamp stays undefined. */
-export const workspaceLabel = (doc: OfficeDoc): string => doc.workspace ?? t("library");
+/** The label the UI shows for a doc's workspace: its scan stamp (the first path segment under its scan root), or its
+ * owner's folder name where it has none yet (one the next scan stamps). */
+export const workspaceLabel = (doc: OfficeDoc): string => doc.workspace ?? doc.owner.split("/").filter(Boolean).pop() ?? doc.owner;
 
 /** The one comparator for every key and both call sites (page + panel). `dir` is applied INSIDE, so rules that
  * must not flip with direction -- "workspace" keeps its undefineds LAST in either order -- stay independent of it:
@@ -48,7 +48,7 @@ export function compareDocs(a: OfficeDoc, b: OfficeDoc, key: SortKey, dir: 1 | -
       const wa = a.workspace;
       const wb = b.workspace;
       if (wa === undefined && wb === undefined) return 0;
-      if (wa === undefined) return 1; // never flipped by dir: library-made docs stay at the bottom
+      if (wa === undefined) return 1; // never flipped by dir: docs not stamped yet stay at the bottom
       if (wb === undefined) return -1;
       return wa.localeCompare(wb) * dir;
     }

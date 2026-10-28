@@ -13,7 +13,8 @@ import { refreshOfficeState, useDocGone, useOfficeState } from "./state";
  * editor (the docs extension keeps its opened document in the page the same way); without it, the workbench:
  * a new-document line and the list of every document with who owns it and who is in it. The list itself is the
  * workspace scan -- every .docx/.xlsx of the agent homes and projects, indexed at boot and on Rescan, each in
- * place (its file IS the document) -- plus what was made here.
+ * place (its file IS the document) and belonging to the agent or project whose folder it is in. What is made here goes
+ * into the default agent's home.
  */
 
 // How the list sorts and where that choice sticks live in web/sort.tsx, shared with the sidebar panel:
@@ -27,19 +28,19 @@ function extMark(doc: OfficeDoc) {
   );
 }
 
+/** Who a document belongs to, as the person knows them: the agent's name or the project's place, else its folder's
+ * last part. */
+export const ownerLabel = (doc: OfficeDoc): string => doc.ownerName ?? doc.owner.split("/").filter(Boolean).pop() ?? doc.owner;
+
 /** How the document's mtimeMs reads: when it last changed on disk, which IS its revision. */
 const when = (doc: OfficeDoc) => portal.format.dateTime(doc.mtimeMs);
 
 function ownerChips(doc: OfficeDoc) {
   return (
     <>
-      {doc.owner ? (
-        <span className="po-chip po-chip-owner" title={doc.owner}>
-          {t("owned")} · {doc.owner.split("/").filter(Boolean).pop() ?? doc.owner}
-        </span>
-      ) : (
-        <span className="po-chip">{t("unowned")}</span>
-      )}
+      <span className="po-chip po-chip-owner" title={doc.owner}>
+        {t("owned")} · {ownerLabel(doc)}
+      </span>
       {doc.missingSince !== undefined && (
         <span className="po-chip po-chip-stale" title={t("Its file is gone; it stays listed for a week, in case it comes back.")}>
           {t("file missing")}
@@ -197,7 +198,8 @@ function DocRow({ doc }: { doc: OfficeDoc }) {
   );
 }
 
-/** A new document in the library: its title and which kind -- word (.docx) or sheet (.xlsx). Human-made ones are unowned. */
+/** A new document in the library: its title and which kind -- word (.docx) or sheet (.xlsx). It is made in the default
+ * agent's home (the server half's POST /documents without a chat) and belongs to that agent. */
 function NewDocument() {
   portal.locale.use();
   const [title, setTitle] = useState("");
@@ -244,7 +246,7 @@ function NewDocument() {
         onChange={setKind}
         showLabel={false}
       />
-      <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || title.trim() === ""}>
+      <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || title.trim() === ""} title={t("Made in the default agent's home")}>
         {t("New document")}
       </button>
       {problem && (
@@ -269,7 +271,7 @@ function RescanLibrary() {
       const out = await api.rescanLibrary();
       setNote(
         out.added === 0 && out.updated === 0
-          ? t("Nothing new: the library already knew every .docx and .xlsx in the agent folders.")
+          ? t("Nothing new: the library already knew every .docx and .xlsx in the agents' homes and the projects.")
           : t("Scan done: {added} indexed, {updated} refreshed.", { added: out.added, updated: out.updated }),
       );
       void refreshOfficeState();
@@ -308,7 +310,7 @@ function Library() {
       <portal.ui.PageHeader
         icon={<LuPresentation />}
         title={t("Office")}
-        description={t("The office documents of this portal: everything made here plus every .docx or .xlsx found across the agent homes and projects -- indexed automatically at boot and by Rescan, editable in place.")}
+        description={t("The office documents of this portal: every .docx or .xlsx in the agents' homes and the projects, each belonging to its agent or project -- indexed automatically at boot and by Rescan, editable in place.")}
       />
       {!state ? (
         <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
@@ -317,7 +319,7 @@ function Library() {
           <NewDocument />
           {state.docs.length === 0 ? (
             <>
-              <portal.ui.Empty>{t("No documents yet. Make a Word or sheet document above, ask an agent to write one -- or drop a .docx / .xlsx into any agent folder and press Rescan: everything is indexed here automatically, in place.")}</portal.ui.Empty>
+              <portal.ui.Empty>{t("No documents yet. Make a Word or sheet document above (in the default agent's home), ask an agent to write one -- or drop a .docx / .xlsx into an agent's home or a project and press Rescan: everything is indexed here automatically, in place.")}</portal.ui.Empty>
               <RescanLibrary />
             </>
           ) : (

@@ -19,6 +19,7 @@ import zlib from "node:zlib";
 import { GUARDS, LABELS, registerTools, __resetToolsForTests } from "../src/tools";
 import { de } from "../src/de";
 import { createDoc, getDoc, readDoc } from "../src/store";
+import { fakePlaces } from "./homes.mts";
 import { parseDocx, readPart, rewriteZip } from "../src/ooxml";
 import * as docchat from "../src/docchat";
 import { resetLive, setUser, setSession, nameAgent } from "../src/live";
@@ -91,7 +92,7 @@ function fakeSeat(root: () => string) {
       const run: Run = { home, docId, mode, kind: job.kind, args: job.args, ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}) };
       state.runs.push(run);
       if (state.answer) return state.answer(run);
-      if (job.kind === "word.read") return { blocks: parseDocx(readDoc(getDoc(docId, root())!, root())).paragraphs.map((p) => ({ p })) };
+      if (job.kind === "word.read") return { blocks: parseDocx(readDoc(getDoc(docId, root())!)).paragraphs.map((p) => ({ p })) };
       if (job.kind === "cell.read") return { book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [], truncated: false }] };
       return { ops: (job.args.ops ?? []).length };
     },
@@ -110,9 +111,11 @@ function fakeSeat(root: () => string) {
 }
 
 /** One isolated world: tmp root, a captured extend factory, a fake pi for `chatId`, seams wired so no default touches portal(). */
-function setup(chatId = "chat-atlas-home"): { root: string; seen: Seen; pi: PiFake; folderPath: string; seat: ReturnType<typeof fakeSeat>["state"]; office: { state: "running" | "starting" | "stopped" } } {
+function setup(chatId = "chat-atlas-home"): { root: string; seen: Seen; pi: PiFake; folderPath: string; seat: ReturnType<typeof fakeSeat>["state"]; office: { state: "running" | "starting" | "stopped" }; places: ReturnType<typeof fakePlaces> } {
   __resetToolsForTests();
   resetLive();
+  // The folders here are names only: a document is made in a folder of the test's own that stands for its owner's.
+  const places = fakePlaces();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-tools-"));
   const seen: Seen = { records: [], logs: [] };
   const pi = makePi();
@@ -129,6 +132,9 @@ function setup(chatId = "chat-atlas-home"): { root: string; seen: Seen; pi: PiFa
       return p;
     },
     folders: () => FOLDERS,
+    // Every document is a file in its folder, opened as the agent would: these stand in for the portal's checks.
+    openFile: (file) => ({ fd: fs.openSync(file, "r"), size: fs.statSync(file).size }),
+    mayWrite: () => {},
     root,
     record: (e) => seen.records.push(e),
     log: (l) => seen.logs.push(l),
@@ -138,7 +144,7 @@ function setup(chatId = "chat-atlas-home"): { root: string; seen: Seen; pi: PiFa
   });
   // The factory body runs PER CALL so each test step sees exactly one registration pass for its chat.
   (setup as any).__run = () => factory(pi, { id: chatId });
-  return { root, seen, pi, folderPath: CHAT_TO_FOLDER[chatId], seat: fake.state, office };
+  return { root, seen, pi, folderPath: CHAT_TO_FOLDER[chatId], seat: fake.state, office, places };
 }
 
 /** Run the captured factory on the fake pi and hand back the registered tool by name. */
@@ -165,7 +171,7 @@ async function refused(p: Promise<unknown>, what = ""): Promise<string> {
 
 const readDocBytes = (root: string, docId: string): Buffer => {
   const doc = getDoc(docId, root)!;
-  return fs.readFileSync(path.join(root, "docs", docId, `${doc.title}.${doc.ext}`));
+  return fs.readFileSync(doc.path);
 };
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -189,7 +195,7 @@ function addGrant(root: string, docId: string, folder: string, commentId: string
  * what stat ACTUALLY reads back -- the zero-tolerance gate compares live-stat vs index and would otherwise refuse. */
 function bumpRevision(root: string, docId: string, toMs: number): void {
   const doc = getDoc(docId, root)!;
-  const file = path.join(root, "docs", docId, `${doc.title}.${doc.ext}`);
+  const file = doc.path;
   fs.utimesSync(file, new Date(toMs), new Date(toMs));
   const actual = fs.statSync(file).mtimeMs; // the value every later stat (and persistBytes) will see
   const p = path.join(root, "index.json");
@@ -248,10 +254,11 @@ test("every tool has its label from the translated table and a guard decided for
   }
 });
 
-test("a document is owned by the project's folder, whichever of its sessions made it", async () => {
+test("a document is made in the project's folder and owned by it, whichever of its sessions made it", async () => {
   const s = setup("zzz-acme-b"); // a NON-lowest session of the Acme project
   const made = await tool(s, "office_create").execute("c", { title: "Acme Note", type: "word" });
   assert.equal(getDoc(made.details.id, s.root)!.owner, "/f/acme");
+  assert.deepEqual(s.places.made.map((m) => [m.folder, m.name]).at(-1), ["/f/acme", "Acme Note.docx"]);
   // and so every session of the folder sees it, the lowest one too
   const other = setup("aaa-acme-a");
   fs.cpSync(s.root, other.root, { recursive: true });
@@ -262,9 +269,9 @@ test("a document is owned by the project's folder, whichever of its sessions mad
 test("scope: owned and granted docs visible; another home's doc invisible to list AND read", async () => {
   const s = setup();
   const home = "/f/atlas";
-  await createDoc({ title: "Mine", type: "word", owner: home }, s.root);
-  const theirs = await createDoc({ title: "Theirs Secret Doc", type: "word", owner: "/f/acme" }, s.root); // no grant to us
-  const granted = await createDoc({ title: "Shared One", type: "cell", owner: "/f/acme" }, s.root);
+  await createDoc({ title: "Mine", type: "word", folder: home }, s.root);
+  const theirs = await createDoc({ title: "Theirs Secret Doc", type: "word", folder: "/f/acme" }, s.root); // no grant to us
+  const granted = await createDoc({ title: "Shared One", type: "cell", folder: "/f/acme" }, s.root);
   addGrant(s.root, granted.docId, home, "c-grant");
 
   (setup as any).__run();
@@ -406,13 +413,17 @@ test("office_read/office_edit: a scanned file that grew past the library's cap s
 /* office_create                                                       */
 /* ------------------------------------------------------------------ */
 
-test("office_create: happy path returns id + meta, owner is the home; duplicate title+type -> error:exists", async () => {
+test("office_create: happy path returns id + meta, made in the agent's home and owned by it; duplicate title+type -> error:exists", async () => {
   const s = setup();
   const t = tool(s, "office_create");
   const res = (await t.execute("c1", { title: "Budget", type: "cell" })) as ToolResult;
   const meta = getDoc(res.details.id, s.root)!;
   assert.ok(meta); // exists in the index and on disk
   assert.equal(meta.owner, "/f/atlas");
+  assert.deepEqual(s.places.made.map((m) => [m.folder, m.name]), [["/f/atlas", "Budget.xlsx"]], "put into the agent's home, not the extension's own folder");
+  assert.equal(meta.path, s.places.made[0]!.file);
+  assert.equal(res.details.path, meta.path);
+  assert.ok(!fs.existsSync(path.join(s.root, "docs")));
   assert.equal(meta.ext, "xlsx");
   assert.equal(typeof res.details.mtimeMs, "number");
   assert.ok(res.content[0].text.includes(res.details.id));
@@ -437,7 +448,7 @@ test("office_create: happy path returns id + meta, owner is the home; duplicate 
 
 test("office_read (Word): the editor's blocks, numbered, with styles and tables; the header says it is live and who typed", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Report", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ blocks: [{ p: "Quarterly report" , style: "Title" }, { p: "Revenue was revised." }, { table: [["Item", "Amount"], ["Ledger", "42"]] }, { p: "" }] });
   setUser(doc.docId, { id: "portal-user", name: "Portal" }, true, { confirmed: true });
   const read = (await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult;
@@ -452,7 +463,7 @@ test("office_read (Word): the editor's blocks, numbered, with styles and tables;
 
 test("office_read (spreadsheet): every sheet by its position and whether it is hidden, then cells by address, texts quoted, formulas after their values; one sheet by name", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Budget", type: "cell", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Budget", type: "cell", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }, { name: "Empty", hidden: true }, { name: "Later", hidden: false }, { name: "Not read", hidden: false }], sheets: [{ name: "Sheet1", range: "A1:C3", cells: [{ a: "A1", v: 2 }, { a: "A3", v: 6, f: "=A1*A2" }, { a: "C1", v: "person" }, { a: "B2", v: true }], truncated: false }, { name: "Empty", range: "A1", cells: [], truncated: true }, { name: "Later", range: "", cells: [], truncated: true, skipped: true }] });
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
   assert.match(t, /\n\nSheets: 1 "Sheet1", 2 "Empty" \(hidden\), 3 "Later", 4 "Not read"\n\nSheet "Sheet1" \(A1:C3\):\nA1: 2\nA3: 6 \(=A1\*A2\)\nC1: "person"\nB2: TRUE\n\nSheet "Empty" \(A1\):\n\(empty\)\n\(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most\)\n\nSheet "Later": not read \(the sheets before it filled the read; read it with sheet\)$/);
@@ -462,19 +473,19 @@ test("office_read (spreadsheet): every sheet by its position and whether it is h
 
 test("office_read with Office stopped (or starting) reads the saved file and says so; no editor is opened", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Saved", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Saved", type: "word", folder: "/f/atlas" }, s.root);
   s.office.state = "stopped";
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
   assert.match(t, /\nSaved copy \(Office is stopped\): what the file holds\./);
   assert.match(t, /\[1\] New document/);
   s.office.state = "starting";
   assert.match(((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text, /Saved copy \(Office is still starting\)/);
-  const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
   assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId })) as ToolResult).content[0].text, /Saved copy .*\n\nSheets: 1 "Sheet1"\n\nSheet "Sheet1":\n\(empty\)$/s);
   assert.match(((await tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Sheet1" })) as ToolResult).content[0].text, /Sheet "Sheet1"/);
   assert.match(await refused(tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "Nope" }), "no such sheet"), /^error:not_found there is no sheet named "Nope" \(the sheets: "Sheet1"\)/);
   // A second sheet, hidden: named with its position in the list, and read by its name in any case.
-  const file = path.join(s.root, "docs", sheet.docId, "Grid.xlsx");
+  const file = sheet.path;
   const workbook = await (await (await import("jszip")).default.loadAsync(fs.readFileSync(file))).file("xl/workbook.xml")!.async("string");
   fs.writeFileSync(file, rewriteZip(fs.readFileSync(file), { "xl/workbook.xml": workbook.replace(/(<sheet\b[^>]*\/>)/, '$1<sheet name="Hidden data" sheetId="2" state="hidden" r:id="rId1"/>') }));
   const both = ((await tool(s, "office_read").execute("r", { id: sheet.docId, sheet: "HIDDEN DATA" })) as ToolResult).content[0].text;
@@ -484,7 +495,7 @@ test("office_read with Office stopped (or starting) reads the saved file and say
 
 test("office_read without the agent's editor downloaded reads the saved file and says why; office_edit is refused with what to do", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Saved", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Saved", type: "word", folder: "/f/atlas" }, s.root);
   // container.ensureAgent's refusal, as it comes through the seat.
   s.seat.answer = () => Promise.reject(Object.assign(new Error("the agent's editor (chromedp/headless-shell:1) is not downloaded"), { code: "agent_editor_missing" }));
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
@@ -498,7 +509,7 @@ test("office_read without the agent's editor downloaded reads the saved file and
 
 test("office_read: a Word document the editor read only in part says it goes on", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Long", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Long", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ blocks: [{ p: "first" }], truncated: true });
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
   assert.match(t, /\[1\] first\n\n\(the document goes on: only its first 200,000 characters were read\)$/);
@@ -506,7 +517,7 @@ test("office_read: a Word document the editor read only in part says it goes on"
 
 test("office_read: Office found stopped as the agent's editor starts (its network gone) reads the saved file", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Saved", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Saved", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => Promise.reject(Object.assign(new Error("the Document Server's network is not there"), { code: "office_stopped" }));
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
   assert.match(t, /\nSaved copy \(Office is stopped\): what the file holds\./);
@@ -515,7 +526,7 @@ test("office_read: Office found stopped as the agent's editor starts (its networ
 
 test("office_read: a text past 200,000 characters is cut with a marker", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Long", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Long", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ blocks: Array.from({ length: 300 }, () => ({ p: "x".repeat(1000) })) });
   const t = ((await tool(s, "office_read").execute("r", { id: doc.docId })) as ToolResult).content[0].text;
   assert.ok(t.length <= 200_000 + 100);
@@ -524,8 +535,8 @@ test("office_read: a text past 200,000 characters is cut with a marker", async (
 
 test("a document written outside the extension: office_read shows its new revision", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Scripted", type: "word", owner: "/f/atlas" }, s.root);
-  const file = path.join(s.root, "docs", doc.docId, "Scripted.docx");
+  const doc = await createDoc({ title: "Scripted", type: "word", folder: "/f/atlas" }, s.root);
+  const file = doc.path;
   fs.writeFileSync(file, rewriteZip(fs.readFileSync(file), { "word/document.xml": '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Written by a script</w:t></w:r></w:p></w:body></w:document>' }));
   fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
   const now = fs.statSync(file).mtimeMs;
@@ -541,7 +552,7 @@ test("a document written outside the extension: office_read shows its new revisi
 
 test("office_edit: the ops go to the agent's editor as one job, the session is saved, and the tool answers the new revision", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Edit Me", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Edit Me", type: "word", folder: "/f/atlas" }, s.root);
   setUser(doc.docId, { id: "portal-user", name: "Portal" }, true, { confirmed: true });
   const ops = [{ quote: "New document", replacement: "Edited text" }, { after: "Edited text", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", table: [["a", "b"]] }, { remove: "gone" }];
   const ok = (await tool(s, "office_edit").execute("e1", { id: doc.docId, ops })) as ToolResult;
@@ -557,14 +568,14 @@ test("office_edit: the ops go to the agent's editor as one job, the session is s
 
 test("office_edit (spreadsheet): the range ops go as one cell.edit job", async () => {
   const s = setup();
-  const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
   await tool(s, "office_edit").execute("e1", { id: sheet.docId, ops: [{ range: "A1:A3", values: [[2], [3], ["=A1*A2"]] }] });
   assert.deepEqual(s.seat.runs.map((r) => [r.kind, r.args]), [["cell.edit", { ops: [{ range: "A1:A3", values: [[2], [3], ["=A1*A2"]] }] }]]);
 });
 
 test("office_edit (spreadsheet): sheet ops go in the same job, with time for the Document Server's answer to each, and the audit names them", async () => {
   const s = setup();
-  const sheet = await createDoc({ title: "Book", type: "cell", owner: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
   const ops = [{ addSheet: "Data", position: 1 }, { sheet: "Data", range: "A1", values: [[1]] }, { copySheet: "Data", to: "Data 2" }, { hideSheet: "Data 2" }];
   await tool(s, "office_edit").execute("e1", { id: sheet.docId, ops });
   assert.deepEqual(s.seat.runs.map((r) => [r.kind, r.args]), [["cell.edit", { ops }]]);
@@ -580,7 +591,7 @@ test("office_edit (spreadsheet): sheet ops go in the same job, with time for the
 
 test("office_edit (spreadsheet): many sheet ops get two minutes at most; one cut off that deletes a sheet says what may be left of it", async () => {
   const s = setup();
-  const sheet = await createDoc({ title: "Book", type: "cell", owner: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   await t.execute("e1", { id: sheet.docId, ops: Array.from({ length: 20 }, (_, k) => ({ addSheet: `S${k}` })) });
   assert.equal(s.seat.runs[0].timeoutMs, 120_000);
@@ -593,7 +604,7 @@ test("office_edit (spreadsheet): many sheet ops get two minutes at most; one cut
 
 test("office_edit (spreadsheet): an edit the editor could not take back whole is error:partial, says to read the document first, and is in the audit log", async () => {
   const s = setup();
-  const sheet = await createDoc({ title: "Book", type: "cell", owner: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: the editor did not delete the sheet "B" within 10 s. Not all of the call could be taken back (the sheet "A" is deleted already).', 1, true));
   const said = await refused(tool(s, "office_edit").execute("e1", { id: sheet.docId, ops: [{ deleteSheet: "A" }, { deleteSheet: "B" }] }));
   assert.match(said, /^error:partial op 2: .*deleted already\)\. Part of this call may be in the document: read it with office_read before you go on, and do not repeat the call as it was\.$/);
@@ -618,8 +629,8 @@ test("office_edit and office_read say what the agent can do with sheets", () => 
 
 test("office_edit: bad ops are refused before anything is sent (bad_op, unsupported_format)", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Doc", type: "word", owner: "/f/atlas" }, s.root);
-  const sheet = await createDoc({ title: "Grid", type: "cell", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Doc", type: "word", folder: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   assert.match(await refused(t.execute("e", { id: doc.docId, ops: [] }), "empty"), /^error:bad_op /);
   assert.match(await refused(t.execute("e", { id: doc.docId, ops: [{ quote: "a" }] }), "no replacement"), /^error:bad_op /);
@@ -630,7 +641,7 @@ test("office_edit: bad ops are refused before anything is sent (bad_op, unsuppor
 
 test("office_edit with Office stopped is error:office_stopped, while it starts error:ds_starting; nothing is sent", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Doc", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Doc", type: "word", folder: "/f/atlas" }, s.root);
   s.office.state = "stopped";
   assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] }), "stopped"), /^error:office_stopped .*start it in Settings → Office/);
   s.office.state = "starting";
@@ -640,7 +651,7 @@ test("office_edit with Office stopped is error:office_stopped, while it starts e
 
 test("office_edit: the editor's refusals reach the agent coded, with what to do", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Doc", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Doc", type: "word", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   const fail = (e: SeatError) => (s.seat.answer = () => Promise.reject(e));
   fail(new SeatError("quote_not_found", "op 2: the quote \"x\" is not in the document", 1));
@@ -657,7 +668,7 @@ test("office_edit: the editor's refusals reach the agent coded, with what to do"
 
 test("office_edit: how the save after the edit came out: saved, kept as a copy (behind, the seat closed), or not in time (editor_not_saved)", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Saving", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Saving", type: "word", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   const op = { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] };
   s.seat.outcome = "timeout";
@@ -675,7 +686,7 @@ test("office_edit: how the save after the edit came out: saved, kept as a copy (
 
 test("office_edit: an edit the editor took and then gave no clear answer for is recorded all the same, with what came of it", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Unclear", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Unclear", type: "word", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   const op = { id: doc.docId, ops: [{ quote: "New document", replacement: "x" }] };
   for (const [code, ran] of [["editor_not_saved", true], ["timeout", true], ["aborted", true], ["editor_closed", true], ["timeout", false], ["aborted", false], ["busy", false]] as const) {
@@ -694,7 +705,7 @@ test("office_edit: an edit the editor took and then gave no clear answer for is 
 
 test("office_edit: an edit that changed nothing has nothing to save, and says so; one that changed something and was not saved is editor_not_saved", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Same", type: "cell", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Same", type: "cell", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   const op = { id: doc.docId, ops: [{ range: "A1", values: [[1]] }] };
   s.seat.outcome = "nothing";
@@ -709,7 +720,7 @@ test("office_edit: an edit that changed nothing has nothing to save, and says so
 
 test("office_edit: an edit queued behind another starts from the revision that one saved", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Queued", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Queued", type: "word", folder: "/f/atlas" }, s.root);
   const t = tool(s, "office_edit");
   const [one, two] = (await Promise.all([t.execute("a", { id: doc.docId, ops: [{ quote: "New document", replacement: "one" }] }), t.execute("b", { id: doc.docId, ops: [{ quote: "one", replacement: "two" }] })])) as ToolResult[];
   assert.equal(one.details.from, doc.mtimeMs);
@@ -719,7 +730,7 @@ test("office_edit: an edit queued behind another starts from the revision that o
 
 test("office_edit: two edits of one document run one after the other, each with its save, never interleaved", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Twice", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Twice", type: "word", folder: "/f/atlas" }, s.root);
   const order: string[] = [];
   s.seat.answer = async (run) => {
     order.push(`start ${run.args.ops[0].replacement}`);
@@ -743,7 +754,7 @@ test("office_edit takes no baseRevision any more, and refuses nothing as revisio
 
 test("office_list: people editing and agents in a document, apart", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Busy", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Busy", type: "word", folder: "/f/atlas" }, s.root);
   nameAgent("agent:abc", "Research (agent)");
   setSession(doc.docId, "k", ["portal-user", "agent:abc"]);
   setUser(doc.docId, { id: "portal-user", name: "Portal" }, true, { confirmed: true });
@@ -784,8 +795,8 @@ function bombDocx(mib: number): Buffer {
 test("office_read of the saved copy whose text part inflates past the cap (600 MiB from 600 KB): refused before it is inflated, the portal's memory untouched", async () => {
   const s = setup();
   s.office.state = "stopped";
-  const doc = await createDoc({ title: "Bomb", type: "word", owner: "/f/atlas" }, s.root);
-  const file = path.join(s.root, "docs", doc.docId, "Bomb.docx");
+  const doc = await createDoc({ title: "Bomb", type: "word", folder: "/f/atlas" }, s.root);
+  const file = doc.path;
   fs.writeFileSync(file, bombDocx(600));
   bumpRevision(s.root, doc.docId, Date.now() - 1000);
   const peak = process.resourceUsage().maxRSS; // KiB
@@ -802,8 +813,8 @@ test("office_comments from the saved file: a Word document's threads with their 
   const s = setup();
   // Nobody in the documents and no editor of the agent's: the saved files.
   s.office.state = "stopped";
-  const doc = await createDoc({ title: "Commented", type: "word", owner: "/f/atlas" }, s.root);
-  const file = path.join(s.root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
+  const doc = await createDoc({ title: "Commented", type: "word", folder: "/f/atlas" }, s.root);
+  const file = doc.path;
   const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"';
   fs.writeFileSync(
     file,
@@ -828,13 +839,13 @@ test("office_comments from the saved file: a Word document's threads with their 
   assert.match(await refused(tool(s, "office_comments").execute("cm2", { id: doc.docId, thread: "deadbeef" }), "no such thread"), /^error:not_found /);
 
   // a doc with no comments -> a readable "(none)", not an error
-  const bare = await createDoc({ title: "Bare", type: "word", owner: "/f/atlas" }, s.root);
+  const bare = await createDoc({ title: "Bare", type: "word", folder: "/f/atlas" }, s.root);
   const bareRes = (await tool(s, "office_comments").execute("cm3", { id: bare.docId })) as ToolResult;
   assert.match(bareRes.content[0].text, /Threads \(0\):\n\(none\)/);
 
   // A spreadsheet's threaded comments, by their cell.
-  const sheet = await createDoc({ title: "Sheet", type: "cell", owner: "/f/atlas" }, s.root);
-  const sheetFile = path.join(s.root, "docs", sheet.docId, `${sheet.title}.${sheet.ext}`);
+  const sheet = await createDoc({ title: "Sheet", type: "cell", folder: "/f/atlas" }, s.root);
+  const sheetFile = sheet.path;
   const bytes = readDocBytes(s.root, sheet.docId);
   const rels = readPart(bytes, "xl/worksheets/_rels/sheet1.xml.rels");
   fs.writeFileSync(
@@ -851,7 +862,7 @@ test("office_comments from the saved file: a Word document's threads with their 
 
 test("office_comments while a person is in the document: what the people's editors reported, unsaved comments among them, with no editor of the agent's opened; while only the agent's editor is in it: what that editor has", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Live", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Live", type: "word", folder: "/f/atlas" }, s.root);
   docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
   setUser(doc.docId, { id: "portal-user", name: "Portal" }, true);
   docchat.report(doc.docId, "k", [{ type: "comment", guid: "626360df", author: "Portal", userId: "portal-user", text: "Ungespeichert", quote: "Text", replies: [{ author: "Portal", text: "Und noch" }] }]);
@@ -872,8 +883,8 @@ test("office_comments: aggregated comment output is capped like office_read (mar
   const s = setup();
   // 300 comments x ~750 chars of text -- comfortably over the shared 200,000-character cap
   const many = Array.from({ length: 300 }, (_, i) => ({ id: String(i), author: "Crowd", text: `note ${i}: ${"x".repeat(750)}` }));
-  const doc = await createDoc({ title: "Wall of Notes", type: "word", owner: "/f/atlas" }, s.root);
-  const file = path.join(s.root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
+  const doc = await createDoc({ title: "Wall of Notes", type: "word", folder: "/f/atlas" }, s.root);
+  const file = doc.path;
   fs.writeFileSync(file, rewriteZip(readDocBytes(s.root, doc.docId), { "word/comments.xml": commentsXml(many) }));
 
   s.office.state = "stopped";
@@ -896,8 +907,8 @@ test("office_comments: aggregated comment output is capped like office_read (mar
 
 test("every refusal the agent reads starts with \"error:<code> \"", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Fmt", type: "word", owner: "/f/atlas" }, s.root);
-  const sheet = await createDoc({ title: "F2", type: "cell", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Fmt", type: "word", folder: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "F2", type: "cell", folder: "/f/atlas" }, s.root);
 
   assert.match(await refused(tool(s, "office_read").execute("x1", { id: "nope" }), "not_found"), /^error:not_found /);
   assert.match(await refused(tool(s, "office_edit").execute("x3", { id: doc.docId, ops: [] }), "empty ops"), /^error:bad_op /);
@@ -916,7 +927,7 @@ test("every refusal the agent reads starts with \"error:<code> \"", async () => 
 
 test("office_edit: comments its edit would have taken away are moved onto the new text; their threads follow, and the agent hears it", async () => {
   const s = setup();
-  const doc = await createDoc({ title: "Moving", type: "word", owner: "/f/atlas" }, s.root);
+  const doc = await createDoc({ title: "Moving", type: "word", folder: "/f/atlas" }, s.root);
   docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
   // A thread on the comment that moves: its record goes on under the new GUID.
   fs.mkdirSync(path.join(s.root, "state", "threads"), { recursive: true });

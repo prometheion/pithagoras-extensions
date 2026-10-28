@@ -80,7 +80,7 @@ function loadScript(src: string): Promise<void> {
 /** The most urgent of a document's comment and chat states, as the bar's one chip says it, with a count of the busy ones
  * and every one in its title. Nothing to say: null. */
 export function docchatChip(items: DocchatItem[]): { text: string; title: string; tone: "busy" | "problem" } | null {
-  const order: DocchatItem["state"][] = ["failed", "not_posted", "no_chat", "nobody", "limit", "interrupted", "working", "queued"];
+  const order: DocchatItem["state"][] = ["failed", "not_posted", "no_chat", "limit", "interrupted", "working", "queued"];
   const shown = items.filter((i) => order.includes(i.state));
   if (!shown.length) return null;
   const first = [...shown].sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state))[0];
@@ -90,7 +90,6 @@ export function docchatChip(items: DocchatItem[]): { text: string; title: string
     failed: t("{name} could not answer", { name }),
     not_posted: t("{name} answered; not posted after a suspected prompt injection", { name }),
     no_chat: t("{name} has no chat to work from: start one with {name}", { name }),
-    nobody: t("Nobody answers in this document's chat: no agent or project owns it"),
     limit: t("Too many comment chats in this document: delete some comments"),
     interrupted: t("{name} was interrupted before it answered", { name }),
     working: busy > 1 ? t("Agents are answering ({n})", { n: busy }) : first.kind === "chat" ? t("{name} is answering in the chat", { name }) : t("{name} is answering a comment", { name }),

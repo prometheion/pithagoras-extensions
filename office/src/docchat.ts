@@ -27,7 +27,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { portal } from "./host";
-import { addGrant, canonical, getDoc, listDocs, readDoc, within, type DocMeta } from "./store";
+import { addGrant, canonical, getDoc, listDocs, readDoc, type DocMeta } from "./store";
 import { docxThreads, xlsxThreads, type CommentThread } from "./ooxml";
 import { keyIdOf } from "./callback";
 import { DEFAULT_SETTINGS, loadSettings } from "./settings";
@@ -37,7 +37,7 @@ import { DEFAULT_SETTINGS, loadSettings } from "./settings";
 /* ------------------------------------------------------------------ */
 
 /** What the person sees of a thread's or a session's chat (the editor's bar, GET /editor-state). */
-export type ChatState = "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "nobody" | "interrupted" | "limit" | "idle";
+export type ChatState = "queued" | "working" | "answered" | "not_posted" | "failed" | "no_chat" | "interrupted" | "limit" | "idle";
 
 type Pending = { since: number; pid: number; asked?: string };
 /** An answer waiting to be posted. `sent`: the chunks of an editor's chat answer posted already; `check`: a post of it
@@ -453,28 +453,13 @@ export function mentionables(): { name: string; email: string }[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** The agent or project folder that holds a scanned document's file: the deepest one. */
-export function homeOf(file: string): string | null {
-  let best: string | null = null;
-  for (const f of mentionable()) {
-    const at = canonical(f.path);
-    if (within(at, file) && (!best || at.length > best.length)) best = at;
-  }
-  return best;
-}
-
-/** Who owns a document: its owner folder, or for a scanned one the agent or project whose folder it is in. */
-export function ownerOf(doc: Pick<DocMeta, "owner" | "path">): string | null {
-  return doc.owner ?? (doc.path ? homeOf(doc.path) : null);
-}
-
 /**
  * The folders a text mentions, each once, in order: `@Name` / `+Name` an agent by its name (a project of that name
  * where no agent has it), `@project:Name` / `+project:Name` a project, `@agent` the document's owner. Names match in any
  * case, the longest first, so names with spaces work as the list inserts them; a name two folders of the kind share is
  * skipped (logged), as is one that matches nothing.
  */
-export function parseMentions(text: string, doc?: Pick<DocMeta, "owner" | "path">): string[] {
+export function parseMentions(text: string, doc?: Pick<DocMeta, "owner">): string[] {
   // Each name lower-cased once, and each mark compared over a window as long as the longest name: a long text of many
   // marks costs no more than its length (a copy of the rest of the text per mark would cost its square).
   const all = mentionable().map((f) => ({ ...f, lower: f.name.toLowerCase() }));
@@ -516,11 +501,7 @@ export function parseMentions(text: string, doc?: Pick<DocMeta, "owner" | "path"
       add(project);
       continue;
     }
-    if (/^agent(?![\p{L}\p{N}_-])/iu.test(rest) && doc) {
-      const owner = ownerOf(doc);
-      if (!owner) log("@agent in a comment on a document no agent or project owns: skipped");
-      add(owner);
-    }
+    if (/^agent(?![\p{L}\p{N}_-])/iu.test(rest) && doc) add(doc.owner);
   }
   return out;
 }
@@ -1060,13 +1041,8 @@ export function statesOf(docId: string): DocchatItem[] {
     for (const [folder, a] of Object.entries(thread.agents)) if (a.state !== "idle") out.push({ kind: "thread", label: labelOf(folder), state: a.state, ...(a.error ? { error: a.error } : {}) });
   }
   for (const s of Object.values(sessionRecords())) if (s.docId === docId && s.state !== "idle") out.push({ kind: "chat", label: labelOf(s.folder), state: s.state, ...(s.error ? { error: s.error } : {}) });
-  const nobody = noOwner.get(docId);
-  if (nobody) out.push({ kind: "chat", label: "", state: "nobody" });
   return out;
 }
-
-/** Documents whose editor's chat had a message with nobody to answer it (no owner). */
-const noOwner = new Map<string, number>();
 
 /** A thread's chat for `folder`, made where it has none: under the parent chosen for it; null where there is none. */
 function chatFor(docId: string, guid: string, folder: string, entry: AgentEntry, text: string, panelChat?: string): string | null {
@@ -1221,11 +1197,8 @@ function onUi(docId: string, key: string, e: Extract<PageEvent, { type: "ui" }>,
 
 function onChat(doc: DocMeta, key: string, text: string, panelChat?: string): void {
   if (!text.trim()) return;
-  const folder = ownerOf(doc);
-  if (!folder) {
-    noOwner.set(doc.docId, now());
-    return;
-  }
+  // The agent or project the document belongs to: every document has one.
+  const folder = doc.owner;
   const all = sessionRecords();
   let s = all[key];
   if (!s || s.docId !== doc.docId) s = all[key] = { docId: doc.docId, folder, chatId: null, parent: null, state: "idle", people: [], queue: [] };
@@ -1712,7 +1685,7 @@ export function sessionsNow(): Record<string, SessionRecord> {
 
 /** Keeps the documents' comments for office_comments while nothing reported them: the saved file's threads. */
 export function savedThreads(doc: DocMeta): CommentThread[] {
-  const buf = readDoc(doc, root());
+  const buf = readDoc(doc);
   return doc.ext === "docx" ? docxThreads(buf) : xlsxThreads(buf);
 }
 

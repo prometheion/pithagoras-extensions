@@ -62,7 +62,8 @@ createRoot(document.getElementById("root")).render(h(OfficeSettings));
  * that holds its chat.tool cards for the calls in `window.__calls`, with a panel host that does what Chat.tsx does
  * (open with params, a state the panel keeps while it is open, close, which takes both). The panel's size and where
  * it is docked are the page's to change (`window.__dock({ w, h, dock })`). With `?tab=<id>` the Office tab's page (its
- * nav.page entry) is drawn beside it too, at `?doc=<id>`, as the person may have it open as well. Kept on the page:
+ * nav.page entry) is drawn beside it too, at `?doc=<id>`, as the person may have it open as well; with `?tab=` alone,
+ * the tab's library. Kept on the page:
  * `__navigated` (where the extension sent the page), `__opens` (each panels.open), `__kept` (panel.keep).
  */
 export async function panelPageJs(pithagoras: string, base: string): Promise<string> {
@@ -96,12 +97,14 @@ office({
     RowsSkeleton: ({ label }) => h("div", null, label),
     Empty: ({ children }) => h("div", { role: "note" }, children),
     ErrorBanner: ({ children }) => h("div", { role: "alert" }, children),
+    PageHeader: ({ title, description }) => h("header", null, h("h1", null, title), h("p", null, description)),
+    Segments: ({ value, options, onChange }) => h("span", null, options.map((o) => h("button", { key: o.id, type: "button", "aria-pressed": o.id === value, onClick: () => onChange(o.id) }, o.label))),
     Select: ({ value, options, onChange, ...rest }) => h("select", { value, "aria-label": rest["aria-label"], onChange: (e) => onChange(e.target.value) }, options.map((o) => h("option", { key: o.value, value: o.value }, o.label))),
     confirm: async () => false,
   },
   format: { dateTime: (ms) => new Date(ms).toISOString() },
   navigate: (to) => window.__navigated.push(to),
-  useLocation: () => ({ search: "?doc=" + encodeURIComponent(query.get("tab") || "") }),
+  useLocation: () => ({ search: query.get("tab") ? "?doc=" + encodeURIComponent(query.get("tab")) : "" }),
   slots: { register: (slot, entry) => (registered[slot] = registered[slot] || []).push(entry) },
 });
 
@@ -134,7 +137,7 @@ function Host() {
   const Tab = registered["nav.page"][0].component;
   const bottom = dock.dock === "bottom";
   return h("div", { style: { display: "flex", height: "100vh" } },
-    query.get("tab") ? h("div", { id: "tab", style: { width: "640px", display: "flex", flexDirection: "column" } }, h(Tab)) : null,
+    query.has("tab") ? h("div", { id: "tab", style: { width: "640px", display: "flex", flexDirection: "column" } }, h(Tab)) : null,
     h("div", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: bottom ? "column" : "row" } },
       h("div", { id: "conversation", style: { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto" } },
         h("button", { type: "button", onClick: () => panels.open("office") }, "Office panel button"),

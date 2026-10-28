@@ -1,6 +1,7 @@
 /**
- * Unit tests for src/store.ts: the document library (index + docs/<docId>/), CRUD, ownership/grant scoping,
- * import/export, the persistBytes REVISION GATE and trash sweeping. Templates are asserted to be REAL office
+ * Unit tests for src/store.ts: the document library (index, each document in place in its agent's or project's
+ * folder), CRUD, ownership/grant scoping, the move out of an earlier version's docs folder, export, the persistBytes
+ * REVISION GATE and trash sweeping. Templates are asserted to be REAL office
  * files by parsing them with src/ooxml.ts (parseDocx/parseXlsx). Every root is an mkdtemp dir in os.tmpdir() --
  * the real data dir and portal() are never touched.
  */
@@ -12,16 +13,18 @@ import path from "node:path";
 import JSZip from "jszip";
 import {
   listDocs, getDoc, docsForHome, createDoc, renameDoc, deleteDoc, sweepTrash,
-  importFile, exportDoc, persistBytes, readDoc, templateDocx, templateXlsx, slugify,
-  scanWorkspace, pruneMissingDocs, addGrant, migrateOwners,
+  exportDoc, persistBytes, readDoc, templateDocx, templateXlsx, slugify,
+  scanWorkspace, pruneMissingDocs, addGrant, migrateOwners, migrateLibrary, configureStore, ownerFolder,
 } from "../src/store";
+import { homeIn } from "./homes.mts";
 import { parseDocx, parseXlsx } from "../src/ooxml";
 
 function tmpRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "office-store-"));
 }
 
-const docFile = (root: string, meta: { docId: string; title: string; ext: string }) => path.join(root, "docs", meta.docId, `${meta.title}.${meta.ext}`);
+/** A document's file: in its folder (`root` is the test's data root, kept for the calls' shape). */
+const docFile = (_root: string, meta: { path: string }) => meta.path;
 
 /* ---------------- templates ---------------- */
 
@@ -52,15 +55,20 @@ test("slugify: lowercase, non-alnum runs -> single dash, trimmed", () => {
 
 /* ---------------- create / list / get ---------------- */
 
-test("createDoc: word and cell write parseable templates into docs/<docId>/", async () => {
+test("createDoc: word and cell write parseable templates into the folder they belong to, nothing into the extension's own", async () => {
   const root = tmpRoot();
-  const w = await createDoc({ title: "Quarterly Report", type: "word" }, root);
+  const home = homeIn(root);
+  const w = await createDoc({ title: "Quarterly Report", type: "word", folder: home }, root);
   assert.equal(w.ext, "docx");
+  assert.equal(w.path, path.join(home, "Quarterly Report.docx"), "in its folder, by its title");
+  assert.equal(w.owner, home, "and belongs to it");
+  assert.equal(w.workspace, path.basename(home));
+  assert.ok(!fs.existsSync(path.join(root, "docs")), "no docs folder of the extension's own");
   assert.match(w.docId, /^quarterly-report-[a-z0-9]{6}$/);
   assert.equal(parseDocx(fs.readFileSync(docFile(root, w))).text, "New document");
   assert.ok(w.sizeBytes > 0 && w.mtimeMs > 0);
 
-  const c = await createDoc({ title: "Budget", type: "cell" }, root);
+  const c = await createDoc({ title: "Budget", type: "cell", folder: homeIn(root) }, root);
   assert.equal(c.ext, "xlsx");
   assert.match(c.docId, /^budget-[a-z0-9]{6}$/);
   assert.deepEqual(parseXlsx(fs.readFileSync(docFile(root, c))).sheetNames, ["Sheet1"]);
@@ -71,19 +79,45 @@ test("createDoc: word and cell write parseable templates into docs/<docId>/", as
   assert.equal(index.docs.length, 2);
 });
 
-test("createDoc: duplicate (same title + type) throws code 'exists'; same title different type is fine", async () => {
+test("createDoc: duplicate (same title + type) throws code 'exists'; same title different type is fine; a file of that name in the folder is never written over", async () => {
   const root = tmpRoot();
-  await createDoc({ title: "Report", type: "word" }, root);
-  await assert.rejects(async () => createDoc({ title: "Report", type: "word" }, root), (err: NodeJS.ErrnoException) => err.code === "exists");
+  await createDoc({ title: "Report", type: "word", folder: homeIn(root) }, root);
+  await assert.rejects(async () => createDoc({ title: "Report", type: "word", folder: homeIn(root, "other") }, root), (err: NodeJS.ErrnoException) => err.code === "exists");
   // a spreadsheet with the same title is a different document, not a duplicate
-  const cell = await createDoc({ title: "Report", type: "cell" }, root);
+  const cell = await createDoc({ title: "Report", type: "cell", folder: homeIn(root) }, root);
   assert.equal(cell.ext, "xlsx");
+  fs.writeFileSync(path.join(homeIn(root), "Notes.docx"), "the agent's own, not indexed yet");
+  await assert.rejects(async () => createDoc({ title: "Notes", type: "word", folder: homeIn(root) }, root), (err: NodeJS.ErrnoException) => err.code === "exists");
+  assert.equal(fs.readFileSync(path.join(homeIn(root), "Notes.docx"), "utf8"), "the agent's own, not indexed yet");
+});
+
+test("createDoc: the file is put into its folder through the store's seam (the portal's files.create), and takes the name it was given", async () => {
+  const root = tmpRoot();
+  const home = homeIn(root);
+  const asked: [string, string][] = [];
+  configureStore({
+    place: (folder, name, bytes) => {
+      asked.push([folder, name]);
+      // Something took the name meanwhile: the portal numbers it.
+      const file = path.join(folder, name.replace(".docx", " (2).docx"));
+      fs.writeFileSync(file, bytes, { flag: "wx" });
+      return file;
+    },
+  });
+  try {
+    const doc = await createDoc({ title: "Raced", type: "word", folder: home }, root);
+    assert.deepEqual(asked, [[home, "Raced.docx"]]);
+    assert.equal(doc.path, path.join(home, "Raced (2).docx"));
+    assert.equal(doc.title, "Raced (2)", "the title is its file's name");
+  } finally {
+    configureStore({ place: (folder, name, bytes) => (fs.writeFileSync(path.join(folder, name), bytes, { flag: "wx" }), path.join(folder, name)) });
+  }
 });
 
 test("listDocs: titles ascending; getDoc miss -> null", async () => {
   const root = tmpRoot();
-  const banana = await createDoc({ title: "Banana Plan", type: "word" }, root);
-  const apple = await createDoc({ title: "apple notes", type: "word" }, root);
+  const banana = await createDoc({ title: "Banana Plan", type: "word", folder: homeIn(root) }, root);
+  const apple = await createDoc({ title: "apple notes", type: "word", folder: homeIn(root) }, root);
   assert.deepEqual(listDocs(root).map((d) => d.docId), [apple.docId, banana.docId]);
   assert.equal(getDoc("nope-123456", root), null);
   const found = getDoc(apple.docId, root);
@@ -94,11 +128,11 @@ test("listDocs: titles ascending; getDoc miss -> null", async () => {
 
 test("docsForHome: owner path, grant path, dedupe of owned-and-granted doc; others' docs excluded", async () => {
   const root = tmpRoot();
-  const homeA = "/homes/a";
-  const homeB = "/homes/b";
-  const owned = await createDoc({ title: "A owned doc", type: "word", owner: homeA }, root);
-  const granted = await createDoc({ title: "B doc granted to A", type: "word", owner: homeB }, root);
-  const stranger = await createDoc({ title: "C doc nobody shares", type: "word", owner: "/homes/c" }, root);
+  const homeA = homeIn(root, "a");
+  const homeB = homeIn(root, "b");
+  const owned = await createDoc({ title: "A owned doc", type: "word", folder: homeA }, root);
+  const granted = await createDoc({ title: "B doc granted to A", type: "word", folder: homeB }, root);
+  const stranger = await createDoc({ title: "C doc nobody shares", type: "word", folder: homeIn(root, "c") }, root);
 
   // grant A access to the B doc (what ping.ts does on a mention), and the A-owned doc too: it is listed once
   assert.equal(addGrant(granted.docId, homeA, "c1", Date.now(), root), "added");
@@ -111,7 +145,7 @@ test("docsForHome: owner path, grant path, dedupe of owned-and-granted doc; othe
   assert.deepEqual(docsForHome(homeB, root).map((d) => d.docId), [granted.docId]);
 });
 
-test("docsForHome: a scanned document is its folder's (at any depth), not every agent's; the person's library documents are everyone's", async () => {
+test("docsForHome: a scanned document is its folder's (at any depth), not every agent's; there are no documents of everyone's", async () => {
   const root = tmpRoot();
   const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-unowned-")));
   const [a, b] = [path.join(ws, "a"), path.join(ws, "b")];
@@ -119,15 +153,17 @@ test("docsForHome: a scanned document is its folder's (at any depth), not every 
   fs.mkdirSync(b);
   fs.writeFileSync(path.join(a, "deep", "plan.docx"), Buffer.from("a docx of sorts"));
   fs.writeFileSync(path.join(b, "salary.docx"), Buffer.from("another"));
-  assert.deepEqual(scanWorkspace([a, b], root), { added: 2, updated: 0 });
+  assert.deepEqual(scanWorkspace([a, b], root), { added: 2, updated: 0, dropped: [] });
   const plan = listDocs(root).find((d) => d.title === "plan")!;
   const salary = listDocs(root).find((d) => d.title === "salary")!;
-  assert.equal(plan.owner, null);
-  const human = await createDoc({ title: "Human-made", type: "word" }, root);
-  const onlyB = await createDoc({ title: "B only", type: "word", owner: b }, root);
+  assert.equal(plan.owner, a, "it belongs to the folder it is in");
+  assert.equal(salary.owner, b);
+  const human = await createDoc({ title: "Made in the default home", type: "word", folder: homeIn(root) }, root);
+  const onlyB = await createDoc({ title: "B only", type: "word", folder: b }, root);
 
-  assert.deepEqual(docsForHome(a, root).map((d) => d.docId).sort(), [human.docId, plan.docId].sort());
-  assert.deepEqual(docsForHome(b, root).map((d) => d.docId).sort(), [human.docId, onlyB.docId, salary.docId].sort());
+  assert.deepEqual(docsForHome(a, root).map((d) => d.docId).sort(), [plan.docId].sort());
+  assert.deepEqual(docsForHome(b, root).map((d) => d.docId).sort(), [onlyB.docId, salary.docId].sort());
+  assert.deepEqual(docsForHome(homeIn(root), root).map((d) => d.docId), [human.docId], "the person's is its home's alone");
   // A link to a's folder is the same folder.
   fs.symlinkSync(a, path.join(ws, "link-to-a"));
   assert.ok(docsForHome(path.join(ws, "link-to-a"), root).some((d) => d.docId === plan.docId));
@@ -139,9 +175,11 @@ test("docsForHome: a scanned document is its folder's (at any depth), not every 
 
 test("migrateOwners: owners and grants that named a chat name that chat's folder; one of a chat that is gone stays as it was", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Old owner", type: "word", owner: "chat-a" }, root);
-  const gone = await createDoc({ title: "Gone owner", type: "word", owner: "chat-gone" }, root);
+  const doc = await createDoc({ title: "Old owner", type: "word", folder: homeIn(root) }, root);
+  const gone = await createDoc({ title: "Gone owner", type: "word", folder: homeIn(root) }, root);
   const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
+  index.docs.find((d: { docId: string }) => d.docId === doc.docId).owner = "chat-a";
+  index.docs.find((d: { docId: string }) => d.docId === gone.docId).owner = "chat-gone";
   index.docs.find((d: { docId: string }) => d.docId === doc.docId).grants = [{ chatId: "chat-b", commentId: "c1", at: 1 }];
   fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
   const folders: Record<string, string> = { "chat-a": "/homes/a", "chat-b": "/homes/b" };
@@ -248,7 +286,7 @@ test("deleteDoc: a scanned document whose folder an agent swapped for a link to 
 test("readDoc: a file that grew past the library's cap since it was indexed is refused before it is read", async () => {
   const { root, ws, file, doc } = await scannedOne();
   fs.truncateSync(file, 513 * 1024 * 1024); // sparse: nothing is written to the disk
-  assert.throws(() => readDoc({ ...doc, mtimeMs: fs.statSync(file).mtimeMs }, root), (e: Error & { code?: string }) => e.code === "too_large");
+  assert.throws(() => readDoc({ ...doc, mtimeMs: fs.statSync(file).mtimeMs }), (e: Error & { code?: string }) => e.code === "too_large");
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -268,7 +306,7 @@ test("renameDoc: a scanned file is never renamed over another file of that name"
 
 test("renameDoc: renames the file on disk, keeps bytes and mtimeMs, bumps updatedAt", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Old Title", type: "word" }, root);
+  const doc = await createDoc({ title: "Old Title", type: "word", folder: homeIn(root) }, root);
   const oldBytes = fs.readFileSync(docFile(root, doc));
   const before = getDoc(doc.docId, root);
   assert.ok(before);
@@ -276,13 +314,13 @@ test("renameDoc: renames the file on disk, keeps bytes and mtimeMs, bumps update
   const renamed = renameDoc(doc.docId, "New Title", root);
   assert.equal(renamed.docId, doc.docId); // stable across renames -- tickets/history key off it
   assert.equal(renamed.title, "New Title");
-  assert.ok(!fs.existsSync(docFile(root, { ...doc, title: "Old Title" })));
+  assert.ok(!fs.existsSync(doc.path));
   const newBytes = fs.readFileSync(docFile(root, renamed));
   assert.deepEqual(newBytes, oldBytes); // bytes untouched
   assert.equal(renamed.mtimeMs, before!.mtimeMs); // content mtime (the revision) is preserved by the rename
   assert.ok(renamed.updatedAt >= before!.updatedAt);
   // renaming onto another doc's title -> exists
-  await createDoc({ title: "Taken", type: "word" }, root);
+  await createDoc({ title: "Taken", type: "word", folder: homeIn(root) }, root);
   assert.throws(() => renameDoc(doc.docId, "Taken", root), (err: NodeJS.ErrnoException) => err.code === "exists");
 });
 
@@ -291,15 +329,15 @@ test("renameDoc on unknown id -> not_found", () => {
   assert.throws(() => renameDoc("ghost-123456", "X", root), (err: NodeJS.ErrnoException) => err.code === "not_found");
 });
 
-test("deleteDoc: moves docs/<docId> into .trash, prunes the index; unknown id -> not_found", async () => {
+test("deleteDoc: moves its file out of its folder into .trash, prunes the index; unknown id -> not_found", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Doomed", type: "word" }, root);
+  const doc = await createDoc({ title: "Doomed", type: "word", folder: homeIn(root) }, root);
   deleteDoc(doc.docId, root);
-  assert.ok(!fs.existsSync(path.join(root, "docs", doc.docId)));
+  assert.ok(!fs.existsSync(doc.path));
   const trash = fs.readdirSync(path.join(root, ".trash"));
   assert.equal(trash.length, 1);
   assert.match(trash[0], new RegExp(`^\\d+-${doc.docId}$`));
-  assert.ok(fs.existsSync(path.join(root, ".trash", trash[0], "docs", "Doomed.docx"))); // content kept for the TTL
+  assert.ok(fs.existsSync(path.join(root, ".trash", trash[0], "Doomed.docx"))); // content kept for the TTL
   assert.equal(getDoc(doc.docId, root), null);
   assert.throws(() => deleteDoc(doc.docId, root), (err: NodeJS.ErrnoException) => err.code === "not_found");
 });
@@ -378,63 +416,9 @@ test("sweepTrash: removes only entries older than 7 days", () => {
 
 /* ---------------- import / export ---------------- */
 
-test("importFile: copies a real docx in (title from basename by default), records size and mtime", async () => {
-  const root = tmpRoot();
-  const srcRoot = tmpRoot();
-  const template = await templateDocx();
-  const src = path.join(srcRoot, "Client proposal FINAL.docx");
-  fs.writeFileSync(src, template);
-
-  const meta = importFile(src, {}, root);
-  assert.equal(meta.title, "Client proposal FINAL");
-  assert.equal(meta.ext, "docx");
-  assert.match(meta.docId, /^client-proposal-final-[a-z0-9]{6}$/);
-  const stored = fs.readFileSync(docFile(root, meta));
-  assert.deepEqual(stored, template);
-  assert.equal(parseDocx(stored).text, "New document");
-  assert.equal("importedKeys" in meta, false, "no comment baseline: the wake it was for is gone");
-  assert.equal(meta.sizeBytes, template.length);
-
-  // explicit title + owner override the defaults
-  const src2 = path.join(srcRoot, "grid.xlsx");
-  fs.writeFileSync(src2, await templateXlsx());
-  const meta2 = importFile(src2, { title: "Grid", owner: "chat-9" }, root);
-  assert.equal(meta2.title, "Grid");
-  assert.equal(meta2.owner, "chat-9");
-});
-
-test("importFile: .txt -> unsupported_format; missing file -> not_found; uppercase extension accepted", async () => {
-  const root = tmpRoot();
-  const srcRoot = tmpRoot();
-  const txt = path.join(srcRoot, "notes.txt");
-  fs.writeFileSync(txt, "hi");
-  await assert.rejects(async () => importFile(txt, {}, root), (err: NodeJS.ErrnoException) => err.code === "unsupported_format");
-  await assert.rejects(async () => importFile(path.join(srcRoot, "ghost.docx"), {}, root), (err: NodeJS.ErrnoException) => err.code === "not_found");
-
-  const upper = path.join(srcRoot, "UPPER.DOCX");
-  fs.writeFileSync(upper, await templateDocx());
-  const meta = importFile(upper, {}, root);
-  assert.equal(meta.ext, "docx"); // normalized to the stored extension
-});
-
-test("importFile: a file above 512 MiB is rejected with too_large before anything is copied", async () => {
-  const root = tmpRoot();
-  const srcRoot = tmpRoot();
-  // Sparse on purpose: ftruncate advertises the size without writing 600 MiB of zeros (stat-based cap).
-  const big = path.join(srcRoot, "huge.docx");
-  const fd = fs.openSync(big, "w");
-  try {
-    fs.ftruncateSync(fd, 600 * 1024 * 1024);
-  } finally {
-    fs.closeSync(fd);
-  }
-  await assert.rejects(async () => importFile(big, {}, root), (err: NodeJS.ErrnoException) => err.code === "too_large" && /512 MiB/.test(err.message));
-  assert.equal(listDocs(root).length, 0, "nothing landed in the library");
-});
-
 test("exportDoc: writes <title>.<ext> into a created dest dir and returns the absolute path", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Export me", type: "word" }, root);
+  const doc = await createDoc({ title: "Export me", type: "word", folder: homeIn(root) }, root);
   const destDir = path.join(tmpRoot(), "out", "nested"); // must be created recursively
   const written = exportDoc(doc.docId, destDir, root);
   assert.equal(written, path.join(destDir, "Export me.docx"));
@@ -447,7 +431,7 @@ test("exportDoc: writes <title>.<ext> into a created dest dir and returns the ab
 
 test("persistBytes: success writes the bytes, updates the index mtime/size and returns the new mtimeMs", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Live", type: "word" }, root);
+  const doc = await createDoc({ title: "Live", type: "word", folder: homeIn(root) }, root);
   const oldMeta = getDoc(doc.docId, root);
   assert.ok(oldMeta);
   const saved = Buffer.from("saved-by-DS-" + "x".repeat(100));
@@ -464,7 +448,7 @@ test("persistBytes: success writes the bytes, updates the index mtime/size and r
 
 test("persistBytes: every write is a revision of its own, also two writes in one tick of a filesystem that keeps times by two seconds", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Quick", type: "word" }, root);
+  const doc = await createDoc({ title: "Quick", type: "word", folder: homeIn(root) }, root);
   for (const name of ["lstatSync", "statSync", "fstatSync"] as const) {
     const real = fs[name] as (...args: unknown[]) => fs.Stats;
     mock.method(fs, name, (...args: unknown[]) => {
@@ -490,7 +474,7 @@ test("persistBytes: every write is a revision of its own, also two writes in one
 
 test("persistBytes: a stale meta (external write moved the mtime) throws revision_mismatch with currentMtimeMs", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Contended", type: "word" }, root);
+  const doc = await createDoc({ title: "Contended", type: "word", folder: homeIn(root) }, root);
   const staleMeta = getDoc(doc.docId, root);
   assert.ok(staleMeta);
 
@@ -516,7 +500,7 @@ test("persistBytes: a stale meta (external write moved the mtime) throws revisio
 
 test("persistBytes: an FRESH meta after the external write persists again (the gate clears)", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Retry", type: "word" }, root);
+  const doc = await createDoc({ title: "Retry", type: "word", folder: homeIn(root) }, root);
   const file = docFile(root, doc);
   fs.writeFileSync(file, Buffer.from("newer content"));
   const freshMeta = getDoc(doc.docId, root) ?? undefined; // re-read: still the OLD index mtime -> would mismatch
@@ -529,7 +513,7 @@ test("persistBytes: an FRESH meta after the external write persists again (the g
 
 test("a full round-trip: create -> edit bytes through the gate -> export is parseable", async () => {
   const root = tmpRoot();
-  const doc = await createDoc({ title: "Round Trip", type: "word" }, root);
+  const doc = await createDoc({ title: "Round Trip", type: "word", folder: homeIn(root) }, root);
   let meta = getDoc(doc.docId, root)!;
   for (let i = 0; i < 3; i++) {
     const bytes = Buffer.from(`revision ${i} of the round trip document`);
@@ -557,27 +541,27 @@ test("scanWorkspace: discovers nested docx/xlsx case-insensitively; skips hidden
   fs.writeFileSync(path.join(ws, "readme.txt"), "not office");
 
   const out = scanWorkspace([ws], root);
-  assert.deepEqual(out, { added: 2, updated: 0 });
+  assert.deepEqual(out, { added: 2, updated: 0, dropped: [] });
   const docs = listDocs(root);
   assert.deepEqual(docs.map((d) => d.title), ["alpha", "BETA"], "listDocs keeps its localeCompare order even with a mixed-case title");
   for (const doc of docs) {
     assert.equal(doc.path, path.join(ws, doc.title === "alpha" ? "alpha.docx" : path.join("nested", "deeper", "BETA.XLSX")), "points at the real file in place");
-    assert.equal(doc.owner, null); // unowned human doc: docsForHome shows it to every home
+    assert.equal(doc.owner, ws, "it belongs to the folder it is in");
     assert.ok(fs.existsSync(doc.path!)); // IN PLACE: no copy was made
   }
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("scanWorkspace: never indexes the library's own dir (docs/ or .trash), even when it is passed as a root", async () => {
+test("scanWorkspace: never indexes the library's own dir (state or .trash), even when it is passed as a root", async () => {
   const root = tmpRoot();
-  await createDoc({ title: "Inside The Library", type: "word" }, root); // lives in docs/<id>/ -- must stay unindexed-as-scanned
   fs.mkdirSync(path.join(root, ".trash"));
   fs.writeFileSync(path.join(root, ".trash", "old.docx"), Buffer.from("trash stays trash"));
+  fs.mkdirSync(path.join(root, "state"));
+  fs.writeFileSync(path.join(root, "state", "kept.docx"), Buffer.from("the extension's own"));
 
   const out = scanWorkspace([root], root); // the data dir IS a root: the whole walk must refuse to enter it
-  assert.deepEqual(out, { added: 0, updated: 0 });
-  const doc = listDocs(root)[0];
-  assert.equal(doc.path, undefined, "the library-created doc has no path and is not re-indexed over itself");
+  assert.deepEqual(out, { added: 0, updated: 0, dropped: [] });
+  assert.equal(listDocs(root).length, 0);
 });
 
 test("scanWorkspace: a second scan refreshes changed mtime/size in place; untouched files do not count as updated", () => {
@@ -585,13 +569,13 @@ test("scanWorkspace: a second scan refreshes changed mtime/size in place; untouc
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "office-scan-refresh-"));
   fs.writeFileSync(path.join(ws, "one.docx"), Buffer.from("12345"));
   fs.writeFileSync(path.join(ws, "two.xlsx"), Buffer.from("abcdef"));
-  assert.deepEqual(scanWorkspace([ws], root), { added: 2, updated: 0 });
+  assert.deepEqual(scanWorkspace([ws], root), { added: 2, updated: 0, dropped: [] });
 
-  assert.deepEqual(scanWorkspace([ws], root), { added: 0, updated: 0 }, "immediately rescanning changes nothing");
+  assert.deepEqual(scanWorkspace([ws], root), { added: 0, updated: 0, dropped: [] }, "immediately rescanning changes nothing");
 
   fs.writeFileSync(path.join(ws, "one.docx"), Buffer.from("123456789")); // grew AND got a new mtime
   const out = scanWorkspace([ws], root);
-  assert.deepEqual(out, { added: 0, updated: 1 }, "only the file that actually changed counts as refreshed");
+  assert.deepEqual(out, { added: 0, updated: 1, dropped: [] }, "only the file that actually changed counts as refreshed");
   const one = getDoc(listDocs(root).find((d) => d.title === "one")!.docId, root)!;
   assert.equal(one.sizeBytes, 9);
   assert.ok(Math.abs(one.mtimeMs - fs.statSync(path.join(ws, "one.docx")).mtimeMs) < 50);
@@ -615,7 +599,7 @@ test("scanWorkspace stamps DocMeta.workspace: first path segment under the DEEPE
   fs.writeFileSync(path.join(home, "plans", "q3.xlsx"), Buffer.from("nested in the home"));
 
   // base is ALSO a root: the deepest matching root must label, not the broadest (via base, sample would read "repos")
-  assert.deepEqual(scanWorkspace([base, repos, home], root), { added: 4, updated: 0 });
+  assert.deepEqual(scanWorkspace([base, repos, home], root), { added: 4, updated: 0, dropped: [] });
   const byTitle = new Map(listDocs(root).map((d) => [d.title, d.workspace]));
   assert.equal(byTitle.get("sample"), "pithagoras", "first path segment under the deepest containing root (repos, not base)");
   assert.equal(byTitle.get("top"), "repos", "a file straight in a root takes that root's OWN dir name, not its own file name");
@@ -629,7 +613,7 @@ test("scanWorkspace rescan BACKFILLS DocMeta.workspace on entries indexed before
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "office-wsbackfill-"));
   fs.mkdirSync(path.join(ws, "pithagoras", "fixtures"), { recursive: true });
   fs.writeFileSync(path.join(ws, "pithagoras", "fixtures", "sample.docx"), Buffer.from("a docx of sorts"));
-  assert.deepEqual(scanWorkspace([ws], root), { added: 1, updated: 0 });
+  assert.deepEqual(scanWorkspace([ws], root), { added: 1, updated: 0, dropped: [] });
 
   // simulate an older index.json (pre-stamp): the entry's workspace field is simply absent
   const indexPathFile = path.join(root, "index.json");
@@ -639,11 +623,11 @@ test("scanWorkspace rescan BACKFILLS DocMeta.workspace on entries indexed before
   assert.equal(listDocs(root)[0].workspace, undefined);
 
   const second = scanWorkspace([ws], root);
-  assert.deepEqual(second, { added: 0, updated: 1 }, "the backfill counts as a refresh, once");
+  assert.deepEqual(second, { added: 0, updated: 1, dropped: [] }, "the backfill counts as a refresh, once");
   assert.equal(listDocs(root)[0].workspace, "pithagoras", "the existing entry picked up its label on the rescan");
 
   const third = scanWorkspace([ws], root);
-  assert.deepEqual(third, { added: 0, updated: 0 }, "idempotent once backfilled");
+  assert.deepEqual(third, { added: 0, updated: 0, dropped: [] }, "idempotent once backfilled");
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -661,7 +645,7 @@ test("scanWorkspace: skips files whose basename cannot be a title or busts the s
   fs.writeFileSync(path.join(ws2, "same.docx"), Buffer.from("second -- same title in another folder: skipped by the guard"));
 
   const out = scanWorkspace([ws, ws2], root);
-  assert.deepEqual(out, { added: 1, updated: 0 }, "only 'same' from the first root survived: bad title, over cap and title collision are all quiet skips");
+  assert.deepEqual(out, { added: 1, updated: 0, dropped: [] }, "only 'same' from the first root survived: bad title, over cap and title collision are all quiet skips");
   assert.equal(listDocs(root)[0].title, "same");
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(ws2, { recursive: true, force: true });
@@ -724,4 +708,134 @@ test("pruneMissingDocs: a file gone for a while (a git checkout of another branc
   assert.deepEqual(back[0]!.grants.map((g) => g.folder), ["/homes/b"]);
   assert.equal(back[0]!.missingSince, undefined);
   fs.rmSync(ws, { recursive: true, force: true });
+});
+
+/* ---------------- no documents of nobody's (owner decision of 2026-10-28) ---------------- */
+
+test("scanWorkspace: a file belongs to the deepest agent's home or project folder that holds it", async () => {
+  const root = tmpRoot();
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-owner-")));
+  const project = path.join(home, "work", "report");
+  fs.mkdirSync(project, { recursive: true });
+  fs.writeFileSync(path.join(home, "mine.docx"), "the agent's");
+  fs.writeFileSync(path.join(project, "draft.docx"), "the project's");
+  scanWorkspace([home, project], root);
+  const by = (title: string) => listDocs(root).find((d) => d.title === title)!;
+  assert.equal(by("mine").owner, home);
+  assert.equal(by("draft").owner, project);
+  assert.equal(ownerFolder(path.join(project, "draft.docx"), [home, project]), project);
+  assert.equal(ownerFolder(path.join(`${home}-other`, "x.docx"), [home, project]), undefined, "a folder whose name only begins like it is not it");
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test("scanWorkspace: a document an earlier version kept without an owner gets the folder it is in on the next scan", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-backfill-owner-")));
+  fs.writeFileSync(path.join(ws, "plan.docx"), "bytes");
+  scanWorkspace([ws], root);
+  const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
+  index.docs[0].owner = null;
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
+  assert.deepEqual(scanWorkspace([ws], root), { added: 0, updated: 1, dropped: [] });
+  assert.equal(listDocs(root)[0]!.owner, ws);
+  assert.deepEqual(scanWorkspace([ws], root), { added: 0, updated: 0, dropped: [] }, "once");
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+test("scanWorkspace: a document in no agent's home or project (a chat's folder an earlier version scanned) leaves the index, its file stays", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-outside-")));
+  const [home, chat] = [path.join(ws, "home"), path.join(ws, "chat-folder")];
+  fs.mkdirSync(home);
+  fs.mkdirSync(chat);
+  fs.writeFileSync(path.join(home, "kept.docx"), "in a home");
+  fs.writeFileSync(path.join(chat, "loose.docx"), "in a chat's folder");
+  fs.writeFileSync(path.join(chat, "away.docx"), "in a chat's folder, gone for now");
+  scanWorkspace([home, chat], root); // as an earlier version scanned: every folder a chat works in too
+  const loose = listDocs(root).find((d) => d.title === "loose")!;
+  const away = listDocs(root).find((d) => d.title === "away")!;
+  fs.rmSync(away.path);
+  assert.deepEqual(scanWorkspace([], root), { added: 0, updated: 0, dropped: [] }, "no folders at all (none listed): nothing leaves");
+  const out = scanWorkspace([home], root);
+  assert.deepEqual(out.dropped, [loose.docId]);
+  assert.deepEqual(listDocs(root).map((d) => d.title).sort(), ["away", "kept"], "one whose file is gone is pruneMissingDocs' to settle");
+  assert.equal(fs.readFileSync(path.join(chat, "loose.docx"), "utf8"), "in a chat's folder", "the file itself stays where it is");
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
+/** An index as an earlier version left it: documents made in the extension's own docs folder, with no `path`. */
+function legacyLibrary(root: string, docs: { docId: string; title: string; owner: string | null; bytes?: string; grants?: unknown[] }[]): void {
+  const entries = docs.map((d) => {
+    if (d.bytes !== undefined) {
+      fs.mkdirSync(path.join(root, "docs", d.docId), { recursive: true });
+      fs.writeFileSync(path.join(root, "docs", d.docId, `${d.title}.docx`), d.bytes);
+    }
+    return { docId: d.docId, title: d.title, ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 5, mtimeMs: 1, owner: d.owner, grants: d.grants ?? [] };
+  });
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify({ version: 1, docs: entries }));
+}
+
+test("migrateLibrary: the person's documents of the docs folder move into the default agent's home, an agent's into its own; id, grants and history stay", async () => {
+  const root = tmpRoot();
+  const home = homeIn(root, "home");
+  const atlas = homeIn(root, "atlas");
+  legacyLibrary(root, [
+    { docId: "minutes-aaaaaa", title: "Minutes", owner: null, bytes: "the person's", grants: [{ folder: atlas, commentId: "c1", at: 1 }] },
+    { docId: "plan-bbbbbb", title: "Plan", owner: atlas, bytes: "atlas made it" },
+    { docId: "orphan-cccccc", title: "Orphan", owner: "/a/folder/that/is/gone", bytes: "its agent is gone" },
+  ]);
+  fs.mkdirSync(path.join(root, "history", "minutes-aaaaaa"), { recursive: true });
+  assert.deepEqual(listDocs(root), [], "nothing hands out a document that has no place yet");
+  const moves = migrateLibrary([home, atlas], home, root);
+  assert.deepEqual(moves.map((m) => ("moved" in m ? [m.docId, m.moved, m.owner] : m)), [
+    ["minutes-aaaaaa", path.join(home, "Minutes.docx"), home],
+    ["plan-bbbbbb", path.join(atlas, "Plan.docx"), atlas],
+    ["orphan-cccccc", path.join(home, "Orphan.docx"), home],
+  ]);
+  const minutes = getDoc("minutes-aaaaaa", root)!;
+  assert.equal(fs.readFileSync(minutes.path, "utf8"), "the person's");
+  assert.equal(minutes.owner, home);
+  assert.deepEqual(minutes.grants, [{ folder: atlas, commentId: "c1", at: 1 }]);
+  assert.equal(minutes.workspace, path.basename(home));
+  assert.equal(minutes.mtimeMs, fs.statSync(minutes.path).mtimeMs, "its revision is its new file's");
+  assert.deepEqual(docsForHome(atlas, root).map((d) => d.title).sort(), ["Minutes", "Plan"], "what atlas made, and what it was granted");
+  assert.ok(fs.existsSync(path.join(root, "history", "minutes-aaaaaa")), "its revisions stay, by its id");
+  assert.ok(!fs.existsSync(path.join(root, "docs")), "the docs folder is gone");
+  assert.deepEqual(migrateLibrary([home, atlas], home, root), [], "once");
+  assert.deepEqual(scanWorkspace([home, atlas], root), { added: 0, updated: 0, dropped: [] }, "the scan finds them as the documents they are");
+});
+
+test("migrateLibrary: a name taken in the folder (by a file, or by a document's title) gets a number; a file gone leaves the index", async () => {
+  const root = tmpRoot();
+  const home = homeIn(root, "home");
+  fs.writeFileSync(path.join(home, "Report.docx"), "the agent's own report");
+  legacyLibrary(root, [
+    { docId: "report-aaaaaa", title: "Report", owner: null, bytes: "the person's report" },
+    { docId: "lost-bbbbbb", title: "Lost", owner: null },
+  ]);
+  const moves = migrateLibrary([home], home, root);
+  assert.deepEqual(moves, [
+    { docId: "report-aaaaaa", title: "Report (2)", moved: path.join(home, "Report (2).docx"), owner: home },
+    { docId: "lost-bbbbbb", title: "Lost", dropped: "file gone" },
+  ]);
+  assert.equal(fs.readFileSync(path.join(home, "Report.docx"), "utf8"), "the agent's own report", "never written over");
+  assert.equal(fs.readFileSync(path.join(home, "Report (2).docx"), "utf8"), "the person's report");
+  assert.deepEqual(listDocs(root).map((d) => d.title), ["Report (2)"]);
+});
+
+test("migrateLibrary: with no default agent's home it moves nothing, keeps the entry for the next start, and a start cut off after the file was put takes that file", async () => {
+  const root = tmpRoot();
+  const home = homeIn(root, "home");
+  legacyLibrary(root, [{ docId: "memo-aaaaaa", title: "Memo", owner: null, bytes: "memo" }]);
+  const [kept] = migrateLibrary([home], undefined, root);
+  assert.ok(kept && "failed" in kept && /no default agent's home/.test(kept.failed));
+  assert.deepEqual(listDocs(root), []);
+  assert.ok(fs.existsSync(path.join(root, "docs", "memo-aaaaaa", "Memo.docx")), "nothing lost");
+  // Another document is written meanwhile: the entry still to be moved is written back with the index.
+  await createDoc({ title: "Other", type: "word", folder: home }, root);
+  // A start put the file in place and was cut off before the index named it.
+  fs.writeFileSync(path.join(home, "Memo.docx"), "memo");
+  const [moved] = migrateLibrary([home], home, root);
+  assert.deepEqual(moved, { docId: "memo-aaaaaa", title: "Memo", moved: path.join(home, "Memo.docx"), owner: home });
+  assert.deepEqual(fs.readdirSync(home).sort(), ["Memo.docx", "Other.docx"], "taken, not made twice");
 });

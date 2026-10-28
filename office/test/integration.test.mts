@@ -24,6 +24,7 @@ import type { AddressInfo } from "node:net";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import officeServer, { jwtSecret, loopbackPort, ticketSecret, ticketSubject } from "../src/server";
 import * as store from "../src/store";
+import { filesCreate, homeIn } from "./homes.mts";
 import * as live from "../src/live";
 import { mintTicket } from "../src/tickets";
 import { signJwt } from "../src/jwt";
@@ -70,6 +71,7 @@ async function boot(): Promise<Booted> {
     http: { json: () => (_a?: unknown, _b?: unknown, next?: () => void) => next?.(), text: () => (_a?: unknown, _b?: unknown, next?: () => void) => next?.(), raw: () => () => {}, send: () => () => {}, upgrade: () => undefined },
     folders: { list: () => [] as never[], allowed: () => false, label: () => ({ name: "" }), on: () => {} },
     chats: { extend: () => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: () => { throw new Error("no workspace folder"); }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {} },
+    files: { create: filesCreate },
     extensions: { use: () => fakeDocker },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
@@ -88,7 +90,7 @@ function closeServer(server: http.Server): Promise<void> {
 test("ticketed GET on the real loopback listener serves a >1 MB document byte-for-byte and rejects an expired ticket", async () => {
   const b = await boot();
   try {
-    const doc = await store.createDoc({ title: "Heavy Report", type: "word" }, b.root);
+    const doc = await store.createDoc({ title: "Heavy Report", type: "word", folder: homeIn(b.root) }, b.root);
 
     // A REAL .docx over 1 MB, built through this extension's own writer (rewriteZip of the store template).
     // Most of the size is one incompressible run: deflate would otherwise shrink repetitive filler below the
@@ -112,7 +114,7 @@ test("ticketed GET on the real loopback listener serves a >1 MB document byte-fo
     assert.equal(r.headers.get("cache-control"), "no-store");
     const served = Buffer.from(await r.arrayBuffer());
     assert.ok(served.length > 1024 * 1024, `the wire payload is ${served.length} bytes -- past the portal-files 1 MB cap`);
-    const onDisk = fs.readFileSync(path.join(b.root, "docs", fresh.docId, "Heavy Report.docx"));
+    const onDisk = fs.readFileSync(fresh.path);
     assert.equal(Buffer.compare(served, onDisk), 0, "the served bytes are exactly the library bytes");
     // and it is a real Word document end to end, not just bytes:
     assert.ok(parseDocx(served).text.startsWith("Heavy document"), "the heavy doc still parses as docx");
@@ -138,7 +140,7 @@ test("synthetic status-2 callback WITHOUT any session cookie: persist happened (
     // The listener's POST /callback was configured at boot to read this tmp root's ds.json + jwt-secret on
     // every request -- so writing the record here is what turns the endpoint from 503 into live.
     fs.writeFileSync(path.join(b.root, "ds.json"), JSON.stringify({ containerId: "it-cid", imageTag: "onlyoffice/documentserver:10.0.0.1" }));
-    const doc = await store.createDoc({ title: "Round Trip", type: "word" }, b.root);
+    const doc = await store.createDoc({ title: "Round Trip", type: "word", folder: homeIn(b.root) }, b.root);
 
     // A stand-in for the DS download endpoint (body.url / changesurl): a second ephemeral loopback server
     // serving the "saved" bytes (our committed fixture docx -- different from the on-disk template) and a
@@ -194,7 +196,7 @@ test("synthetic status-2 callback WITHOUT any session cookie: persist happened (
     assert.deepEqual(await r.json(), { error: 0 }, "DS reads the JSON error field; 0 is the only success");
 
     const after = store.getDoc(before.docId, b.root)!;
-    const onDisk = fs.readFileSync(path.join(b.root, "docs", before.docId, "Round Trip.docx"));
+    const onDisk = fs.readFileSync(before.path);
     assert.equal(Buffer.compare(onDisk, SAVED_DOCX), 0, "the bytes the callback downloaded are now the library bytes");
     assert.ok(parseDocx(onDisk).comments.length === 2, "and they really ARE a docx -- our own parser reads it back");
     assert.notEqual(after.mtimeMs, before.mtimeMs, "the index revision (mtimeMs) bumped with the persist");

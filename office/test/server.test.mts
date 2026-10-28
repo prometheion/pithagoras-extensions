@@ -21,6 +21,7 @@ import * as seat from "../src/seat";
 import { PLUGIN_GUID } from "../src/seat-page";
 import { browser } from "./seat-browser.mts";
 import * as store from "../src/store";
+import { filesCreate, homeIn } from "./homes.mts";
 import { rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 import { mintTicket, verifyTicket } from "../src/tickets";
@@ -132,7 +133,10 @@ interface Booted {
   cleanup: () => Promise<void>;
 }
 
-async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<string, string> = {}): Promise<Booted> {
+/** The folders the fake portal lists (folders.list): an agent's home, a project, or a folder a chat works in. */
+type ListedFolder = { path: string; name: string; kind: "agent" | "project" | "chat"; home?: true };
+
+async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<string, string> = {}, listed: ListedFolder[] = []): Promise<Booted> {
   container.forgetReach();
   container.forgetProbe(); // and what a start or a download of a test before said
   const rootDir = root ?? fs.mkdtempSync(path.join(os.tmpdir(), "office-server-"));
@@ -148,8 +152,9 @@ async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<stri
     audit: { record: (e: Record<string, unknown>) => audits.push(e) },
     router,
     http: { json: (_o?: unknown) => (_req: unknown, _res: unknown, next: () => void) => next(), text: () => () => undefined, raw: () => () => undefined, send: () => () => {}, upgrade: () => undefined },
-    folders: { list: () => [] as never[], allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: () => ({ name: "" }), on: () => {} },
+    folders: { list: () => listed, allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: (f: string) => ({ name: listed.find((l) => l.path === f)?.name ?? path.basename(f) }), on: () => {} },
     chats: { extend: (_f: unknown) => {}, get: () => undefined, list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {} },
+    files: { create: filesCreate },
     extensions: { use: () => ddock },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
@@ -267,7 +272,7 @@ test("the loopback listener answers on 127.0.0.1 alone", async () => {
 
 test("loopback GET /doc/<ticket> returns the exact bytes + content-type + no-store; bad/expired tickets -> 401", async () => {
   const b = await boot();
-  const doc = await store.createDoc({ title: "Loop", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Loop", type: "word", folder: homeIn(b.root) }, b.root);
   const secret = ticketSecret(b.root);
   const { token } = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), 600_000, secret);
 
@@ -275,11 +280,11 @@ test("loopback GET /doc/<ticket> returns the exact bytes + content-type + no-sto
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("content-type"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
   assert.equal(r.headers.get("cache-control"), "no-store");
-  const disk = fs.readFileSync(path.join(b.root, "docs", doc.docId, `${doc.title}.docx`));
+  const disk = fs.readFileSync(doc.path);
   assert.ok(Buffer.compare(Buffer.from(await r.arrayBuffer()), disk) === 0, "served bytes are exactly the library bytes");
 
   // xlsx gets the spreadsheet media type
-  const cell = await store.createDoc({ title: "Cells", type: "cell" }, b.root);
+  const cell = await store.createDoc({ title: "Cells", type: "cell", folder: homeIn(b.root) }, b.root);
   const { token: t2 } = mintTicket(ticketSubject(cell.docId, cell.mtimeMs), 600_000, secret);
   const r2 = await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${t2}`);
   assert.equal(r2.headers.get("content-type"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -299,12 +304,12 @@ test("loopback GET /doc/<ticket> returns the exact bytes + content-type + no-sto
 
 test("loopback GET /doc/<ticket>: the Document Server's own secret makes no ticket, one for an older revision reads nothing, and a link in the file's place is not followed", async () => {
   const b = await boot();
-  const doc = await store.createDoc({ title: "Ticketed", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Ticketed", type: "word", folder: homeIn(b.root) }, b.root);
   assert.notEqual(ticketSecret(b.root), jwtSecret(b.root), "two secrets: the Document Server holds only one of them");
   const forged = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), 600_000, jwtSecret(b.root)).token;
   assert.equal((await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${forged}`)).status, 401);
   const before = mintTicket(ticketSubject(doc.docId, doc.mtimeMs), 600_000, ticketSecret(b.root)).token;
-  const file = path.join(b.root, "docs", doc.docId, "Ticketed.docx");
+  const file = doc.path;
   fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000)); // something wrote it since
   assert.equal((await fetch(`http://127.0.0.1:${loopbackPort()}/doc/${before}`)).status, 409);
   // A link in the file's place, to a file the portal can read and an agent cannot.
@@ -343,7 +348,7 @@ test("loopback POST /callback while the DS is unconfigured -> 503 {error:1}; unk
 test("editor-config (docx): key round-trips through parseKey, url is a fresh verifiable ticket through the relay, the whole config is JWT-signed", async () => {
   const b = await boot();
   writeDsJson(b);
-  const doc = await store.createDoc({ title: "Plan", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Plan", type: "word", folder: homeIn(b.root) }, b.root);
   const secret = jwtSecret(b.root);
 
   const res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
@@ -402,9 +407,9 @@ test("editor-config (docx): key round-trips through parseKey, url is a fresh ver
 test("editor-config: a file written outside the extension is opened at its new revision, under a new key", async () => {
   const b = await boot();
   writeDsJson(b);
-  const doc = await store.createDoc({ title: "Pulled", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Pulled", type: "word", folder: homeIn(b.root) }, b.root);
   const first = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
-  const file = path.join(b.root, "docs", doc.docId, "Pulled.docx");
+  const file = doc.path;
   fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
   const second = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
   assert.notEqual(second.document.key, first.document.key, "the Document Server downloads the file afresh");
@@ -417,7 +422,7 @@ test("editor-config: a file written outside the extension is opened at its new r
 test("editor-config: an editor opened while a session that saved this revision is open joins that session (its key), not a second one beside it", async () => {
   const b = await boot();
   writeDsJson(b);
-  const doc = await store.createDoc({ title: "Joined", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Joined", type: "word", folder: homeIn(b.root) }, b.root);
   const opened = (await b.router.dispatch("POST", "/editor-config", { doc: doc.docId })).body as { document: { key: string } };
   const key = opened.document.key;
   live.setSession(doc.docId, key, ["portal-user"]);
@@ -451,20 +456,20 @@ async function savedBySession(b: Booted, doc: store.DocMeta, key: string, bytes:
 test("/editor-state: an editor's key is current on its own revision and on what its session saved, and is behind a change made outside", async () => {
   const b = await boot();
   writeDsJson(b);
-  const doc = await store.createDoc({ title: "Standing", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Standing", type: "word", folder: homeIn(b.root) }, b.root);
   const key = makeKey(doc.docId, doc.mtimeMs);
   const ask = async (k = key) => (await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}&key=${encodeURIComponent(k)}`)).body;
   assert.deepEqual(await ask(), { standing: "current", docchat: [] });
   const saved = await savedBySession(b, doc, key, "saved by the session");
   assert.deepEqual(await ask(), { standing: "current", docchat: [] }, "its own save does not take it off its revision");
   assert.ok(saved > doc.mtimeMs);
-  const file = path.join(b.root, "docs", doc.docId, "Standing.docx");
+  const file = doc.path;
   // A script writes the file: nothing the editor's session had is in that revision.
   fs.writeFileSync(file, "a script's");
   fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
   assert.deepEqual(await ask(), { standing: "behind", docchat: [] });
   // A key of another document, or none, is refused.
-  const other = await store.createDoc({ title: "Other", type: "word" }, b.root);
+  const other = await store.createDoc({ title: "Other", type: "word", folder: homeIn(b.root) }, b.root);
   assert.equal((await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}&key=${encodeURIComponent(makeKey(other.docId, other.mtimeMs))}`)).statusCode, 400);
   assert.equal((await b.router.dispatch("GET", `/editor-state?doc=${encodeURIComponent(doc.docId)}`)).statusCode, 400);
   live.resetLive();
@@ -478,7 +483,7 @@ test("editor-config while a new Document Server still makes its fonts: 503 ds_st
   container.forgetProbe();
   let making = true;
   b.dock.state.answer = (cmd) => (cmd.join(" ").includes("AllFonts.js") ? { output: "", exitCode: making ? 1 : 0, timedOut: false } : undefined);
-  const doc = await store.createDoc({ title: "Early", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Early", type: "word", folder: homeIn(b.root) }, b.root);
   let res = await b.router.dispatch("POST", "/editor-config", { doc: doc.docId });
   assert.equal(res.statusCode, 503);
   assert.equal((res.body as Record<string, unknown>).code, "ds_starting");
@@ -492,7 +497,7 @@ test("editor-config while a new Document Server still makes its fonts: 503 ds_st
 
 test("editor-config while a start is under way (no ds.json until it ends): 503 ds_starting, not \"not configured\"", async () => {
   const b = await boot();
-  const doc = await store.createDoc({ title: "Soon", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Soon", type: "word", folder: homeIn(b.root) }, b.root);
   // The image download holds the start until the test lets it go.
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
@@ -521,7 +526,7 @@ test("editor-config while a start is under way (no ds.json until it ends): 503 d
 test("editor-config (xlsx): documentType cell, also for a portal in a container; unconfigured -> 503; unknown doc -> 404", async () => {
   const b = await boot(undefined, fakeDocker({ sharedNetwork: "container:9f3a1c2d", reach: { host: "pithagoras-office-ds-relay", port: 3890 } }));
   writeDsJson(b, "http://pithagoras-office-ds-relay:3890");
-  const cell = await store.createDoc({ title: "Budget", type: "cell" }, b.root);
+  const cell = await store.createDoc({ title: "Budget", type: "cell", folder: homeIn(b.root) }, b.root);
   let res = await b.router.dispatch("POST", "/editor-config", { doc: cell.docId });
   assert.equal(res.statusCode, 200);
   assert.equal((res.body as Record<string, unknown>).documentType, "cell");
@@ -537,28 +542,117 @@ test("editor-config (xlsx): documentType cell, also for a portal in a container;
   await b.cleanup();
 });
 
-test("/scope: what the agent of a chat's folder sees, by the tools' own rule; a chat with no folder sees the person's library documents", async () => {
-  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-scope-")));
-  const [a, b] = [path.join(ws, "a"), path.join(ws, "b")];
-  fs.mkdirSync(a);
-  fs.mkdirSync(b);
-  fs.writeFileSync(path.join(b, "theirs.docx"), await store.templateDocx());
-  const bt = await boot(undefined, fakeDocker(), { "chat-a": a, "chat-b": b });
-  store.scanWorkspace([a, b], bt.root);
-  const human = await store.createDoc({ title: "The person's", type: "word" }, bt.root);
-  const mine = await store.createDoc({ title: "A's", type: "word", owner: a }, bt.root);
+/** A workspace of folders, as a portal lists them: the default agent's home, another agent's, a project, a folder a
+ * chat works in inside the project, and one outside every home and project. */
+function workspace(): { ws: string; home: string; a: string; project: string; sub: string; loose: string; listed: ListedFolder[]; chats: Record<string, string> } {
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-folders-")));
+  const [home, a, project, loose] = ["home", "a", "project", "loose"].map((n) => path.join(ws, n));
+  const sub = path.join(project, "sub");
+  for (const d of [home, a, sub, loose]) fs.mkdirSync(d, { recursive: true });
+  return {
+    ws, home, a, project, sub, loose,
+    listed: [
+      { path: home, name: "Home", kind: "agent", home: true },
+      { path: a, name: "Atlas", kind: "agent" },
+      { path: project, name: "Report", kind: "project" },
+      { path: sub, name: "Report/sub", kind: "chat" },
+      { path: loose, name: "loose", kind: "chat" },
+    ],
+    chats: { "chat-home": home, "chat-a": a, "chat-project": project, "chat-sub": sub, "chat-loose": loose },
+  };
+}
+
+test("/scope: what the agent or project of a chat sees, by the tools' own rule; a chat in a project's subfolder is the project's, one outside every home and project the default agent's; a chat that is gone sees none", async () => {
+  const w = workspace();
+  fs.writeFileSync(path.join(w.project, "theirs.docx"), await store.templateDocx());
+  const bt = await boot(undefined, fakeDocker(), w.chats, w.listed);
   const theirs = store.listDocs(bt.root).find((d) => d.title === "theirs")!;
+  assert.equal(theirs.owner, w.project, "the boot scan found it, and it is the project's");
+  const human = await store.createDoc({ title: "The person's", type: "word", folder: w.home }, bt.root);
+  const mine = await store.createDoc({ title: "A's", type: "word", folder: w.a }, bt.root);
   const scope = async (chat: string) => ((await bt.router.dispatch("GET", `/scope?chat=${chat}`)).body as { docIds: string[] }).docIds.sort();
-  assert.deepEqual(await scope("chat-a"), [human.docId, mine.docId].sort());
-  assert.deepEqual(await scope("chat-b"), [human.docId, theirs.docId].sort());
-  assert.deepEqual(await scope("chat-gone"), [human.docId]);
+  assert.deepEqual(await scope("chat-a"), [mine.docId]);
+  assert.deepEqual(await scope("chat-project"), [theirs.docId]);
+  assert.deepEqual(await scope("chat-sub"), [theirs.docId]);
+  assert.deepEqual(await scope("chat-home"), [human.docId]);
+  assert.deepEqual(await scope("chat-loose"), [human.docId]);
+  assert.deepEqual(await scope("chat-gone"), []);
   await bt.cleanup();
-  fs.rmSync(ws, { recursive: true, force: true });
+  fs.rmSync(w.ws, { recursive: true, force: true });
+});
+
+test("POST /documents: the Office tab's New document is made in the default agent's home, a chat panel's in the chat's agent home or project folder; no home is a 409", async () => {
+  const w = workspace();
+  const bt = await boot(undefined, fakeDocker(), w.chats, w.listed);
+  const make = async (body: Record<string, unknown>) => bt.router.dispatch("POST", "/documents", { type: "word", ...body });
+  const tab = await make({ title: "Minutes" });
+  assert.equal(tab.statusCode, 201);
+  const minutes = tab.body as store.DocMeta;
+  assert.equal(minutes.path, path.join(w.home, "Minutes.docx"));
+  assert.equal(minutes.owner, w.home);
+  assert.ok(fs.existsSync(minutes.path));
+  assert.ok(!fs.existsSync(path.join(bt.root, "docs")), "nothing in the extension's own folder");
+  assert.equal(((await make({ title: "Atlas notes", chat: "chat-a" })).body as store.DocMeta).path, path.join(w.a, "Atlas notes.docx"));
+  assert.equal(((await make({ title: "Sub notes", chat: "chat-sub" })).body as store.DocMeta).owner, w.project);
+  assert.equal(((await make({ title: "Loose notes", chat: "chat-loose" })).body as store.DocMeta).owner, w.home);
+  // An owner the page names is not taken: where a document goes is the server half's to decide.
+  assert.equal(((await make({ title: "Elsewhere", owner: w.a })).body as store.DocMeta).owner, w.home);
+  assert.equal((await make({ title: "Gone", chat: "chat-gone" })).statusCode, 404);
+  assert.ok(bt.audits.some((a) => String(a.reason).includes(path.join(w.home, "Minutes.docx"))), "the audit says where it was made");
+  await bt.cleanup();
+  const none = await boot(undefined, fakeDocker(), {}, w.listed.filter((f) => !f.home));
+  const refused = await none.router.dispatch("POST", "/documents", { title: "Nowhere", type: "word" });
+  assert.equal(refused.statusCode, 409);
+  assert.equal((refused.body as { code: string }).code, "no_home");
+  await none.cleanup();
+  fs.rmSync(w.ws, { recursive: true, force: true });
+});
+
+test("boot: the scan takes only the agents' homes and the projects, and a document an earlier version found elsewhere leaves the index", async () => {
+  const w = workspace();
+  fs.writeFileSync(path.join(w.loose, "loose.docx"), await store.templateDocx());
+  fs.writeFileSync(path.join(w.sub, "deep.docx"), await store.templateDocx());
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-boot-scan-"));
+  store.scanWorkspace([w.loose], root); // as an earlier version did: every folder a chat works in
+  assert.equal(store.listDocs(root).length, 1);
+  const bt = await boot(root, fakeDocker(), w.chats, w.listed);
+  assert.deepEqual(store.listDocs(root).map((d) => [d.title, d.owner]), [["deep", w.project]]);
+  assert.ok(fs.existsSync(path.join(w.loose, "loose.docx")), "its file stays");
+  assert.ok(bt.logs.some((l) => /workspace scan at boot: 1 added, 0 refreshed, 1 out of every agent's home and project/.test(l)), bt.logs.join("\n"));
+  await bt.cleanup();
+  fs.rmSync(w.ws, { recursive: true, force: true });
+});
+
+test("boot: the documents an earlier version made in its own docs folder move into the default agent's home, or their agent's, and the move is logged", async () => {
+  const w = workspace();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-boot-move-"));
+  const legacy = (docId: string, title: string, owner: string | null) => {
+    fs.mkdirSync(path.join(root, "docs", docId), { recursive: true });
+    fs.writeFileSync(path.join(root, "docs", docId, `${title}.docx`), `${title}'s bytes`);
+    return { docId, title, ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 9, mtimeMs: 1, owner, grants: [] };
+  };
+  fs.writeFileSync(path.join(w.home, "Minutes.docx"), "the agent's own minutes");
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify({ version: 1, docs: [legacy("minutes-aaaaaa", "Minutes", null), legacy("plan-bbbbbb", "Plan", w.a)] }));
+  const bt = await boot(root, fakeDocker(), w.chats, w.listed);
+  const minutes = store.getDoc("minutes-aaaaaa", root)!;
+  assert.equal(minutes.path, path.join(w.home, "Minutes (2).docx"), "a name taken there gets a number");
+  assert.equal(minutes.owner, w.home);
+  assert.equal(fs.readFileSync(minutes.path, "utf8"), "Minutes's bytes");
+  assert.equal(store.getDoc("plan-bbbbbb", root)!.path, path.join(w.a, "Plan.docx"), "an agent's goes into its own home");
+  assert.ok(!fs.existsSync(path.join(root, "docs")));
+  assert.ok(bt.logs.some((l) => l.includes(`"Minutes (2)" (minutes-aaaaaa) moved from the extension's docs folder to ${minutes.path}`)), bt.logs.join("\n"));
+  // The scan after it finds the agent's own file as a document of its own, and the moved ones as what they are.
+  assert.deepEqual(store.listDocs(root).map((d) => d.title).sort(), ["Minutes", "Minutes (2)", "Plan"]);
+  await bt.cleanup();
+  fs.rmSync(w.ws, { recursive: true, force: true });
 });
 
 test("boot moves owners and grants that named a chat to that chat's folder", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-migrate-"));
-  const doc = await store.createDoc({ title: "Owned before", type: "word", owner: "chat-a" }, root);
+  const doc = await store.createDoc({ title: "Owned before", type: "word", folder: homeIn(root) }, root);
+  const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
+  index.docs[0].owner = "chat-a";
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
   const bt = await boot(root, fakeDocker(), { "chat-a": "/homes/a" });
   assert.equal(store.getDoc(doc.docId, root)!.owner, "/homes/a");
   await bt.cleanup();
@@ -566,7 +660,7 @@ test("boot moves owners and grants that named a chat to that chat's folder", asy
 
 test("a change asked from another page than the portal's own is refused; a read is not", async () => {
   const b = await boot();
-  const doc = await store.createDoc({ title: "Kept", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Kept", type: "word", folder: homeIn(b.root) }, b.root);
   const elsewhere = { origin: "http://portal.test:8081" };
   for (const [method, url, body] of [["DELETE", `/documents/${doc.docId}`], ["POST", "/container/remove", { data: true }], ["POST", "/settings", { imageTag: "x/y:1" }]] as const) {
     const res = await b.router.dispatch(method, url, body, elsewhere);
@@ -581,8 +675,8 @@ test("a change asked from another page than the portal's own is refused; a read 
 
 test("/state: settings + container status + docs list + locks for EVERY doc", async () => {
   const b = await boot();
-  const d1 = await store.createDoc({ title: "Alpha", type: "word" }, b.root);
-  const d2 = await store.createDoc({ title: "Beta", type: "cell" }, b.root);
+  const d1 = await store.createDoc({ title: "Alpha", type: "word", folder: homeIn(b.root) }, b.root);
+  const d2 = await store.createDoc({ title: "Beta", type: "cell", folder: homeIn(b.root) }, b.root);
   live.setUser(d1.docId, { id: "u-ada", name: "Ada" }, true);
 
   const res = await b.router.dispatch("GET", "/state");
@@ -612,7 +706,8 @@ test("/state: settings + container status + docs list + locks for EVERY doc", as
 /* ---------------- /documents CRUD ---------------- */
 
 test("/documents: create (409 on duplicate), rename keeps mtimeMs, download bytes+disposition, delete clears live presence", async () => {
-  const b = await boot();
+  const w = workspace();
+  const b = await boot(undefined, fakeDocker(), w.chats, w.listed);
 
   let res = await b.router.dispatch("POST", "/documents", { title: "Plan", type: "word" });
   assert.equal(res.statusCode, 201);
@@ -641,7 +736,7 @@ test("/documents: create (409 on duplicate), rename keeps mtimeMs, download byte
   live.setUser(meta.docId, { id: "u-1", name: "U" }, true); // set presence BEFORE delete to prove clearDoc
   res = await b.router.dispatch("GET", `/documents/${meta.docId}`);
   assert.equal(res.statusCode, 200);
-  const disk = fs.readFileSync(path.join(b.root, "docs", meta.docId, "Plan v2.docx"));
+  const disk = fs.readFileSync(after.path);
   assert.ok(Buffer.compare(Buffer.from(res.data as Buffer), disk) === 0);
   assert.equal(res.headers["content-type"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
   assert.match(String(res.headers["content-disposition"]), /attachment; filename="Plan v2\.docx"/);
@@ -694,7 +789,7 @@ fs.mkdirSync(path.join(ws, "node_modules", "pkg"), { recursive: true });
   assert.equal(report.path, path.join(ws, "report.docx"), "the entry points at the REAL file");
   assert.ok(fs.existsSync(path.join(ws, "report.docx")), "the source file is still where it was: IN PLACE, never copied");
   assert.ok(!fs.existsSync(path.join(b.root, "docs", report.docId)), "nothing was written into the library's docs/ for a scanned doc");
-  assert.equal(report.owner, null); // a human doc: every home's view shows it (docsForHome's unowned pass)
+  assert.equal(report.owner, fs.realpathSync(ws), "the project's whose folder it is in");
   assert.equal(report.imported, true);
 
   // rescan again with nothing changed: idempotent by realpath identity, counts stay honest
@@ -914,12 +1009,12 @@ test("switching Office on starts it as Start does: the agents' editor's image is
 
 test("settleKept: stale index entries are pruned, orphan dirs stay, fresh trash is kept and old trash is swept", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-settle-"));
-  // a real doc (bytes present) + a ghost entry whose dir vanished out-of-band + an orphan dir with NO index entry
-  const real: store.DocMeta = { docId: "real-1", title: "Real", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 3, mtimeMs: 1, owner: null, grants: [] };
-  const ghost: store.DocMeta = { ...real, docId: "ghost-1", title: "Gone" };
-  fs.mkdirSync(path.join(root, "docs", "real-1"), { recursive: true });
-  fs.writeFileSync(path.join(root, "docs", "real-1", "Real.docx"), "abc");
-  fs.mkdirSync(path.join(root, "docs", "orphan-9"), { recursive: true }); // index is the source of truth: NOT added back
+  // a real doc (bytes present) + a ghost entry whose file vanished out-of-band + an orphan file with NO index entry
+  const home = homeIn(root);
+  const real: store.DocMeta = { docId: "real-1", title: "Real", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 3, mtimeMs: 1, owner: home, grants: [], path: path.join(home, "Real.docx") };
+  const ghost: store.DocMeta = { ...real, docId: "ghost-1", title: "Gone", path: path.join(home, "Gone.docx") };
+  fs.writeFileSync(path.join(home, "Real.docx"), "abc");
+  fs.writeFileSync(path.join(home, "Orphan.docx"), "abc"); // index is the source of truth: NOT added back
   fs.writeFileSync(path.join(root, "index.json"), JSON.stringify({ version: 1, docs: [real, ghost] }));
 
   const day = 24 * 60 * 60 * 1000;
@@ -939,7 +1034,7 @@ test("settleKept: stale index entries are pruned, orphan dirs stay, fresh trash 
   assert.deepEqual(settleKept(root).prunedDocs, ["ghost-1"]);
 
   const idx = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8")) as { docs: store.DocMeta[] };
-  assert.deepEqual(idx.docs.map((d) => d.docId), ["real-1"], "the ghost entry is gone and the orphan dir was NOT indexed");
+  assert.deepEqual(idx.docs.map((d) => d.docId), ["real-1"], "the ghost entry is gone and the orphan file was NOT indexed");
   assert.ok(!fs.existsSync(path.join(root, ".trash", oldStamp)), "the 8-day-old trash entry was swept");
   assert.ok(fs.existsSync(path.join(root, ".trash", freshStamp)), "the 2-day-old trash entry stays (7-day TTL)");
   assert.ok(fs.existsSync(path.join(root, ".trash", "not-a-timestamp")), "non-deleteDoc entries are untouched");
@@ -1294,7 +1389,7 @@ test("an agent's editor config: its own user, the plugin by its GUID from its ow
   const b = await boot();
   writeDsJson(b);
   live.resetLive();
-  const doc = await store.createDoc({ title: "Seated", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Seated", type: "word", folder: homeIn(b.root) }, b.root);
   const home = "/homes/research";
   const built = buildEditorConfig(b.root, jwtSecret(b.root), doc.docId, { kind: "agent", home, label: "Research", mode: "view", pluginUrl: "http://relay:3891/plugin/0123456789abcdef0123456789abcdef/" });
   const ec = (built.config as { editorConfig: Record<string, any> }).editorConfig;
@@ -1319,7 +1414,7 @@ test("an agent's editor and a person's join each other's open session: the same 
   const b = await boot();
   writeDsJson(b);
   live.resetLive();
-  const doc = await store.createDoc({ title: "Shared", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Shared", type: "word", folder: homeIn(b.root) }, b.root);
   // A session whose key stands for this revision, which an agent's editor opened (its status 1 named it).
   const key = makeKey(doc.docId, doc.mtimeMs);
   live.setSession(doc.docId, key, [`agent:${keyIdOf("/homes/a")}`]);
@@ -1338,7 +1433,7 @@ test("no route of the portal's or the listener's hands out an agent's editor con
   const b = await boot();
   writeDsJson(b);
   live.resetLive();
-  const doc = await store.createDoc({ title: "Walked", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Walked", type: "word", folder: homeIn(b.root) }, b.root);
   const marks = [PLUGIN_GUID, "pluginsData", "agent:", "/plugin/"];
   const leaks: string[] = [];
   const look = (where: string, body: unknown) => {
@@ -1407,7 +1502,7 @@ async function withSeats(dock = fakeDocker()) {
 test("the agents' seats, wired: a trashed document's agent editor closes", async () => {
   const w = await withSeats();
   try {
-    const doc = await store.createDoc({ title: "Trashed", type: "word" }, w.b.root);
+    const doc = await store.createDoc({ title: "Trashed", type: "word", folder: homeIn(w.b.root) }, w.b.root);
     assert.equal(await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} }), "word.read");
     assert.equal(seat.seats().length, 1);
     const res = await w.b.router.dispatch("DELETE", `/documents/${doc.docId}`);
@@ -1421,7 +1516,7 @@ test("the agents' seats, wired: a trashed document's agent editor closes", async
 test("the agents' seats, wired: Office switched off, and removed, closes every agent editor with the browser", async () => {
   const w = await withSeats();
   try {
-    const doc = await store.createDoc({ title: "Open", type: "word" }, w.b.root);
+    const doc = await store.createDoc({ title: "Open", type: "word", folder: homeIn(w.b.root) }, w.b.root);
     fs.writeFileSync(path.join(w.b.root, "settings.json"), JSON.stringify({ enabled: true, imageTag: DEFAULT_TAG }));
     await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
     assert.equal((await w.b.router.dispatch("POST", "/settings", { enabled: false })).statusCode, 200);
@@ -1441,7 +1536,7 @@ test("the agents' seats, wired: Office switched off, and removed, closes every a
 test("the agents' seats, wired: a Document Server started again (revived, a new image) closes every agent editor and stops the browser", async () => {
   const w = await withSeats();
   try {
-    const doc = await store.createDoc({ title: "Revived", type: "word" }, w.b.root);
+    const doc = await store.createDoc({ title: "Revived", type: "word", folder: homeIn(w.b.root) }, w.b.root);
     await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
     const ds = w.b.dock.containers.get("pithagoras-office-ds")!;
     ds.inspect.State = { Status: "exited", Running: false };
@@ -1473,7 +1568,7 @@ test("the agents' seats, wired: a browser left from the run before is removed at
 test("the agents' seats, wired: the agents' editors reach the Document Server through the relay's way in, never by its own name", async () => {
   const w = await withSeats();
   try {
-    const doc = await store.createDoc({ title: "Where", type: "word" }, w.b.root);
+    const doc = await store.createDoc({ title: "Where", type: "word", folder: homeIn(w.b.root) }, w.b.root);
     await seat.run("/homes/a", doc.docId, "edit", { kind: "word.read", args: {} });
     assert.equal(w.chromium.opened[0].apiJs, "http://pithagoras-office-ds-relay:3890/web-apps/apps/api/documents/api.js");
     assert.equal(w.chromium.behaviour.configs[0].headers.get("access-control-allow-origin"), "http://pithagoras-office-ds-relay:3890");
@@ -1512,12 +1607,12 @@ test("GET /mentionables: the agents by their names and the projects as project:<
 
 test("POST /docchat/events and /ready: the page's protocol, a key of that document's open session (or one the command service says a person is in), and a rate cap; what passes is taken", async () => {
   const b = await boot();
-  const doc = await store.createDoc({ title: "Talk", type: "word" }, b.root);
+  const doc = await store.createDoc({ title: "Talk", type: "word", folder: homeIn(b.root) }, b.root);
   const key = makeKey(doc.docId, doc.mtimeMs);
   const send = (body: Record<string, unknown>, path = "/docchat/events") => b.router.dispatch("POST", path, { v: 1, docId: doc.docId, key, events: [], ...body });
   assert.equal((await send({ v: 0 })).statusCode, 409, "another protocol reloads");
   assert.equal(((await send({ v: 0 })).body as { code: string }).code, "reload_page");
-  const other = await store.createDoc({ title: "Other", type: "word" }, b.root);
+  const other = await store.createDoc({ title: "Other", type: "word", folder: homeIn(b.root) }, b.root);
   assert.equal((await send({ key: makeKey(other.docId, other.mtimeMs) })).statusCode, 400, "a key of another document");
   // No session the callbacks named, and no Document Server to ask: not taken.
   assert.equal((await send({})).statusCode, 409);

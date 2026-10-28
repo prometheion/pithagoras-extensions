@@ -16,8 +16,9 @@
  *      Document Server reaches it through Office's relay (container.ts): document.url and callbackUrl name the
  *      island's relay, which hands each request to a tunnel the half holds open to it (back.ts), and the half passes
  *      it on to this listener.
- *   6. Boot: settleKept() (.trash >7d sweep + index-vs-disk settle) FIRST, then the workspace scan
- *      (store.scanWorkspace over portal().folders.list(): every .docx/.xlsx of the agent homes and projects
+ *   6. Boot: the documents of an earlier version's own docs folder moved into folders (store.migrateLibrary), then
+ *      settleKept() (.trash >7d sweep + index-vs-disk settle), then the workspace scan (store.scanWorkspace over the
+ *      agent and project folders of portal().folders.list(): every .docx/.xlsx of the agent homes and projects
  *      indexed IN PLACE; POST /documents/rescan re-runs it on demand) + container.lookAfter(), then a 30_000 ms
  *      unref'd interval that re-runs settleKept+lookAfter. The returned cleanup closes the listener and clears it.
  *   7. jszip (the blank document templates) is bundled into server.js by build.mjs, so the package needs nothing
@@ -153,8 +154,8 @@ export function ticketSubject(docId: string, mtimeMs: number): string {
 /* ------------------------------------------------------------------ */
 
 /** Reconcile the library with what is on disk: sweep .trash entries older than 7 days, then drop index entries
- * whose library file vanished (store.pruneMissingDocs). The index is the source of truth -- a docs/<id>/ dir with no
- * entry is NOT added back. Pure function of (root): booted at start and on the interval, unit-tested directly. */
+ * whose file vanished (store.pruneMissingDocs). The index is the source of truth -- a file with no entry is NOT added
+ * back here (that is the scan's). Pure function of (root): booted at start and on the interval, unit-tested directly. */
 export function settleKept(root?: string): { sweptTrash: number; prunedDocs: string[] } {
   const dd = root ?? dataDir();
   return { sweptTrash: store.sweepTrash(dd), prunedDocs: store.pruneMissingDocs(dd) };
@@ -174,17 +175,55 @@ const CODE_STATUS: Record<string, number> = {
   index_corrupt: 500,
   no_docker: 503,
   too_large: 413, // store's 512 MiB cap: on import, and on every read of a file whole
+  no_home: 409, // no agent's home or project to make a document in
 };
+
+/* ------------------------------------------------------------------ */
+/* where documents live                                                */
+/* ------------------------------------------------------------------ */
+
+/** The folders documents live in and belong to: every agent's home and every project's folder (not the folders chats
+ * work in, nor the rest of the workspace), canonical. */
+function docFolders(): string[] {
+  return portal().folders.list().filter((f) => f.kind === "agent" || f.kind === "project").map((f) => store.canonical(f.path));
+}
+
+/** The portal's default agent's home: the folder folders.list() marks `home`, the first agent's, which the sidebar calls
+ * Home and which a chat, channel or routine goes to when none is named. Undefined where it is not listed (gone, out of
+ * reach). */
+export function defaultHome(): string | undefined {
+  const home = portal().folders.list().find((f) => f.kind === "agent" && f.home);
+  return home && store.canonical(home.path);
+}
+
+/** The folder a chat's documents live in and belong to: the agent's home or the project folder the chat works in (the
+ * deepest that holds its folder), else the default agent's home, the agent a chat outside every home and project runs
+ * as. Throws where the chat or its folder is gone. */
+export function folderForChat(chatId: string): string | undefined {
+  return store.ownerFolder(store.canonical(portal().chats.folder(chatId)), docFolders()) ?? defaultHome();
+}
+
+/** What the person calls the agent or project a document belongs to (folders.label), or its folder's last part. */
+function ownerName(folder: string): string {
+  try {
+    return portal().folders.label(folder).name;
+  } catch {
+    return path.basename(folder);
+  }
+}
+
+/** The workspace scan over the agents' homes and the projects (store.scanWorkspace); what left the index is gone for
+ * the comments' and the editor's chats too. */
+function scan(dd: string): ReturnType<typeof store.scanWorkspace> {
+  const out = store.scanWorkspace(docFolders(), dd);
+  for (const gone of out.dropped) void docchat.documentGone(gone);
+  return out;
+}
 
 /** Map the coded errors store/container throw onto consistent JSON {error, code?}. */
 function codedResponse(res: { status: (c: number) => { json: (b: unknown) => void } }, e: unknown): void {
   const ce = e as Error & { code?: string };
   res.status(CODE_STATUS[ce.code ?? ""] ?? 500).json({ error: ce.message, ...(ce.code ? { code: ce.code } : {}) });
-}
-
-/** Where a doc's bytes live NOW: a scanned doc's real workspace file (DocMeta.path), else its library folder. */
-function fileFor(root: string, doc: store.DocMeta): string {
-  return store.docPath(doc, root);
 }
 
 /** Content-Disposition for a download: an ASCII fallback name plus the RFC 5987 UTF-8 form for any non-ASCII title. */
@@ -235,10 +274,10 @@ function makeLoopbackHandler(dd: string, tickets: string): (req: http.IncomingMe
       }
       let bytes: Buffer;
       try {
-        bytes = store.readDoc(doc, dd);
+        bytes = store.readDoc(doc);
       } catch (e) {
         if ((e as { code?: string }).code === "too_large") jsonRaw(res, 413, { error: (e as Error).message, code: "too_large" });
-        else jsonRaw(res, 404, { error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
+        else jsonRaw(res, 404, { error: `the file of ${doc.docId} is missing from disk`, code: "not_found" });
         return;
       }
       res.writeHead(200, { "Content-Type": mediaType(doc.ext), "Cache-Control": "no-store" });
@@ -273,7 +312,7 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
   const doc = store.refresh(docId, dd);
   if (!doc) return { res: { status: 404, body: { error: `no document with id ${docId}`, code: "not_found" } } };
 
-  if (!fs.existsSync(fileFor(dd, doc))) return { res: { status: 404, body: { error: `the file of "${doc.title}" is gone from disk; it stays listed for a week, in case it comes back`, code: "not_found" } } };
+  if (!fs.existsSync(doc.path)) return { res: { status: 404, body: { error: `the file of "${doc.title}" is gone from disk; it stays listed for a week, in case it comes back`, code: "not_found" } } };
   const record = container.readDsRecord(dd);
   if (!record) return { res: { status: 503, body: { error: "the document server is not configured yet -- start it from the Office page first", code: "ds_not_configured" } } };
 
@@ -385,36 +424,45 @@ function registerRoutes(dd: string, secret: string): void {
     }
     const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG, browser: seat.health() };
     const limits = Object.fromEntries(Object.keys(LIMIT_BOUNDS).map((k) => [k, s[k as keyof typeof LIMIT_BOUNDS]]));
-    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, limitBounds: LIMIT_BOUNDS, container: c, agent, docs, locks });
+    // Each with the name the person knows its owner by: the agent's, or the project's place.
+    const named = docs.map((d) => ({ ...d, ownerName: ownerName(d.owner) }));
+    res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, limitBounds: LIMIT_BOUNDS, container: c, agent, docs: named, locks });
   });
 
-  /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat's folder sees (store.docsForHome, the
-   * tools' own rule), for the panel beside the chat. A chat whose folder is gone sees the person's library documents. */
+  /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat sees (store.docsForHome of
+   * folderForChat, the tools' own rule), for the panel beside the chat. A chat that is gone sees none. */
   r.get("/scope", async (req, res) => {
     const chatId = typeof req.query?.chat === "string" ? req.query.chat : "";
-    let folder = "";
+    let home: string | undefined;
     try {
-      folder = chatId ? portal().chats.folder(chatId) : "";
+      home = chatId ? folderForChat(chatId) : undefined;
     } catch {
-      folder = "";
+      home = undefined;
     }
-    const docs = folder ? store.docsForHome(folder, dd) : store.listDocs(dd).filter((d) => d.owner === null && !d.path);
-    res.json({ docIds: docs.map((d) => d.docId) });
+    res.json({ docIds: home ? store.docsForHome(home, dd).map((d) => d.docId) : [] });
   });
 
-  /** POST /documents {title, type:"word"|"cell", owner?} -> 201 meta; 409 exists. A failure is logged too, so a live
-   * failure LEAVES A LINE in the portal's log (the pre-fix routes logged nothing, which is why the first live
-   * create-failure had no trace to read). */
+  /** POST /documents {title, type:"word"|"cell", chat?} -> 201 meta; 409 exists or no home to make it in. Made in the
+   * folder it then belongs to: the chat's agent home or project folder (folderForChat) where the chat's panel makes
+   * it, else the default agent's home (the Office tab). A failure is logged too, so a live failure LEAVES A LINE in the
+   * portal's log. */
   r.post("/documents", json, async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const title = typeof body.title === "string" ? body.title : "";
     const type = body.type;
+    const chatId = typeof body.chat === "string" && body.chat !== "" ? body.chat : undefined;
     if (title.trim() === "") return res.status(400).json({ error: "a document needs a non-empty { title }", code: "invalid_title" });
     if (type !== "word" && type !== "cell") return res.status(400).json({ error: '{ type } must be "word" or "cell"', code: "unsupported_format" });
-    const owner = typeof body.owner === "string" && body.owner !== "" ? body.owner : null;
     try {
-      const doc = await store.createDoc({ title, type, owner }, dd);
-      recordAudit({ subject: title, reason: `created ${doc.ext} document ${doc.docId}`, chatId: owner ?? undefined });
+      let folder: string | undefined;
+      try {
+        folder = chatId ? folderForChat(chatId) : defaultHome();
+      } catch {
+        throw Object.assign(new Error(`there is no chat ${chatId}, or its folder is gone`), { code: "not_found" });
+      }
+      if (!folder) throw Object.assign(new Error("the portal's default agent has no home to make it in"), { code: "no_home" });
+      const doc = await store.createDoc({ title, type, folder }, dd);
+      recordAudit({ subject: doc.title, reason: `created ${doc.ext} document ${doc.docId} in ${doc.path}`, chatId });
       res.status(201).json(doc);
     } catch (e) {
       logLine(`POST /documents failed: ${(e as Error).message}`);
@@ -422,13 +470,14 @@ function registerRoutes(dd: string, secret: string): void {
     }
   });
 
-  /** POST /documents/rescan -> { added, updated }: re-run the workspace scan NOW over every agent folder (fresh from
-   * portal().folders.list()), in addition to the automatic one at boot. The library UI's Rescan button calls it. */
+  /** POST /documents/rescan -> { added, updated }: re-run the workspace scan NOW over the agents' homes and the projects
+   * (fresh from portal().folders.list()), in addition to the automatic one at boot. The library UI's Rescan button
+   * calls it. */
   r.post("/documents/rescan", json, async (_req, res) => {
     try {
-      const out = store.scanWorkspace(portal().folders.list().map((f) => f.path), dd);
-      logLine(`workspace rescan: ${out.added} added, ${out.updated} refreshed`);
-      res.json(out);
+      const out = scan(dd);
+      logLine(`workspace rescan: ${out.added} added, ${out.updated} refreshed${out.dropped.length ? `, ${out.dropped.length} out of every agent's home and project` : ""}`);
+      res.json({ added: out.added, updated: out.updated });
     } catch (e) {
       logLine(`workspace rescan failed: ${(e as Error).message}`);
       codedResponse(res, e);
@@ -456,10 +505,10 @@ function registerRoutes(dd: string, secret: string): void {
     if (!doc) return res.status(404).json({ error: `no document with id ${String(req.params?.id ?? "")}`, code: "not_found" });
     let bytes: Buffer;
     try {
-      bytes = store.readDoc(doc, dd);
+      bytes = store.readDoc(doc);
     } catch (e) {
       if ((e as { code?: string }).code === "too_large") return codedResponse(res, e);
-      return res.status(404).json({ error: `the library file for ${doc.docId} is missing from disk`, code: "not_found" });
+      return res.status(404).json({ error: `the file of ${doc.docId} is missing from disk`, code: "not_found" });
     }
     res.setHeader("Content-Type", mediaType(doc.ext));
     res.setHeader("Cache-Control", "no-store");
@@ -896,7 +945,6 @@ function wireDocchat(dd: string): void {
     officeState: () => officeState(dd),
     // A scanned document is changed only where the agent could change its file itself (tools.ts asks the same).
     mayWrite: (doc, _folder, chatId) => {
-      if (!doc.path) return true;
       if (!chatId) return false;
       try {
         portal().files.identity(path.dirname(doc.path), ".", { likeParent: true, chats: [chatId] });
@@ -1001,6 +1049,8 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   // the seams, as their module headers describe them (audit lands in portal().audit AND a log line). The tools read and
   // edit through the agents' editors (seat.ts) while Office runs; they ask here whether it does.
   registerTools({ root: dd, record: recordAudit, officeState: () => officeState(dd) });
+  // A new document is put into its folder through the portal, which gives it the folder's owner: the agent's file.
+  store.configureStore({ place: (folder, name, bytes) => path.join(folder, portal().files.create(folder, ".", name, bytes)) });
   // Owners and grants were chat ids before: moved to the folders those chats work in.
   try {
     const moved = store.migrateOwners((chatId) => {
@@ -1013,6 +1063,17 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
     if (moved) logLine(`@pithagoras/office: ${moved} document(s) now owned by a folder instead of a chat`);
   } catch (e) {
     logLine(`@pithagoras/office: owners could not be moved to folders: ${(e as Error).message}`);
+  }
+  // Documents an earlier version made in the extension's own docs folder: moved once into their owner's folder, else
+  // the default agent's home. Before the scan, which would otherwise find a moved file as a document of its own.
+  try {
+    for (const m of store.migrateLibrary(docFolders(), defaultHome(), dd)) {
+      if ("moved" in m) logLine(`@pithagoras/office: "${m.title}" (${m.docId}) moved from the extension's docs folder to ${m.moved}`);
+      else if ("dropped" in m) logLine(`@pithagoras/office: "${m.title}" (${m.docId}) was in the extension's docs folder, its file is gone: left the index`);
+      else logLine(`@pithagoras/office: "${m.title}" (${m.docId}) could not be moved out of the extension's docs folder, tried again at the next start: ${m.failed}`);
+    }
+  } catch (e) {
+    logLine(`@pithagoras/office: the documents of the docs folder could not be moved: ${(e as Error).message}`);
   }
   wireDocchat(dd);
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd, record: recordAudit });
@@ -1040,12 +1101,13 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   } catch (e) {
     logLine(`settleKept at boot failed: ${(e as Error).message}`);
   }
-  // the workspace scan indexes every .docx/.xlsx of the agent folders IN PLACE (product decision: no manual import
-  // any more -- what the agents work in IS the library). settleKept runs FIRST on purpose: it prunes entries whose
-  // file vanished while the portal slept, so the scan then REFRESHES only surviving files instead of re-adding them.
+  // the workspace scan indexes every .docx/.xlsx of the agents' homes and the projects IN PLACE (product decision: no
+  // manual import any more -- what the agents work in IS the library). settleKept runs FIRST on purpose: it prunes
+  // entries whose file vanished while the portal slept, so the scan then REFRESHES only surviving files instead of
+  // re-adding them.
   try {
-    const out = store.scanWorkspace(portal().folders.list().map((f) => f.path), dd);
-    logLine(`workspace scan at boot: ${out.added} added, ${out.updated} refreshed`);
+    const out = scan(dd);
+    logLine(`workspace scan at boot: ${out.added} added, ${out.updated} refreshed${out.dropped.length ? `, ${out.dropped.length} out of every agent's home and project` : ""}`);
   } catch (e) {
     logLine(`workspace scan at boot failed: ${(e as Error).message}`);
   }

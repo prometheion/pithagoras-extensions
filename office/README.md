@@ -47,9 +47,13 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 ## What you get
 
 - **The library**, on the portal's Office tab: create blank Word documents and spreadsheets, open one full screen in
-  the embedded editor, sort the list by name, modified, size or type, and download a copy. Every `.docx` and `.xlsx` in
-  the agents' and projects' folders (what the portal lists as folders) is indexed when the extension starts, and again
-  with **Rescan**, **in place**: the scanned file is the document, and editing it edits that file. One whose file is
+  the embedded editor, sort the list by name, modified, size or type, and download a copy. Every document lives in an
+  agent's home or a project's folder and belongs to that agent or project; there are no documents of nobody's. Every
+  `.docx` and `.xlsx` in the agents' homes and the projects' folders (not the folders other chats work in, nor the rest
+  of the workspace) is indexed when the extension starts, and again with **Rescan**, **in place**: the file is the
+  document, and editing it edits that file. **New document** on the Office tab makes it in the default agent's home
+  (the first agent, which the sidebar calls Home); the one in a chat's panel, and the agent's `office_create`, make it
+  in that chat's agent home or project folder. One whose file is
   gone (a git checkout of another branch, say) stays listed for a week, marked, with its owner and grants, and is the
   same document again when the file comes back. Deleting one moves its real file into the library's trash
   (`.trash/<time>-<id>/` in the data folder), with `document.json`, which says where it was, and what was kept for
@@ -63,10 +67,10 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   lists the documents opens the list). The same document open in the panel and in the Office tab (or in two browser
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects: `office_list`, `office_create`, `office_read`,
-  `office_edit` and `office_comments`. An agent sees the documents in its own folder, the ones it made and the ones it
-  was granted by a mention, and the ones you made in the library; another agent's, and the files in another agent's or
-  project's folder, are not there for it, and asking for one gets the same answer as for a document that does not
-  exist. What an agent makes or is granted belongs to its folder, not to one of its chats. A file in its folder is read
+  `office_edit` and `office_comments`. An agent sees the documents in its own folder (its home, or its project's) and
+  the ones it was granted by a mention; another agent's, and the files in another agent's or project's folder, are not
+  there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
+  goes into its folder and belongs to it, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
   and a link is not followed.
 - **The agent edits beside you, live**: each agent (each agent's or project's folder) that works in a document has an
@@ -120,12 +124,11 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   When the agent's edit replaces a larger text that a comment is on, the comment is made again on the new text, with
   its author, time and replies, and its thread and chat go on there.
 - **Talk to the document's agent in the editor's chat**: what you write in the editor's own chat (the speech bubble on
-  the left) goes to the agent or project that owns the document (that made it, or in whose folder it is), in one chat
-  for the editing session; its answers come in the editor's chat as the agent's. Messages written while it is still
-  answering reach it together as its next message. The chat goes a minute after the last person left the document
-  (a reload in that time keeps it), and when the Document Server starts again. A document nobody owns has nobody to
-  answer in its chat; the editor's bar says so. An answer that fails, or a run cut off by a restart, says so in the
-  chat, as a comment's does in its thread.
+  the left) goes to the agent or project the document belongs to (in whose folder it is), in one chat for the editing
+  session; its answers come in the editor's chat as the agent's. Messages written while it is still answering reach it
+  together as its next message. The chat goes a minute after the last person left the document (a reload in that time
+  keeps it), and when the Document Server starts again. An answer that fails, or a run cut off by a restart, says so
+  in the chat, as a comment's does in its thread.
 - **Nobody is asked from these chats**: they have no question tool, and a confirmation the agent's tools or the guard
   would ask for stops that step at once; the agent is told that nobody can answer there and goes on without it (a
   second time, its answer says it could not finish). The editor's bar shows how the agents stand in the document:
@@ -244,10 +247,13 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 
 Everything is in the extension's own data folder, beside the portal's other data: `settings.json` (what you set; a
 default you never changed is not written down, so a later version's default applies), `jwt-secret`, `ticket-secret`,
-`relay-secret`, `ds.json` (the container and image of the last start), `index.json` and `docs/<id>/<title>.<ext>`
-(the library), `.trash/`, `state/threads/<id>.json` (each comment thread's agents, their chats and what waits to be
-posted) and `state/sessions.json` (the chats of the editor's chat, by editing session). A
-scanned document stays where it is; only its entry is in the index. The containers (`pithagoras-office-ds`, its
+`relay-secret`, `ds.json` (the container and image of the last start), `index.json` (the library), `.trash/`,
+`state/threads/<id>.json` (each comment thread's agents, their chats and what waits to be posted) and
+`state/sessions.json` (the chats of the editor's chat, by editing session). A document stays where it is, in its
+agent's home or project folder; only its entry is in the index. Documents an earlier version made in `docs/<id>/` of
+the data folder are moved once, at the first start of this one, into the folder of the agent or project that made
+them, else into the default agent's home, keeping their id, grants and revisions; a name taken there gets a number
+("Report (2)"), and each move is in the portal's log. The containers (`pithagoras-office-ds`, its
 relay `-relay` and the agents' editor `-agent`), the networks (`pithagoras-office-ds-net`, and `-agents` for the
 agents' editor) and the Document Server's volumes are Docker's, shown in Settings → Docker under this extension. The
 volumes are one for each folder its image keeps apart: `pithagoras-office-ds-cache` (`/var/lib/onlyoffice`: the

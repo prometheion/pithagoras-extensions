@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -7,7 +7,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { templateDocx } from "../../src/store.ts";
+import { templateDocx, within } from "../../src/store.ts";
 
 /**
  * Office as Pithagoras runs it: its server half started by the portal's own extension host, after Docker's, which it
@@ -60,6 +60,11 @@ writeFileSync(path.join(data, "settings.json"), JSON.stringify({ enabled: true, 
 const project = path.join(process.env.WORKSPACE_ROOT!, "acme");
 mkdirSync(project, { recursive: true });
 writeFileSync(path.join(project, "plan.docx"), await templateDocx());
+// A document an earlier version made in the extension's own docs folder, which nobody owned: moved once into the
+// default agent's home as the half starts.
+mkdirSync(path.join(data, "docs", "minutes-aaaaaa"), { recursive: true });
+writeFileSync(path.join(data, "docs", "minutes-aaaaaa", "Old minutes.docx"), await templateDocx());
+writeFileSync(path.join(data, "index.json"), JSON.stringify({ version: 1, docs: [{ docId: "minutes-aaaaaa", title: "Old minutes", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] }] }));
 
 const host = await import(from("core/server/dist/extension-host.js"));
 const { requiresOf } = await import(from("core/server/dist/extension-ui.js"));
@@ -163,8 +168,26 @@ test("the tools are in a project's chats, read the project's own document throug
   const createdDoc = await tool("office_create").execute("c3", { title: "Minutes", type: "word" });
   const doc = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === createdDoc.details.id);
   assert.equal(doc.owner, project, "owned by the project's folder");
+  assert.equal(doc.path, path.join(project, "Minutes.docx"), "and made in it, through the portal's files");
+  assert.ok(existsSync(doc.path));
   await assert.rejects(tool("office_edit").execute("c4", { id: plan.id, ops: [{ quote: "New document", replacement: "Planned by the agent" }] }), (e: Error) => /^error:agent_editor_missing .*Start container in Settings → Office/.test(e.message));
   assert.equal(made("pithagoras-office-ds-agent"), undefined, "a tool never downloads the agents' editor, nor makes it without");
+});
+
+test("no document of nobody's: New document on the Office tab is made in the default agent's home, and the one an earlier version kept in its own docs folder was moved there", async () => {
+  const { defaultAgent } = await import(from("core/server/dist/agents.js"));
+  const home = realpathSync(defaultAgent().home);
+  const made = await json(`${at}/documents`, { method: "POST", body: JSON.stringify({ title: "Agenda", type: "word" }) });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  assert.equal(made.body.path, path.join(home, "Agenda.docx"));
+  assert.equal(made.body.owner, home);
+  const docs = (await json(`${at}/state`)).body.docs as { docId: string; path: string; owner: string; ownerName: string }[];
+  const old = docs.find((d) => d.docId === "minutes-aaaaaa")!;
+  assert.equal(old.path, path.join(home, "Old minutes.docx"));
+  assert.equal(old.owner, home);
+  assert.ok(old.ownerName, "named as the person knows its agent");
+  assert.ok(!existsSync(path.join(data, "docs")), "the docs folder is gone");
+  assert.ok(docs.every((d) => typeof d.owner === "string" && within(d.owner, d.path)), "every document is in its owner's folder");
 });
 
 test("the agents' editor: missing while the Document Server runs, then downloaded through Docker's API by its tag with Start, and refused where the tag names another build", async () => {

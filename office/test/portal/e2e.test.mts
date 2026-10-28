@@ -218,7 +218,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       if (measured) await measure("Document Server with one person editing, no browser", false);
       await page.evaluate(() => (window as unknown as { __editor: { destroyEditor(): void } }).__editor.destroyEditor());
       const file = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === doc.docId);
-      const onDisk = path.join(data, "docs", doc.docId, `${file.title}.docx`);
+      const onDisk = file.path; // in the default agent's home, where New document made it
       let text = "";
       for (let i = 0; i < 90 && !text.includes(typed); i++) {
         await delay(1000);
@@ -260,7 +260,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   const agentDoc = async (title: string, type: "word" | "cell") => String((await tools.office_create.execute(`c-${title}`, { title, type })).details.id);
   const fileOf = async (docId: string) => {
     const doc = (await json(`${at}/state`)).body.docs.find((d: { docId: string }) => d.docId === docId);
-    return path.join(data, "docs", docId, `${doc.title}.${doc.ext}`);
+    return doc.path as string;
   };
   const partOf = async (docId: string, part: string) => (await JSZip.loadAsync(readFileSync(await fileOf(docId)))).file(part)!.async("string");
   const browser = await chromium.launch();

@@ -68,7 +68,7 @@ function OfficePanel({ chat, panel }: PanelProps) {
 }
 
 /** The documents beside a chat: what its agent or project sees (GET /scope, the tools' own rule): the ones in its
- * folder, the ones it made or was granted, and the person's library documents. The sort choice is the one of
+ * folder (its own) and the ones it was granted by a comment mention. The sort choice is the one of
  * web/sort.tsx, persisted under "po-sort" so this panel and the full Office page share it. A row opens its document
  * here, in the panel. */
 function PanelList({ chat, onOpen }: { chat: Chat; onOpen(docId: string): void }) {
@@ -92,9 +92,9 @@ function PanelList({ chat, onOpen }: { chat: Chat; onOpen(docId: string): void }
   const mine = [...state.docs].filter((d) => scope.has(d.docId)).sort((a, b) => compareDocs(a, b, sort.key, sort.dir));
   return (
     <div className="space-y-1 p-2">
-      <PanelNewDocument />
+      <PanelNewDocument chatId={chat.id} />
       {mine.length === 0 ? (
-        <portal.ui.Empty>{t("No office documents yet -- the workspace .docx and .xlsx files, human-made docs, and the ones this chat owns or was granted by a comment mention will appear here.")}</portal.ui.Empty>
+        <portal.ui.Empty>{t("No office documents yet -- the .docx and .xlsx files of this chat's agent or project, the ones made here, and the ones a comment mention granted it will appear here.")}</portal.ui.Empty>
       ) : (
         <>
           <SortBar sort={sort} onSort={chooseSort} />
@@ -126,9 +126,9 @@ function PanelList({ chat, onOpen }: { chat: Chat; onOpen(docId: string): void }
 }
 
 /** The panel's slim new-document row: title + a word/sheet kind toggle + create, on the SAME api.createDocument
- * as the page's NewDocument -- and like it it passes NO owner, so a doc made here is unowned and lands where the
- * workspace docs already are: every chat's panel and the global library. */
-function PanelNewDocument() {
+ * as the page's NewDocument, with the chat: the document is made in the chat's agent home or project folder and
+ * belongs to it, so it shows in this panel (and in the panels of that agent's or project's other chats). */
+function PanelNewDocument({ chatId }: { chatId: string }) {
   portal.locale.use();
   const [title, setTitle] = useState("");
   const [kind, setKind] = useState<"word" | "cell">("word");
@@ -139,7 +139,7 @@ function PanelNewDocument() {
     setBusy(true);
     setProblem(null);
     try {
-      await api.createDocument({ title: title.trim(), type: kind });
+      await api.createDocument({ title: title.trim(), type: kind, chat: chatId });
       setTitle("");
       void refreshOfficeState(); // the new doc appears in this panel immediately, not on the next 5 s poll
     } catch (e) {
@@ -288,9 +288,8 @@ export default function office(given: Portal): void {
     ),
   });
 
-  // Beside every chat -- shown for all: every unowned (workspace-scanned / human-made) doc
-  // is shared by every chat, plus what this one owns or was granted; where there is nothing at all, it says so. A
-  // document opens in it, beside the conversation (`portal.panels.open("office", { doc })` reaches it from anywhere).
+  // Beside every chat -- shown for all: the documents of the chat's agent or project (in its folder) and what it was
+  // granted; where there is nothing at all, it says so. A document opens in it, beside the conversation (`portal.panels.open("office", { doc })` reaches it from anywhere).
   portal.slots.register("chat.panel", {
     id: "office",
     name: "office",

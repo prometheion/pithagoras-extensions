@@ -1,16 +1,16 @@
 /**
- * The office document library: docs/<docId>/<title>.<ext> under the extension's own dataDir plus an
- * index.json ({ version: 1, docs: DocMeta[] }) that is the single source of truth for metadata. Every
- * operation reads the index fresh from disk (no caching -- a human UI tab, the loopback listener and
- * the agent tools all share this process's files) and writes it back atomically (tmp file in the same
- * directory + rename). Document bytes live in the plain filesystem: the portal's 1 MB managed-file cap
- * does not apply here, so >1 MB Office files work natively.
+ * The office document library: an index.json ({ version: 1, docs: DocMeta[] }) under the extension's own dataDir that
+ * is the single source of truth for metadata. Every operation reads the index fresh from disk (no caching -- a human
+ * UI tab, the loopback listener and the agent tools all share this process's files) and writes it back atomically
+ * (tmp file in the same directory + rename). Document bytes live in the plain filesystem: the portal's 1 MB
+ * managed-file cap does not apply here, so >1 MB Office files work natively.
  *
- * Created docs are written INTO this library (docs/<docId>/<title>.<ext>); workspace-scanned docs (see
- * scanWorkspace) point at their file IN PLACE via DocMeta.path -- the scanned file IS the document, and
- * every path-taking operation (persistBytes, renameDoc, deleteDoc, exportDoc, pruneMissingDocs) resolves
- * through docPath(), which prefers that field. A deleted scanned doc moves its REAL file into this
- * library's .trash (7-day sweep); a scanned file already gone out-of-band is pruned, not an error.
+ * Every document lives in the folder of an agent's home or a project, and belongs to that agent or project (owner
+ * decision of 2026-10-28: there are no unowned documents). The index points at each file IN PLACE (DocMeta.path):
+ * a made one is written into its owner's folder (createDoc), a scanned one is found there (scanWorkspace), and the
+ * file IS the document. A deleted doc moves its file into this library's .trash (7-day sweep); a file already gone
+ * out-of-band is pruned, not an error. Documents an earlier version made in the extension's own docs folder move
+ * into a folder once (migrateLibrary).
  *
  * Every exported function takes a trailing optional `root = dataDir()` so unit tests can pass a tmp
  * dir; production callers just omit it. The ONLY async functions are
@@ -34,31 +34,35 @@ export type DocMeta = {
   updatedAt: number;
   sizeBytes: number;
   mtimeMs: number;
-  /** The agent or project that made it, by its folder (the path the portal lists it at, resolved): an agent's chats
-   * come and go, and which of them stands for the folder changes, but the folder stays. Null for the person's own. */
-  owner: string | null;
+  /** The agent or project it belongs to, by its folder (the path the portal lists it at, resolved): the agent's home or
+   * project folder its file is in (the deepest, where one is inside another). An agent's chats come and go, and which of
+   * them stands for the folder changes, but the folder stays. */
+  owner: string;
   grants: Grant[];
   createdBy?: string;
-  /** Set for workspace-scanned and imported docs, and conflict copies: the file came from elsewhere, not made blank here.
+  /** Set for workspace-scanned docs and conflict copies: the file came from elsewhere, not made blank here.
    * (An `importedKeys` field older index files hold is the comment wake's baseline, which is gone: nothing reads it.) */
   imported?: boolean;
-  /** A workspace-scanned doc lives in PLACE: its real, absolute file path (realpathSync'd at index time). ABSENT for library-created docs, whose bytes are docs/<docId>/<title>.<ext> under the library root -- docPath() prefers this field when present. */
-  path?: string;
+  /** Its file, in PLACE: its real, absolute path (realpathSync'd at index time), in its owner's folder. */
+  path: string;
   /** Since when its file has been gone (pruneMissingDocs): kept meanwhile, in case it comes back. */
   missingSince?: number;
   /** Which workspace a scanned doc lives in -- the "workspace" sort key of the UI: the FIRST path segment under the scan
    * root that contains it (scanWorkspace; deepest matching root wins, so /root/repos/pithagoras/... labels "pithagoras"),
-   * and for a file straight in a root that root's OWN dir name. Stamped at index time and BACKFILLED on every rescan;
-   * ABSENT for library-created docs -- the UI reads undefined as "library". */
+   * and for a file straight in a root that root's OWN dir name. Stamped at index time and BACKFILLED on every rescan. */
   workspace?: string;
 };
 
-type IndexFile = { version: 1; docs: DocMeta[] };
+/** An entry of an index from before every document lived in an agent's or project's folder: one made in the extension's
+ * own docs folder (docs/<docId>/<title>.<ext>), with no `path`, and no owner where the person made it. Kept apart from
+ * the documents (readIndex), so that nothing hands it out, and written back as it was until migrateLibrary moves it. */
+export type LibraryDoc = Omit<DocMeta, "owner" | "path"> & { owner: string | null; path?: undefined };
+
+type IndexFile = { version: 1; docs: DocMeta[]; unplaced: LibraryDoc[] };
 
 const TRASH_TTL_MS = 7 * 24 * 60 * 60 * 1000; // sweepTrash removes .trash entries older than this
-// importFile caps: the sync copy must not commit an unbounded file into the library (and any xlsx/docx in it
-// is parsed later against ooxml.ts' 256 MiB / 1 GiB zip envelope).
-// The same cap holds for every later read of a file whole (readDoc, the tools' read as the agent): an indexed file
+// The scan's cap: a file above it stays out of the library (any xlsx/docx in it is parsed later against ooxml.ts'
+// 256 MiB / 1 GiB zip envelope). The same cap holds for every later read of a file whole (readDoc, the tools' read as the agent): an indexed file
 // that grew since is refused, not read into the portal's memory.
 export const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
 
@@ -79,9 +83,14 @@ function readIndex(root: string): IndexFile {
   try {
     const raw: unknown = JSON.parse(fs.readFileSync(indexPath(root), "utf8"));
     if (typeof raw !== "object" || raw === null || !Array.isArray((raw as Record<string, unknown>).docs)) throw new Error("bad shape");
-    return raw as IndexFile;
+    const all = (raw as { docs: (DocMeta | LibraryDoc)[] }).docs;
+    return {
+      version: 1,
+      docs: all.filter((d): d is DocMeta => typeof d.path === "string"),
+      unplaced: all.filter((d): d is LibraryDoc => typeof d.path !== "string"),
+    };
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, docs: [] };
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, docs: [], unplaced: [] };
     throw Object.assign(new Error(`corrupt document index at ${indexPath(root)} -- run settleKept to reconcile`), { code: "index_corrupt", cause: err });
   }
 }
@@ -89,14 +98,30 @@ function readIndex(root: string): IndexFile {
 function writeIndex(root: string, index: IndexFile): void {
   const dest = indexPath(root);
   const tmp = path.join(root, `.${path.basename(dest)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, JSON.stringify(index, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, docs: [...index.docs, ...index.unplaced] }, null, 2));
   fs.renameSync(tmp, dest);
 }
 
-/** Where a document's bytes are: a scanned doc's own file (`path`), else its file in the library. */
-export function docPath(doc: DocMeta, root: string): string {
-  // A scanned doc's bytes are the workspace file itself; only library-created docs live under docs/<docId>/.
-  return doc.path ?? path.join(root, "docs", doc.docId, `${doc.title}.${doc.ext}`);
+/** Whether a title of that type is taken in the index, by a document or an entry still to be moved. */
+function titleTaken(index: IndexFile, title: string, ext: DocMeta["ext"], except?: string): boolean {
+  return [...index.docs, ...index.unplaced].some((d) => d.docId !== except && d.title === title && d.ext === ext);
+}
+
+/** What puts a new file into an agent's or project's folder: `bytes` as `name` in `folder`, never over something there,
+ * and owned as the folder's files are, so that its agent can go on with it; its real path. The server half puts it
+ * through the portal (files.create, which gives the file the folder's owner where the portal runs as root); plain
+ * here, for the tests. */
+export type PlaceFile = (folder: string, name: string, bytes: Buffer) => string;
+
+let placeFile: PlaceFile = (folder, name, bytes) => {
+  const file = path.join(folder, name);
+  writeNewKeeping(file, bytes);
+  return file;
+};
+
+/** The seam of the store: how a new file is put into a folder (server.ts gives the portal's way). */
+export function configureStore(opts: { place?: PlaceFile }): void {
+  if (opts.place) placeFile = opts.place;
 }
 
 function notFound(message = "no such document"): Error {
@@ -233,7 +258,7 @@ export function getDoc(docId: string, root?: string): DocMeta | null {
 function stampFromDisk(doc: DocMeta, root: string): boolean {
   let st: fs.Stats;
   try {
-    st = fs.statSync(docPath(doc, root));
+    st = fs.statSync(doc.path);
   } catch {
     return false;
   }
@@ -296,13 +321,19 @@ export function within(folder: string, file: string): boolean {
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }
 
-/** Whether the agent or project of `home` (a canonical folder) sees `doc`: what it made or was granted, the scanned
- * documents in its own folder, and the documents the person made in the library. A scanned document in another
- * agent's or project's folder is not its: the sandbox keeps that folder from its agent, and the tools must not hand
- * it what is in it. */
+/** Whether the agent or project of `home` (a canonical folder) sees `doc`: what it owns or was granted, and the
+ * documents in its own folder (also one of a project inside it). A document in another agent's or project's folder is
+ * not its: the sandbox keeps that folder from its agent, and the tools must not hand it what is in it. */
 export function visibleTo(doc: DocMeta, home: string): boolean {
-  if (doc.owner === home || doc.grants.some((g) => g.folder === home)) return true;
-  return doc.path ? within(home, doc.path) : doc.owner === null;
+  return doc.owner === home || doc.grants.some((g) => g.folder === home) || within(home, doc.path);
+}
+
+/** The agent's or project's folder a file is in, out of `folders` (canonical): the deepest that holds it; none where
+ * no folder holds it. */
+export function ownerFolder(file: string, folders: string[]): string | undefined {
+  let best: string | undefined;
+  for (const folder of folders) if ((file === folder || within(folder, file)) && (!best || folder.length > best.length)) best = folder;
+  return best;
 }
 
 /** The documents the agent or project of `home` (a folder, resolved here) sees in its panel and office tools
@@ -326,7 +357,7 @@ export function migrateOwners(folderOf: (chatId: string) => string | undefined, 
     const folder = folderOf(who);
     return folder ? canonical(folder) : who;
   };
-  for (const doc of index.docs) {
+  for (const doc of [...index.docs, ...index.unplaced]) {
     const before = JSON.stringify([doc.owner, doc.grants]);
     if (doc.owner !== null) doc.owner = moved(doc.owner);
     doc.grants = (doc.grants ?? []).map((g) => {
@@ -338,6 +369,82 @@ export function migrateOwners(folderOf: (chatId: string) => string | undefined, 
   }
   if (changed) writeIndex(root, index);
   return changed;
+}
+
+/** What migrateLibrary did with each document of the extension's own docs folder. */
+export type LibraryMove =
+  | { docId: string; title: string; moved: string; owner: string }
+  | { docId: string; title: string; dropped: "file gone" }
+  | { docId: string; title: string; failed: string };
+
+/**
+ * The documents an earlier version made in the extension's own docs folder (docs/<docId>/<title>.<ext>, `LibraryDoc`),
+ * moved once into a folder they then live and belong in: their owner's, where an agent or project made one and its
+ * folder is among `folders` (the agents' homes and the projects, canonical), else the default agent's home
+ * (`defaultHome`). A name taken there (by a file, or a document of that title) gets a number, "Report (2)". Its id,
+ * grants, comments seen and revisions stay with it. One whose file is gone leaves the index; one that cannot be moved
+ * (no default agent's home, a folder that refuses the file) stays as it was, to be moved at the next start. The file is
+ * put in its place before the index names it, and the old folder removed after: a start cut off between the two finds
+ * the file it put there already (the same bytes under the name) and takes it, rather than making a second.
+ */
+export function migrateLibrary(folders: string[], defaultHome: string | undefined, root = dataDir()): LibraryMove[] {
+  const out: LibraryMove[] = [];
+  for (const legacy of readIndex(root).unplaced) {
+    const from = path.join(root, "docs", legacy.docId, `${legacy.title}.${legacy.ext}`);
+    const owner = legacy.owner !== null && folders.includes(legacy.owner) ? legacy.owner : defaultHome && canonical(defaultHome);
+    try {
+      let bytes: Buffer;
+      try {
+        bytes = fs.readFileSync(from);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        const index = readIndex(root);
+        index.unplaced = index.unplaced.filter((d) => d.docId !== legacy.docId);
+        writeIndex(root, index);
+        out.push({ docId: legacy.docId, title: legacy.title, dropped: "file gone" });
+        continue;
+      }
+      if (!owner) throw new Error("there is no default agent's home to move it to");
+      const index = readIndex(root);
+      // The first name free in the index and in the folder; a file there with these very bytes is this one, put there
+      // by a start that was cut off before it wrote the index.
+      let title = legacy.title;
+      let adopt: string | undefined;
+      for (let n = 2; ; n++) {
+        const file = path.join(owner, `${title}.${legacy.ext}`);
+        const there = fs.lstatSync(file, { throwIfNoEntry: false });
+        if (there?.isFile() && there.size === bytes.length && !titleTaken(index, title, legacy.ext, legacy.docId) && !index.docs.some((d) => d.path === canonical(file)) && fs.readFileSync(file).equals(bytes)) {
+          adopt = canonical(file);
+          break;
+        }
+        if (!there && !titleTaken(index, title, legacy.ext, legacy.docId)) break;
+        const tag = ` (${n})`;
+        title = legacy.title.slice(0, 200 - tag.length) + tag;
+      }
+      const doc: DocMeta = { ...legacy, title, owner, path: "", workspace: path.basename(owner) };
+      if (adopt) {
+        const st = fs.statSync(adopt);
+        Object.assign(doc, { path: adopt, sizeBytes: st.size, mtimeMs: st.mtimeMs });
+      } else {
+        placeDoc(doc, owner, bytes);
+      }
+      doc.updatedAt = Date.now();
+      index.unplaced = index.unplaced.filter((d) => d.docId !== legacy.docId);
+      index.docs.push(doc);
+      writeIndex(root, index);
+      fs.rmSync(path.join(root, "docs", legacy.docId), { recursive: true, force: true });
+      out.push({ docId: doc.docId, title: doc.title, moved: doc.path, owner });
+    } catch (e) {
+      out.push({ docId: legacy.docId, title: legacy.title, failed: (e as Error).message });
+    }
+  }
+  // The docs folder itself, once nothing is left in it.
+  try {
+    fs.rmdirSync(path.join(root, "docs"));
+  } catch {
+    // not there, or something is still in it
+  }
+  return out;
 }
 
 function freshDocId(existing: DocMeta[], title: string): string {
@@ -359,28 +466,34 @@ function assertSafeTitle(title: string): void {
   }
 }
 
-function storeDoc(doc: DocMeta, bytes: Buffer, rootDir: string): DocMeta { // sync on purpose: the create/import paths must not await between readIndex and writeIndex
-  const dir = path.join(rootDir, "docs", doc.docId);
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${doc.title}.${doc.ext}`);
-  fs.writeFileSync(file, bytes);
+/** `bytes` put into `folder` as `<title>.<ext>` (placeFile), and the entry's file, title, size and revision taken from
+ * the file as it was made: where something took the name meanwhile, the portal's way numbers it. Sync on purpose: the
+ * create and move paths must not await between readIndex and writeIndex. */
+function placeDoc(doc: DocMeta, folder: string, bytes: Buffer): DocMeta {
+  const file = canonical(placeFile(folder, `${doc.title}.${doc.ext}`, bytes));
   const st = fs.statSync(file);
+  doc.path = file;
+  doc.title = path.basename(file).slice(0, -(doc.ext.length + 1));
   doc.sizeBytes = st.size;
   doc.mtimeMs = st.mtimeMs;
   return doc;
 }
 
-/** Create a document from the blank template of its type. docId = slug(title) + "-" + 6 random chars (see
- * randomSuffix for the alphabet). Duplicate -- an existing entry with the SAME docId or the SAME title AND same
- * type (case-sensitive) -- throws Error{code:"exists"} before anything touches disk. The owner is the creating
- * agent's or project's folder (agent tools pass it) or null for human-created docs; createdBy records who did it. */
-export async function createDoc(input: { title: string; type: "word" | "cell"; owner?: string | null; createdBy?: string }, root = dataDir()): Promise<DocMeta> {
+/** Create a document from the blank template of its type, as `<title>.<ext>` in `folder`: the agent's home or the
+ * project folder it belongs to (its owner; the person's go into the default agent's home). docId = slug(title) + "-" +
+ * 6 random chars (see randomSuffix for the alphabet). A title of that type already in the index, or a file of that name
+ * already in the folder, throws Error{code:"exists"} before anything is written. createdBy records who did it. */
+export async function createDoc(input: { title: string; type: "word" | "cell"; folder: string; createdBy?: string }, root = dataDir()): Promise<DocMeta> {
   const rootDir = root ?? dataDir();
   assertSafeTitle(input.title); // titles are file names
   const ext: DocMeta["ext"] = input.type === "word" ? "docx" : "xlsx";
   const bytes = ext === "docx" ? await templateDocx() : await templateXlsx(); // BEFORE the index round-trip: no await may sit between readIndex and writeIndex, or a concurrent create would have its write clobbered
+  const folder = canonical(input.folder);
   const index = readIndex(rootDir);
-  if (index.docs.some((d) => d.title === input.title && d.ext === ext)) throw Object.assign(new Error(`a document titled "${input.title}" already exists`), { code: "exists" });
+  if (titleTaken(index, input.title, ext)) throw Object.assign(new Error(`a document titled "${input.title}" already exists`), { code: "exists" });
+  if (fs.lstatSync(path.join(folder, `${input.title}.${ext}`), { throwIfNoEntry: false })) {
+    throw Object.assign(new Error(`a file named "${input.title}.${ext}" is already in ${folder}`), { code: "exists" });
+  }
   const now = Date.now();
   const doc: DocMeta = {
     docId: freshDocId(index.docs, input.title),
@@ -390,11 +503,13 @@ export async function createDoc(input: { title: string; type: "word" | "cell"; o
     updatedAt: now,
     sizeBytes: 0,
     mtimeMs: 0,
-    owner: input.owner ?? null,
+    owner: folder,
     grants: [],
+    path: "",
+    workspace: path.basename(folder), // what the scan stamps on a file straight in its folder
   };
   if (input.createdBy !== undefined) doc.createdBy = input.createdBy;
-  storeDoc(doc, bytes, rootDir);
+  placeDoc(doc, folder, bytes);
   index.docs.push(doc);
   writeIndex(rootDir, index);
   return { ...doc };
@@ -418,7 +533,7 @@ function renameNoClobber(from: string, to: string, title: string): void {
   fs.unlinkSync(from);
 }
 
-/** Retitle a document and rename its file on disk (docs/<docId>/<newTitle>.<ext>). The docId is stable across the
+/** Retitle a document and rename its file on disk (<its folder>/<newTitle>.<ext>). The docId is stable across the
  * whole lifetime of the doc (tickets, history paths, state files key off it), and rename preserves the content's
  * mtimeMs -- that IS the revision tools gate on, so a retitle is never a new revision. updatedAt bumps. A title
  * already held by ANOTHER document throws {code:"exists"} (refusing is the safe reading of a retitle collision). */
@@ -428,16 +543,15 @@ export function renameDoc(docId: string, newTitle: string, root = dataDir()): Do
   const index = readIndex(rootDir);
   const doc = index.docs.find((d) => d.docId === docId);
   if (!doc) throw notFound(`no document with id ${docId}`);
-  if (newTitle !== doc.title && index.docs.some((d) => d.docId !== docId && d.title === newTitle)) {
+  if (newTitle !== doc.title && [...index.docs, ...index.unplaced].some((d) => d.docId !== docId && d.title === newTitle)) {
     throw Object.assign(new Error(`a document titled "${newTitle}" already exists`), { code: "exists" });
   }
-  // One rule for both kinds: rename inside the file's OWN directory. For a library doc that is docs/<docId>/;
-  // for a scanned doc it renames the real workspace file next to where it already is (same parent, new name).
-  const from = docPath(doc, rootDir);
+  // Renamed inside the file's OWN folder: next to where it already is (same parent, new name).
+  const from = doc.path;
   const to = path.join(path.dirname(from), `${newTitle}.${doc.ext}`);
   plainFile(doc, from);
   renameNoClobber(from, to, newTitle);
-  if (doc.path) doc.path = to;
+  doc.path = to;
   doc.title = newTitle;
   doc.updatedAt = Date.now();
   writeIndex(rootDir, index);
@@ -447,12 +561,12 @@ export function renameDoc(docId: string, newTitle: string, root = dataDir()): Do
 /**
  * Delete a document: it is moved into the trash as one entry, `.trash/<Date.now()>-<docId>/`, that holds its file
  * (`<title>.<ext>`), what was kept for it (the comments seen, `state.json`; an older version's `history/`), and
- * `document.json`, its index entry with where it was (`path`, for a scanned one): what is needed to put it back by
- * hand. Then the index entry goes. A scanned doc's real file moves out of its folder; where the trash is on another
+ * `document.json`, its index entry with where it was (`path`): what is needed to put it back by
+ * hand. Then the index entry goes. Its real file moves out of its folder; where the trash is on another
  * file system than that folder (a portal in a container with the workspace bound in), it is copied and the original
  * removed. A link put in the file's place is removed as the link. Where the file's folder leads elsewhere since it was
  * indexed (a link took the folder's place), or a folder took the file's name, nothing on disk is touched: the path
- * leads into another folder now, whose file is not this document's. A scanned file already gone is NOT an error: only
+ * leads into another folder now, whose file is not this document's. A file already gone is NOT an error: only
  * the index entry drops. sweepTrash (server boot / settleKept) removes entries older than 7 days, whole. Throws
  * {code:"not_found"} for an unknown id.
  */
@@ -474,25 +588,21 @@ export function deleteDoc(docId: string, root = dataDir()): void {
       fs.rmSync(from, { recursive: true, force: true });
     }
   };
-  if (doc.path) {
-    let plain = true;
-    try {
-      plainFile(doc, doc.path);
-    } catch (err) {
-      plain = false; // gone, or not a plain file at its own name in its own folder any more
-      // A link in its place, in the folder as it was indexed: removed as the link, never followed. Through a folder
-      // that leads elsewhere now, the same path names another folder's file: left alone.
-      const dir = path.dirname(doc.path);
-      if ((err as { code?: string }).code === "invalid" && canonical(dir) === dir && fs.lstatSync(doc.path, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(doc.path, { force: true });
-    }
-    if (plain) moveIn(doc.path, `${doc.title}.${doc.ext}`);
-  } else {
-    moveIn(path.join(rootDir, "docs", doc.docId), "docs");
+  let plain = true;
+  try {
+    plainFile(doc, doc.path);
+  } catch (err) {
+    plain = false; // gone, or not a plain file at its own name in its own folder any more
+    // A link in its place, in the folder as it was indexed: removed as the link, never followed. Through a folder
+    // that leads elsewhere now, the same path names another folder's file: left alone.
+    const dir = path.dirname(doc.path);
+    if ((err as { code?: string }).code === "invalid" && canonical(dir) === dir && fs.lstatSync(doc.path, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(doc.path, { force: true });
   }
+  if (plain) moveIn(doc.path, `${doc.title}.${doc.ext}`);
   moveIn(path.join(rootDir, "state", `${docId}.json`), "state.json");
   moveIn(path.join(rootDir, "history", docId), "history");
   fs.writeFileSync(path.join(entry, "document.json"), JSON.stringify({ ...doc, deletedAt: Date.now() }, null, 2) + "\n");
-  writeIndex(rootDir, { version: 1, docs: index.docs.filter((d) => d.docId !== docId) });
+  writeIndex(rootDir, { ...index, docs: index.docs.filter((d) => d.docId !== docId) });
 }
 
 /** The library's trash dir, made if missing -- one place that names it. */
@@ -533,7 +643,8 @@ const MISSING_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 /** The settleKept half of index-vs-disk reconciliation (server.ts calls it at boot and on the interval): a document
  * whose file is gone is marked (`missingSince`), and dropped from the index only once it has been gone for
  * MISSING_GRACE_MS; one whose file is back is unmarked. The index is the source of truth in BOTH directions: a
- * docs/<id>/ dir with NO index entry is NOT added. Returns the dropped docIds; writes nothing when nothing changed. */
+ * file with NO index entry is NOT added here (that is the scan's). Returns the dropped docIds; writes nothing when
+ * nothing changed. */
 export function pruneMissingDocs(root = dataDir(), now = Date.now()): string[] {
   const rootDir = root ?? dataDir();
   const index = readIndex(rootDir);
@@ -541,7 +652,7 @@ export function pruneMissingDocs(root = dataDir(), now = Date.now()): string[] {
   const dropped: string[] = [];
   let changed = false;
   for (const doc of index.docs) {
-    if (fs.existsSync(docPath(doc, rootDir))) {
+    if (fs.existsSync(doc.path)) {
       if (doc.missingSince !== undefined) {
         delete doc.missingSince;
         changed = true;
@@ -558,7 +669,7 @@ export function pruneMissingDocs(root = dataDir(), now = Date.now()): string[] {
       kept.push(doc);
     }
   }
-  if (changed) writeIndex(rootDir, { version: 1, docs: kept });
+  if (changed) writeIndex(rootDir, { ...index, docs: kept });
   return dropped;
 }
 
@@ -566,7 +677,7 @@ export function pruneMissingDocs(root = dataDir(), now = Date.now()): string[] {
  * regular .docx/.xlsx and {code:"too_large"} above the 512 MiB cap; returns null when the basename (without its
  * extension) cannot become a document title -- such a file is skipped, not indexed. The single place where a
  * scanned file becomes a DocMeta, so the stamping rules of the former importFile live in exactly one spot. */
-function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | null {
+function indexOne(real: string, rootDir: string, owner: string, workspace?: string): DocMeta | null {
   const base = path.basename(real);
   const dot = base.lastIndexOf(".");
   if (dot < 1) throw Object.assign(new Error(`${base} has no extension`), { code: "unsupported_format" });
@@ -591,7 +702,7 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
   }
   const now = Date.now();
   const index = readIndex(rootDir);
-  if (index.docs.some((d) => d.path === real || (d.title === title && d.ext === extRaw))) {
+  if (index.docs.some((d) => d.path === real) || titleTaken(index, title, extRaw)) {
     throw Object.assign(new Error(`a document titled "${title}" (${extRaw}) is already in the library`), { code: "exists" });
   }
   const doc: DocMeta = {
@@ -602,7 +713,7 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
     updatedAt: now,
     sizeBytes: st.size,
     mtimeMs: st.mtimeMs, // the file's OWN mtime IS its revision from day one -- the mtime-gated flow edits it in place
-    owner: null, // nobody made it here: the agent or project whose folder it is in sees it (visibleTo), and the person
+    owner, // the agent or project whose folder it is in
     grants: [],
     imported: true,
     path: real, // IN PLACE: the scanned file IS the document; nothing is copied into the library
@@ -615,19 +726,23 @@ function indexOne(real: string, rootDir: string, workspace?: string): DocMeta | 
 
 /** Synchronous workspace scan: every *.docx/*.xlsx (case-insensitive) under `roots`, indexed IN PLACE.
  *
- * roots are the portal's agent folders (portal().folders.list(): every agent home, every project, every chat's
- * working folder). The walk is bounded and deliberately dumb -- no git, no content sniffing: it never enters the
- * library's own data dir (indexing a copy of itself would re-index its own docs forever), never hidden dirs
- * (dot-prefixed: .git, editor scratch), and never node_modules. A file is identified by its REALPATH, so two roots
- * reaching the same file through a symlink or bind mount produce ONE entry. Already-indexed files get their
- * mtimeMs/sizeBytes REFRESHED from disk (a rescan after something wrote the file straight to disk keeps the list
- * honest) and count as `updated` only when something actually changed; new files go through indexOne -- in place,
- * owner null. A file
- * that cannot be indexed (oversized, unsafe title, already titled, unreadable) is skipped: one bad file must
- * never fail the whole sweep.
+ * roots are the agents' homes and the projects' folders (the agent and project folders of portal().folders.list();
+ * not the folders chats work in, nor the rest of the workspace): each file belongs to the deepest of them that holds
+ * it (its owner). The walk is bounded and deliberately dumb -- no git, no content sniffing: it never enters the
+ * library's own data dir, never hidden dirs (dot-prefixed: .git, editor scratch), and never node_modules. A file is
+ * identified by its REALPATH, so two roots reaching the same file through a symlink or bind mount produce ONE entry.
+ * Already-indexed files get their mtimeMs/sizeBytes REFRESHED from disk (a rescan after something wrote the file
+ * straight to disk keeps the list honest), and their owner and workspace label brought up to where they are, and count
+ * as `updated` only when something actually changed; new files go through indexOne. A file that cannot be indexed
+ * (oversized, unsafe title, already titled, unreadable) is skipped: one bad file must never fail the whole sweep.
  *
- * Returns { added, updated }. */
-export function scanWorkspace(roots: string[], root = dataDir()): { added: number; updated: number } {
+ * A document whose file is there but in none of the roots (one an earlier version found in a chat's folder, or in a
+ * folder that is no project any more) leaves the index (`dropped`; its file stays where it is): no agent or project
+ * owns it. A file that is gone is pruneMissingDocs' (kept a while, in case it comes back), and so is everything where
+ * there are no roots at all.
+ *
+ * Returns { added, updated, dropped } (dropped: the docIds that left the index). */
+export function scanWorkspace(roots: string[], root = dataDir()): { added: number; updated: number; dropped: string[] } {
   const rootDir = root ?? dataDir();
   let self: string;
   try {
@@ -669,23 +784,12 @@ export function scanWorkspace(roots: string[], root = dataDir()): { added: numbe
   // contains it -- the DEEPEST matching root wins, so a nested root labels more specifically than its parent.
   // A file straight in a root takes that root's OWN dir name instead of being labelled by its own file name
   // (a home-root file -> the home's dir name). undefined when no resolved root claims the file.
-  const resolvedRoots = roots.map((r) => {
-    try {
-      return fs.realpathSync(r);
-    } catch {
-      return path.resolve(r);
-    }
-  });
+  const resolvedRoots = roots.map(canonical);
   const workspaceOf = (real: string): string | undefined => {
-    let best: { dir: string; rel: string } | null = null;
-    for (const rootReal of resolvedRoots) {
-      if (real === rootReal || !real.startsWith(rootReal + path.sep)) continue;
-      const rel = path.relative(rootReal, real);
-      if (!best || rootReal.length > best.dir.length) best = { dir: rootReal, rel };
-    }
-    if (!best) return undefined;
-    const segs = best.rel.split(path.sep);
-    return segs.length > 1 ? segs[0] : path.basename(best.dir);
+    const dir = ownerFolder(real, resolvedRoots);
+    if (!dir || dir === real) return undefined;
+    const segs = path.relative(dir, real).split(path.sep);
+    return segs.length > 1 ? segs[0] : path.basename(dir);
   };
 
   // What is ALREADY indexed, by its real path: refreshes target these; everything else in `found` is a candidate add.
@@ -716,17 +820,21 @@ export function scanWorkspace(roots: string[], root = dataDir()): { added: numbe
         updated++;
       }
       const ws = workspaceOf(real);
-      if (ws !== undefined && known.workspace !== ws) {
-        // BACKFILL on every rescan: entries indexed before the stamp (or under an older root layout) pick up their
-        // workspace label here -- counted as a refresh, exactly once.
-        known.workspace = ws;
+      const owner = ownerFolder(real, resolvedRoots);
+      if ((ws !== undefined && known.workspace !== ws) || (owner !== undefined && known.owner !== owner)) {
+        // BACKFILL on every rescan: entries indexed before the stamp, or without an owner (an earlier version's), or
+        // under an older root layout pick up their workspace label and owner here -- counted as a refresh, once.
+        if (ws !== undefined) known.workspace = ws;
+        if (owner !== undefined) known.owner = owner;
         known.updatedAt = Date.now();
         updated++;
       }
       continue; // refresh-and-continue: a rescan never re-indexes what it already has
     }
+    const owner = ownerFolder(real, resolvedRoots);
+    if (owner === undefined) continue; // reached through a link that leads out of every root: no agent's or project's
     try {
-      const doc = indexOne(real, rootDir, workspaceOf(real)); // its own atomic read-modify-write -- one entry per file
+      const doc = indexOne(real, rootDir, owner, workspaceOf(real)); // its own atomic read-modify-write -- one entry per file
       if (doc) {
         byReal.set(real, doc);
         added++;
@@ -737,75 +845,36 @@ export function scanWorkspace(roots: string[], root = dataDir()): { added: numbe
       throw err; // a real failure (index corrupt, disk full) IS a rescan failure
     }
   }
-  if (updated > 0) {
+  // What no root holds any more, while its file is there: out of the index (see above).
+  const outside = new Set<string>();
+  if (resolvedRoots.length) {
+    for (const doc of initial.docs) {
+      if (ownerFolder(doc.path, resolvedRoots) === undefined && fs.lstatSync(doc.path, { throwIfNoEntry: false })) outside.add(doc.docId);
+    }
+  }
+  if (updated > 0 || outside.size) {
     const index = readIndex(rootDir); // fresh: add-writes may have landed since `initial`
     let wrote = false;
     for (const [realPath, doc] of byReal) {
       const entry = index.docs.find((d) => d.path === realPath);
       if (
         !entry ||
-        (doc.mtimeMs === entry.mtimeMs && doc.sizeBytes === entry.sizeBytes && doc.workspace === entry.workspace)
+        (doc.mtimeMs === entry.mtimeMs && doc.sizeBytes === entry.sizeBytes && doc.workspace === entry.workspace && doc.owner === entry.owner)
       ) continue;
       entry.mtimeMs = doc.mtimeMs;
       entry.sizeBytes = doc.sizeBytes;
       entry.updatedAt = doc.updatedAt;
+      entry.owner = doc.owner;
       if (doc.workspace !== undefined) entry.workspace = doc.workspace;
+      wrote = true;
+    }
+    if (outside.size) {
+      index.docs = index.docs.filter((d) => !outside.has(d.docId));
       wrote = true;
     }
     if (wrote) writeIndex(rootDir, index);
   }
-  return { added, updated };
-}
-
-/** Import an existing .docx/.xlsx from an absolute path into the library (copy, never move -- the source stays). SUPERSEDED for the UI flow by scanWorkspace (in-place indexing).
- * The extension comes from the basename (case-insensitive) and anything else throws {code:"unsupported_format"};
- * a missing/unreadable source throws {code:"not_found"}; a file above 512 MiB throws {code:"too_large"} before
- * anything is copied. title defaults to the basename without its extension; owner is set by the caller (an
- * agent/project context passes its home chat, human imports stay ownerless). */
-export function importFile(absPath: string, meta: { title?: string; owner?: string | null }, root = dataDir()): DocMeta {
-  const rootDir = root ?? dataDir();
-  const base = path.basename(absPath);
-  const dot = base.lastIndexOf(".");
-  if (dot < 1) throw Object.assign(new Error(`${base} has no extension`), { code: "unsupported_format" });
-  const extRaw = base.slice(dot + 1).toLowerCase();
-  if (extRaw !== "docx" && extRaw !== "xlsx") throw Object.assign(new Error(`${base}: only .docx and .xlsx files can be imported`), { code: "unsupported_format" });
-  let st: fs.Stats;
-  try {
-    st = fs.statSync(absPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") throw notFound(`no such file ${absPath}`);
-    throw err;
-  }
-  if (!st.isFile()) throw Object.assign(new Error(`${absPath} is not a regular file`), { code: "unsupported_format" });
-  // Hard size cap (N2): importFile copies synchronously into the library and parses xlsx/docx later -- an uncapped
-  // source would also blow the ooxml reader's 1 GiB zip envelope. 512 MiB is far above any real Office file.
-  if (st.size > MAX_IMPORT_BYTES) throw Object.assign(new Error(`${absPath} is ${st.size} bytes: imports are capped at ${MAX_IMPORT_BYTES / (1024 * 1024)} MiB`), { code: "too_large" });
-  const title = meta.title ?? base.slice(0, dot);
-  assertSafeTitle(title); // the imported file lands in the library as <title>.<ext> -- same rules as created titles
-  const index = readIndex(rootDir);
-  const now = Date.now();
-  const doc: DocMeta = {
-    docId: `${slugify(title)}-${randomSuffix()}`, // fresh id -- imports are copies; the index's exists rule (title+type) is NOT re-checked for imports, so a same-titled import coexists
-    title,
-    ext: extRaw,
-    createdAt: now,
-    updatedAt: now,
-    sizeBytes: st.size,
-    mtimeMs: 0,
-    owner: meta.owner ?? null,
-    grants: [],
-    imported: true,
-  };
-  const dir = path.join(rootDir, "docs", doc.docId);
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${title}.${extRaw}`);
-  fs.copyFileSync(absPath, file);
-  const dst = fs.statSync(file);
-  doc.sizeBytes = dst.size;
-  doc.mtimeMs = dst.mtimeMs;
-  index.docs.push(doc);
-  writeIndex(rootDir, index);
-  return { ...doc };
+  return { added, updated, dropped: [...outside] };
 }
 
 /** Copy a document OUT of the library to destAbsDir (created if missing) as <title>.<ext>; returns the absolute
@@ -816,7 +885,7 @@ export function exportDoc(docId: string, destAbsDir: string, root = dataDir()): 
   if (!doc) throw notFound(`no document with id ${docId}`);
   fs.mkdirSync(destAbsDir, { recursive: true });
   const dest = path.join(destAbsDir, `${doc.title}.${doc.ext}`);
-  fs.writeFileSync(dest, readDoc(doc, rootDir)); // never through a link put in the file's place
+  fs.writeFileSync(dest, readDoc(doc)); // never through a link put in the file's place
   return path.resolve(dest);
 }
 
@@ -833,7 +902,7 @@ function plainFile(doc: DocMeta, file: string): fs.Stats {
     throw notFound(`no file for ${doc.docId}`);
   }
   if (!st.isFile()) throw Object.assign(new Error(`${file} is not a plain file any more (a link or a folder took its name)`), { code: "invalid" });
-  if (doc.path && canonical(path.dirname(file)) !== path.dirname(file)) {
+  if (canonical(path.dirname(file)) !== path.dirname(file)) {
     throw Object.assign(new Error(`the folder of ${file} leads elsewhere now (a link took its place)`), { code: "invalid" });
   }
   return st;
@@ -841,8 +910,8 @@ function plainFile(doc: DocMeta, file: string): fs.Stats {
 
 /** A document's bytes, from its own file and never through a link (plainFile, then opened without following one), so
  * that an agent that put a link in its file's place cannot have the portal hand out what the link leads to. */
-export function readDoc(doc: DocMeta, root = dataDir()): Buffer {
-  const file = docPath(doc, root);
+export function readDoc(doc: DocMeta): Buffer {
+  const file = doc.path;
   plainFile(doc, file);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -907,31 +976,26 @@ function writeNewKeeping(file: string, bytes: Buffer, was?: fs.Stats, newer = fa
 
 /**
  * A save the revision gate refused, kept as a document of its own rather than lost: "<title> (conflict <date time>)",
- * beside a scanned document in its folder (as its file is: owner, group and mode) and in the library for a library
- * document, with the original's owner and grants, so the same agents see it.
+ * beside the document in its folder (as its file is: owner, group and mode), with the original's owner and grants, so
+ * the same agents see it.
  */
 export function saveConflictCopy(doc: DocMeta, bytes: Buffer, root = dataDir()): DocMeta {
   const index = readIndex(root);
   const stamp = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", ".");
-  const folder = doc.path ? path.dirname(doc.path) : null;
-  const taken = (title: string) =>
-    index.docs.some((d) => d.title === title && d.ext === doc.ext) || (folder !== null && fs.existsSync(path.join(folder, `${title}.${doc.ext}`)));
+  const folder = path.dirname(doc.path);
+  const taken = (title: string) => titleTaken(index, title, doc.ext) || fs.existsSync(path.join(folder, `${title}.${doc.ext}`));
   let title = "";
   for (let n = 1; !title || taken(title); n++) {
     const tag = ` (conflict ${stamp}${n > 1 ? ` ${n}` : ""})`;
     title = doc.title.slice(0, 200 - tag.length) + tag;
   }
   const now = Date.now();
-  const copy: DocMeta = { docId: freshDocId(index.docs, title), title, ext: doc.ext, createdAt: now, updatedAt: now, sizeBytes: 0, mtimeMs: 0, owner: doc.owner, grants: doc.grants.map((g) => ({ ...g })), imported: true };
-  if (doc.path && folder !== null) {
-    const was = plainFile(doc, doc.path);
-    const file = path.join(folder, `${title}.${doc.ext}`);
-    writeNewKeeping(file, bytes, was);
-    const st = fs.statSync(file);
-    Object.assign(copy, { path: file, sizeBytes: st.size, mtimeMs: st.mtimeMs, ...(doc.workspace !== undefined ? { workspace: doc.workspace } : {}) });
-  } else {
-    storeDoc(copy, bytes, root);
-  }
+  const file = path.join(folder, `${title}.${doc.ext}`);
+  const copy: DocMeta = { docId: freshDocId(index.docs, title), title, ext: doc.ext, createdAt: now, updatedAt: now, sizeBytes: 0, mtimeMs: 0, owner: doc.owner, grants: doc.grants.map((g) => ({ ...g })), imported: true, path: file };
+  const was = plainFile(doc, doc.path);
+  writeNewKeeping(file, bytes, was);
+  const st = fs.statSync(file);
+  Object.assign(copy, { sizeBytes: st.size, mtimeMs: st.mtimeMs, ...(doc.workspace !== undefined ? { workspace: doc.workspace } : {}) });
   index.docs.push(copy);
   writeIndex(root, index);
   return { ...copy };
@@ -946,7 +1010,7 @@ export function saveConflictCopy(doc: DocMeta, bytes: Buffer, root = dataDir()):
  * history revision under that number. Sync on purpose: no zip is involved here, only a byte copy. */
 export function persistBytes(doc: DocMeta, bytes: Buffer, root = dataDir()): { mtimeMs: number } {
   const rootDir = root ?? dataDir();
-  const file = docPath(doc, rootDir);
+  const file = doc.path;
   const st = plainFile(doc, file);
   if (st.mtimeMs !== doc.mtimeMs) {
     throw Object.assign(new Error("revision_mismatch: the document changed since this session opened it"), { code: "revision_mismatch", currentMtimeMs: st.mtimeMs });

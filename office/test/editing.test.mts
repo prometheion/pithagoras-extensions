@@ -17,6 +17,7 @@ import { signJwt, verifyJwt } from "../src/jwt";
 import { configure, handleCallback, keyStanding, makeKey, type CallbackState } from "../src/callback";
 import { saveNow } from "../src/editing";
 import { createDoc, getDoc, listDocs, refresh, templateDocx } from "../src/store";
+import { homeIn } from "./homes.mts";
 import { parseDocx, readPart, rewriteZip } from "../src/ooxml";
 import * as live from "../src/live";
 
@@ -143,9 +144,9 @@ async function world(answer: (asked: Forcesave) => Answer) {
   const ds = await standInDs(answer);
   servers.push(ds);
   configure({ getState: () => DS_STATE, getSecret: () => SECRET, getOrigin: async () => ds.origin, root, retryDelaysMs: [], log: () => {} });
-  const doc = await createDoc({ title: "Open", type: "word", owner: "/f/atlas" }, root);
+  const doc = await createDoc({ title: "Open", type: "word", folder: homeIn(root, "atlas") }, root);
   // An older revision than now, so that any write is a new one.
-  const file = path.join(root, "docs", doc.docId, "Open.docx");
+  const file = doc.path;
   fs.utimesSync(file, new Date(Date.now() - 5000), new Date(Date.now() - 5000));
   const opened = refresh(doc.docId, root)!;
   const key = makeKey(doc.docId, opened.mtimeMs);

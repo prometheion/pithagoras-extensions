@@ -53,7 +53,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === `${BASE}/editor-state`) return send(200, "application/json", JSON.stringify({ standing: url.searchParams.get("key") === routes.key ? "current" : routes.standing }));
   if (url.pathname === `${BASE}/state`) {
-    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "x", container: { state: "running" }, docs: [{ docId: "d1", title: "Doc", ext: "docx", createdAt: 0, updatedAt: 0, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] }], locks: { d1: [] } }));
+    return send(200, "application/json", JSON.stringify({ enabled: true, imageTag: "x", container: { state: "running" }, docs: [{ docId: "d1", title: "Doc", ext: "docx", createdAt: 0, updatedAt: 0, sizeBytes: 1, mtimeMs: 1, owner: "/agents/home", path: "/agents/home/Doc.docx", grants: [] }], locks: { d1: [] } }));
   }
   send(404, "application/json", "{}");
 });

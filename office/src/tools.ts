@@ -1,7 +1,6 @@
 /**
  * The agent's office tools: list, create, read, edit and list the comments of the documents the agent's or project's
- * folder sees (store.visibleTo: what it made or was granted, the scanned documents in its own folder, and the person's
- * library documents), in the style of the portal's document tools -- named by id, coded error prefixes
+ * folder sees (store.visibleTo: what it owns or was granted, and the documents in its own folder), in the style of the portal's document tools -- named by id, coded error prefixes
  * ("error:<code> <message>").
  *
  * Ownership scope: `registerTools` walks every chat through portal.chats.extend; for a chat it resolves the
@@ -17,7 +16,7 @@
  * of the editor. Where the person stopped Office, office_read reads the saved file and office_edit is refused: there
  * is one way to write.
  *
- * A scanned document is opened for the agent only where the agent could read its file itself (portal.files.open, as
+ * A document is opened for the agent only where the agent could read its file itself (portal.files.open, as
  * the chat's agent: with the sandbox on, a file the agent could not read is refused, and a link is not followed), and
  * in edit mode only where it could change it (portal.files.identity); otherwise its editor opens in view mode and
  * office_edit is refused (`read_only`).
@@ -33,7 +32,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
-import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, readDoc, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
+import { canonical, createDoc, docsForHome, MAX_IMPORT_BYTES, refresh, refreshAll, tooLarge, type DocMeta } from "./store";
 import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
@@ -56,8 +55,8 @@ export const LABELS: Record<string, string> = {
 /**
  * What the guard holds each tool to. What they return is outside content: the text and comments of files found in
  * the agents' folders, written by anybody, and their titles (file names). None of them is the shape of one of the
- * guard's rules after a suspected prompt injection (`acts`): office_create makes a blank document in the extension's
- * own library, and office_edit changes text in a document of the agent's own scope through its editor, which runs
+ * guard's rules after a suspected prompt injection (`acts`): office_create makes a blank document in the agent's own
+ * folder (its home, or its project's), where it writes anyway, and office_edit changes text in a document of the agent's own scope through its editor, which runs
  * nothing, carries nothing out and lands nowhere a later run reads as instructions.
  */
 export const GUARDS: Record<string, { outside: boolean; acts: string[] }> = {
@@ -93,11 +92,11 @@ export type ToolsDeps = {
   chatFolder?: (chatId: string) => string;
   /** The folders the agents work in. Default: () => portal().folders.list(). */
   folders?: () => ToolsFolderInfo[];
-  /** A scanned document's file, opened for `chatId`'s agent as it could open it itself (`file` is the document's own
+  /** A document's file, opened for `chatId`'s agent as it could open it itself (`file` is the document's own
    * path): its descriptor, which the caller closes, and its size. Default: portal().files.open with likeParent, the
    * chat, and no link followed. */
   openFile?: (file: string, chatId: string) => { fd: number; size: number };
-  /** Throws where `chatId`'s agent could not change the scanned document `file` itself: its folder is not one the agent
+  /** Throws where `chatId`'s agent could not change the document `file` itself: its folder is not one the agent
    * may write in, as the kernel would tell it. Default: portal().files.identity of the folder with likeParent and the
    * chat, which asks for that. */
   mayWrite?: (file: string, chatId: string) => void;
@@ -138,7 +137,7 @@ function folders(): ToolsFolderInfo[] {
 function seats(): ToolsSeat {
   return cfg.seat ?? seat;
 }
-/** The file of a scanned document opened as the agent of `chatId` would open it: refused where that agent could not
+/** The file of a document opened as the agent of `chatId` would open it: refused where that agent could not
  * read it, and never through a link. */
 function openAsAgent(file: string, chatId: string): { fd: number; size: number } {
   return (cfg.openFile ?? ((f: string, c: string) => portal().files.open(path.dirname(f), path.basename(f), { likeParent: true, chats: [c], direct: true })))(file, chatId);
@@ -163,7 +162,7 @@ function readAsAgent(file: string, chatId: string): Buffer {
     fs.closeSync(opened.fd);
   }
 }
-/** Whether the agent of `chatId` could change the scanned document `file` itself: the portal (and the Document
+/** Whether the agent of `chatId` could change the document `file` itself: the portal (and the Document
  * Server's save) writes it with its own rights, which may be root's. */
 function mayWrite(file: string, chatId: string): boolean {
   try {
@@ -289,12 +288,11 @@ const text = (content: string, details?: unknown) => ({ content: [{ type: "text"
  * office_read's sibling office_comments truncate at this length with an explicit marker. */
 const MAX_READ_CHARS = 200_000;
 
-/** A doc's saved bytes, for the agent of `chatId`: a scanned doc's own file as that agent could read it
- * (portal.files), a library doc's from the extension's own folder, which no agent can write; a not_found refusal
- * where it is gone. */
+/** A doc's saved bytes, for the agent of `chatId`: its own file as that agent could read it (portal.files); a
+ * not_found refusal where it is gone. */
 function readBytes(doc: DocMeta, chatId: string): Buffer {
   try {
-    return doc.path ? readAsAgent(doc.path, chatId) : readDoc(doc, rootDir());
+    return readAsAgent(doc.path, chatId);
   } catch (e) {
     throw unreadable(doc, e);
   }
@@ -309,10 +307,9 @@ function unreadable(doc: DocMeta, e: unknown): unknown {
   return e;
 }
 
-/** A scanned document's file opened as the agent would and closed again: where it could not read it, the Document
- * Server (which reads as the portal) is never handed it. */
+/** A document's file opened as the agent would and closed again: where it could not read it, the Document Server
+ * (which reads as the portal) is never handed it. */
 function assertMayRead(doc: DocMeta, chatId: string): void {
-  if (!doc.path) return;
   let opened: { fd: number; size: number };
   try {
     opened = openAsAgent(doc.path, chatId);
@@ -422,7 +419,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_list",
     label: LABELS.office_list,
     guard: GUARDS.office_list,
-    description: "List the office documents of your library: every Word (.docx) and spreadsheet (.xlsx) document in your folder, the ones you made or were granted (by being mentioned in one of its comments), and the ones the person made in the library. Each line has the id, title, format, owner, how many grants it holds, its revision, how many people are editing it right now, and which agents have it open.",
+    description: "List the office documents of your library: every Word (.docx) and spreadsheet (.xlsx) document in your folder (yours), and the ones you were granted (by being mentioned in one of its comments). Each line has the id, title, format, owner, how many grants it holds, its revision, how many people are editing it right now, and which agents have it open.",
     promptSnippet: "List the office documents you own or were granted",
     parameters: {
       type: "object",
@@ -435,7 +432,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const lines = docs.map((doc) => {
         const users = usersOf(doc.docId);
         const agents = agentsOf(doc.docId);
-        return `- ${doc.docId}  "${doc.title}"  ${doc.ext}  owner ${doc.owner === home ? "you" : doc.owner ?? "(nobody)"}  ${doc.grants.length} grant${doc.grants.length === 1 ? "" : "s"}  revision ${doc.mtimeMs}${users.length ? `  ${users.length} editing now` : ""}${agents.length ? `  agents in it: ${agents.map((a) => a.name).join(", ")}` : ""}`;
+        return `- ${doc.docId}  "${doc.title}"  ${doc.ext}  owner ${doc.owner === home ? "you" : doc.owner}  ${doc.grants.length} grant${doc.grants.length === 1 ? "" : "s"}  revision ${doc.mtimeMs}${users.length ? `  ${users.length} editing now` : ""}${agents.length ? `  agents in it: ${agents.map((a) => a.name).join(", ")}` : ""}`;
       });
       return text(`${docs.length} document${docs.length === 1 ? "" : "s"}:\n${lines.join("\n")}`, {
         action: "list",
@@ -449,7 +446,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_create",
     label: LABELS.office_create,
     guard: GUARDS.office_create,
-    description: "Make a new blank office document in the shared library: type \"word\" (a .docx) or \"cell\" (an .xlsx spreadsheet), both starting empty; fill it with office_edit, or the person opens it in the editor. It is owned by you, so every chat of your home sees it; other agents get access only when it mentions them in a comment. A title+type pair already taken is refused.",
+    description: "Make a new blank office document in your folder (your home, or the project's folder): type \"word\" (a .docx) or \"cell\" (an .xlsx spreadsheet), both starting empty, as \"<title>.docx\" or \"<title>.xlsx\"; fill it with office_edit, or the person opens it in the editor. It is yours, so every chat of your home sees it; other agents get access only when it mentions them in a comment. A title+type pair already taken, or a file of that name in your folder, is refused.",
     promptSnippet: "Create a blank Word or spreadsheet document",
     executionMode: "sequential",
     parameters: {
@@ -464,9 +461,10 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const t = typeof title === "string" ? title.trim() : "";
       if (!t) throw new Refusal("invalid", "A document needs a title");
       if (type !== "word" && type !== "cell") throw new Refusal("unsupported_format", `type is \"word\" or \"cell\" (got ${typeof type === "string" ? `"${type}"` : String(type)})`);
-      const doc = await createDoc({ title: t, type, owner: home, createdBy: "agent" }, rootDir()); // throws {code:"exists"} on a duplicate title+type
-      record({ subject: doc.title, reason: `office_create: new ${doc.ext} document ${doc.docId}, owner ${home}`, chatId });
-      return text(`Created "${doc.title}" (id ${doc.docId}, ${doc.ext}, revision ${doc.mtimeMs}). Fill it with office_edit.`, { action: "create", id: doc.docId, title: doc.title, ext: doc.ext, mtimeMs: doc.mtimeMs, owner: doc.owner });
+      // In the chat's own folder, which the tools are only there for: an agent's home or a project's.
+      const doc = await createDoc({ title: t, type, folder: home, createdBy: "agent" }, rootDir()); // throws {code:"exists"} on a duplicate title+type or file
+      record({ subject: doc.title, reason: `office_create: new ${doc.ext} document ${doc.docId} at ${doc.path}`, chatId });
+      return text(`Created "${doc.title}" (id ${doc.docId}, ${doc.ext}, revision ${doc.mtimeMs}) at ${doc.path}. Fill it with office_edit.`, { action: "create", id: doc.docId, title: doc.title, ext: doc.ext, mtimeMs: doc.mtimeMs, owner: doc.owner, path: doc.path });
     }),
   });
 
@@ -492,7 +490,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       let said = "";
       let live = false;
       if (state === "running") {
-        const mode = doc.path && !mayWrite(doc.path, chatId) ? "view" : "edit";
+        const mode = mayWrite(doc.path, chatId) ? "edit" : "view";
         const job = doc.ext === "docx" ? { kind: "word.read", args: {} } : { kind: "cell.read", args: sheet ? { sheet } : {} };
         try {
           const read = await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, job, { signal }));
@@ -560,7 +558,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const job: EditJob = editJob(doc.ext, ops);
       assertMayRead(doc, chatId);
       // Written with the portal's rights (and the Document Server's save): only where the agent could have written it.
-      if (doc.path && !mayWrite(doc.path, chatId)) throw new Refusal("read_only", `"${doc.title}" is not a file your agent may change: you can read it, not edit it`);
+      if (!mayWrite(doc.path, chatId)) throw new Refusal("read_only", `"${doc.title}" is not a file your agent may change: you can read it, not edit it`);
       const state = await officeState();
       if (state === "stopped") throw new Refusal("office_stopped", `Office is stopped, so "${doc.title}" cannot be edited: ask the person to start it in Settings → Office. office_read reads the saved file meanwhile.`);
       if (state === "starting") throw new Refusal("ds_starting", "Office is still starting (its Document Server sets itself up after its first start, about two minutes): try again in a moment.");
@@ -668,7 +666,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       };
     }
     if (seats().keyOf(home, doc.docId) && (await officeState()) === "running") {
-      const mode = doc.path && !mayWrite(doc.path, chatId) ? "view" : "edit";
+      const mode = mayWrite(doc.path, chatId) ? "edit" : "view";
       const read = (await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, { kind: doc.ext === "docx" ? "word.comments" : "cell.comments", args: {} }, { signal }))) as {
         comments?: { guid?: string; sessionId?: string; author: string; userId: string; text: string; solved: boolean; quote: string; replies: { author: string; text: string }[] }[];
       };

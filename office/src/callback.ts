@@ -638,7 +638,7 @@ async function persistCore(log: (line: string) => void, cfg: CallbackConfig, doc
     // the file holds already is no conflict.
     let current: Buffer | undefined;
     try {
-      current = store.readDoc(meta, rootDir());
+      current = store.readDoc(meta);
     } catch {
       current = undefined;
     }

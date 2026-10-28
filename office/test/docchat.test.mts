@@ -11,6 +11,7 @@ import path from "node:path";
 import { setImmediate as tick, setTimeout as delay } from "node:timers/promises";
 import * as docchat from "../src/docchat";
 import { createDoc, getDoc, rewriteZipFor } from "./docchat-helpers.mts";
+import { fakePlaces } from "./homes.mts";
 
 const FOLDERS = [
   { path: "/f/aegis", name: "Aegis", kind: "agent" as const },
@@ -114,7 +115,9 @@ const settle = async () => {
   for (let i = 0; i < 40; i++) await tick();
 };
 const ui = (id: string, kind: "comment" | "reply" | "edit" | "editReply" | "resolve" | "chat", guid: string | undefined, text: string, more: Record<string, unknown> = {}): docchat.PageEvent => ({ type: "ui", id, kind, ...(guid ? { guid } : {}), text, ...more }) as docchat.PageEvent;
-const word = async (owner: string | null = "/f/aegis") => (await createDoc({ title: `Doc ${Math.random().toString(36).slice(2, 8)}`, type: "word", owner }, root)).docId;
+// The folders here are names only: each document is made in a folder of the test's own that stands for its owner's.
+fakePlaces();
+const word = async (owner = "/f/aegis") => (await createDoc({ title: `Doc ${Math.random().toString(36).slice(2, 8)}`, type: "word", folder: owner }, root)).docId;
 const childOf = (parent: string) => chats.filter((c) => c.parent === parent);
 /** A spreadsheet's threaded comment id, as the editor names one. */
 const SHEET_GUID = "{CEDAB90E-0000-4000-8000-000000000001}";
@@ -259,7 +262,7 @@ test("an answer after a suspected injection is not posted; a failed run says so 
 
 test("a spreadsheet's answer is found by the comment's author, text and time the pages reported, once the comment is a few seconds old", async () => {
   Object.assign(docchat.postTimings, { freshMs: 300 });
-  const docId = (await createDoc({ title: "Sheet", type: "cell", owner: "/f/aegis" }, root)).docId;
+  const docId = (await createDoc({ title: "Sheet", type: "cell", folder: "/f/aegis" }, root)).docId;
   docchat.report(docId, "k", [{ type: "comment", guid: SHEET_GUID, sessionId: "sheet5_x", userId: "portal-user", text: "Bitte prüfen +Aegis", time: 1793108364144 }, ui("u1", "comment", SHEET_GUID, "Bitte prüfen +Aegis")]);
   await settle();
   prompts[0].resolve({ status: "done", answer: "Geprüft." });
@@ -358,7 +361,7 @@ test("a save removes only threads an earlier saved file had, after the grace; a 
   assert.equal(removed.length, 1);
 });
 
-test("the editor's chat: the first message makes one internal chat of the document's owner, messages during its run come together as the next prompt, the answer is posted in chunks of 2,048 characters, at most the limit; nobody answers where nobody owns the document", async () => {
+test("the editor's chat: the first message makes one internal chat of the document's owner, messages during its run come together as the next prompt, the answer is posted in chunks of 2,048 characters, at most the limit", async () => {
   limits = { ...limits, chatMessages: 2 };
   const docId = await word();
   docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Hallo, fasse zusammen")]);
@@ -378,11 +381,6 @@ test("the editor's chat: the first message makes one internal chat of the docume
   assert.equal(sent.length, 2);
   assert.equal(sent[0].job.args.text.length, 2048);
   assert.match(sent[1].job.args.text, / \(…\)$/);
-  const ownerless = await word(null);
-  docchat.report(ownerless, "key-b", [ui("c4", "chat", undefined, "Hallo?")]);
-  await settle();
-  assert.equal(prompts.length, 2);
-  assert.deepEqual(docchat.statesOf(ownerless), [{ kind: "chat", label: "", state: "nobody" }]);
 });
 
 test("the editor's chat ends after the last person left (only agents in its session, or its end), unless a person comes back in time; a Document Server started again ends it at once", async () => {
@@ -782,7 +780,7 @@ test("an agent that may only view answers the thread and the editor's chat from 
 test("two cell comments of the same author and text: an answer is read back on the comment its reply went on, and posted once", async (t) => {
   Object.assign(docchat.postTimings, { repostMs: 10 });
   t.after(() => void Object.assign(docchat.postTimings, { repostMs: 5_000 }));
-  const docId = (await createDoc({ title: "Sheet", type: "cell", owner: "/f/aegis" }, root)).docId;
+  const docId = (await createDoc({ title: "Sheet", type: "cell", folder: "/f/aegis" }, root)).docId;
   const [g1, g2] = [SHEET_GUID, SHEET_GUID.replace("0001}", "0002}")];
   seatWith((job) => {
     if (job.kind === "cell.reply") {

@@ -37,12 +37,14 @@ const FAKE_API = `window.DocsAPI = { DocEditor: function (id, config) {
   return { destroyEditor() { log.push(["destroyed", config.document.key]); frame.remove(); } };
 } };`;
 
-const DOC = (docId: string, title: string, ext: "docx" | "xlsx") => ({ docId, title, ext, createdAt: 0, updatedAt: 0, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] });
+const DOC = (docId: string, title: string, ext: "docx" | "xlsx") => ({ docId, title, ext, createdAt: 0, updatedAt: 0, sizeBytes: 1, mtimeMs: 1, owner: "/agents/home", ownerName: "Home", path: `/agents/home/${title}.${ext}`, grants: [] });
 const DOCS = [DOC("d1", "Plan", "docx"), DOC("d2", "Budget", "xlsx")];
 /** Documents the server half has made since the page last asked (an agent's new one). */
 const made: ReturnType<typeof DOC>[] = [];
 /** Who the server half says is in "Plan". */
 let editing: { id: string; name: string }[] = [];
+/** What the page asked a new document with (POST /documents). */
+const asked: Record<string, unknown>[] = [];
 
 let pageJs = "";
 const server = http.createServer(async (req, res) => {
@@ -64,6 +66,12 @@ const server = http.createServer(async (req, res) => {
     return send(200, "application/json", JSON.stringify({ document: { key: `key-${doc}`, fileType: "docx" }, token: "t", apiJs: "/fake-api.js" }));
   }
   if (url.pathname === `${BASE}/editor-state`) return send(200, "application/json", JSON.stringify({ standing: "current" }));
+  if (url.pathname === `${BASE}/documents` && req.method === "POST") {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    asked.push(JSON.parse(raw));
+    return send(201, "application/json", JSON.stringify(DOC("d9", "New", "docx")));
+  }
   send(404, "application/json", "{}");
 });
 let origin = "";
@@ -243,5 +251,24 @@ test("a document an agent just made opens from its card at once, never said to b
   await cards.nth(1).click();
   await panel(page).getByText("This document is no longer in the library.", { exact: false }).waitFor({ timeout: 3_000 });
   made.length = 0;
+  await page.context().close();
+});
+
+test("a new document: the Office tab's asks for none but a title and kind (the server half makes it in the default agent's home, and says so), the panel's names its chat; every row says whose it is", async () => {
+  asked.length = 0;
+  const page = await chatPage([], "?tab=");
+  const tab = page.locator("#tab");
+  await tab.locator(".po-row, li", { hasText: "Plan" }).first().waitFor({ timeout: 10_000 });
+  assert.equal(await tab.getByText("owned · Home", { exact: true }).count(), 2, "each row names its owner, as the person knows it");
+  assert.equal(await tab.getByText("unowned").count(), 0);
+  await tab.getByLabel("Title of a new document").fill("Minutes");
+  const make = tab.getByRole("button", { name: "New document" });
+  assert.equal(await make.getAttribute("title"), "Made in the default agent's home");
+  await make.click();
+  await page.getByRole("button", { name: "Office panel button" }).click();
+  await panel(page).getByLabel("New document title").fill("Notes");
+  await panel(page).getByRole("button", { name: "Add" }).click();
+  for (let i = 0; i < 100 && asked.length < 2; i++) await page.waitForTimeout(50);
+  assert.deepEqual(asked, [{ title: "Minutes", type: "word" }, { title: "Notes", type: "word", chat: "chat-1" }]);
   await page.context().close();
 });

@@ -413,8 +413,8 @@ export function migrateLibrary(folders: string[], defaultHome: string | undefine
       for (let n = 2; ; n++) {
         const file = path.join(owner, `${title}.${legacy.ext}`);
         const there = fs.lstatSync(file, { throwIfNoEntry: false });
-        if (there?.isFile() && there.size === bytes.length && !titleTaken(index, title, legacy.ext, legacy.docId) && !index.docs.some((d) => d.path === canonical(file)) && fs.readFileSync(file).equals(bytes)) {
-          adopt = canonical(file);
+        if (there?.isFile() && there.size === bytes.length && !titleTaken(index, title, legacy.ext, legacy.docId) && !index.docs.some((d) => d.path === file) && fs.readFileSync(file).equals(bytes)) {
+          adopt = file; // as named, never resolved through a link put there since (placeDoc)
           break;
         }
         if (!there && !titleTaken(index, title, legacy.ext, legacy.docId)) break;
@@ -467,11 +467,17 @@ function assertSafeTitle(title: string): void {
 }
 
 /** `bytes` put into `folder` as `<title>.<ext>` (placeFile), and the entry's file, title, size and revision taken from
- * the file as it was made: where something took the name meanwhile, the portal's way numbers it. Sync on purpose: the
- * create and move paths must not await between readIndex and writeIndex. */
+ * the file as it was made: where something took the name meanwhile, the portal's way numbers it. The file is taken at
+ * the name it was made under, never resolved through a link: the folder's agent may put a link in its place before
+ * the store looks, and the entry would then name the file it leads to, in another agent's folder, which the portal
+ * reads and writes with its own rights. Such a link is refused ({code:"invalid"}); one put there later is refused by
+ * every read and write of the file (plainFile). Sync on purpose: the create and move paths must not await between
+ * readIndex and writeIndex. */
 function placeDoc(doc: DocMeta, folder: string, bytes: Buffer): DocMeta {
-  const file = canonical(placeFile(folder, `${doc.title}.${doc.ext}`, bytes));
-  const st = fs.statSync(file);
+  const placed = placeFile(folder, `${doc.title}.${doc.ext}`, bytes);
+  const file = path.join(canonical(path.dirname(placed)), path.basename(placed));
+  const st = fs.lstatSync(file);
+  if (!st.isFile()) throw Object.assign(new Error(`${file} is not a plain file (a link or a folder took its name as it was made)`), { code: "invalid" });
   doc.path = file;
   doc.title = path.basename(file).slice(0, -(doc.ext.length + 1));
   doc.sizeBytes = st.size;

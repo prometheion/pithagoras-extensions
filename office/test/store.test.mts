@@ -114,6 +114,31 @@ test("createDoc: the file is put into its folder through the store's seam (the p
   }
 });
 
+test("createDoc: a link the agent put in the new file's place (between its making and the index) is refused, never followed to another folder's file", async () => {
+  const root = tmpRoot();
+  const mine = homeIn(root, "b");
+  const theirs = homeIn(root, "a");
+  const secret = path.join(theirs, "secret.docx");
+  fs.writeFileSync(secret, "agent A's own");
+  configureStore({
+    place: (folder, name, bytes) => {
+      const file = path.join(folder, name);
+      fs.writeFileSync(file, bytes, { flag: "wx" });
+      // The agent of the folder swaps the file for a link to another agent's file before the store looks at it.
+      fs.rmSync(file);
+      fs.symlinkSync(secret, file);
+      return file;
+    },
+  });
+  try {
+    await assert.rejects(createDoc({ title: "Mine", type: "word", folder: mine }, root), (err: NodeJS.ErrnoException) => err.code === "invalid");
+    assert.deepEqual(listDocs(root), [], "nothing in the index, and nothing names agent A's file");
+    assert.equal(fs.readFileSync(secret, "utf8"), "agent A's own");
+  } finally {
+    configureStore({ place: (folder, name, bytes) => (fs.writeFileSync(path.join(folder, name), bytes, { flag: "wx" }), path.join(folder, name)) });
+  }
+});
+
 test("listDocs: titles ascending; getDoc miss -> null", async () => {
   const root = tmpRoot();
   const banana = await createDoc({ title: "Banana Plan", type: "word", folder: homeIn(root) }, root);

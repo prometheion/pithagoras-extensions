@@ -297,9 +297,10 @@ test("frame function, Word: a large page is made smaller to 1,024 px on its long
  * columns, 8 rows in view at 100 %); looking up a cell out of view scrolls so that it is in the middle (as far as the
  * sheet's start allows). At 75 %, cells are 8 x 4 behind headers of 5 x 3 (12 columns in view).
  */
-function sheetEditor() {
+function sheetEditor(frozenRows = 0) {
   const did: string[] = [];
-  const view = { col: 0, row: 0, zoom: 1, active: [0, 0] as [number, number], sheet: 0 };
+  // `row`: the first row of the part that scrolls (below the frozen rows).
+  const view = { col: 0, row: frozenRows, zoom: 1, active: [0, 0] as [number, number], sheet: 0 };
   // Whole pixels, as the editor draws them.
   const size = () => (view.zoom === 1 ? { w: 10, h: 5, hx: 6, hy: 4 } : { w: 8, h: 4, hx: 5, hy: 3 });
   const cols = () => Math.floor((106 - size().hx) / size().w);
@@ -314,12 +315,15 @@ function sheetEditor() {
       const c = [...m[1]].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
       const r = Number(m[2]) - 1;
       if (c < view.col || c >= view.col + cols()) view.col = Math.max(0, c - Math.floor(cols() / 2));
-      if (r < view.row || r >= view.row + rows()) view.row = Math.max(0, r - Math.floor(rows() / 2));
+      // Frozen rows are always in view. DS 10.0 does not scroll back to the first row after them: it stays out of view.
+      const scrolling = rows() - frozenRows;
+      if (r >= frozenRows && r !== (frozenRows || -1) && (r < view.row || r >= view.row + scrolling)) view.row = Math.max(frozenRows, r - Math.floor(scrolling / 2));
       view.active = [c, r];
     },
     asc_getActiveCellCoord: () => {
       const s = size();
-      return { asc_getX: () => s.hx + (view.active[0] - view.col) * s.w, asc_getY: () => s.hy + (view.active[1] - view.row) * s.h, asc_getWidth: () => s.w, asc_getHeight: () => s.h };
+      const [c, r] = view.active;
+      return { asc_getX: () => s.hx + (c - view.col) * s.w, asc_getY: () => s.hy + (r < frozenRows ? r : frozenRows + r - view.row) * s.h, asc_getWidth: () => s.w, asc_getHeight: () => s.h };
     },
   };
   // The headers' strips in a grey of their own up to their border; the grid white.
@@ -388,4 +392,16 @@ test("frame function: a second picture of the same editor ends the first; the de
   const late = frameWindow({ editor: { ...editor, getCountPages: () => n++ } }, { id_viewer: viewer });
   assert.deepEqual(await frameFn(late.window, { kind: "word", page: 1, pages: 99, until: Date.now() + 100 }), { error: { code: "timeout", message: "the picture took too long" } });
   assert.equal(late.drawn.length, 0);
+});
+
+test("frame function, sheets: a range across frozen panes, with the view scrolled far down, is looked at from the cell after the first one after the panes, which the editor scrolls back to", async () => {
+  // Rows 1-2 frozen; the view scrolled to rows 30 and on; the range A2:B5 across the panes.
+  const s = sheetEditor(2);
+  s.view.row = 30;
+  const w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
+  const out = await frameFn(w.window, { kind: "cell", index: 0, c1: 0, r1: 1, c2: 1, r2: 4, centre: [0, 2], away: [0, 304], zoom: 1, frozen: [0, 2] });
+  assert.equal(out.zoom, 1);
+  assert.deepEqual([out.width, out.height], [6 + 20, 4 + 20]);
+  assert.equal(s.view.row, 2, "the part that scrolls is back at its start");
+  assert.deepEqual(w.drawn.filter((d) => d.from === s.ws)[3].args.slice(0, 4), [6, 9, 20, 20], "rows 2 to 5 as they join below the panes");
 });

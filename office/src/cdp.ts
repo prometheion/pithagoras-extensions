@@ -172,12 +172,15 @@ export const FRAME_FN = `async function (t) {
       while (y < cv.height && pixel(box.x + 1, y) === bg) y++;
       return { x: x + 1, y: y + 1 };
     };
-    // In view as the editor stands, else from the first cell after frozen panes the range crosses (where the panes and
+    // In view as the editor stands, else from a cell just after frozen panes the range crosses (where the panes and
     // the rest join), else with its centre found from a cell far from it (the editor centres a cell it scrolls to).
     var place = async function () {
       for (var attempt = 0; attempt < 2; attempt++) {
         if (attempt === 1) {
-          if (t.frozen) at(t.frozen[0], t.frozen[1]);
+          // The cell after the first one after the panes: DS 10.0 does not scroll back to the first one itself (its
+          // place is answered as above the view, and the view stays). Near the sheet's start, the editor's centring
+          // puts the view where the panes and the rest join.
+          if (t.frozen) at(t.frozen[0] + 1, t.frozen[1] + 1);
           else { at(t.away[0], t.away[1]); await drawn(); at(t.centre[0], t.centre[1]); }
         }
         await drawn();

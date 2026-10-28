@@ -902,11 +902,11 @@ async function run(PITHAGORAS: string): Promise<void> {
     });
     const settled = last.out.details.pages as number;
     assert.ok(settled > pages, `the edit added a page (${pages} -> ${settled})`);
-    assert.match(last.text, /Paragraph 1200:/, "the last page holds the last paragraph");
     assert.ok(Math.abs(last.out.details.height / last.out.details.width - 297 / 210) < 0.02, "whole");
     await assert.rejects(tools.office_screenshot.execute("p-past", { id: doc, page: settled + 1 }), (e: Error) => new RegExp(`^error:no_page the document has ${settled} pages`).test(e.message));
-    const again = await shoot("the last page again", { id: doc, page: settled });
+    const again = await shoot("the last page", { id: doc, page: settled });
     assert.equal(again.out.details.pages, settled, "the count it said was the settled one");
+    assert.match(again.text, /Paragraph 1200:/, "the last page holds the last paragraph");
     console.log(`16. a Word page with the editor open: ${again.took} ms`);
   });
 

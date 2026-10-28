@@ -320,6 +320,26 @@ test("removal: a deleted comment's chat goes after the grace; seen again within 
   assert.equal(posts.find((p) => p.job.kind === "word.reply")?.job.args.guid, "7164b85f");
 });
 
+test("an answer that ends while its comment is being deleted is not posted (a reply would bring the comment back): it goes with the thread, or is posted once the comment is seen again", async () => {
+  limits = { ...limits, removeAfterS: 0.3 };
+  const docId = await word();
+  docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins"), ui("u2", "comment", "00000002", "+Aegis zwei")]);
+  await settle();
+  const [one, two] = prompts;
+  docchat.report(docId, "k", [{ type: "removed", guids: ["00000001", "00000002"] }]);
+  one.resolve({ status: "done", answer: "Eins." });
+  two.resolve({ status: "done", answer: "Zwei." });
+  await settle();
+  assert.deepEqual(posts.filter((p) => p.job.kind === "word.reply"), [], "nothing is posted on a comment being deleted");
+  // The second is undone within the grace: its answer is posted then.
+  docchat.report(docId, "k", [{ type: "comment", guid: "00000002", text: "+Aegis zwei" }]);
+  await settle();
+  assert.deepEqual(posts.filter((p) => p.job.kind === "word.reply").map((p) => [p.job.args.guid, p.job.args.text]), [["00000002", "Zwei."]]);
+  await delay(500);
+  assert.deepEqual(removed, [one.chatId], "the first went with its thread, its answer never posted");
+  assert.deepEqual(posts.filter((p) => p.job.kind === "word.reply").length, 1);
+});
+
 test("a save removes only threads an earlier saved file had, after the grace; a comment the save has by author and text under another GUID renames the thread", async () => {
   limits = { ...limits, removeAfterS: 0.2 };
   const docId = await word();

@@ -1,7 +1,11 @@
 // A chat model that follows a script, for the real-portal test (real-portal.test.mts): an OpenAI-compatible
 // /v1/chat/completions that calls the tools a chat's message lists, one after another, and then answers "Done". The
 // message carries its script as `SCRIPT#<id> <<<[{"name": "office_read", "arguments": {...}}, ...]>>>`; each tool result
-// pi sends back is written to `<log>` (one JSON line per request), so the test reads what the tools answered.
+// pi sends back is written to `<log>` (one JSON line per request), so the test reads what the tools answered. A script
+// may end in `{"say": "<text>"}`, which is then its answer in place of "Done". `SLOW#<ms>` in the message holds the
+// script's first answer back that long (a run that is still going while more messages come). Each line also names the
+// scripts the chat's earlier messages carried (`seen`, what the model has of the chat's history) and the message's text
+// (`prompt`), so the test sees what a chat was given and in which prompt.
 //
 //   node scripted-model.mjs <port> <log>
 //
@@ -20,7 +24,9 @@ function reading(messages) {
     const found = /SCRIPT#([\w-]+) <<<([\s\S]*?)>>>/.exec(textOf(messages[i].content));
     if (!found) return undefined;
     const results = messages.slice(i + 1).filter((m) => m.role === "tool").map((m) => textOf(m.content));
-    return { id: found[1], calls: JSON.parse(found[2]), results };
+    const seen = messages.filter((m) => m.role === "user").flatMap((m) => [...textOf(m.content).matchAll(/SCRIPT#([\w-]+)/g)].map((x) => x[1]));
+    const slow = /SLOW#(\d+)/.exec(textOf(messages[i].content));
+    return { id: found[1], calls: JSON.parse(found[2]), results, seen, prompt: textOf(messages[i].content).slice(-4000), slow: slow ? Number(slow[1]) : 0 };
   }
   return undefined;
 }
@@ -43,11 +49,14 @@ http
     const ask = JSON.parse(body);
     n++;
     const script = reading(ask.messages ?? []);
-    const step = script && script.results.length < script.calls.length ? script.calls[script.results.length] : undefined;
-    appendFileSync(log, `${JSON.stringify({ at: Date.now(), id: script?.id ?? null, results: script?.results ?? [], call: step ?? null, final: !!script && !step, tools: (ask.tools ?? []).map((t) => t.function?.name) })}\n`);
+    const next = script && script.results.length < script.calls.length ? script.calls[script.results.length] : undefined;
+    const said = typeof next?.say === "string" ? next.say : undefined;
+    const step = said === undefined ? next : undefined;
+    appendFileSync(log, `${JSON.stringify({ at: Date.now(), id: script?.id ?? null, results: script?.results ?? [], call: step ?? null, final: !!script && !step, tools: (ask.tools ?? []).map((t) => t.function?.name), seen: script?.seen ?? [], prompt: script?.prompt ?? "" })}\n`);
+    if (script?.slow && !script.results.length) await new Promise((resolve) => setTimeout(resolve, script.slow));
     const deltas = step
       ? [chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: `call_${n}`, type: "function", function: { name: step.name, arguments: JSON.stringify(step.arguments) } }] }), chunk({}, "tool_calls")]
-      : [chunk({ role: "assistant", content: script ? `Done ${script.id}.` : "No script." }), chunk({}, "stop")];
+      : [chunk({ role: "assistant", content: said ?? (script ? `Done ${script.id}.` : "No script.") }), chunk({}, "stop")];
     if (ask.stream === false) {
       res.setHeader("content-type", "application/json");
       const message = step ? { role: "assistant", content: null, tool_calls: deltas[0].choices[0].delta.tool_calls.map(({ index: _i, ...c }) => c) } : { role: "assistant", content: deltas[0].choices[0].delta.content };

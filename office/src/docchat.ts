@@ -883,6 +883,10 @@ async function postOne(t: Target, entry: AgentEntry | SessionRecord, item: ToPos
     } else {
       const thread = docRecord(docId).threads[t.guid];
       if (!thread) return true;
+      // A comment being deleted gets no answer: a reply on it would bring it back for everyone (a change rewrites a
+      // comment whole from the changing editor's view, which may not have heard of the delete yet). The answer waits:
+      // posted if the comment is seen again within the grace (an undo), gone with the thread after it.
+      if (thread.removing) return false;
       // A cell comment just made is held by its author's editor a moment longer (its lock comes back with its save):
       // a reply in that moment is turned back.
       if (doc.ext === "xlsx") {
@@ -1334,6 +1338,8 @@ function cancelRemoval(docId: string, guid: string): void {
   delete thread.removing;
   clearTimer(`rm:${docId}:${guid}`);
   saveDoc(docId);
+  // Answers held back while it was being deleted are posted now.
+  for (const [folder, a] of Object.entries(thread.agents)) if (a.toPost?.length) void postNow({ kind: "thread", docId, guid, folder });
 }
 
 async function removeChat(chatId: string): Promise<void> {

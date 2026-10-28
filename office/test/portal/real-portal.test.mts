@@ -34,8 +34,13 @@ import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
  *
  *   OFFICE_E2E=1 PITHAGORAS_DIR=<a built Pithagoras> [OFFICE_PORTAL_MODE=container] node --import tsx --test test/portal/real-portal.test.mts
  *
+ * Cases h to l are comments and the editor's chat as the way to talk to agents, in Word and a spreadsheet: mentions
+ * from the editor's list and typed by hand, answers in the thread and in the editor's chat, a thread's chat kept
+ * through replies, resolve and unresolve and gone after a delete, messages that come during a run given together, no
+ * question tool, none of these chats listed, and limits set on the Office page.
+ *
  * OFFICE_E2E_SHOTS=<a folder> keeps pictures there: Settings → Office after Start, the chat with a document open in
- * its Office panel, and the panel made narrow. OFFICE_E2E_PULL_AGENT=1 removes the agents' editor's image
+ * its Office panel, the panel made narrow, the mention lists, answered threads and the editors' chats. OFFICE_E2E_PULL_AGENT=1 removes the agents' editor's image
  * (`chromedp/headless-shell`, about 540 MB) before Start, so the page's Start is seen downloading it.
  */
 
@@ -724,6 +729,325 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const listed = (await json(`${origin}/api/sessions`)).body as unknown;
     assert.ok(!JSON.stringify(listed).includes("Comment: Bitte entscheide"), "the comment's chat is not listed");
     await personCloses(page);
+  });
+
+  /* Comments and the editor's chat as the way to talk to agents (office-docchat-plan.md, with the owner's answers):
+   * an agent Aegis and a project Report, each with a task chat of its own; a Word document and a spreadsheet Aegis made
+   * (so Aegis owns them). */
+  type ModelLine = { at: number; id: string | null; results: string[]; call: { name: string } | null; final: boolean; tools: string[]; seen: string[]; prompt: string };
+  const modelLines = () => readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as ModelLine);
+  /** The model's requests of the script `id`, once it ran to its end. */
+  const ranScript = async (id: string, ms = 120_000) => {
+    let lines: ModelLine[] = [];
+    assert.ok(await until(() => (lines = modelLines().filter((l) => l.id === id)).some((l) => l.final), ms), `the script ${id} ran to its end (portal log: ${path.join(root, "portal.log")})`);
+    return lines;
+  };
+  const shot = async (page: Page, name: string) => {
+    if (process.env.OFFICE_E2E_SHOTS) await page.screenshot({ path: path.join(process.env.OFFICE_E2E_SHOTS, `${name}.png`) });
+  };
+  type ThreadRecord = { agents: Record<string, { chatId: string | null; state: string; error?: string }>; removing?: unknown };
+  /** A document's comment threads as docchat keeps them, and the editor's chats by editing session. */
+  const threadRecords = (docId: string): Record<string, ThreadRecord> => {
+    try {
+      return JSON.parse(readFileSync(path.join(officeData, "state", "threads", `${docId}.json`), "utf8")).threads;
+    } catch {
+      return {};
+    }
+  };
+  const sessionRecords = (): Record<string, { docId: string; chatId: string | null; state: string }> => {
+    try {
+      return JSON.parse(readFileSync(path.join(officeData, "state", "sessions.json"), "utf8"));
+    } catch {
+      return {};
+    }
+  };
+  const chatExists = async (id: string) => (await json(`${origin}/api/sessions/${id}`)).status === 200;
+  /** Every chat the portal's chat lists show: the sidebar's, and each agent's page. */
+  const listedChats = async () => {
+    const ids = new Set<string>();
+    for (const s of (await json(`${origin}/api/sessions`)).body.sessions ?? []) ids.add(s.id);
+    for (const a of (await json(`${origin}/api/agents`)).body.agents ?? []) for (const s of (await json(`${origin}/api/agent/sessions?agent=${encodeURIComponent(a.id)}`)).body.sessions ?? []) ids.add(s.id);
+    return ids;
+  };
+  /** The comments controller of the editor's UI (Word's DE, the spreadsheet's SSE): what its buttons call. */
+  const comments = `(window.DE || window.SSE).getController("Common.Controllers.Comments")`;
+  type Shown = { uid: string; guid: string; text: string; resolved: boolean; replies: string[][] };
+  const threadsIn = (frame: Frame) =>
+    frame.evaluate(`JSON.stringify(${comments}.collection.map(function (c) { return { uid: c.get("uid"), guid: c.get("guid"), text: c.get("comment"), resolved: !!c.get("resolved"), replies: (c.get("replys") || []).map(function (r) { return [r.get("username"), r.get("reply")]; }) }; }))`).then((s) => JSON.parse(s as string) as Shown[]);
+  /** The entries the editor's mention list shows now. */
+  const mentionList = (frame: Frame) => frame.evaluate(`Array.from(document.querySelectorAll("li")).filter(function (li) { var r = li.getBoundingClientRect(); return li.offsetParent && r.height > 0; }).map(function (li) { return (li.textContent || "").replace(/\\s+/g, " ").trim(); })`) as Promise<string[]>;
+  /** A comment made in the popover on what is selected, as a person makes one: `parts` is [text, search, name to pick,
+   * text, …], each pick after an "@" and its search; `atList` looks at the list the first "@" opened. Where the
+   * popover closed under the typing (now and then), it is opened and typed into again, once. */
+  async function commentInPopover(page: Page, frame: Frame, parts: string[], atList?: () => Promise<void>): Promise<string> {
+    for (let attempt = 1; ; attempt++) {
+      await frame.evaluate(`${comments}.addDummyComment()`);
+      await delay(800);
+      await frame.locator("textarea.msg-reply").first().click();
+      for (let i = 0; i < parts.length; i += 3) {
+        await page.keyboard.type(parts[i], { delay: 5 });
+        if (parts[i + 1] === undefined) break;
+        await page.keyboard.type("@", { delay: 60 });
+        await delay(1500);
+        if (i === 0 && attempt === 1) await atList?.();
+        await page.keyboard.type(parts[i + 1], { delay: 60 });
+        await delay(1200);
+        await frame.locator("li", { hasText: parts[i + 2] }).first().click();
+        await delay(300);
+      }
+      const typed = (await frame.evaluate(`Array.from(document.querySelectorAll("textarea.msg-reply")).filter(function (t) { return t.offsetParent; }).map(function (t) { return t.value; })[0]`)) as string;
+      const add = frame.locator("button", { hasText: /^(Add|Hinzufügen)$/ }).first();
+      if (attempt > 1 || (await add.isVisible().catch(() => false))) {
+        await add.click();
+        return typed;
+      }
+      console.log("the comment popover closed while the test typed: opened again");
+      await page.keyboard.press("Escape");
+      await delay(500);
+    }
+  }
+  /** The list the first "@" opened shows the agents and the projects. */
+  const listsAgentsAndProjects = (page: Page, frame: Frame, name: string) => async () => {
+    let seen: string[] = [];
+    assert.ok(await until(async () => (seen = await mentionList(frame)).some((t) => t.startsWith("Aegis")) && seen.some((t) => t.includes("report (project)")), 5000), `typing @ lists the agents and the projects: ${JSON.stringify(seen)}`);
+    console.log(`${name}: the mention list after "@": ${JSON.stringify(seen.filter((t) => /Aegis|report|\(project\)/.test(t) || /agent/i.test(t)))}`);
+    await shot(page, name);
+  };
+  /** The editor's chat panel opened, and every message the editor hears from now on recorded. */
+  const openChat = async (frame: Frame) => {
+    await frame.evaluate(`window.__chat = []; window.Asc.editor.asc_registerCallback("asc_onCoAuthoringChatReceiveMessage", function (m) { (m || []).forEach(function (x) { window.__chat.push([x.useridoriginal, x.username, x.message]); }); })`);
+    await frame.locator("#left-btn-chat").click();
+    await delay(800);
+  };
+  const sendChat = async (page: Page, frame: Frame, text: string) => {
+    await frame.locator("#chat-msg-text").click();
+    await page.keyboard.type(text, { delay: 3 });
+    await frame.locator("#chat-msg-btn-add").click();
+  };
+  const chatHeard = (frame: Frame) => frame.evaluate("window.__chat") as Promise<string[][]>;
+
+  let aegisChat = "";
+  let reportChat = "";
+  let wordDoc = "";
+  let sheetDoc = "";
+  const limitsNow = async () => (await json(`${at}/state`)).body.limits as Record<string, number>;
+
+  test("i: the limits of comments and the editor's chat are set on the Office page (the grace of a deleted comment's chat, the longest answer in a comment) and take effect at once; an agent Aegis and a project Report, each with a chat", { timeout: 900_000 }, async () => {
+    const page = await (await browser.newContext({ viewport: { width: 1400, height: 1000 } })).newPage();
+    await page.goto(`${origin}/settings/x/@pithagoras/office`);
+    const region = page.getByRole("region", { name: /^(Comments and chat with agents|Kommentare und Chat mit Agenten)$/ });
+    await region.waitFor({ timeout: 60_000 });
+    const grace = region.getByRole("textbox", { name: /^(Seconds before a deleted comment's chat goes|Sekunden, bis der Chat eines gelöschten Kommentars geht)$/ });
+    assert.equal(await grace.inputValue(), "120");
+    await grace.fill("5");
+    await region.getByRole("textbox", { name: /^(Longest answer in a comment, in characters|Längste Antwort in einem Kommentar, in Zeichen)$/ }).fill("200");
+    await region.getByRole("button", { name: /^(Save|Speichern)$/ }).click();
+    let limits: Record<string, number> = {};
+    assert.ok(await until(async () => (limits = await limitsNow()).docchatRemoveAfterS === 5 && limits.docchatReplyChars === 200, 10_000), `saved: ${JSON.stringify(limits)}`);
+    await page.context().close();
+
+    const agent = await json(`${origin}/api/agents`, { method: "POST", body: JSON.stringify({ name: "Aegis" }) });
+    assert.equal(agent.status, 200, JSON.stringify(agent.body));
+    const withAegis = await json(`${origin}/api/sessions`, { method: "POST", body: JSON.stringify({ agent: agent.body.id }) });
+    assert.equal(withAegis.status, 200, JSON.stringify(withAegis.body));
+    aegisChat = withAegis.body.id;
+    const project = await json(`${origin}/api/projects`, { method: "POST", body: JSON.stringify({ name: "Report" }) });
+    assert.equal(project.status, 200, JSON.stringify(project.body));
+    const inReport = await json(`${origin}/api/sessions`, { method: "POST", body: JSON.stringify({ workspace: project.body.path }) });
+    assert.equal(inReport.status, 200, JSON.stringify(inReport.body));
+    reportChat = inReport.body.id;
+    await say(reportChat, []);
+    const [word, sheet] = await say(aegisChat, [
+      { name: "office_create", arguments: { title: "Talk to Aegis", type: "word" } },
+      { name: "office_create", arguments: { title: "Numbers for Report", type: "cell" } },
+    ]);
+    wordDoc = /id ([\w-]+),/.exec(word)![1];
+    sheetDoc = /id ([\w-]+),/.exec(sheet)![1];
+    const users = (await json(`${at}/mentionables`)).body.users as { name: string; email: string }[];
+    console.log(`i. who can be mentioned: ${JSON.stringify(users)}`);
+    assert.ok(users.some((u) => u.name === "Aegis" && u.email === "Aegis"));
+    // The portal names a project by its folder: "report".
+    assert.ok(users.some((u) => u.name === "report (project)" && u.email === "project:report"));
+  });
+
+  test("j: Word: a person types @ in a comment and sees the agents and projects, picks Aegis, and Aegis answers in the thread within seconds; a reply continues the same chat, which has the thread's history; resolve and unresolve keep it; a comment with @Aegis typed by hand gets a chat of its own, which goes after the Office page's grace once the comment is deleted; no chat list shows these chats", { timeout: 900_000 }, async () => {
+    const { page, frame } = await personOpens(wordDoc, "word");
+    await frame.locator("#editor_sdk").click({ position: { x: 300, y: 200 } });
+    await page.keyboard.type("The budget grows by ten percent next year.", { delay: 10 });
+    await page.keyboard.press("Control+a");
+    const [j1, j2, j3, j4] = ["j1", "j2", "j3", "j4"].map((x) => `${x}-${process.pid}`);
+    const typed = await commentInPopover(page, frame, [`Stimmt das? SCRIPT#${j1} <<<[]>>> `, "Ae", "Aegis"], listsAgentsAndProjects(page, frame, "word-mention-list"));
+    const t0 = Date.now();
+    assert.match(typed, /\+Aegis\s*$/, "the picked name is inserted");
+    const mine = async (id: string) => (await threadsIn(frame)).find((t) => t.text.includes(id));
+    let thread: Shown | undefined;
+    assert.ok(await until(async () => Boolean((thread = await mine(j1))?.replies.some(([who, text]) => who === "Aegis (agent)" && text === `Done ${j1}.`)), 60_000, 300), `Aegis's answer in the thread: ${JSON.stringify(await threadsIn(frame))}`);
+    const took = Date.now() - t0;
+    console.log(`j. Aegis's answer in the thread ${took} ms after Add`);
+    assert.ok(took < 30_000, `within seconds: ${took} ms`);
+    const records = threadRecords(wordDoc);
+    assert.deepEqual(Object.keys(records), [thread!.guid], "one thread, by the comment's GUID");
+    const entries = Object.entries(records[thread!.guid].agents);
+    assert.equal(entries.length, 1);
+    const first = entries[0][1].chatId!;
+    assert.ok(first && (await chatExists(first)), "its chat is there");
+
+    // A reply in the same thread: the same chat, which has the comment as its history.
+    await frame.evaluate(`${comments}.onAddReplyComment(${JSON.stringify(thread!.uid)}, ${JSON.stringify(`Und warum? SCRIPT#${j2} <<<[]>>>`)})`);
+    const replied = await ranScript(j2);
+    console.log(`j. the reply's run: seen ${JSON.stringify(replied[0].seen)}, prompt ${JSON.stringify(replied[0].prompt)}`);
+    assert.deepEqual(replied[0].seen, [j1, j2], "the chat has the comment and the reply");
+    assert.equal(replied[0].prompt, `A reply in the thread:\nUnd warum? SCRIPT#${j2} <<<[]>>>`);
+    assert.ok(await until(async () => Boolean((await mine(j1))?.replies.some(([who, text]) => who === "Aegis (agent)" && text === `Done ${j2}.`)), 60_000, 300), "the reply's answer in the thread");
+    assert.equal(Object.values(threadRecords(wordDoc)[thread!.guid].agents)[0].chatId, first, "the same chat");
+    await shot(page, "word-answered-thread");
+
+    // Resolved, then unresolved: longer than the grace, and the thread and its chat stay.
+    await frame.evaluate(`${comments}.onResolveComment(${JSON.stringify(thread!.uid)})`);
+    assert.ok(await until(async () => Boolean((await mine(j1))?.resolved), 5000), "resolved");
+    await delay(7000);
+    await frame.evaluate(`${comments}.onResolveComment(${JSON.stringify(thread!.uid)})`);
+    assert.ok(await until(async () => (await mine(j1))?.resolved === false, 5000), "unresolved");
+    await delay(7000);
+    assert.ok(await chatExists(first), "resolve and unresolve keep the chat");
+    assert.equal(Object.values(threadRecords(wordDoc)[(await mine(j1))!.guid]?.agents ?? {})[0]?.chatId, first, "and the thread");
+    await frame.evaluate(`${comments}.onAddReplyComment(${JSON.stringify((await mine(j1))!.uid)}, ${JSON.stringify(`Noch da? SCRIPT#${j3} <<<[]>>>`)})`);
+    assert.deepEqual((await ranScript(j3))[0].seen, [j1, j2, j3], "a reply after the unresolve goes on in the same chat");
+
+    // A second comment, the agent's name typed by hand: a chat of its own.
+    await frame.locator("#editor_sdk").click({ position: { x: 300, y: 200 } });
+    await page.keyboard.press("Control+a");
+    const byHand = await commentInPopover(page, frame, [`@Aegis wie viel ist das? SCRIPT#${j4} <<<[]>>>`]);
+    assert.match(byHand, /^@Aegis wie viel/, "typed by hand");
+    assert.ok(await until(async () => Boolean((await mine(j4))?.replies.some(([who, text]) => who === "Aegis (agent)" && text === `Done ${j4}.`)), 60_000, 300), `the typed mention's answer: ${JSON.stringify(await threadsIn(frame))}`);
+    const other = (await mine(j4))!;
+    const second = Object.values(threadRecords(wordDoc)[other.guid].agents)[0].chatId!;
+    assert.ok(second && second !== first, "a chat of its own");
+    assert.deepEqual((await ranScript(j4))[0].seen, [j4], "which has only its own comment");
+
+    // Neither is in any chat list (the person's own chat with Aegis is).
+    const listed = await listedChats();
+    assert.ok(listed.has(aegisChat), "the lists show the person's chats");
+    assert.ok(!listed.has(first) && !listed.has(second), "the comments' chats are in no list");
+
+    // The second comment deleted: its chat goes after the grace the Office page set (5 s; 120 s by default).
+    await frame.evaluate(`${comments}.onRemoveComment(${JSON.stringify(other.uid)})`);
+    const t1 = Date.now();
+    assert.ok(await until(async () => !(await chatExists(second)), 40_000, 500), "the deleted comment's chat goes");
+    console.log(`j. the deleted comment's chat went ${Date.now() - t1} ms after the delete`);
+    assert.ok(Date.now() - t1 >= 4000, "after the grace");
+    assert.equal(threadRecords(wordDoc)[other.guid], undefined, "and its thread");
+    assert.ok(await chatExists(first), "the other comment's chat stays");
+    await personCloses(page);
+  });
+
+  test("k: a spreadsheet: a cell comment that picks the project Report gets Report's answer in its thread, cut at the Office page's longest answer; a reply continues the same chat with its history; resolve and unresolve keep it; deleted, its chat goes after the grace", { timeout: 900_000 }, async () => {
+    const { page, frame } = await personOpens(sheetDoc, "cell");
+    // The workbook takes a moment after the editor is there.
+    assert.ok(await until(() => frame.evaluate(`window.Asc.editor.asc_findCell("B2")`).then(() => true, () => false), 30_000, 500), "B2 selected");
+    const [k1, k2, k3] = ["k1", "k2", "k3"].map((x) => `${x}-${process.pid}`);
+    const long = `${"Die Summe stimmt. ".repeat(20)}Ende.`;
+    const typed = await commentInPopover(page, frame, [`Summe prüfen SCRIPT#${k1} <<<${JSON.stringify([{ say: long }])}>>> `, "re", "report (project)"], listsAgentsAndProjects(page, frame, "cell-mention-list"));
+    const t0 = Date.now();
+    assert.match(typed, /\+project:report\s*$/);
+    const mine = async (id: string) => (await threadsIn(frame)).find((t) => t.text.includes(id));
+    const cut = `${long.slice(0, 200)} (…)`;
+    assert.ok(await until(async () => Boolean((await mine(k1))?.replies.some(([who, text]) => who === "report (agent)" && text === cut)), 60_000, 300), `Report's answer, cut at 200 characters: ${JSON.stringify(await threadsIn(frame))}`);
+    const took = Date.now() - t0;
+    console.log(`k. Report's answer in the cell comment's thread ${took} ms after Add (a cell comment's answer waits until it is 5 s old)`);
+    assert.ok(took < 30_000, `within seconds: ${took} ms`);
+    const thread = (await mine(k1))!;
+    const [[guid, record]] = Object.entries(threadRecords(sheetDoc));
+    const chat = Object.values(record.agents)[0].chatId!;
+    assert.ok(await chatExists(chat));
+    assert.ok(!(await listedChats()).has(chat), "in no chat list");
+
+    await frame.evaluate(`${comments}.onAddReplyComment(${JSON.stringify(thread.uid)}, ${JSON.stringify(`Und Spalte C? SCRIPT#${k2} <<<[]>>>`)})`);
+    assert.deepEqual((await ranScript(k2))[0].seen, [k1, k2], "the same chat, with the comment");
+    assert.ok(await until(async () => Boolean((await mine(k1))?.replies.some(([who, text]) => who === "report (agent)" && text === `Done ${k2}.`)), 60_000, 300), `the reply's answer: ${JSON.stringify(await threadsIn(frame))}`);
+    await shot(page, "cell-answered-thread");
+
+    await frame.evaluate(`${comments}.onResolveComment(${JSON.stringify(thread.uid)})`);
+    assert.ok(await until(async () => Boolean((await mine(k1))?.resolved), 5000), "resolved");
+    await delay(7000);
+    await frame.evaluate(`${comments}.onResolveComment(${JSON.stringify(thread.uid)})`);
+    assert.ok(await until(async () => (await mine(k1))?.resolved === false, 5000), "unresolved");
+    await delay(7000);
+    assert.ok(await chatExists(chat), "resolve and unresolve keep the chat");
+    await frame.evaluate(`${comments}.onAddReplyComment(${JSON.stringify(thread.uid)}, ${JSON.stringify(`Danke SCRIPT#${k3} <<<[]>>>`)})`);
+    assert.deepEqual((await ranScript(k3))[0].seen, [k1, k2, k3]);
+    // The person deletes the comment once they read the answer (a reply posted on a comment just deleted would bring it
+    // back: docchat holds answers back while a delete is under way, but one already handed to the agent's editor goes).
+    assert.ok(await until(async () => Boolean((await mine(k1))?.replies.some(([, text]) => text === `Done ${k3}.`)), 60_000, 300), "the last answer in the thread");
+
+    await frame.evaluate(`${comments}.onRemoveComment(${JSON.stringify(thread.uid)})`);
+    const t1 = Date.now();
+    assert.ok(await until(async () => !(await chatExists(chat)), 40_000, 500), `the deleted comment's chat goes: ${JSON.stringify({ record: threadRecords(sheetDoc), shown: await threadsIn(frame) })}`);
+    console.log(`k. the deleted cell comment's chat went ${Date.now() - t1} ms after the delete`);
+    assert.equal(threadRecords(sheetDoc)[guid], undefined);
+    await personCloses(page);
+  });
+
+  test("l: the editor's chat, in Word and a spreadsheet: a message gets the owning agent's answer there; two messages during a run arrive together as the next prompt; a run that would ask a person gets an error at once and answers; no chat list shows these chats", { timeout: 900_000 }, async () => {
+    const [l1, l2, l3, l4, l5] = ["l1", "l2", "l3", "l4", "l5"].map((x) => `${x}-${process.pid}`);
+    const fromAgent = (heard: string[][], text: string) => heard.some(([id, name, said]) => /^agent:/.test(id) && /Aegis/.test(name) && said === text);
+
+    const word = await personOpens(wordDoc, "word");
+    await openChat(word.frame);
+    const t0 = Date.now();
+    await sendChat(word.page, word.frame, `Worum geht es? SCRIPT#${l1} <<<[]>>>`);
+    assert.ok(await until(async () => fromAgent(await chatHeard(word.frame), `Done ${l1}.`), 60_000, 300), `Aegis's answer in the editor's chat: ${JSON.stringify(await chatHeard(word.frame))}`);
+    console.log(`l. Aegis's answer in Word's editor chat ${Date.now() - t0} ms after Send`);
+    await delay(500);
+    await shot(word.page, "word-editor-chat");
+    const wordSession = Object.values(sessionRecords()).find((s) => s.docId === wordDoc)!;
+    assert.ok(wordSession?.chatId && (await chatExists(wordSession.chatId)), "the session's chat");
+
+    const sheet = await personOpens(sheetDoc, "cell");
+    await openChat(sheet.frame);
+    // A run that takes a while; two messages come during it.
+    await sendChat(sheet.page, sheet.frame, `Erste Frage SLOW#8000 SCRIPT#${l2} <<<[]>>>`);
+    assert.ok(await until(() => modelLines().some((l) => l.id === l2), 60_000), "the first message's run started");
+    await sendChat(sheet.page, sheet.frame, `Zweite SCRIPT#${l3} <<<[]>>>`);
+    await sendChat(sheet.page, sheet.frame, `Dritte SCRIPT#${l4} <<<[]>>>`);
+    const both = await ranScript(l3);
+    console.log(`l. the prompt after the run: ${JSON.stringify(both[0].prompt)}`);
+    assert.match(both[0].prompt, new RegExp(`Zweite SCRIPT#${l3} <<<\\[\\]>>>\\n\\nDritte SCRIPT#${l4} <<<\\[\\]>>>$`), "the two messages are the next prompt, together");
+    // (The first run's answer was held back 8 s after its request.)
+    assert.ok(both[0].at >= modelLines().find((l) => l.id === l2 && l.final)!.at + 7500, "after the run they came in");
+    assert.ok(!modelLines().some((l) => l.id === l4), "the third was no prompt of its own");
+    assert.deepEqual(both[0].seen, [l2, l3, l4]);
+    assert.ok(await until(async () => {
+      const heard = await chatHeard(sheet.frame);
+      return fromAgent(heard, `Done ${l2}.`) && fromAgent(heard, `Done ${l3}.`);
+    }, 60_000, 300), `both answers in the spreadsheet's editor chat: ${JSON.stringify(await chatHeard(sheet.frame))}`);
+
+    // Nothing waits for a person: the question tool is refused at once, and the run goes on to its answer.
+    await sendChat(sheet.page, sheet.frame, `Frag mich SCRIPT#${l5} <<<${JSON.stringify([{ name: "ask_question", arguments: { questions: [{ question: "Which one?", options: ["A", "B"] }] } }])}>>>`);
+    const asked = await ranScript(l5);
+    const final = asked.find((l) => l.final)!;
+    console.log(`l. the question in the editor's chat: ${JSON.stringify(final.results)}, ${final.at - asked[0].at} ms from the call to its answer`);
+    assert.ok(asked.every((l) => !l.tools.includes("ask_question")), "not offered");
+    assert.match(final.results[0] ?? "", /ask_question not found|not available in this chat/);
+    assert.ok(final.at - asked[0].at < 10_000, "refused at once");
+    assert.ok(await until(async () => fromAgent(await chatHeard(sheet.frame), `Done ${l5}.`), 60_000, 300), "and answered");
+    await delay(500);
+    await shot(sheet.page, "cell-editor-chat");
+
+    const sessions = Object.values(sessionRecords()).filter((s) => s.docId === wordDoc || s.docId === sheetDoc);
+    const listed = await listedChats();
+    assert.ok(listed.has(aegisChat));
+    for (const s of sessions) assert.ok(s.chatId && !listed.has(s.chatId), `the editor's chat ${s.chatId} is in no list`);
+    // Nor does the person see one in the sidebar beside their chat with Aegis.
+    const view = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
+    await view.goto(`${origin}/s/${aegisChat}`);
+    await view.locator("textarea, [contenteditable=true]").first().waitFor({ timeout: 60_000 });
+    await delay(1500);
+    const shown = await view.locator("body").innerText();
+    assert.doesNotMatch(shown, /Comment: |Office chat/, "no internal chat in the portal's page");
+    await view.context().close();
+    await personCloses(word.page);
+    await personCloses(sheet.page);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

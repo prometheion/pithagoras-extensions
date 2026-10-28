@@ -1,0 +1,676 @@
+/**
+ * OOXML primitives for @pithagoras/office: parse docx/xlsx into text and comments (office_comments, a save's comment
+ * threads, and office_read while Office is stopped), and write or rewrite a zip (the fixtures, and the tests that build
+ * documents). The agent's edits are made in the editor, not here (seat-page.ts). All functions here are pure over
+ * Buffers/strings (no fs, no settings, no network); store.ts owns disk, tools.ts owns the tool surface.
+ *
+ * ZIP I/O is a small synchronous reader/writer on node:zlib rather than jszip: parseDocx/parseXlsx/rewriteZip
+ * are synchronous (a save's comment threads and the office_* tools run
+ * them inline), and jszip only exposes async load/generate. The writer keeps entry order and is
+ * content-preserving -- every untouched entry re-extracts byte-identical -- but recompresses, so an
+ * output zip is NOT compression-byte-identical to its input. node builtins only; jszip stays for templates.
+ */
+import { createHash } from "node:crypto";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
+
+export type Comment = { id: string; author: string; date?: string; text: string };
+
+function ooxmlError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+/* ------------------------------------------------------------------ */
+/* minimal sync zip reader/writer (stored + deflate)                   */
+/* ------------------------------------------------------------------ */
+
+type ZipEntry = {
+  name: string;
+  method: number; // 0 stored, 8 deflated
+  crc: number;
+  csize: number;
+  usize: number;
+  lfhOffset: number;
+  modTime: number;
+  modDate: number;
+};
+
+const EOCD_SIG = 0x06054b50;
+const CD_SIG = 0x02014b50;
+const LFH_SIG = 0x04034b50;
+const ZIP64 = 0xffffffff;
+
+/** Entry directory of a zip: central-directory records in file order. Throws {code:"invalid_zip"}. */
+function readZip(buf: Buffer): ZipEntry[] {
+  if (buf.length < 22) throw ooxmlError("not a zip archive (too small)", "invalid_zip");
+  // EOCD lives in the last 22+65535 bytes.
+  const from = Math.max(0, buf.length - 22 - 65535);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= from; i--) if (buf.readUInt32LE(i) === EOCD_SIG) { eocd = i; break; }
+  if (eocd < 0) throw ooxmlError("not a zip archive (no end of central directory)", "invalid_zip");
+  const count = buf.readUInt16LE(eocd + 10);
+  const cdSize = buf.readUInt32LE(eocd + 12);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  if (count === 0xffff || cdSize === ZIP64 || cdOffset === ZIP64) throw ooxmlError("zip64 archives are not supported", "invalid_zip");
+  const entries: ZipEntry[] = [];
+  let totalUncompressed = 0; // running sum of the ADVERTISED expansion of every entry (archive cap below)
+  let p = cdOffset;
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== CD_SIG) throw ooxmlError("corrupt zip central directory", "invalid_zip");
+    const method = buf.readUInt16LE(p + 10);
+    const csize = buf.readUInt32LE(p + 20);
+    const usize = buf.readUInt32LE(p + 24);
+    if (method === ZIP64 || csize === ZIP64 || usize === ZIP64) throw ooxmlError("zip64 archives are not supported", "invalid_zip");
+    totalUncompressed += usize; // BEFORE the entry is retained, so a hostile central directory cannot accumulate unbounded expansion
+    if (totalUncompressed > MAX_TOTAL_BYTES) throw ooxmlError(`combined uncompressed size exceeds the ${MAX_TOTAL_BYTES / (1024 * 1024)} MiB archive cap`, "invalid_zip");
+    const nameLen = buf.readUInt16LE(p + 28);
+    const extraLen = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    const lfhOffset = buf.readUInt32LE(p + 42);
+    entries.push({
+      name: buf.toString("utf8", p + 46, p + 46 + nameLen),
+      method,
+      crc: buf.readUInt32LE(p + 16),
+      csize,
+      usize,
+      lfhOffset,
+      modTime: buf.readUInt16LE(p + 12),
+      modDate: buf.readUInt16LE(p + 14),
+    });
+    p = p + 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+// Hard cap on the uncompressed size of any single zip entry: a corrupt or hostile central directory could
+// otherwise advertise a multi-GB expansion (stored or deflated) that the portal would commit into memory.
+// 256 MiB is far above anything real in docx/xlsx parts we ever read back.
+const MAX_ENTRY_BYTES = 256 * 1024 * 1024;
+
+// Same guard at the archive level: readZipParts retains EVERY central-directory entry, so a hostile archive could
+// advertise several just-under-cap entries -- or thousands of small ones -- whose combined uncompressed size is far
+// beyond anything a docx/xlsx reader would ever touch. 1 GiB total is still far beyond real files; reject the whole
+// archive when the advertised sum crosses it (checked in readZip, before any entry is retained).
+const MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
+
+/** Uncompressed payload of one entry (payload length comes from the central directory, so local data descriptors are fine). */
+function readEntryData(buf: Buffer, e: ZipEntry): Buffer {
+  if (e.lfhOffset + 30 > buf.length || buf.readUInt32LE(e.lfhOffset) !== LFH_SIG) throw ooxmlError(`corrupt zip local header for ${e.name}`, "invalid_zip");
+  const nameLen = buf.readUInt16LE(e.lfhOffset + 26);
+  const extraLen = buf.readUInt16LE(e.lfhOffset + 28);
+  const start = e.lfhOffset + 30 + nameLen + extraLen;
+  if (start + e.csize > buf.length) throw ooxmlError(`truncated zip payload for ${e.name}`, "invalid_zip");
+  const raw = buf.subarray(start, start + e.csize);
+  if (e.usize > MAX_ENTRY_BYTES) throw ooxmlError(`zip entry ${e.name} exceeds the ${MAX_ENTRY_BYTES / (1024 * 1024)} MiB per-entry cap`, "invalid_zip");
+  let out: Buffer;
+  if (e.method === 0) out = raw;
+  else if (e.method === 8) { try { out = inflateRawSync(raw, { maxOutputLength: Math.max(e.usize, 1) }); } catch { throw ooxmlError(`bad deflate data for ${e.name}`, "invalid_zip"); } }
+  else throw ooxmlError(`unsupported zip compression method ${e.method} for ${e.name}`, "invalid_zip");
+  if (out.length !== e.usize) throw ooxmlError(`size mismatch for ${e.name}`, "invalid_zip");
+  // CRC-32 of the DECODED payload vs the central directory's record. Without this, bit-rot / partial-write
+  // corruption (the most common real-world kind -- a flipped stored-entry byte or a deflate stream that still
+  // inflates to the advertised length) would parse silently and rewriteZip would re-persist the corrupt bytes
+  // with their original wrong CRC, masking the damage inside the library. Cheap: `out` is already materialized.
+  if (crc32(out) !== e.crc) throw ooxmlError(`CRC mismatch for ${e.name}: the stored entry data does not match its checksum`, "invalid_zip");
+  return out;
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; table[n] = c; }
+  return table;
+})();
+
+function crc32(data: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function dosDateTime(d: Date): { time: number; date: number } {
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    date: ((Math.max(1980, d.getFullYear()) - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+/** Fresh zip from named entries (order kept). Deflate for non-empty data, stored otherwise.
+ * Exported so scripts/make-fixtures.mjs can build the committed fixtures THROUGH this writer -- the
+ * fixtures then double as round-trip material for our own reader/writer pair. */
+export function writeZip(entries: { name: string; data: Buffer; time?: { time: number; date: number } }[]): Buffer {
+  const now = dosDateTime(new Date());
+  const chunks: Buffer[] = [];
+  const cd: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const time = entry.time ?? now;
+    const name = Buffer.from(entry.name, "utf8");
+    const data = entry.data;
+    const deflate = data.length > 0;
+    const payload = deflate ? deflateRawSync(data, { level: 6 }) : Buffer.alloc(0);
+    const crc = crc32(data);
+    // Local file header. UTF-8 names get the flag bit set; no extra field, no data descriptor.
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(LFH_SIG, 0);
+    lfh.writeUInt16LE(20, 4); // version needed
+    lfh.writeUInt16LE(/[^\x00-\x7f]/.test(entry.name) ? 0x800 : 0, 6);
+    lfh.writeUInt16LE(deflate ? 8 : 0, 8);
+    lfh.writeUInt16LE(time.time, 10);
+    lfh.writeUInt16LE(time.date, 12);
+    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(payload.length, 18);
+    lfh.writeUInt32LE(data.length, 22);
+    lfh.writeUInt16LE(name.length, 26);
+    lfh.writeUInt16LE(0, 28);
+    chunks.push(lfh, name, payload);
+    const rec = Buffer.alloc(46);
+    rec.writeUInt32LE(CD_SIG, 0);
+    rec.writeUInt16LE(20, 4); // version made by
+    rec.writeUInt16LE(20, 6); // version needed
+    rec.writeUInt16LE(lfh.readUInt16LE(6), 8);
+    rec.writeUInt16LE(deflate ? 8 : 0, 10);
+    rec.writeUInt16LE(time.time, 12);
+    rec.writeUInt16LE(time.date, 14);
+    rec.writeUInt32LE(crc, 16);
+    rec.writeUInt32LE(payload.length, 20);
+    rec.writeUInt32LE(data.length, 24);
+    rec.writeUInt16LE(name.length, 28);
+    rec.writeUInt16LE(0, 30); // extra
+    rec.writeUInt16LE(0, 32); // comment
+    rec.writeUInt16LE(0, 34); // disk number
+    rec.writeUInt16LE(0, 36); // internal attrs
+    rec.writeUInt32LE(0, 38); // external attrs
+    rec.writeUInt32LE(offset, 42);
+    cd.push(rec, name);
+    offset += lfh.length + name.length + payload.length;
+  }
+  const cdBuf = Buffer.concat(cd);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(EOCD_SIG, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...chunks, cdBuf, eocd]);
+}
+
+/** One part of a zip as text, read within the same caps as every other (256 MiB an entry, 1 GiB a zip); undefined
+ * where there is none. */
+export function readPart(buf: Buffer, name: string): string | undefined {
+  return readZipParts(buf)[name]?.toString("utf8");
+}
+
+/** A digest of what a document holds: every part of the zip but its properties (`docProps/`, where the Document Server
+ * writes the time of each save), by name. Two saves of the same content compare equal, whatever their zip bytes and
+ * save times. Null for what is not a zip. Every save from the editor is digested, so the parts are inflated one at a
+ * time, each dropped before the next: what it holds at once is the largest part, not the whole document. */
+export function contentDigest(buf: Buffer): string | null {
+  const hash = createHash("sha256");
+  try {
+    // Duplicate names: the last one wins, as everywhere else here (jszip's behaviour).
+    const entries = new Map<string, ZipEntry>();
+    for (const entry of readZip(buf)) entries.set(entry.name, entry);
+    for (const name of [...entries.keys()].sort()) {
+      if (name.startsWith("docProps/")) continue;
+      const data = readEntryData(buf, entries.get(name)!);
+      hash.update(`${name}\0${data.length}\0`).update(data);
+    }
+  } catch {
+    return null;
+  }
+  return hash.digest("hex");
+}
+
+/** All file parts of a zip as uncompressed bytes; duplicate names: last one wins (jszip behavior). */
+function readZipParts(buf: Buffer): Record<string, Buffer> {
+  const parts: Record<string, Buffer> = {};
+  for (const entry of readZip(buf)) parts[entry.name] = readEntryData(buf, entry);
+  return parts;
+}
+
+/* ------------------------------------------------------------------ */
+/* small targeted XML helpers (no full DOM -- only the tags these       */
+/* functions own)                                                      */
+/* ------------------------------------------------------------------ */
+
+function decodeEntities(s: string): string {
+  return s.replace(/&#x([0-9a-fA-F]+);|&#([0-9]+);|&([a-zA-Z][a-zA-Z0-9]*);/g, (match, hex, dec, name) => {
+    if (hex !== undefined) return String.fromCodePoint(parseInt(hex, 16));
+    if (dec !== undefined) return String.fromCodePoint(parseInt(dec, 10));
+    switch (name) { case "amp": return "&"; case "lt": return "<"; case "gt": return ">"; case "quot": return '"'; case "apos": return "'"; }
+    return match; // unknown named entity: keep as-is rather than drop text
+  });
+}
+
+/** Attribute name="value" pairs of a tag (double-quoted, OOXML style); keys keep their local part (w:id -> id). */
+function parseAttributes(tag: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  for (const m of tag.matchAll(/([A-Za-z_][\w.:-]*)="([^"]*)"/g)) attrs[m[1].slice(m[1].lastIndexOf(":") + 1)] = decodeEntities(m[2]);
+  return attrs;
+}
+
+type Para = { contentStart: number; contentEnd: number }; // paragraph-content offsets in the XML string (self-closing w:p: equal)
+
+/** Every top-level w:p of a document.xml body in order. Nested paragraphs (text boxes, w:txbxContent) are out of scope
+ *  (only "w:p > w:r > w:t" is read); such content would be read as the outer paragraph's trailing run. */
+function findParagraphs(xml: string): Para[] {
+  const paras: Para[] = [];
+  for (const m of xml.matchAll(/<w:p(?:\s[^>]*?)?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) {
+    if (m.index === undefined) continue;
+    const content = m[1];
+    paras.push(content === undefined ? { contentStart: 0, contentEnd: 0 } : { contentStart: m.index + m[0].indexOf(">") + 1, contentEnd: m.index + m[0].length - "</w:p>".length });
+  }
+  return paras;
+}
+
+/** Decoded text of one w:p's content (empty string when the paragraph has no runs -- empty paragraphs are kept on purpose). */
+function paragraphText(content: string): string {
+  let out = "";
+  for (const m of content.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)) out += decodeEntities(m[1]);
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* docx                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Extract a docx: paragraph texts (one entry per w:p, in order, empty paragraphs kept as "") joined with
+ * "\n" into `text`, plus the word/comments.xml comments. Missing word/document.xml throws {code:"missing_part"};
+ * a missing comments part is simply no comments. Runs are read as plain text: w:tab/w:br and other run children
+ * contribute nothing (a simplification).
+ */
+export function parseDocx(buf: Buffer): { text: string; paragraphs: string[]; comments: Comment[] } {
+  const parts = readZipParts(buf);
+  const document = parts["word/document.xml"];
+  if (!document) throw ooxmlError("docx has no word/document.xml", "missing_part");
+  const xml = document.toString("utf8");
+  const paragraphs: string[] = [];
+  for (const para of findParagraphs(xml)) {
+    const content = para.contentStart === 0 && para.contentEnd === 0 ? "" : xml.slice(para.contentStart, para.contentEnd);
+    paragraphs.push(paragraphText(content));
+  }
+  const comments: Comment[] = [];
+  for (const part of commentParts(parts)) comments.push(...parseComments(parts[part]!.toString("utf8")));
+  return { text: paragraphs.join("\n"), paragraphs, comments };
+}
+
+/** The relationship type OnlyOffice files a document's comments that are anchored to no text under ("document
+ * comments"), in a part of their own beside word/comments.xml. */
+const ONLYOFFICE_DOCUMENT_COMMENTS = "http://schemas.onlyoffice.com/commentsDocument";
+
+/** The parts that hold a docx's comments: word/comments.xml, and what word/document.xml's relationships name as
+ * OnlyOffice's document comments (word/commentsDocument.xml where they name nothing). */
+function commentParts(parts: Record<string, Buffer>): string[] {
+  const found = new Set<string>();
+  if (parts["word/comments.xml"]) found.add("word/comments.xml");
+  const rels = parts["word/_rels/document.xml.rels"]?.toString("utf8") ?? "";
+  for (const m of rels.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+    const attrs = parseAttributes(m[1]);
+    if (attrs["Type"] !== ONLYOFFICE_DOCUMENT_COMMENTS || !attrs["Target"]) continue;
+    const target = attrs["Target"].startsWith("/") ? attrs["Target"].slice(1) : `word/${attrs["Target"]}`;
+    if (parts[target]) found.add(target);
+  }
+  if (parts["word/commentsDocument.xml"]) found.add("word/commentsDocument.xml");
+  return [...found];
+}
+
+/** The w:comment elements of a comments.xml; each comment's text is its w:p/w:r/w:t runs joined in order. */
+function parseComments(xml: string): Comment[] {
+  const comments: Comment[] = [];
+  for (const m of xml.matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)) {
+    if (m.index === undefined) continue;
+    const attrs = parseAttributes(m[1]);
+    let text = "";
+    for (const t of m[2].matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)) text += decodeEntities(t[1]);
+    const comment: Comment = { id: attrs["id"] ?? "", author: attrs["author"] ?? "", text };
+    if (attrs["date"] !== undefined) comment.date = attrs["date"];
+    comments.push(comment);
+  }
+  return comments;
+}
+
+/* ------------------------------------------------------------------ */
+/* comment threads (docx and xlsx)                                     */
+/* ------------------------------------------------------------------ */
+
+/** A reply in a comment thread, as a saved file holds it. */
+export type ThreadReply = { author: string; userId?: string; date?: string; text: string };
+
+/**
+ * A comment thread as a saved file holds it: the comment and its replies. `guid` is what the editor calls the thread
+ * (asc_getGuid): a Word comment's durableId (word/commentsIds.xml, or commentsIdsDocument.xml for a comment on the
+ * document), 8 hex digits in lower case, or "" where the file has none (a file an outside tool saved); a spreadsheet's
+ * threaded comment id, `{…}` as written. `userId` is the editor's user id of the author, where the file names it
+ * (word/people.xml, xl/persons/person.xml). A spreadsheet thread says its sheet and cell.
+ */
+export type CommentThread = {
+  guid: string;
+  author: string;
+  userId?: string;
+  date?: string;
+  text: string;
+  solved: boolean;
+  quote?: string;
+  sheet?: string;
+  cell?: string;
+  replies: ThreadReply[];
+};
+
+/** The most threads, and replies of one thread, a file is read for: what a document of people's comments holds is far
+ * below, and a file made to be large costs no more than this. */
+const MAX_THREADS = 2000;
+const MAX_REPLIES = 500;
+
+/** `w14:paraId` of every paragraph of an element's content, in order. */
+function paraIds(content: string): string[] {
+  return [...content.matchAll(/<w:p\b([^>]*)>/g)].map((m) => parseAttributes(m[1])["paraId"] ?? "").filter(Boolean);
+}
+
+/** Text of a comment's paragraphs, one line each. */
+function commentText(content: string): string {
+  const lines: string[] = [];
+  for (const m of content.matchAll(/<w:p\b[^>]*?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) lines.push(paragraphText(m[1] ?? ""));
+  return lines.join("\n");
+}
+
+/**
+ * The comment threads of a docx: word/comments.xml and OnlyOffice's comments on the document, each comment put with its
+ * thread by commentsExtended's `paraIdParent` (a reply names its comment's last paragraph), solved by its `done`, its
+ * GUID from commentsIds' durableId of its last paragraph, its author's user id from word/people.xml, and for a comment
+ * on text the text between its range marks in word/document.xml.
+ */
+export function docxThreads(buf: Buffer): CommentThread[] {
+  const parts = readZipParts(buf);
+  const people = new Map<string, string>();
+  const peopleXml = parts["word/people.xml"]?.toString("utf8") ?? "";
+  for (const m of peopleXml.matchAll(/<w15:person\b([^>]*)>([\s\S]*?)<\/w15:person>/g)) {
+    const author = parseAttributes(m[1])["author"];
+    const info = /<w15:presenceInfo\b([^>]*)\/?>/.exec(m[2]);
+    const userId = info ? parseAttributes(info[1])["userId"] : undefined;
+    if (author !== undefined && userId) people.set(author, userId);
+  }
+  const document = parts["word/document.xml"]?.toString("utf8") ?? "";
+  const threads: CommentThread[] = [];
+  for (const part of commentParts(parts)) {
+    const suffix = /comments(\w*)\.xml$/.exec(part)?.[1] ?? "";
+    const dir = part.slice(0, part.lastIndexOf("/") + 1);
+    const extended = new Map<string, { parent?: string; done: boolean }>();
+    for (const m of (parts[`${dir}commentsExtended${suffix}.xml`]?.toString("utf8") ?? "").matchAll(/<w15:commentEx\b([^>]*)\/?>/g)) {
+      const a = parseAttributes(m[1]);
+      if (a["paraId"]) extended.set(a["paraId"], { parent: a["paraIdParent"], done: a["done"] === "1" || a["done"] === "true" });
+    }
+    const durable = new Map<string, string>();
+    for (const m of (parts[`${dir}commentsIds${suffix}.xml`]?.toString("utf8") ?? "").matchAll(/<w16cid:commentId\b([^>]*)\/?>/g)) {
+      const a = parseAttributes(m[1]);
+      if (a["paraId"] && a["durableId"]) durable.set(a["paraId"], a["durableId"].toLowerCase().padStart(8, "0"));
+    }
+    const byPara = new Map<string, CommentThread>();
+    const replies: { parent: string; reply: ThreadReply }[] = [];
+    for (const m of parts[part]!.toString("utf8").matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)) {
+      const a = parseAttributes(m[1]);
+      const last = paraIds(m[2]).pop() ?? "";
+      const ex = extended.get(last);
+      const author = a["author"] ?? "";
+      const text = commentText(m[2]);
+      const userId = people.get(author);
+      if (ex?.parent) {
+        replies.push({ parent: ex.parent, reply: { author, ...(userId ? { userId } : {}), ...(a["date"] ? { date: a["date"] } : {}), text } });
+        continue;
+      }
+      if (threads.length >= MAX_THREADS) continue;
+      const thread: CommentThread = { guid: durable.get(last) ?? "", author, ...(userId ? { userId } : {}), ...(a["date"] ? { date: a["date"] } : {}), text, solved: ex?.done ?? false, replies: [] };
+      if (suffix === "" && a["id"] !== undefined) {
+        const id = a["id"].replace(/[^\w-]/g, "");
+        const range = new RegExp(`<w:commentRangeStart\\b[^>]*w:id="${id}"[^>]*/>([\\s\\S]*?)<w:commentRangeEnd\\b[^>]*w:id="${id}"[^>]*/>`).exec(document);
+        if (range) {
+          let quote = "";
+          for (const t of range[1].matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)) quote += decodeEntities(t[1]);
+          if (quote) thread.quote = quote.slice(0, 2000);
+        }
+      }
+      threads.push(thread);
+      if (last) byPara.set(last, thread);
+    }
+    for (const { parent, reply } of replies) {
+      const thread = byPara.get(parent);
+      if (thread && thread.replies.length < MAX_REPLIES) thread.replies.push(reply);
+    }
+  }
+  return threads;
+}
+
+/**
+ * The comment threads of an xlsx: the threaded comments of each sheet (`xl/threadedComments/*.xml`, found through the
+ * sheet's relationships), a reply by its `parentId`, the author's name and user id from `xl/persons/person.xml`. A
+ * workbook with only legacy notes (`xl/commentsN.xml`, no threads) has none: the editor writes every comment threaded.
+ */
+export function xlsxThreads(buf: Buffer): CommentThread[] {
+  const parts = readZipParts(buf);
+  const persons = new Map<string, { name: string; userId?: string }>();
+  for (const name of Object.keys(parts).filter((n) => /^xl\/persons\/[^/]+\.xml$/.test(n))) {
+    for (const m of parts[name]!.toString("utf8").matchAll(/<person\b([^>]*)\/?>/g)) {
+      const a = parseAttributes(m[1]);
+      if (a["id"]) persons.set(a["id"], { name: a["displayName"] ?? "", ...(a["userId"] ? { userId: a["userId"] } : {}) });
+    }
+  }
+  const workbook = parts["xl/workbook.xml"]?.toString("utf8") ?? "";
+  const relsXml = parts["xl/_rels/workbook.xml.rels"]?.toString("utf8") ?? "";
+  const targets: Record<string, string> = {};
+  for (const m of relsXml.matchAll(/<Relationship\b([^>]*?)\/?>/g)) {
+    const a = parseAttributes(m[1]);
+    if (a["Id"] && a["Target"]) targets[a["Id"]] = a["Target"];
+  }
+  const threads: CommentThread[] = [];
+  for (const m of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    const a = parseAttributes(m[1]);
+    const target = a["id"] !== undefined ? targets[a["id"]] : undefined;
+    if (!target) continue;
+    const sheetPart = resolveTarget(target);
+    const rels = parts[`${sheetPart.slice(0, sheetPart.lastIndexOf("/"))}/_rels/${sheetPart.slice(sheetPart.lastIndexOf("/") + 1)}.rels`]?.toString("utf8") ?? "";
+    for (const r of rels.matchAll(/<Relationship\b([^>]*?)\/?>/g)) {
+      const ra = parseAttributes(r[1]);
+      if (!/threadedComment$/.test(ra["Type"] ?? "") || !ra["Target"]) continue;
+      const resolved = ra["Target"].startsWith("/") ? ra["Target"].slice(1) : resolveTarget(`${sheetPart.slice(3, sheetPart.lastIndexOf("/"))}/${ra["Target"]}`);
+      const xml = parts[resolved]?.toString("utf8");
+      if (!xml) continue;
+      const byId = new Map<string, CommentThread>();
+      for (const c of xml.matchAll(/<threadedComment\b([^>]*)>([\s\S]*?)<\/threadedComment>/g)) {
+        const ca = parseAttributes(c[1]);
+        const person = persons.get(ca["personId"] ?? "");
+        // `<text xml:space="preserve">`, as the editor writes a text with spaces at its ends.
+        // The editor ends a saved reply's text with a line break: not part of what was written.
+        const text = decodeEntities(/<(?:\w+:)?text\b[^>]*>([\s\S]*?)<\/(?:\w+:)?text>/.exec(c[2])?.[1] ?? "").replace(/\r?\n$/, "");
+        const who = { author: person?.name ?? "", ...(person?.userId ? { userId: person.userId } : {}), ...(ca["dT"] ? { date: ca["dT"] } : {}) };
+        if (ca["parentId"]) {
+          const thread = byId.get(ca["parentId"]);
+          if (thread && thread.replies.length < MAX_REPLIES) thread.replies.push({ ...who, text });
+          continue;
+        }
+        if (threads.length >= MAX_THREADS) continue;
+        const thread: CommentThread = { guid: ca["id"] ?? "", ...who, text, solved: ca["done"] === "1" || ca["done"] === "true", sheet: a["name"] ?? "", ...(ca["ref"] ? { cell: ca["ref"] } : {}), replies: [] };
+        threads.push(thread);
+        if (ca["id"]) byId.set(ca["id"], thread);
+      }
+    }
+  }
+  return threads;
+}
+
+/* ------------------------------------------------------------------ */
+/* xlsx                                                                */
+/* ------------------------------------------------------------------ */
+
+/** Resolve a workbook rels Target against xl/: absolute ("/xl/...") or relative ("worksheets/sheet1.xml"). */
+function resolveTarget(target: string): string {
+  const pieces = target.startsWith("/") ? target.slice(1).split("/") : ["xl", ...target.split("/")];
+  const parts: string[] = [];
+  for (const piece of pieces) if (!piece || piece === ".") continue; else if (piece === "..") parts.pop(); else parts.push(piece);
+  return parts.join("/");
+}
+
+function columnOf(ref: string): number { // "AB12" -> 27 (zero-based), -1 when the ref has no letters
+  let col = 0;
+  for (const ch of ref) { if (ch >= "A" && ch <= "Z") col = col * 26 + (ch.charCodeAt(0) - 64); else break; }
+  return col === 0 ? -1 : col - 1;
+}
+
+/**
+ * Extract an xlsx: sheet names in workbook order, and per sheet a dense grid of cell strings -- sparse cells
+ * are filled to the farthest used row/column with "" (grids, not sparse maps). The
+ * materialized grid is bounded (see MAX_GRID_ROWS/MAX_GRID_COLS/MAX_SHEET_CELLS/MAX_TOTAL_GRID_CELLS): a sheet
+ * that would densify past its share of the cell budget gets only the affordable leading rows, and truncatedSheets
+ * names it so callers can say "those far-out cells were not read". Values:
+ * sharedStrings lookups (t="s"), inline strings (t="inlineStr"), and stored text as-is for numbers/formulas/
+ * booleans ("keep stored text"). Cells without an r= reference are skipped. A missing workbook or referenced
+ * sheet part throws {code:"missing_part"}.
+ */
+export function parseXlsx(buf: Buffer): { sheetNames: string[]; hiddenSheets: string[]; sheets: Record<string, string[][]>; truncatedSheets: Record<string, boolean> } {
+  const parts = readZipParts(buf);
+  const workbook = parts["xl/workbook.xml"];
+  if (!workbook) throw ooxmlError("xlsx has no xl/workbook.xml", "missing_part");
+  const relsXml = parts["xl/_rels/workbook.xml.rels"]?.toString("utf8") ?? "";
+  const targets: Record<string, string> = {};
+  for (const m of relsXml.matchAll(/<Relationship\b([^>]*?)\/?>/g)) {
+    if (m.index === undefined) continue;
+    const attrs = parseAttributes(m[1]);
+    if (attrs["Id"] && attrs["Target"] && attrs["TargetMode"] !== "External") targets[attrs["Id"]] = attrs["Target"];
+  }
+  let sharedStrings: string[] = [];
+  if (parts["xl/sharedStrings.xml"]) {
+    for (const m of parts["xl/sharedStrings.xml"].toString("utf8").matchAll(/<si(?:\s[^>]*?)?(?:\/>|>([\s\S]*?)<\/si>)/g)) {
+      const content = m[1] ?? "";
+      let text = "";
+      for (const t of content.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)) text += decodeEntities(t[1]);
+      sharedStrings.push(text);
+    }
+  }
+  const sheetNames: string[] = [];
+  // A sheet's `state` is "hidden" or "veryHidden" where it does not show; "visible", or none, where it does.
+  const hiddenSheets: string[] = [];
+  const sheets: Record<string, string[][]> = {};
+  const truncatedSheets: Record<string, boolean> = {};
+  const gridBudget: { left: number } = { left: MAX_TOTAL_GRID_CELLS }; // decremented as each sheet densifies
+  for (const m of workbook.toString("utf8").matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    if (m.index === undefined) continue;
+    const attrs = parseAttributes(m[1]);
+    const name = attrs["name"] ?? "";
+    sheetNames.push(name);
+    if (attrs["state"] === "hidden" || attrs["state"] === "veryHidden") hiddenSheets.push(name);
+    sheets[name] = [];
+    const target = attrs["id"] !== undefined ? targets[attrs["id"]] : undefined;
+    if (target === undefined) continue; // unresolvable sheet: listed by name, no grid
+    const sheetPart = parts[resolveTarget(target)];
+    if (!sheetPart) throw ooxmlError(`xlsx is missing the worksheet part ${resolveTarget(target)} for sheet "${name}"`, "missing_part");
+    const flags: { truncated?: boolean } = {};
+    // The grid budget is per ARCHIVE (every sheet shares it) so a workbook cannot multiply the allocation
+    // across many sheets; see MAX_TOTAL_GRID_CELLS below.
+    sheets[name] = parseSheet(sheetPart.toString("utf8"), sharedStrings, gridBudget, flags);
+    if (flags.truncated) truncatedSheets[name] = true;
+  }
+  return { sheetNames, hiddenSheets, sheets, truncatedSheets };
+}
+
+// Dense-grid caps: a hostile worksheet can reference absurdly distant cells (1M-row x 16K-col class); without
+// bounds the grid allocation below is unbounded. Cap both axes; skipped far cells are reported as truncation.
+const MAX_GRID_ROWS = 20000;
+const MAX_GRID_COLS = 500;
+// The AXIS caps alone do not bound MEMORY: a sheet with just two cells (one at row 20000, one near column 500)
+// still densifies to the PRODUCT maxRow x maxCol (~10M cell slots, hundreds of MB per measured run), and there
+// is no cap on sheet count. Cap the materialized product per sheet AND the combined grid across the archive --
+// the same "per-unit / total" shape as MAX_ENTRY_BYTES (256 MiB) / MAX_TOTAL_BYTES (1 GiB), in CELLS instead
+// of bytes (256*1024 cells/sheet, 1024*1024 cells/archive ~= a few MB of JS arrays each). Rows beyond the
+// affordable height are not allocated; the sheet is flagged in truncatedSheets so callers surface it honestly.
+const MAX_SHEET_CELLS = 256 * 1024;
+const MAX_TOTAL_GRID_CELLS = 1024 * 1024;
+function parseSheet(xml: string, sharedStrings: string[], budget: { left: number }, flags?: { truncated?: boolean }): string[][] {
+  const sheetData = xml.match(/<sheetData(?:\s[^>]*)?>([\s\S]*?)<\/sheetData>/);
+  if (!sheetData) return [];
+  let maxRow = 0;
+  let maxCol = 0;
+  let truncated = false;
+  const cells: Record<string, string> = {}; // "row,col" -> cell text
+  for (const m of sheetData[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+    if (m.index === undefined) continue;
+    const attrs = parseAttributes(m[1]);
+    if (!attrs["r"]) continue; // no reference: position unknown, skip (kept simple)
+    const row = Number.parseInt(attrs["r"].replace(/^[A-Z]+/, ""), 10);
+    const col = columnOf(attrs["r"]);
+    if (col < 0 || !Number.isFinite(row) || row < 1) continue;
+    if (row > MAX_GRID_ROWS || col >= MAX_GRID_COLS) { truncated = true; continue; } // grid cap, reported by the caller
+    let value = "";
+    const inner = m[2] ?? "";
+    if (attrs["t"] === "inlineStr") {
+      for (const t of inner.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)) value += decodeEntities(t[1]);
+    } else {
+      const v = inner.match(/<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/);
+      if (v) value = attrs["t"] === "s" ? (sharedStrings[Number.parseInt(v[1], 10)] ?? "") : decodeEntities(v[1]); // numbers/formulas/booleans: stored text as-is
+    }
+    cells[`${row},${col}`] = value;
+    if (row > maxRow) maxRow = row;
+    if (col >= maxCol) maxCol = col + 1;
+  }
+  // Bound the MATERIALIZED product before allocating: shrink the height so rows x maxCol stays under the
+  // per-sheet cell cap AND what the shared archive budget can still afford; anything beyond is truncation.
+  let rows = maxRow;
+  if (rows > 0 && maxCol > 0) {
+    const perSheetRows = Math.floor(MAX_SHEET_CELLS / maxCol);
+    const affordableRows = budget.left > 0 ? Math.floor(budget.left / maxCol) : 0;
+    const limit = Math.min(perSheetRows, affordableRows);
+    if (limit < rows) { rows = limit; truncated = true; } // the far rows exist in the file but are not read
+    budget.left -= rows * maxCol;
+  }
+  const grid: string[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const line: string[] = [];
+    for (let c = 0; c < maxCol; c++) line.push(cells[`${r + 1},${c}`] ?? "");
+    grid.push(line);
+  }
+  if (truncated) flags && (flags.truncated = true);
+  return grid;
+}
+
+/* ------------------------------------------------------------------ */
+/* zip rewriting + comment diffing                                     */
+/* ------------------------------------------------------------------ */
+
+function asBuffer(value: string | Buffer): Buffer {
+  return typeof value === "string" ? Buffer.from(value, "utf8") : value;
+}
+
+/**
+ * Rewrite a zip with named parts replaced or added. Part matching is CASE-INSENSITIVE (and change keys that
+ * collide only by case are deduped last-one-wins, jszip behavior): OOXML part names are treated case-tolerantly
+ * in several of Word/DS' code paths, so a key like "WORD/DOCUMENT.XML" over an archive holding word/document.xml
+ * OVERWRITES the existing part IN PLACE (its original name is kept) instead of creating a shadow duplicate that
+ * could win on load. The output is CONTENT-preserving -- every
+ * untouched entry re-extracts byte-identical to its original uncompressed bytes, entry order is kept where this
+ * writer allows (replacements stay put, new parts are appended) -- but the zip as a whole is NOT
+ * compression-byte-identical to the input: unchanged deflate entries are recompressed and rewritten with fresh
+ * timestamps for added parts. Throws {code:"invalid_zip"} on unreadable archives.
+ */
+export function rewriteZip(buf: Buffer, changes: Record<string, string | Buffer>): Buffer {
+  const entries = readZip(buf);
+  // Change keys that differ from each other only in case would emit one shadow part for the same logical name --
+  // keep the LAST of them (jszip "last one wins") and let it match the existing entry case-insensitively below.
+  const norm: Record<string, string | Buffer> = {};
+  for (const [name, value] of Object.entries(changes)) {
+    for (const k of Object.keys(norm)) if (k.toLowerCase() === name.toLowerCase()) delete norm[k];
+    norm[name] = value;
+  }
+  const changeLower = new Map<string, string>(); // lowercased part name -> the surviving change key
+  for (const k of Object.keys(norm)) changeLower.set(k.toLowerCase(), k);
+  const applied = new Set<string>(); // lowercase names consumed by a change (an input SHADOW pair gets the data once)
+  const out: { name: string; data: Buffer; time?: { time: number; date: number } }[] = [];
+  for (const entry of entries) {
+    let data = readEntryData(buf, entry);
+    const key = changeLower.get(entry.name.toLowerCase());
+    if (key !== undefined && !applied.has(key.toLowerCase())) { // exact match OR differs only by case
+      data = asBuffer(norm[key]);
+      applied.add(key.toLowerCase());
+    }
+    out.push({ name: entry.name, data, time: { time: entry.modTime, date: entry.modDate } });
+  }
+  for (const [name, value] of Object.entries(norm)) if (!applied.has(name.toLowerCase())) out.push({ name, data: asBuffer(value) });
+  return writeZip(out);
+}
+

@@ -1,0 +1,38 @@
+{
+  "name": "@pithagoras/office",
+  "version": "0.1.0",
+  "description": "Word and Excel documents in OnlyOffice, edited by you and your agents together",
+  "type": "module",
+  "keywords": ["pi-package", "pithagoras", "office", "docx", "xlsx", "onlyoffice"],
+  "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/office#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prometheion/pithagoras-extensions.git",
+    "directory": "office"
+  },
+  "bugs": {
+    "url": "https://github.com/prometheion/pithagoras-extensions/issues"
+  },
+  "pi": {},
+  "pithagoras": {
+    "client": "./web/client.js",
+    "style": "./web/client.css",
+    "server": "./server.js",
+    "requires": { "pithagoras-docker": "^1.3.0" }
+  },
+  "files": ["web", "server.js", "README.md", "NOTICE", "THIRD-PARTY-LICENSES", "LICENSE"],
+  "scripts": {
+    "build": "node build.mjs && tsc --noEmit -p .",
+    "test": "node --import tsx --test --test-timeout=60000 test/*.test.mts",
+    "test:portal": "node --import tsx --test --test-timeout=120000 test/portal/portal.test.mts test/portal/editor.test.mts test/portal/settings.test.mts test/portal/panel.test.mts test/portal/docchat.test.mts",
+    "test:e2e": "node --import tsx --test --test-concurrency=1 --test-timeout=900000 test/portal/e2e.test.mts test/portal/spike.test.mts test/portal/docchat-spike.test.mts test/portal/docchat-e2e.test.mts",
+    "test:real": "node --import tsx --test --test-concurrency=1 --test-timeout=1800000 test/portal/real-portal.test.mts",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "jszip": "3.10.2",
+    "react-icons": "5.7.0"
+  },
+  "publishConfig": { "access": "public" },
+  "license": "Apache-2.0"
+}

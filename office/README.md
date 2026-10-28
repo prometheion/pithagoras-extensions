@@ -255,7 +255,8 @@ default you never changed is not written down, so a later version's default appl
 agent's home or project folder; only its entry is in the index. Documents an earlier version made in `docs/<id>/` of
 the data folder are moved once, at the first start of this one, into the folder of the agent or project that made
 them, else into the default agent's home, keeping their id, grants and revisions; a name taken there gets a number
-("Report (2)"), and each move is in the portal's log. The containers (`pithagoras-office-ds`, its
+("Report (2)"), and each move is in the portal's log. One that cannot be moved yet (no default agent listed) is
+tried again at each Rescan and every half minute. The containers (`pithagoras-office-ds`, its
 relay `-relay` and the agents' editor `-agent`), the networks (`pithagoras-office-ds-net`, and `-agents` for the
 agents' editor) and the Document Server's volumes are Docker's, shown in Settings → Docker under this extension. The
 volumes are one for each folder its image keeps apart: `pithagoras-office-ds-cache` (`/var/lib/onlyoffice`: the

@@ -36,7 +36,7 @@ import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
  *   OFFICE_E2E=1 PITHAGORAS_DIR=<a built Pithagoras> [OFFICE_PORTAL_MODE=container] node --import tsx --test test/portal/real-portal.test.mts
  *
  * Case m is where documents live: each in an agent's home or a project, owned by it. New document on the Office tab makes
- * one in the default agent's home, office_create in the chat's agent home or project; the library has only what is in
+ * one in the home New starts chats in (the default agent's, nobody picked another here), office_create in the chat's agent home or project; the library has only what is in
  * the homes and projects; a document an earlier version kept in the extension's own docs folder (one is put there
  * before the portal starts) was moved into the default agent's home; the editor's chat of a document made on the tab is
  * answered by the default agent.
@@ -697,7 +697,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await noConflictCopy("Quarter");
   });
 
-  test("h: a comment that mentions the agent starts a chat of its own, which nobody sees and which has no question tool: the agent's ask_question is refused there at once, and its answer comes as the agent's reply in the thread", { timeout: 900_000 }, async () => {
+  test("h: a comment that mentions the agent starts a chat of its own in the agent's home (no child of the person's chat), which nobody sees and nobody attends, so it has no question tool: the agent's ask_question is refused there at once, and its answer comes as the agent's reply in the thread", { timeout: 900_000 }, async () => {
     const parent = await chat();
     const made = await say(parent, [{ name: "office_create", arguments: { title: "Asked in a comment", type: "word" } }]);
     const docId = /id ([\w-]+),/.exec(made[0])![1];
@@ -720,7 +720,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await delay(300);
     await frame.locator("button", { hasText: /^(Add|Hinzufügen)$/ }).first().click();
 
-    // The child ran the script: its model was never offered ask_question, and the call was refused at once.
+    // The comment's chat ran the script: its model was never offered ask_question, and the call was refused at once.
     let lines: { id: string | null; results: string[]; final: boolean; tools: string[] }[] = [];
     assert.ok(
       await until(() => {
@@ -730,18 +730,24 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       `the comment's chat ran the script (portal log: ${path.join(root, "portal.log")})`,
     );
     console.log(`the comment's chat: ${JSON.stringify(lines.map((l) => ({ tools: l.tools.filter((t) => /ask|question/.test(t)), results: l.results.map((r) => r.slice(0, 160)) })))}`);
-    // A chat of the person's has it (the parent's office_create above): the comment's chat had it taken away.
+    // A chat of the person's has it (the office_create above): the comment's chat, started unattended, is not offered it.
     const parentLines = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => typeof l.id === "string" && l.id.startsWith("s"));
     assert.ok(parentLines.some((l) => l.tools.includes("ask_question")), "the person's own chat is offered ask_question");
     assert.ok(lines.every((l) => !l.tools.includes("ask_question")), "the question tool is not offered in the comment's chat");
-    // pi refuses a tool that is not active before it runs (docchat's own tool_call refusal is the second layer).
-    assert.match(lines.find((l) => l.final)!.results[0] ?? "", /ask_question not found|not available in this chat/);
+    // pi refuses a tool it was not given before it runs.
+    assert.match(lines.find((l) => l.final)!.results[0] ?? "", /ask_question not found/);
     // Its answer is the agent's reply in the thread, in the person's editor.
     const replies = () => frame.evaluate(`JSON.stringify(DE.getController("Common.Controllers.Comments").collection.map(function (c) { return (c.get("replys") || []).map(function (r) { return [r.get("username"), r.get("reply")]; }); }))`).then((x) => JSON.parse(x as string) as string[][][]);
     assert.ok(await until(async () => (await replies()).flat().some(([who, text]) => /\(agent\)$/.test(who) && text === `Done ${id}.`), 60_000), JSON.stringify(await replies()));
     // Shown nowhere: no chat of the comment in the chat lists.
     const listed = (await json(`${origin}/api/sessions`)).body as unknown;
     assert.ok(!JSON.stringify(listed).includes("Comment: Bitte entscheide"), "the comment's chat is not listed");
+    // A chat of the agent's home of its own (chats.start), not a child of the chat the person works in.
+    const recorded = Object.values(JSON.parse(readFileSync(path.join(officeData, "state", "threads", `${docId}.json`), "utf8")).threads as Record<string, { agents: Record<string, { chatId: string }> }>)[0];
+    const [[folder, entry]] = Object.entries(recorded.agents);
+    const started = (await json(`${origin}/api/sessions/${entry.chatId}`)).body as { parent?: string; workspace: string };
+    assert.equal(started.parent, undefined, "no parent");
+    assert.equal(realpathSync(started.workspace), folder, "in the agent's home");
     await personCloses(page);
   });
 
@@ -1046,7 +1052,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const final = asked.find((l) => l.final)!;
     console.log(`l. the question in the editor's chat: ${JSON.stringify(final.results)}, ${final.at - asked[0].at} ms from the call to its answer`);
     assert.ok(asked.every((l) => !l.tools.includes("ask_question")), "not offered");
-    assert.match(final.results[0] ?? "", /ask_question not found|not available in this chat/);
+    assert.match(final.results[0] ?? "", /ask_question not found/);
     assert.ok(final.at - asked[0].at < 10_000, "refused at once");
     assert.ok(await until(async () => fromAgent(await chatHeard(sheet.frame), `Done ${l5}.`), 60_000, 300), "and answered");
     await delay(500);

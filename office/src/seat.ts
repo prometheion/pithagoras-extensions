@@ -29,6 +29,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BRIDGE_JS, HOLD_MS, pluginConfig, pluginIndex, SEAT_PAGE_HTML, SEAT_PAGE_JS } from "./seat-page";
+import type { ShotImage, ShotTarget } from "./cdp";
 
 /** How an agent's editor opens: to edit, to read only, or to read and comment only (an agent that may not change the
  * document still answers in its comment threads). */
@@ -46,6 +47,9 @@ export interface SeatDeps {
   /** How an editor opened with `key` stands to the document now (callback.keyStanding on its revision): only a
    * "current" one is used; null where the document is gone. */
   standing(docId: string, key: string): "current" | "behind" | null;
+  /** A picture of the editor `editorId` as its document's locate said (cdp.shot through the relay); rejects with a
+   * coded error. Without it, office_screenshot is refused (`agent_unavailable`). */
+  capture?(editorId: string, target: ShotTarget & { large?: boolean }): Promise<ShotImage>;
   /** Where the browser reaches the listener (the relay's way back), `http://<relay>:<port>`. */
   listenerOrigin(): string;
   /** Where the browser reaches the Document Server, `http://<container>`: the origin the plugin's config is fetched
@@ -94,6 +98,8 @@ type Job = {
   handedAt: number;
   /** When it was handed, the editor had said it holds changes unsent and not yet that it sent them. */
   unsentAtHand: boolean;
+  /** A picture's locate: once it is handed, the editor takes no other job until the picture is taken (`Editor.held`). */
+  hold?: string;
 };
 
 type Editor = {
@@ -123,6 +129,8 @@ type Editor = {
   unsentSeq: number;
   sentSeq: number;
   stateWaiters: (() => void)[];
+  /** The picture under way in it (its locate's `hold`): no other job is handed until it is taken. */
+  holding?: string;
 };
 
 /** A coded refusal the tools pass on as `error:<code> <message>`. `ran`: the editor's plugin had taken the job, so
@@ -134,6 +142,8 @@ export class SeatError extends Error {
 }
 
 let deps: SeatDeps | null = null;
+/** The end of the last picture asked for: one at a time in the whole browser. */
+let shooting: Promise<void> = Promise.resolve();
 let limits = { ...LIMITS };
 let secret = randomBytes(32).toString("hex");
 const editors = new Map<string, Editor>();
@@ -255,6 +265,67 @@ export async function run(home: string, docId: string, mode: SeatMode, job: Seat
     editor.busy = false;
     editor.lastUsed = Date.now();
   }
+}
+
+/**
+ * A picture of the document as the agent's editor of (`home`, `docId`) shows it (office_screenshot): `locate` (a
+ * `view.locate` job) is run in that editor, and in the same step of its queue, before it is handed any other job, the
+ * picture is taken of what the locate answered (`deps.capture`, cdp.ts). Pictures are taken one at a time in the whole
+ * browser. Answers the locate's result and the picture; rejects with a SeatError: the locate's codes, the capture's
+ * (`no_page`, `range_too_large`, `not_drawn`, …), and those of `run`.
+ */
+export async function shot(home: string, docId: string, mode: SeatMode, locate: SeatJob, options: { signal?: AbortSignal; large?: boolean } = {}): Promise<{ located: Record<string, unknown>; image: ShotImage }> {
+  if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
+  const capture = deps.capture;
+  if (!capture) throw new SeatError("agent_unavailable", "pictures of the agent's editor are not set up");
+  // In line behind every picture asked for before, also where this one is aborted while it waits.
+  const before = shooting;
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => (release = resolve));
+  shooting = Promise.all([before, mine]).then(() => {});
+  try {
+    await turn(before, options.signal);
+    const editor = await editorFor(home, docId, mode, options.signal, true);
+    editor.busy = true;
+    editor.lastUsed = Date.now();
+    editor.lastTool = Date.now();
+    const hold = randomUUID();
+    try {
+      if (!editors.has(editor.id)) throw new SeatError("editor_closed", "the agent's editor of this document was closed for another document as the call began; try again");
+      const outcome = await handOver(editor, { ...locate, hold }, options);
+      if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed");
+      const located = (outcome.result && typeof outcome.result === "object" ? outcome.result : {}) as Record<string, unknown>;
+      if (!editors.has(editor.id)) throw new SeatError("editor_closed", "the agent's editor of this document was closed while the picture was taken; try again");
+      try {
+        return { located, image: await capture(editor.id, { ...(located.view as ShotTarget), large: Boolean(options.large) }) };
+      } catch (e) {
+        const err = e as { code?: unknown; message?: unknown } | null;
+        throw new SeatError(typeof err?.code === "string" ? err.code : "failed", typeof err?.message === "string" ? err.message : String(e));
+      }
+    } finally {
+      // The jobs that came meanwhile go on.
+      if (editor.holding === hold) editor.holding = undefined;
+      editor.busy = false;
+      editor.lastUsed = Date.now();
+      feed(editor);
+    }
+  } finally {
+    release();
+  }
+}
+
+/** `before` ended, or the call was aborted. */
+function turn(before: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return before;
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(new SeatError("aborted", "the call was aborted"));
+    if (signal.aborted) return aborted();
+    signal.addEventListener("abort", aborted, { once: true });
+    void before.then(() => {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    });
+  });
 }
 
 /** Whether a job changes the document (an edit, or a reply on a comment): it is waited for until the editor sent it, and
@@ -444,7 +515,7 @@ function waitFor(listen: (wake: () => void) => void, done: () => boolean, ms: nu
 
 /** The job handed to the editor's plugin (now, where it waits, or at its next poll) and its outcome waited for. A job
  * with no outcome in time closes the editor: what it did is unknown. */
-function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<Outcome & { handedAt?: number; unsentAtHand?: boolean }> {
+function handOver(editor: Editor, job: SeatJob & { hold?: string }, options: { signal?: AbortSignal; timeoutMs?: number }): Promise<Outcome & { handedAt?: number; unsentAtHand?: boolean }> {
   const ms = options.timeoutMs ?? limits.jobMs;
   return new Promise((resolve, reject) => {
     let over = false;
@@ -455,6 +526,7 @@ function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal;
       handed: false,
       handedAt: 0,
       unsentAtHand: false,
+      ...(job.hold ? { hold: job.hold } : {}),
       settle: (outcome) => {
         if (over) return;
         over = true;
@@ -485,12 +557,15 @@ function handOver(editor: Editor, job: SeatJob, options: { signal?: AbortSignal;
   });
 }
 
-/** The next job to the plugin's held poll, where both are there. */
+/** The next job to the plugin's held poll, where both are there and no picture holds the editor. A picture's locate
+ * holds it from when it is handed until the picture is taken (`shot`). */
 function feed(editor: Editor): void {
+  if (editor.holding) return;
   const job = editor.queue.find((j) => !j.handed);
   if (!job || !editor.held) return;
   const res = editor.held;
   editor.held = null;
+  if (job.hold) editor.holding = job.hold;
   job.handed = true;
   job.handedAt = Date.now();
   job.unsentAtHand = editor.unsentSeq > editor.sentSeq;

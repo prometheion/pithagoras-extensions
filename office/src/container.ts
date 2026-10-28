@@ -48,7 +48,11 @@ import path from "node:path";
 import { dataDir, docker as hostDocker, portal } from "./host";
 import { loadSettings } from "./settings";
 import { namesFrom, SPEC_LABEL, specHash, stamped, type Names } from "../../shared/service";
-import type { ContainerInfo, ContainerSpec, Docker, NetworkInfo, PullState, Reach } from "../../shared/docker-api";
+import type { ContainerInfo, ContainerSpec, Docker, ExecResult, NetworkInfo, PullState, Reach } from "../../shared/docker-api";
+import { CDP_PORT } from "./cdp";
+
+/** Chromium's own debugging port in the agents' browser, on its 127.0.0.1 only (socat passes CDP_PORT to it). */
+export const CDP_INNER = 9223;
 
 /** The names Office's containers go by, each one the portal's environment can change (`PITHAGORAS_OFFICE_*`): a test
  * never meets the containers of a portal in use. */
@@ -271,19 +275,27 @@ export const AGENT_WINDOW = { width: 1600, height: 1400 };
 const AGENT_MEMORY = 3 * 1024 ** 3;
 
 /**
- * The browser, on the island alone and with no port published: it reaches the Document Server by its name and the
- * relay's way back, and nothing else (the island has no way out). Hardened as the relay is, as a user that is not
- * root, with a read-only root and its profile in memory. Chromium's own sandbox is off (`--no-sandbox`): it needs
- * namespaces that the default seccomp profile and no-new-privileges refuse, and this container is the boundary. It
- * opens the seat page (`url`, which carries the page's secret) and nothing else, with no debugging port: the portal
- * talks to it only through that page.
+ * The browser, on the agents' network alone and with no port published: it reaches the Document Server and the
+ * listener through the relay, and nothing else (the network has no way out). Hardened as the relay is, as a user that
+ * is not root, with a read-only root and its profile in memory. Chromium's own sandbox is off (`--no-sandbox`): it
+ * needs namespaces that the default seccomp profile and no-new-privileges refuse, and this container is the boundary.
+ * It opens the seat page (`url`, which carries the page's secret) and nothing else.
+ *
+ * Its debugging port (CDP) is for pictures of the agents' editors (cdp.ts, office_screenshot) and nothing else.
+ * Chromium opens it on its own 127.0.0.1:CDP_INNER only (it takes no other address), and socat passes CDP_PORT on the
+ * agents' network to it: there, only the relay is besides the browser, and only a Docker exec of cdp.ts' fixed script
+ * in the relay uses it, which only the portal can make. It is published nowhere, and no page may use it: Chromium
+ * refuses a page's request for /json (CORS) and a WebSocket with an Origin (no `--remote-allow-origins`), so a
+ * document cannot reach it either. CDP controls the whole browser, which holds every document an agent has open.
  */
 export function agentSpec(network: string, url: string): ContainerSpec {
+  const chromium = ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", `--window-size=${AGENT_WINDOW.width},${AGENT_WINDOW.height}`, `--remote-debugging-port=${CDP_INNER}`];
   return {
     Image: AGENT_IMAGE,
     User: "1000:1000",
-    Entrypoint: ["/headless-shell/headless-shell"],
-    Cmd: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", `--window-size=${AGENT_WINDOW.width},${AGENT_WINDOW.height}`, url],
+    // The arguments after the script's name ("agent") go to Chromium as they are ("$@"), never into the script.
+    Entrypoint: ["/bin/bash", "-c", `socat TCP4-LISTEN:${CDP_PORT},fork,reuseaddr TCP4:127.0.0.1:${CDP_INNER} & exec /headless-shell/headless-shell "$@"`, "agent"],
+    Cmd: [...chromium, url],
     Env: ["HOME=/tmp"],
     HostConfig: {
       NetworkMode: network,
@@ -379,6 +391,15 @@ export async function stopAgent(docker?: Docker): Promise<void> {
   const d = await reachable(docker);
   const found = await d.containers.get(NAMES.agent);
   if (found && found.owner === ownName()) await d.containers.remove(NAMES.agent);
+}
+
+/** Runs `cmd` in the relay (cdp.ts' client, which reaches the agents' browser's debugging port from there), given up
+ * on after `timeoutMs`. Refused where the relay is not Office's or not running. */
+export async function execRelay(cmd: string[], timeoutMs: number, docker?: Docker): Promise<ExecResult> {
+  const d = await reachable(docker);
+  const found = await d.containers.get(NAMES.relay);
+  if (!found || found.owner !== ownName() || found.state !== "running") throw coded("office_stopped", "Office's relay is not running");
+  return d.containers.exec(NAMES.relay, cmd, { timeoutMs });
 }
 
 /** The key the portal's tunnels open with (server.ts makes the file at boot, as it makes jwt-secret). */

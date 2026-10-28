@@ -778,6 +778,206 @@ async function run(PITHAGORAS: string): Promise<void> {
     await page.context().close();
   });
 
+  /* ------------------------------------------------------------------ */
+  /* office_screenshot                                                    */
+  /* ------------------------------------------------------------------ */
+
+  type Shot = { content: ({ type: string; text?: string; data?: string; mimeType?: string })[]; details: Record<string, any> };
+  const shoot = async (label: string, params: Record<string, unknown>, through: Record<string, Tool> = tools) => {
+    const t0 = Date.now();
+    const out = (await through.office_screenshot.execute(`p-${label}`, params)) as unknown as Shot;
+    const took = Date.now() - t0;
+    const image = out.content.find((c) => c.type === "image")!;
+    console.log(`16. ${label}: ${took} ms, ${JSON.stringify(out.details)}; ${JSON.stringify(out.content[0].text!.split("\n")[0])}`);
+    return { out, image: image.data!, text: out.content[0].text!, took };
+  };
+  /** The pixels of a JPEG (base64) at `points`, [r, g, b] each, as a page of Chromium decodes it. A string, not a
+   * function: tsx names the helpers of a function, which the page does not have. */
+  const pixels = async (data: string, points: [number, number][]) => {
+    const page = await browser.newPage();
+    try {
+      return (await page.evaluate(`(async function () {
+        var img = new Image();
+        img.src = "data:image/jpeg;base64," + ${JSON.stringify(data)};
+        await img.decode();
+        var c = document.createElement("canvas");
+        c.width = img.width; c.height = img.height;
+        var g = c.getContext("2d");
+        g.drawImage(img, 0, 0);
+        return ${JSON.stringify(points)}.map(function (p) { return Array.prototype.slice.call(g.getImageData(p[0], p[1], 1, 1).data, 0, 3); });
+      })()`)) as number[][];
+    } finally {
+      await page.close();
+    }
+  };
+  /**
+   * A workbook made outside the editor (as a person's file would be), written over `docId`'s file: "Grid" with a
+   * number in each cell of A1:BH120 and C3 filled with `fill`; "Frozen", A1:J100 with its rows 1-5 frozen; and
+   * "Secret", hidden.
+   */
+  async function workbookFile(docId: string, fill: string): Promise<void> {
+    const col = (n: number) => {
+      let s = "";
+      for (n++; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+      return s;
+    };
+    const rows = (cols: number, count: number, styled?: string) =>
+      Array.from({ length: count }, (_, r) => `<row r="${r + 1}">${Array.from({ length: cols }, (_, c) => `<c r="${col(c)}${r + 1}"${`${col(c)}${r + 1}` === styled ? ' s="1"' : ""}><v>${(r + 1) * 100 + c}</v></c>`).join("")}</row>`).join("");
+    const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' + [1, 2, 3].map((n) => `<Override PartName="/xl/worksheets/sheet${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") + "</Types>");
+    zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns}><sheets><sheet name="Grid" sheetId="1" r:id="rId1"/><sheet name="Frozen" sheetId="2" r:id="rId2"/><sheet name="Secret" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>`);
+    zip.file("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + [1, 2, 3].map((n) => `<Relationship Id="rId${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${n}.xml"/>`).join("") + '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
+    zip.file("xl/styles.xml", `<?xml version="1.0" encoding="UTF-8"?><styleSheet ${ns}><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF${fill}"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/></cellXfs></styleSheet>`);
+    zip.file("xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${rows(60, 120, "C3")}</sheetData></worksheet>`);
+    zip.file("xl/worksheets/sheet2.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>${rows(10, 100)}</sheetData></worksheet>`);
+    zip.file("xl/worksheets/sheet3.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData>${rows(2, 2)}</sheetData></worksheet>`);
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+  }
+  const red = (p: number[]) => p[0] > 200 && p[1] < 90 && p[2] < 90;
+  const blue = (p: number[]) => p[2] > 200 && p[0] < 90 && p[1] < 90;
+
+  test("16. office_screenshot of a sheet: a range at 100 %, a larger one at 75 %, one too large refused with the part that fits, the used range cut to what fits, a range beyond frozen panes and one across them, a hidden sheet refused; the filled cell where it is", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Pictured", "cell");
+    await workbookFile(doc, "FF0000");
+    const small = await shoot("Grid!A1:E5", { id: doc, sheet: "grid", range: "A1:E5" });
+    assert.match(small.text, /^Sheet "Grid" A1:E5 at 100 %, as your editor shows it now\. Its cells:\n\nA1: 100\nB1: 101\n/);
+    assert.equal(small.out.details.zoom, 100);
+    // Headers of 26 x 19 px, cells of 64 x 19: C3's middle, and B2's.
+    assert.deepEqual([small.out.details.width, small.out.details.height], [26 + 5 * 64, 19 + 5 * 19]);
+    const [c3, b2] = await pixels(small.image, [[26 + 2 * 64 + 32, 19 + 2 * 19 + 9], [26 + 64 + 32, 19 + 19 + 3]]);
+    console.log(`16. C3 ${c3}, B2 ${b2}`);
+    assert.ok(red(c3), `C3 is red: ${c3}`);
+    assert.ok(!red(b2), `B2 is not: ${b2}`);
+    const wider = await shoot("Grid!A1:AD55", { id: doc, range: "A1:AD55" });
+    assert.equal(wider.out.details.zoom, 75);
+    assert.equal(wider.out.details.width, 1024, "made smaller to 1,024 px");
+    const native = await shoot("Grid!A1:AD55 large", { id: doc, range: "A1:AD55", large: true });
+    assert.ok(native.out.details.width > 1024 && native.out.details.width <= 1568);
+    await assert.rejects(tools.office_screenshot.execute("p-big", { id: doc, range: "A1:AH60" }), (e: Error) => /^error:range_too_large the range A1:AH60 is larger than the editor shows at 75 %: the largest range from A1 that fits is A1:AD55; take it in parts/.test(e.message));
+    const used = await shoot("Grid used range", { id: doc });
+    assert.match(used.text, /^Sheet "Grid" A1:AD55 at 75 %, as your editor shows it now\. The sheet's used range is A1:BH120: this is the part that fits from A1; take the rest with range\./);
+    const far = await shoot("Grid!AA90:AF100", { id: doc, range: "AA90:AF100" });
+    assert.match(far.text, /\nAA90: 9026\n/);
+    assert.equal(far.out.details.zoom, 100);
+    const beyond = await shoot("Frozen!A40:E60", { id: doc, sheet: "Frozen", range: "A40:E60" });
+    assert.match(beyond.text, /^Sheet "Frozen" A40:E60 at 100 %.*\n\nA40: 4000\n/s);
+    assert.equal(beyond.out.details.height, 19 + 21 * 19, "the 21 rows asked for, not the frozen ones above them");
+    const across = await shoot("Frozen!A3:E12", { id: doc, sheet: "Frozen", range: "A3:E12" });
+    assert.equal(across.out.details.height, 19 + 10 * 19);
+    await assert.rejects(tools.office_screenshot.execute("p-hidden", { id: doc, sheet: "Secret" }), (e: Error) => /^error:sheet_hidden "Secret" is hidden/.test(e.message));
+    // With the editor open, a picture takes about this long.
+    const timed = await shoot("Grid!A1:H20 timed", { id: doc, range: "A1:H20" });
+    console.log(`16. a sheet range with the editor open: ${timed.took} ms`);
+  });
+
+  test("17. office_screenshot of Word: page n, a quote's page, and the last page of a 40-page document right after an edit at its top, whole and with the page count settled", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Long pictured", "word");
+    const paragraphs = Array.from({ length: 1200 }, (_, n) => `Paragraph ${n + 1}: the quick brown fox jumps over the lazy dog, and then it runs on for a while so that the line wraps at least once.`);
+    await tools.office_edit.execute("w-fill", { id: doc, ops: [{ quote: "New document", replacement: "Top line" }, { after: "Top line", paragraphs }] });
+    const first = await shoot("page 1", { id: doc });
+    const pages = first.out.details.pages as number;
+    console.log(`16. pages: ${pages}`);
+    assert.ok(pages >= 30, `${pages} pages`);
+    assert.match(first.text, new RegExp(`^Page 1 of ${pages} of "Long pictured" \\(id ${doc}\\), as your editor shows it now\\. Its text:\\n\\n\\[1\\] Top line\\n\\[2\\] Paragraph 1:`));
+    const ratio = first.out.details.height / first.out.details.width;
+    assert.ok(Math.abs(ratio - 297 / 210) < 0.02, `an A4 page, whole: ${first.out.details.width} x ${first.out.details.height}`);
+    assert.equal(first.out.details.height, 1024);
+    const [corner, middle] = await pixels(first.image, [[3, 3], [Math.round(first.out.details.width / 2), 3]]);
+    assert.ok(corner.every((v) => v > 240) && middle.every((v) => v > 240), `the page's white top edge: ${corner} ${middle}`);
+    const quoted = await shoot("quote", { id: doc, quote: "Paragraph 600:" });
+    assert.match(quoted.text, /\nParagraph 600:|\] Paragraph 600:/);
+    const quotedPage = quoted.out.details.page as number;
+    assert.ok(quotedPage > 10 && quotedPage < pages, `${quotedPage}`);
+    await assert.rejects(tools.office_screenshot.execute("p-amb", { id: doc, quote: "lazy dog" }), (e: Error) => /^error:quote_ambiguous .* 1200 times: give nth/.test(e.message));
+    const nth = await shoot("nth", { id: doc, quote: "lazy dog", nth: 600 });
+    assert.equal(nth.out.details.page, quotedPage);
+    // An edit at the top that adds pages, and at once a picture of the last page.
+    const long = "A much longer top line. ".repeat(400);
+    await tools.office_edit.execute("w-top", { id: doc, ops: [{ quote: "Top line", replacement: long }] });
+    const last = await shoot("the last page after an edit at the top", { id: doc, page: pages + 1 }).catch(async (e: Error) => {
+      console.log(`16. page ${pages + 1}: ${e.message}`);
+      throw e;
+    });
+    const settled = last.out.details.pages as number;
+    assert.ok(settled > pages, `the edit added a page (${pages} -> ${settled})`);
+    assert.match(last.text, /Paragraph 1200:/, "the last page holds the last paragraph");
+    assert.ok(Math.abs(last.out.details.height / last.out.details.width - 297 / 210) < 0.02, "whole");
+    await assert.rejects(tools.office_screenshot.execute("p-past", { id: doc, page: settled + 1 }), (e: Error) => new RegExp(`^error:no_page the document has ${settled} pages`).test(e.message));
+    const again = await shoot("the last page again", { id: doc, page: settled });
+    assert.equal(again.out.details.pages, settled, "the count it said was the settled one");
+    console.log(`16. a Word page with the editor open: ${again.took} ms`);
+  });
+
+  test("18. two homes' pictures at once each show their own document; three editors' memory", { timeout: 600_000 }, async () => {
+    const other = path.join(process.env.WORKSPACE_ROOT!, "beta");
+    mkdirSync(other, { recursive: true });
+    const otherChat = `office-e2e-b-${Math.random().toString(36).slice(2)}`;
+    db.createSession({ id: otherChat, title: otherChat, workspace: other, executor: "host", kind: "task" });
+    const theirs: Record<string, Tool> = {};
+    for (const { factory } of host.hostExtensions(otherChat)) factory({ registerTool: (t: { name: string }) => (theirs[t.name] = t as never), on() {}, registerCommand() {}, events: { on: () => () => {} } });
+    const mine = await agentDoc("Mine in red", "cell");
+    const yours = String((await theirs.office_create.execute("c-blue", { title: "Theirs in blue", type: "cell" })).details.id);
+    await workbookFile(mine, "FF0000");
+    await workbookFile(yours, "0000FF");
+    // Both editors open first, then the pictures asked for at once, again and again.
+    await tools.office_read.execute("r-mine", { id: mine, sheet: "Grid" });
+    await theirs.office_read.execute("r-yours", { id: yours, sheet: "Grid" });
+    for (let round = 0; round < 3; round++) {
+      const [a, b] = await Promise.all([shoot(`mine ${round}`, { id: mine, range: "A1:E5" }), shoot(`theirs ${round}`, { id: yours, range: "A1:E5" }, theirs)]);
+      const [pa] = await pixels(a.image, [[26 + 2 * 64 + 32, 19 + 2 * 19 + 9]]);
+      const [pb] = await pixels(b.image, [[26 + 2 * 64 + 32, 19 + 2 * 19 + 9]]);
+      assert.ok(red(pa) && blue(pb), `round ${round}: mine ${pa}, theirs ${pb}`);
+    }
+    // A third editor, a Word document's, and what the three take.
+    const word = await agentDoc("Third", "word");
+    await shoot("third", { id: word });
+    assert.equal(seat.seats().length, 3);
+    await measure("Document Server + agents' browser, three agent editors at their size (two sheets, one Word page)", true);
+  });
+
+  test("19. the browser's debugging port is reachable from the relay alone: not from the island, not from the machine, not from a page in that browser", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Port", "word");
+    await tools.office_read.execute("r-port", { id: doc }); // the browser runs
+    const agent = agentContainer();
+    const ip = (agent.NetworkSettings.Networks[`${PREFIX}-agents`] as { IPAddress: string }).IPAddress;
+    // From the machine, by the browser's address on its network (an isolated one: the machine has no address there).
+    const fromHost = await fetch(`http://${ip}:9222/json/version`, { signal: AbortSignal.timeout(5000) }).then((r) => `HTTP ${r.status}`, (e: Error) => `refused (${e.message})`);
+    console.log(`19. from the machine, ${ip}:9222: ${fromHost}`);
+    assert.match(fromHost, /^refused/);
+    // From the island: the Document Server's container.
+    const tcp = `exec 3<>"/dev/tcp/$1/$2" && printf 'GET /json/version HTTP/1.0\\r\\n\\r\\n' >&3 && head -c 200 <&3 || echo "NO CONNECTION"`;
+    for (const host of [`${PREFIX}-agent`, ip]) {
+      const out = await promisify(execFile)("docker", ["exec", PREFIX, "timeout", "8", "bash", "-c", tcp, "probe", host, "9222"], { encoding: "utf8" }).then((r) => r.stdout + r.stderr, (e: { stdout?: string; stderr?: string }) => `${e.stdout ?? ""}${e.stderr ?? ""}`);
+      console.log(`19. from the island, ${host}:9222: ${JSON.stringify(out.trim().slice(0, 160))}`);
+      assert.doesNotMatch(out, /Browser|webSocketDebuggerUrl/);
+    }
+    // From the relay, the one that may: it answers.
+    const relay = await promisify(execFile)("docker", ["exec", `${PREFIX}-relay`, "node", "-e", `require("dns").promises.lookup(process.argv[1]).then(a => fetch("http://" + a.address + ":9222/json/version")).then(r => r.json()).then(j => console.log(j.Browser), e => console.log("FAILED " + e.message))`, `${PREFIX}-agent`], { encoding: "utf8" });
+    console.log(`19. from the relay: ${relay.stdout.trim()}`);
+    assert.match(relay.stdout, /Chrome\/157/);
+    // From a page in the browser (the seat page, through CDP from the relay): neither the list nor the WebSocket.
+    const probe = `
+      const dns = require("dns");
+      (async () => {
+        const a = (await dns.promises.lookup(process.argv[1])).address;
+        const list = await (await fetch("http://" + a + ":9222/json/list")).json();
+        // The browser's own WebSocket path, which a page could not read: given to it, as if it had guessed it.
+        const path = new URL((await (await fetch("http://" + a + ":9222/json/version")).json()).webSocketDebuggerUrl).pathname;
+        const seat = list.find((p) => p.type === "page" && /\\/seat\\//.test(p.url));
+        const ws = new WebSocket("ws://" + a + ":9222" + seat.webSocketDebuggerUrl.replace(/^ws:\\/\\/[^/]+/, ""));
+        await new Promise((ok) => (ws.onopen = ok));
+        const page = "(async function () { var out = {}; for (var url of ['http://" + process.argv[1] + ":9222', 'http://127.0.0.1:9223']) { out[url] = await fetch(url + '/json/version').then(function (r) { return 'read ' + r.status; }, function (e) { return 'failed: ' + e.message; }); out[url + ' ws'] = await new Promise(function (ok) { var w = new WebSocket(url.replace('http', 'ws') + '" + path + "'); w.onopen = function () { ok('open'); }; w.onerror = function () { ok('refused'); }; setTimeout(function () { ok('no answer'); }, 4000); }); } return JSON.stringify(out); })()";
+        ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.id === 1) { console.log(m.result.result.value); process.exit(0); } };
+        ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: page, awaitPromise: true, returnByValue: true } }));
+      })().catch((e) => { console.log("FAILED " + e.message); process.exit(0); });`;
+    const inPage = await promisify(execFile)("docker", ["exec", `${PREFIX}-relay`, "node", "--no-warnings", "-e", probe, `${PREFIX}-agent`], { encoding: "utf8", timeout: 30_000 });
+    console.log(`19. from a page in the agents' browser: ${inPage.stdout.trim()}`);
+    const seen = JSON.parse(inPage.stdout.trim()) as Record<string, string>;
+    for (const [what, how] of Object.entries(seen)) assert.match(how, what.endsWith(" ws") ? /^(refused|no answer)$/ : /^failed/, what);
+  });
+
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Stopped", "word");
     await tools.office_edit.execute("s1", { id: doc, ops: [{ paragraphs: ["Saved before the stop"] }] });

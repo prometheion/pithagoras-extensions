@@ -74,7 +74,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
   as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`,
-  `office_read`, `office_edit` and `office_comments`. An agent sees the documents in its own folder (its home, or its project's) and
+  `office_read`, `office_edit`, `office_comments` and `office_screenshot`. An agent sees the documents in its own folder (its home, or its project's) and
   the ones it was granted by a mention; another agent's, and the files in another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
   goes into its folder and belongs to it, not to one of its chats. A file in its folder is read
@@ -110,6 +110,19 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   closes for a fourth); the browser stops ten minutes after its last editor closed, and starts again with the next
   call (a few seconds). Where you stopped Office, `office_read` reads the saved file and says so, and `office_edit` is
   refused until it runs again: there is no other way to write.
+  **The agent sees what it made**: `office_screenshot` gives it a picture (JPEG) of a document as its own editor shows
+  it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still; or
+  a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
+  refused beyond that with the largest range from its first cell that fits (about 23 columns by 41 rows of default
+  cells at 100 %, 30 by 55 at 75 %). By default a sheet's used range from A1, as much as fits. 1,024 px on the longer
+  side (`large`: up to 1,568, never larger than the editor draws it). The picture is drawn from the editor's own page
+  or grid, so it shows that document alone: no other editor, no selection, no cursors or names of the people in it.
+  The text the picture shows comes with it, as office_read gives it, so the guard reads it (text inside pictures in
+  the document is not read). A model that cannot take pictures is refused (`error:no_images`) before anything is
+  done. A picture costs the model about 1,000 to 1,600 input tokens on every later turn of the chat. Taking one moves
+  the agent's own view (its page, zoom, sheet and selection), which you may see as its cursor moving; pictures are
+  taken one at a time in the agents' browser. The page is laid out as the editor lays it out: with its fonts (Carlito
+  for Calibri, for instance), so a page break may fall elsewhere than in desktop Word.
   A save that would overwrite a newer revision (the file changed on disk while it was open: a script, a git pull) is
   not lost and does not overwrite it: it is kept beside the document as "<title> (conflict <date time>)", and the audit
   log says so; the agent is told, and its editor of that document closes. A save the Document Server could not hand
@@ -198,17 +211,25 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   out of reach), and the extension's listener through the relay's way back; nothing else, never the portal, its pages
   or anyone's session (a portal in a container of its own is on the Document Server's network, not on this one). It
   runs as a user that is not root, with none of the kernel's capabilities,
-  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most, and no
-  debugging port. Chromium's own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses:
+  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most. Chromium's own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses:
   the container is the boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
   extension's listener through the relay, under a secret that is new at every start of the server half and is only in
   its command line (`/seat/<secret>/`), and that page opens an editor for each document an agent works in, with a
   config the server half signs. Those configs are the only ones with a plugin: Office's own (people's editors keep
   plugins and macros off, signed). The plugin takes the agent's edits from the listener under a token of its editor's
-  (`/plugin/<token>/`), and runs one of four fixed commands with them as data: the model never sends code. Anything
+  (`/plugin/<token>/`), and runs one of its fixed commands with them as data: the model never sends code. Anything
   else on those paths is answered as an unknown address. The agent's write permission is checked before each edit and
   when its editor opens (one it may not change opens read-only), and a file in a folder the agent could not read is
   never opened.
+  **Its debugging port** (CDP, which controls the whole browser and with it every document an agent has open) is for
+  `office_screenshot` alone. Chromium opens it on its own loopback (127.0.0.1:9223) only, and `socat` passes port
+  9222 on the agents' network to it; nothing publishes it. On that network only the relay is besides the browser, and
+  the port's one user is a fixed Node script that the server half runs in the relay with `docker exec` (which needs
+  the portal's Docker access, so nothing on the host or in a container of anybody else's reaches it). The script's
+  only argument is data: which editor, and the page or range, which the server half checked and which reaches the
+  editor as an argument, never as code. A page in the browser cannot use the port: Chromium refuses a page's request
+  for its list of pages, and a WebSocket that names an origin (none is allowed). The Document Server and the island
+  are not on that network.
   What this browser does not keep apart: the editors of every document the agents have open (three at most, of any
   agent) are in that one page, on one origin, so a document that got a script running in its editor (a bug of
   OnlyOffice's own; macros are off) reaches the other documents open there at that moment. And `office_read` reads
@@ -318,6 +339,9 @@ agents' editor.
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
+- `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %; a
+  larger range is taken in parts. A Word page beyond the count the editor has laid out after 5 s is refused with that
+  count.
 
 ## Licences
 

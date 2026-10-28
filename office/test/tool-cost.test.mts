@@ -1,0 +1,48 @@
+/**
+ * What Office's tools cost in every request of a chat that has them: each one's description, its schema and the line
+ * pi lists it by in the system prompt, counted as Pithagoras' own tests/tool-texts.test.mts counts its tools (a
+ * quarter of a token to the character). A text that grows past its cap fails here; the caps are the lengths agreed
+ * for each tool, with 3 % room for a word to be changed. A change of a cap says why in its commit.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { registerTools, __resetToolsForTests } from "../src/tools";
+
+type Registered = { name: string; description: string; parameters: unknown; promptSnippet?: string };
+
+const tokens = (text: string) => Math.ceil(text.length / 4);
+/** A tool's cost as the model is charged for it: the description, the schema and the line pi lists it by. */
+const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.stringify(tool.parameters)) + (tool.promptSnippet ? tokens(`- ${tool.name}: ${tool.promptSnippet}`) : 0);
+
+/** The agreed cost of each tool, in tokens (office_screenshot: about 260 in the plan of #13, 248 as written). */
+const AGREED: Record<string, number> = {
+  office_list: 113,
+  office_create: 190,
+  office_read: 246,
+  office_edit: 958,
+  office_comments: 181,
+  office_screenshot: 248,
+};
+const ROOM = 1.03;
+
+function tools(): Registered[] {
+  const out: Registered[] = [];
+  __resetToolsForTests();
+  registerTools({ extend: (factory) => factory({ registerTool: (t: Registered) => out.push(t) }, { id: "chat" }), owner: () => "/f/atlas", root: "/nowhere", log: () => {} });
+  __resetToolsForTests();
+  return out;
+}
+
+test("every office tool has an agreed cost, and none costs more than that", () => {
+  const all = tools();
+  assert.deepEqual(all.map((t) => t.name).sort(), Object.keys(AGREED).sort());
+  const over = all.filter((t) => cost(t) > Math.ceil(AGREED[t.name] * ROOM)).map((t) => `${t.name}: ${cost(t)} tokens, agreed ${AGREED[t.name]}`);
+  assert.deepEqual(over, []);
+});
+
+test("all office tools together cost what their caps add up to", () => {
+  const total = tools().reduce((n, t) => n + cost(t), 0);
+  const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
+  assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
+  assert.equal(agreed, 1936);
+});

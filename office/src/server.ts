@@ -52,6 +52,7 @@ import { saveNow } from "./editing";
 import { holdWayBack } from "./back";
 import { registerTools } from "./tools";
 import * as seat from "./seat";
+import * as cdp from "./cdp";
 import { PLUGIN_GUID } from "./seat-page";
 import { floatingTag } from "./office-ui";
 import { writesFromHere } from "../../shared/proxy";
@@ -988,6 +989,8 @@ function wireSeats(dd: string, secret: string): void {
     },
     listenerOrigin: () => `http://${container.NAMES.relay}:${container.BACK_PORT}`,
     dsOrigin: agentsDs,
+    // A picture through the browser's debugging port, from the relay (cdp.ts).
+    capture: (editorId, target) => cdp.shot(editorId, target, { exec: (cmd, ms) => container.execRelay(cmd, ms), browser: container.NAMES.agent }),
     log: logLine,
   });
   // A Document Server (re)started ends every session the agents' editors were in, and with them the chats of the

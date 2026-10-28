@@ -19,6 +19,8 @@ import * as container from "../src/container";
 import officeServer, { buildEditorConfig, dsPathAllowed, forwardedFor, jwtSecret, loopbackPort, settleKept, ticketSecret, ticketSubject } from "../src/server";
 import * as seat from "../src/seat";
 import { PLUGIN_GUID } from "../src/seat-page";
+import { CDP_SRC } from "../src/cdp";
+import { createHash } from "node:crypto";
 import { browser } from "./seat-browser.mts";
 import * as store from "../src/store";
 import { filesCreate, homeIn } from "./homes.mts";
@@ -618,7 +620,7 @@ test("the office tools are given to a chat by the panel's rule: whose the portal
   fs.symlinkSync(w.project, path.join(w.home, "report-link"));
   const bt = await boot(undefined, fakeDocker(), { ...w.chats, "chat-link": path.join(w.home, "report-link") }, w.listed);
   try {
-    const all = ["office_comments", "office_create", "office_edit", "office_list", "office_read"];
+    const all = ["office_comments", "office_create", "office_edit", "office_list", "office_read", "office_screenshot"];
     for (const chat of ["chat-a", "chat-home", "chat-project", "chat-sub", "chat-link"]) assert.deepEqual(bt.toolsOf(chat), all, chat);
     assert.deepEqual(bt.toolsOf("chat-loose"), [], "in no agent's home nor project");
     assert.deepEqual(bt.toolsOf("chat-gone"), []);
@@ -1666,6 +1668,28 @@ test("the agents' seats, wired: the agents' editors reach the Document Server th
 });
 
 
+test("the agents' seats, wired: a picture is taken by cdp's client in Office's relay, of the agent's own editor in the agents' browser", async () => {
+  const dock = fakeDocker();
+  const json = JSON.stringify({ data: "/9j/", width: 4, height: 3, pages: 1 });
+  dock.state.answer = (cmd) => (cmd[0] === "node" ? { output: `CDP ${json.length} ${createHash("sha256").update(json).digest("hex")} ${json}\n`, exitCode: 0, timedOut: false } : undefined);
+  const w = await withSeats(dock);
+  try {
+    const doc = await store.createDoc({ title: "Look", type: "word", folder: homeIn(w.b.root) }, w.b.root);
+    const out = await seat.shot("/homes/a", doc.docId, "edit", { kind: "view.locate", args: { kind: "word", page: 1 } });
+    assert.deepEqual(out.image, { data: "/9j/", width: 4, height: 3, pages: 1 });
+    const call = dock.calls.find((c) => c.startsWith("exec pithagoras-office-ds-relay node"));
+    assert.ok(call, dock.calls.join(", "));
+    assert.ok(call.startsWith(`exec pithagoras-office-ds-relay node --no-warnings -e ${CDP_SRC}`));
+    const spec = JSON.parse(call.slice(`exec pithagoras-office-ds-relay node --no-warnings -e ${CDP_SRC} `.length));
+    assert.equal(spec.browser, AGENT);
+    assert.equal(spec.port, 9222);
+    assert.equal(spec.editorId, w.chromium.opened[0].editorId, "the agent's own editor of that document");
+    assert.deepEqual(dock.state.execs.filter((e) => e.name === "pithagoras-office-ds-relay"), [{ name: "pithagoras-office-ds-relay", timeoutMs: 15_000 }]);
+  } finally {
+    await w.done();
+  }
+});
+
 /* ---------------- comments and the editor's chat (docchat) ---------------- */
 
 test("who is behind a request (http.person): nobody signed in is refused every route but the Document Server's own traffic; a person who is not the primary one may read, not change documents or talk to the agents", async () => {
@@ -1727,7 +1751,7 @@ test("on a portal without the extension API of #339, comments and the editor's c
     const scope = async (chat: string) => ((await b.router.dispatch("GET", `/scope?chat=${chat}`)).body as { docIds: string[] }).docIds;
     assert.deepEqual(await scope("chat-a"), [(panel.body as store.DocMeta).docId]);
     assert.equal((await scope("chat-home")).length, 2, "the home's own two");
-    assert.equal(b.toolsOf("chat-a").length, 5);
+    assert.equal(b.toolsOf("chat-a").length, 6);
     // In a folder inside a project, nothing tells whose the chat is here: no documents, no tools, and its New document
     // says why.
     assert.deepEqual(await scope("chat-sub"), []);

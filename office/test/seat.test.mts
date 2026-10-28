@@ -9,7 +9,7 @@ import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { closeDoc, closeEditor, configureSeat, health, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
+import { closeDoc, closeEditor, configureSeat, health, keyOf, LIMITS, pageUrl, resetSeats, run, SeatError, seats, shot, stopSeats, handleSeat, tuneSeats, type SeatDeps } from "../src/seat";
 import { BRIDGE_JS, PLUGIN_GUID } from "../src/seat-page";
 import { browser, type Handler } from "./seat-browser.mts";
 
@@ -734,5 +734,106 @@ test("an editor that may only comment serves a read asked in view mode; a change
     assert.deepEqual(seats().filter((x) => x.home === "/homes/b").map((x) => x.mode), ["comment"]);
   } finally {
     await s.done();
+  }
+});
+
+/* ---------------- pictures (office_screenshot) ---------------- */
+
+/** A capture that records when each picture began and ended, and of which editor, taking `ms` each. */
+function captures(ms = 200) {
+  const log: string[] = [];
+  const capture: NonNullable<SeatDeps["capture"]> = async (editorId, target) => {
+    log.push(`begin ${editorId} ${JSON.stringify(target)}`);
+    await delay(ms);
+    log.push(`end ${editorId}`);
+    return { data: "/9j/", width: 10, height: 10 };
+  };
+  return { log, capture };
+}
+
+test("a picture: the locate runs in the agent's editor, and what it answers is what the picture is taken of, in that editor", async () => {
+  const c = captures(10);
+  const s = await setup((job) => (job.kind === "view.locate" ? { page: 2, view: { kind: "word", page: 2, pages: 3 } } : { kind: job.kind }), {}, { capture: c.capture });
+  try {
+    const out = await shot("/homes/a", "doc-1", "view", { kind: "view.locate", args: { kind: "word", page: 2 } }, { large: true });
+    const id = s.b.opened[0].editorId;
+    assert.deepEqual(out, { located: { page: 2, view: { kind: "word", page: 2, pages: 3 } }, image: { data: "/9j/", width: 10, height: 10 } });
+    assert.deepEqual(c.log, [`begin ${id} {"kind":"word","page":2,"pages":3,"large":true}`, `end ${id}`]);
+    assert.deepEqual(seats().map((x) => [x.home, x.mode]), [["/homes/a", "view"]]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("pictures are taken one at a time in the whole browser: two homes' at once run one after the other", async () => {
+  const c = captures(300);
+  const s = await setup(() => ({ view: { kind: "cell" } }), {}, { capture: c.capture });
+  try {
+    await Promise.all([
+      shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: { kind: "cell" } }),
+      shot("/homes/b", "doc-2", "edit", { kind: "view.locate", args: { kind: "cell" } }),
+    ]);
+    const ids = s.b.opened.map((o) => o.editorId);
+    assert.equal(ids.length, 2);
+    assert.deepEqual(c.log.map((l) => l.split(" ").slice(0, 2).join(" ")), [`begin ${ids[0]}`, `end ${ids[0]}`, `begin ${ids[1]}`, `end ${ids[1]}`]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("an edit of the editor asked for while its picture is taken waits until the picture is taken; one asked before runs first", async () => {
+  const c = captures(400);
+  const order: string[] = [];
+  const s = await setup((job) => {
+    order.push(job.kind);
+    return job.kind === "view.locate" ? { view: { kind: "word", page: 1, pages: 1 } } : { ops: 1 };
+  }, {}, { capture: async (id, t) => {
+    order.push("capture");
+    const out = await c.capture(id, t);
+    order.push("captured");
+    return out;
+  } });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    const picture = shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: { kind: "word" } });
+    await delay(150);
+    assert.deepEqual(order, ["word.read", "view.locate", "capture"]);
+    const edit = run("/homes/a", "doc-1", "edit", { kind: "word.edit", args: {} });
+    await delay(100);
+    assert.deepEqual(order, ["word.read", "view.locate", "capture"], "the editor's plugin is handed nothing while the picture is taken");
+    await picture;
+    await edit;
+    assert.deepEqual(order, ["word.read", "view.locate", "capture", "captured", "word.edit"]);
+  } finally {
+    await s.done();
+  }
+});
+
+test("a picture's refusals: the locate's own code, the capture's code; without a capture the seats take no picture; the editor goes on after a failed one", async () => {
+  let fail: "locate" | "capture" | "" = "locate";
+  const s = await setup((job) => {
+    if (job.kind === "view.locate" && fail === "locate") throw { code: "no_page", message: "the document has 2 pages" };
+    return job.kind === "view.locate" ? { view: { kind: "word", page: 1, pages: 2 } } : { kind: job.kind };
+  }, {}, {
+    capture: async () => {
+      if (fail === "capture") throw Object.assign(new Error("the range does not fit in the editor's view at 75 %"), { code: "range_too_large" });
+      return { data: "/9j/", width: 1, height: 1 };
+    },
+  });
+  try {
+    await assert.rejects(shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: { kind: "word", page: 3 } }), code("no_page"));
+    fail = "capture";
+    await assert.rejects(shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: { kind: "word" } }), (e: unknown) => e instanceof SeatError && e.code === "range_too_large" && /75 %/.test(e.message));
+    fail = "";
+    assert.deepEqual(await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} }), { kind: "word.read" }, "the editor takes jobs again");
+    assert.equal((await shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: { kind: "word" } })).image.width, 1);
+  } finally {
+    await s.done();
+  }
+  const bare = await setup(() => ({ view: {} }));
+  try {
+    await assert.rejects(shot("/homes/a", "doc-1", "edit", { kind: "view.locate", args: {} }), code("agent_unavailable"));
+  } finally {
+    await bare.done();
   }
 });

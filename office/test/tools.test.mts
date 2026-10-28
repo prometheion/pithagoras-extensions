@@ -43,6 +43,15 @@ const CHAT_TO_FOLDER: Record<string, string> = {
   "chat-notes": "/f/notes",
 };
 
+/** Whose a chat is, as owner.ts would say (its own tests are in server.test): the agent's or project's folder its chat
+ * works in, none for another kind of folder; a chat with no folder throws. */
+function ownerOf(id: string): string | undefined {
+  const at = CHAT_TO_FOLDER[id];
+  if (!at) throw new Error(`no workspace for ${id}`);
+  const f = FOLDERS.find((f) => f.path === at);
+  return f && (f.kind === "agent" || f.kind === "project") ? f.path : undefined;
+}
+
 type ToolResult = { content: { type: string; text: string }[]; details?: any };
 type PiFake = { registered: Record<string, any>[]; sent: unknown[][]; uiHandlers: ((m: any) => void)[]; find: (name: string) => any } & Record<string, any>;
 
@@ -126,12 +135,7 @@ function setup(chatId = "chat-atlas-home"): { root: string; seen: Seen; pi: PiFa
     extend: (f) => {
       factory = f;
     },
-    chatFolder: (id) => {
-      const p = CHAT_TO_FOLDER[id];
-      if (!p) throw new Error(`no workspace for ${id}`);
-      return p;
-    },
-    folders: () => FOLDERS,
+    owner: ownerOf,
     // Every document is a file in its folder, opened as the agent would: these stand in for the portal's checks.
     openFile: (file) => ({ fd: fs.openSync(file, "r"), size: fs.statSync(file).size }),
     mayWrite: () => {},
@@ -220,8 +224,7 @@ test("registers office_* only in agent and project home chats", () => {
   const notes = makePi();
   registerTools({
     extend: (f) => f(notes, { id: "chat-notes" }),
-    chatFolder: (id) => CHAT_TO_FOLDER[id],
-    folders: () => FOLDERS,
+    owner: ownerOf,
     root: s.root,
     log: (l) => s.seen.logs.push(l),
   });
@@ -231,10 +234,9 @@ test("registers office_* only in agent and project home chats", () => {
   const ghost = makePi();
   registerTools({
     extend: (f) => f(ghost, { id: "chat-gone" }),
-    chatFolder: () => {
+    owner: () => {
       throw new Error("folder gone");
     },
-    folders: () => FOLDERS,
     root: s.root,
     log: (l) => s.seen.logs.push(l),
   });
@@ -309,7 +311,7 @@ async function scanned(seams: Parameters<typeof registerTools>[0], files: string
   (await import("../src/store")).scanWorkspace([ws], root);
   const pi = makePi();
   const fake = fakeSeat(() => root);
-  registerTools({ extend: (f) => f(pi, { id: "chat-a" }), chatFolder: () => ws, folders: () => [{ path: ws, name: "Atlas", kind: "agent" }], root, record: () => {}, log: () => {}, seat: fake.seat, save: fake.save, officeState: () => "running", ...seams });
+  registerTools({ extend: (f) => f(pi, { id: "chat-a" }), owner: () => ws, root, record: () => {}, log: () => {}, seat: fake.seat, save: fake.save, officeState: () => "running", ...seams });
   const doc = (await import("../src/store")).listDocs(root)[0]!;
   return { root, ws, file: path.join(ws, files[0]), doc, seat: fake.state, find: (name: string) => pi.registered.find((t) => t.name === name)! };
 }
@@ -333,8 +335,7 @@ test("scanned documents: the ones in the agent's own folder are opened in its ed
   fake.state.answer = (run) => (run.kind === "word.read" ? { blocks: [{ p: "New document" }] } : { ops: 1 });
   registerTools({
     extend: (f) => f(pi, { id: "chat-a" }),
-    chatFolder: () => mine,
-    folders: () => [{ path: mine, name: "Atlas", kind: "agent" }, { path: theirs, name: "Bolt", kind: "agent" }],
+    owner: () => mine,
     openFile: (file, chatId) => {
       opened.push([file, chatId]);
       return { fd: fs.openSync(file, "r"), size: fs.statSync(file).size };
@@ -412,8 +413,7 @@ test("a document another agent's home holds, granted by a mention: read as the p
   const office = { state: "running" as "running" | "stopped" };
   registerTools({
     extend: (f) => f(pi, { id: "chat-a" }),
-    chatFolder: () => mine,
-    folders: () => [{ path: mine, name: "Atlas", kind: "agent" }, { path: theirs, name: "Home", kind: "agent", home: true }],
+    owner: () => mine,
     // The sandbox: another agent's home is closed to this agent, for reading and writing.
     openFile: (file) => {
       opened.push(file);

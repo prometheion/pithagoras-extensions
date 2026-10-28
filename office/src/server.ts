@@ -39,6 +39,7 @@ import { randomBytes } from "node:crypto";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { setPortal, portal, dataDir, missingApi, tooOld } from "./host";
 import { portal339, type RequestPerson } from "./extension-api-339.temporary";
+import { chatOwner, defaultHome, ownerKnown } from "./owner";
 import * as container from "./container";
 import { LIMIT_BOUNDS, limitOk, loadSettings, saveSettings, type OfficeSettings } from "./settings";
 import { signJwt } from "./jwt";
@@ -190,13 +191,6 @@ function docFolders(): string[] {
   return portal().folders.list().filter((f) => f.kind === "agent" || f.kind === "project").map((f) => store.canonical(f.path));
 }
 
-/** The default agent's home: the folder folders.list() marks `home`, the agent a chat, channel or routine goes to when
- * none is named. Undefined where it is not listed (gone, out of reach). */
-export function defaultHome(): string | undefined {
-  const home = portal().folders.list().find((f) => f.kind === "agent" && f.home);
-  return home && store.canonical(home.path);
-}
-
 /** Where a document the person makes on the Office tab goes: the home of the agent New starts the person's chats with
  * (`newChats`, which the person may have picked on its Agent page), else the default agent's (a portal that marks no
  * such home). A new document of the person's is something new of theirs, as a new chat is. */
@@ -206,15 +200,12 @@ export function newDocumentHome(): string | undefined {
   return picked && store.canonical(picked.path);
 }
 
-/** The folder a chat's documents live in and belong to: its agent's home or its project's folder, as the portal says
- * whose the chat is (chats.owner), else the default agent's home, the agent the sandbox runs a chat in neither as.
- * Throws `not_found` where there is no such chat, and `portal_too_old` on a portal that cannot say whose a chat is. */
+/** The folder a chat's documents live in and belong to: its agent's home or its project's folder (owner.ts `chatOwner`,
+ * the rule the tools are given to the chat by), else, on a portal that says whose a chat is, the default agent's home,
+ * the agent the sandbox runs a chat that is neither's as (the tools are given to no such chat: the panel lists that
+ * agent's documents, and its New document makes one there). Throws `not_found` where there is no such chat. */
 export function folderForChat(chatId: string): string | undefined {
-  const chats = portal339().chats;
-  if (typeof chats.owner !== "function") throw Object.assign(new Error(tooOld(["chats.owner"])), { code: "portal_too_old" });
-  if (!chats.get(chatId)) throw Object.assign(new Error(`there is no chat ${chatId}`), { code: "not_found" });
-  const owner = chats.owner(chatId);
-  return owner ? store.canonical(owner.path) : defaultHome();
+  return chatOwner(chatId) ?? (ownerKnown() ? defaultHome() : undefined);
 }
 
 /** What the person calls the agent or project a document belongs to (folders.label), or its folder's last part; none
@@ -496,7 +487,8 @@ function registerRoutes(dd: string, secret: string): void {
   });
 
   /** GET /scope?chat=<id> -> { docIds }: what the agent or project of that chat sees (store.docsForHome of
-   * folderForChat, the tools' own rule), for the panel beside the chat. A chat that is gone sees none. */
+   * folderForChat, by the rule the tools are given to it by), for the panel beside the chat. A chat that is gone sees
+   * none, and so does one that is neither an agent's nor a project's on a portal that cannot say whose it is. */
   r.get("/scope", async (req, res) => {
     const chatId = typeof req.query?.chat === "string" ? req.query.chat : "";
     let home: string | undefined;
@@ -523,10 +515,10 @@ function registerRoutes(dd: string, secret: string): void {
       let folder: string | undefined;
       try {
         folder = chatId ? folderForChat(chatId) : newDocumentHome();
-      } catch (e) {
-        if ((e as { code?: string }).code === "portal_too_old") throw e;
+      } catch {
         throw Object.assign(new Error(`there is no chat ${chatId}, or its folder is gone`), { code: "not_found" });
       }
+      if (!folder && chatId && !ownerKnown()) throw Object.assign(new Error("this chat works in no agent's home nor project's folder, which is all this portal can tell whose a chat is by"), { code: "no_home" });
       if (!folder) throw Object.assign(new Error("the portal's default agent has no home to make it in"), { code: "no_home" });
       const doc = await store.createDoc({ title, type, folder }, dd);
       recordAudit({ subject: doc.title, reason: `created ${doc.ext} document ${doc.docId} in ${doc.path}`, chatId });

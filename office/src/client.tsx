@@ -67,8 +67,9 @@ function OfficePanel({ chat, panel }: PanelProps) {
   );
 }
 
-/** The documents beside a chat: what its agent or project sees (GET /scope, the tools' own rule): the ones in its
- * folder (its own) and the ones it was granted by a comment mention. The sort choice is the one of
+/** The documents beside a chat: what its agent or project sees (GET /scope, whose the chat is by the rule its office
+ * tools are given to it by; for a chat that is neither's, the default agent's): the ones in its folder (its own) and
+ * the ones it was granted by a comment mention. The sort choice is the one of
  * web/sort.tsx, persisted under "po-sort" so this panel and the full Office page share it. A row opens its document
  * here, in the panel. */
 function PanelList({ chat, onOpen }: { chat: Chat; onOpen(docId: string): void }) {

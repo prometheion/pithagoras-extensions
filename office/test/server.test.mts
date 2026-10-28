@@ -130,6 +130,8 @@ interface Booted {
   allowedDirs: string[];
   /** The Docker for extensions the half was given (fake-docker.mts). */
   dock: ReturnType<typeof fakeDocker>;
+  /** The office tools' names a chat's pi is given (the half's chats.extend factory run for that chat). */
+  toolsOf: (chatId: string) => string[];
   cleanup: () => Promise<void>;
 }
 
@@ -162,6 +164,7 @@ async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<stri
   const allowedDirs: string[] = [];
   const router = new MiniRouter();
   const ddock = dock.docker; // ONE instance per boot: extensions.use() resolves the same fake every time
+  const factories: ((pi: unknown, chat: { id: string }) => void)[] = [];
   const portalObj = {
     extension: "@pithagoras/office",
     dataDir: () => rootDir,
@@ -171,14 +174,19 @@ async function boot(root?: string, dock = fakeDocker(), chatFolders: Record<stri
     http: { json: (_o?: unknown) => (_req: unknown, _res: unknown, next: () => void) => next(), text: () => () => undefined, raw: () => () => undefined, send: () => () => {}, upgrade: () => undefined, ...(api === "339" ? { person: () => requestPerson } : {}) },
     folders: { list: () => listed, allowed: (p: string) => allowedDirs.some((d) => p === d || p.startsWith(d + path.sep)), label: (f: string) => ({ name: listed.find((l) => l.path === f)?.name ?? path.basename(f) }), on: () => {} },
     chats: {
-      extend: (_f: unknown) => {}, get: (id: string) => (chatFolders[id] ? { id } : undefined), list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {},
+      extend: (f: (pi: unknown, chat: { id: string }) => void) => void factories.push(f), get: (id: string) => (chatFolders[id] ? { id } : undefined), list: () => [], inFolder: () => [] as never[], folder: (id: string) => { if (!chatFolders[id]) throw new Error("none"); return chatFolders[id]; }, send: () => {}, tell: async () => false, onEvent: () => {}, on: () => {},
       ...(api === "339" ? { start: () => { throw new Error("no chats in this test"); }, lastAnswer: () => undefined, owner: (id: string) => ownerOf(chatFolders, listed, owners, id) } : {}),
     },
     files: { create: filesCreate },
     extensions: { use: () => ddock },
   } as unknown as ServerPortal;
   const cleanup = await officeServer(portalObj);
-  return { root: rootDir, portal: portalObj, router, logs, audits, allowedDirs, dock, cleanup };
+  const toolsOf = (chatId: string) => {
+    const names: string[] = [];
+    for (const f of factories) f({ registerTool: (t: { name: string }) => names.push(t.name), on: () => {}, registerCommand: () => {}, sendMessage: () => {}, events: { on: () => () => {} } }, { id: chatId });
+    return names.sort();
+  };
+  return { root: rootDir, portal: portalObj, router, logs, audits, allowedDirs, dock, toolsOf, cleanup };
 }
 
 async function until(cond: () => boolean, ms = 2000): Promise<void> {
@@ -603,6 +611,21 @@ test("/scope: what the agent or project of a chat sees, whose the portal says th
   assert.deepEqual(await scope("chat-gone"), []);
   await bt.cleanup();
   fs.rmSync(w.ws, { recursive: true, force: true });
+});
+
+test("the office tools are given to a chat by the panel's rule: whose the portal says the chat is, a chat in a project's subfolder and one in a link in an agent's home included; a chat that is neither's, or gone, gets none", async () => {
+  const w = workspace();
+  fs.symlinkSync(w.project, path.join(w.home, "report-link"));
+  const bt = await boot(undefined, fakeDocker(), { ...w.chats, "chat-link": path.join(w.home, "report-link") }, w.listed);
+  try {
+    const all = ["office_comments", "office_create", "office_edit", "office_list", "office_read"];
+    for (const chat of ["chat-a", "chat-home", "chat-project", "chat-sub", "chat-link"]) assert.deepEqual(bt.toolsOf(chat), all, chat);
+    assert.deepEqual(bt.toolsOf("chat-loose"), [], "in no agent's home nor project");
+    assert.deepEqual(bt.toolsOf("chat-gone"), []);
+  } finally {
+    await bt.cleanup();
+    fs.rmSync(w.ws, { recursive: true, force: true });
+  }
 });
 
 test("POST /documents: the Office tab's New document is made in the home New starts the person's chats in (the default agent's where none is marked), a chat panel's in the chat's agent home or project folder; no home is a 409", async () => {
@@ -1692,12 +1715,24 @@ test("on a portal without the extension API of #339, comments and the editor's c
     }
     assert.deepEqual((await b.router.dispatch("GET", "/mentionables")).body, { users: [] }, "nobody to mention");
     assert.deepEqual((await b.router.dispatch("GET", `/editor-state?doc=${doc.docId}&key=${encodeURIComponent(key)}`)).body, { standing: "current", docchat: [], docchatOff: off });
-    // Documents still work: the Office tab's New document, a download; a chat's panel cannot say whose the chat is.
+    // Documents still work: the Office tab's New document, a download, and a chat's panel and tools where the chat works
+    // in an agent's home or a project's folder itself, which is what this portal says of whose a chat is.
     assert.equal((await b.router.dispatch("POST", "/documents", { title: "Still", type: "word" })).statusCode, 201);
     assert.equal((await b.router.dispatch("GET", `/documents/${doc.docId}`)).statusCode, 200);
     const panel = await b.router.dispatch("POST", "/documents", { title: "Panel", type: "word", chat: "chat-a" });
-    assert.equal(panel.statusCode, 501);
-    assert.equal((panel.body as { code: string }).code, "portal_too_old");
+    assert.equal(panel.statusCode, 201);
+    assert.equal((panel.body as store.DocMeta).owner, w.a);
+    const scope = async (chat: string) => ((await b.router.dispatch("GET", `/scope?chat=${chat}`)).body as { docIds: string[] }).docIds;
+    assert.deepEqual(await scope("chat-a"), [(panel.body as store.DocMeta).docId]);
+    assert.equal((await scope("chat-home")).length, 2, "the home's own two");
+    assert.equal(b.toolsOf("chat-a").length, 5);
+    // In a folder inside a project, nothing tells whose the chat is here: no documents, no tools, and its New document
+    // says why.
+    assert.deepEqual(await scope("chat-sub"), []);
+    assert.deepEqual(b.toolsOf("chat-sub"), []);
+    const sub = await b.router.dispatch("POST", "/documents", { title: "Sub", type: "word", chat: "chat-sub" });
+    assert.equal(sub.statusCode, 409);
+    assert.match((sub.body as { error: string }).error, /no agent's home nor project's folder/);
     live.resetLive();
   } finally {
     await b.cleanup();

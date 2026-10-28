@@ -3,10 +3,11 @@
  * folder sees (store.visibleTo: what it owns or was granted, and the documents in its own folder), in the style of the portal's document tools -- named by id, coded error prefixes
  * ("error:<code> <message>").
  *
- * Ownership scope: `registerTools` walks every chat through portal.chats.extend; for a chat it resolves the
- * workspace folder (chats.folder(chat.id)), finds it in folders.list() by path and REGISTERS ONLY when its kind is
- * "agent" or "project". That folder is the home: a document is owned by and granted to a folder, not a chat, as an
- * agent's chats come and go. Docs outside the scope are invisible to every tool: office_read asks for them and hears
+ * Ownership scope: `registerTools` walks every chat through portal.chats.extend; for a chat it asks whose the chat is
+ * (owner.ts `chatOwner`: chats.owner, an agent's home or a project's folder, a folder inside a project included) and
+ * REGISTERS ONLY for a chat that is an agent's or a project's. That folder is the home: a document is owned by and
+ * granted to a folder, not a chat, as an agent's chats come and go. The Office panel beside a chat lists by the same
+ * rule (server.ts `folderForChat`). Docs outside the scope are invisible to every tool: office_read asks for them and hears
  * the same "no document with that id" as for a nonexistent one, and no editor is opened for them.
  *
  * Reading and editing go through the agent's own editor in the document (seat.ts): an OnlyOffice editor of the
@@ -27,13 +28,14 @@
  * chat of the folder. Nobody attends it, which the portal holds it to (no question tool, no dialog that waits).
  *
  * Injection seams (unit tests must never reach portal()): registerTools(opts) takes the portal bits -- chats.extend
- * registrar, chat->folder lookup, folders list, the file reader, store root, audit record fn, log fn, the seats, the
+ * registrar, whose a chat is, the file reader, store root, audit record fn, log fn, the seats, the
  * save after an edit and whether Office runs. EVERY one defaults LAZY: the real portal() is read only when a default
  * is used (in production). office_create and office_edit call record({subject, reason, chatId}) after the write.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { portal } from "./host";
+import { chatOwner } from "./owner";
 import { canonical, createDoc, docSize, docsForHome, MAX_IMPORT_BYTES, readDoc, refresh, refreshAll, tooLarge, within, type DocMeta } from "./store";
 import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
@@ -72,9 +74,6 @@ export const GUARDS: Record<string, { outside: boolean; acts: string[] }> = {
 /** An audit line recorded after every mutating op. `subject` is the doc title, `chatId` the acting home chat. */
 export type OfficeAuditEntry = { subject: string; reason: string; chatId: string };
 
-/** The folders list entries the factory resolves against (the shape of portal.folders.list() minus nothing it needs). */
-export type ToolsFolderInfo = { path: string; name: string; kind: "agent" | "project" | "chat"; home?: boolean };
-
 /** Whether Office runs: its Document Server set up and settled, setting itself up, or stopped by the person (or never
  * started). */
 export type OfficeState = "running" | "starting" | "stopped";
@@ -90,10 +89,9 @@ export type ToolsSeat = {
 export type ToolsDeps = {
   /** The chats.extend registrar. Default: (factory) => portal().chats.extend(factory). */
   extend?: (factory: (pi: unknown, chat: { id: string }) => void) => void;
-  /** A chat's workspace folder path (throws when the chat or its folder is gone). Default: (id) => portal().chats.folder(id). */
-  chatFolder?: (chatId: string) => string;
-  /** The folders the agents work in. Default: () => portal().folders.list(). */
-  folders?: () => ToolsFolderInfo[];
+  /** The agent's home or project's folder a chat is (its tools' home), none for a chat that is neither's; throws when
+   * the chat or its folder is gone. Default: owner.ts `chatOwner`. */
+  owner?: (chatId: string) => string | undefined;
   /** A document's file, opened for `chatId`'s agent as it could open it itself (`file` is the document's own
    * path): its descriptor, which the caller closes, and its size. Default: portal().files.open with likeParent, the
    * chat, and no link followed. */
@@ -133,11 +131,8 @@ export function __resetToolsForTests(): void {
 function rootDir(): string {
   return cfg.root ?? portal().dataDir();
 }
-function chatFolder(chatId: string): string {
-  return (cfg.chatFolder ?? ((id: string) => portal().chats.folder(id)))(chatId);
-}
-function folders(): ToolsFolderInfo[] {
-  return (cfg.folders ?? (() => portal().folders.list()))();
+function ownerOf(chatId: string): string | undefined {
+  return (cfg.owner ?? chatOwner)(chatId);
 }
 function seats(): ToolsSeat {
   return cfg.seat ?? seat;
@@ -223,18 +218,18 @@ export function registerTools(opts?: ToolsDeps): void {
   registrar((pi, chat) => installForChat(pi, chat));
 }
 
-/** The chats.extend factory body: resolve the chat's folder via chats.folder -> folders.list() by path -> kind; RETURN UNLESS "agent" or "project"; then register the tools on that chat's pi, for that folder. */
+/** The chats.extend factory body: whose the chat is (`ownerOf`); RETURN where it is no agent's nor project's; then
+ * register the tools on that chat's pi, for that folder. */
 function installForChat(pi: unknown, chat: { id: string }): void {
-  let folderPath: string;
+  let home: string | undefined;
   try {
-    folderPath = chatFolder(chat.id);
+    home = ownerOf(chat.id);
   } catch (e) {
     logLine(`office tools: no workspace folder for chat ${chat.id} (${(e as Error)?.message ?? e}) -- no office_* tools`);
     return; // gone chat or folder: nothing to register into
   }
-  const folder = folders().find((f) => f.path === folderPath);
-  if (!folder || (folder.kind !== "agent" && folder.kind !== "project")) return; // not an agent/project home: no tools
-  installTools(pi, canonical(folder.path), chat.id);
+  if (!home) return; // no agent's nor project's: no tools
+  installTools(pi, canonical(home), chat.id);
 }
 
 /* ------------------------------------------------------------------ */

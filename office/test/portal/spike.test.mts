@@ -18,7 +18,8 @@ import { EDITOR_HTML, editorPageJs } from "./page.mts";
 /**
  * The gate of the agent's own editor (step 1 of the plan): inside Office's real island and relay, with the real
  * Document Server and the pinned headless Chromium, the mechanics the design stands on hold:
- * - the agents' browser loads the seat page through relay:3891 and stays up, with no debugging port;
+ * - the agents' browser loads the seat page through relay:3891 and stays up, its debugging port on its own loopback
+ *   (passed on to its network by socat, for office_screenshot) and published nowhere;
  * - the plugin served from the listener (CORS to the Document Server's origin) loads and polls;
  * - a person's unsaved typing is in the agent's live read;
  * - a range replace (delete, then add), a paragraph and a table after an anchor land in the person's open editor;
@@ -177,7 +178,8 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`the first read (browser started, editor opened) took ${Date.now() - started} ms: ${JSON.stringify(first)}`);
     assert.ok(texts(first).some((t) => t.includes("Revenue figures were revised after the audit.")), "the agent reads what the person typed and did not save");
 
-    // The browser: on the agents' own network alone, nothing published, hardened, and no debugging port.
+    // The browser: on the agents' own network alone, nothing published, hardened, its debugging port on its own
+    // loopback only (cdp.ts reaches it from the relay through socat).
     const agent = JSON.parse(execFileSync("docker", ["inspect", `${PREFIX}-agent`], { encoding: "utf8" }))[0];
     assert.equal(agent.HostConfig.NetworkMode, `${PREFIX}-agents`);
     assert.deepEqual(agent.HostConfig.PortBindings ?? {}, {});
@@ -185,7 +187,8 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.equal(agent.HostConfig.ReadonlyRootfs, true);
     assert.deepEqual(agent.HostConfig.CapDrop, ["ALL"]);
     assert.equal(agent.Config.Image, container.AGENT_IMAGE);
-    assert.ok(!agent.Config.Cmd.join(" ").includes("remote-debugging"), "no debugging port");
+    assert.ok(agent.Config.Cmd.includes("--remote-debugging-port=9223") && !agent.Config.Cmd.join(" ").includes("remote-debugging-address"), "the debugging port on the browser's loopback only");
+    assert.ok(!agent.Config.Cmd.join(" ").includes("remote-allow-origins"), "no page's origin may use it");
     assert.ok(Object.keys(agent.NetworkSettings.Networks).length === 1, "on one network");
 
     // A range replace, a heading and a table after an anchor, in one command; the person sees them without a reload.
@@ -299,7 +302,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.ok(viewed.some((t) => t.includes("and the person")), "a view seat reads live");
     await page.context().close();
 
-    // The browser stayed up the whole time, with no debugging port to keep it.
+    // The browser stayed up the whole time.
     const agent = JSON.parse(execFileSync("docker", ["inspect", `${PREFIX}-agent`], { encoding: "utf8" }))[0];
     assert.equal(agent.State.Running, true);
     assert.equal(agent.RestartCount, 0);

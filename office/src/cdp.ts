@@ -46,9 +46,10 @@ export type ShotImage = { data: string; width: number; height: number; zoom?: nu
  * begins meanwhile ends this one (`superseded`), as does the deadline, both checked after every wait.
  *
  * Word: the layout is waited for until the page count holds still (it lands up to 0.7 s after an edit of 20 pages);
- * then "fit to page" and the page, and the page's rectangle found on the canvas `#id_viewer` (white on grey): down the
- * middle for its top, along a line just below its top for its sides (inside its top margin), and down a line just
- * inside its left edge for its bottom. Co-authors' marks are switched off in the agent's editor first.
+ * then "fit to page" and the page, and the page's rectangle found on the canvas `#id_viewer` (white on grey): the pages
+ * in view down a line inside their left margin, the one drawn whole at the top (the last page's at the bottom: the
+ * view does not scroll past the end), and its sides along a line just below its top (inside its top margin).
+ * Co-authors' marks are switched off in the agent's editor first.
  * Sheets: the sheet shown, the zoom set, and the range made visible: as it is, or else with its centre cell found (the
  * editor centres a cell it scrolls to), from a cell far from it; both corners must then be inside the grid, and the
  * first corner where it was before the second was looked up. A range across frozen panes is looked at from the first
@@ -106,13 +107,32 @@ export const FRAME_FN = `async function (t) {
     if (!cv) return stop("not_drawn", "the editor has no page canvas");
     var W = cv.width, H = cv.height, d = cv.getContext("2d").getImageData(0, 0, W, H).data;
     var white = function (x, y) { var i = (y * W + x) * 4; return d[i] > 250 && d[i + 1] > 250 && d[i + 2] > 250 && d[i + 3] > 250; };
-    var top = -1, mid = W >> 1, left = -1, right = -1, bottom = H - 1;
-    for (var y = 0; y < H && top === -1; y++) if (white(mid, y)) top = y;
-    if (top === -1) return stop("not_drawn", "the page is not on the editor's canvas");
-    var line = Math.min(H - 1, top + 4);
-    for (var x = 0; x < W && left === -1; x++) if (white(x, line)) left = x;
-    for (var x2 = W - 1; x2 >= 0 && right === -1; x2--) if (white(x2, line)) right = x2;
-    for (var y2 = top; y2 < H; y2++) if (!white(left + 3, y2)) { bottom = y2 - 1; break; }
+    // A page's sides along a line through it, from either end to the first white.
+    var sides = function (y) {
+      var l = -1, r = -1;
+      for (var x = 0; x < W && l === -1; x++) if (white(x, y)) l = x;
+      for (var x2 = W - 1; x2 >= 0 && r === -1; x2--) if (white(x2, y)) r = x2;
+      return [l, r];
+    };
+    // A line through some page: down the middle to the first white.
+    var some = -1, mid = W >> 1;
+    for (var y = 0; y < H && some === -1; y++) if (white(mid, y)) some = y;
+    if (some === -1) return stop("not_drawn", "the page is not on the editor's canvas");
+    // The pages in view, down a line just inside their left edge (in their margin): each white run with grey above
+    // and below it is a page drawn whole. The page gone to is at the top of the view, but the last page, which the
+    // view cannot scroll to the top, is at its bottom.
+    var edge = sides(some)[0] + 3, whole = [], from = -1;
+    for (var y2 = 0; y2 <= H; y2++) {
+      var on = y2 < H && white(edge, y2);
+      if (on && from === -1) from = y2;
+      if (!on && from !== -1) {
+        if (from > 0 && y2 < H) whole.push([from, y2 - 1]);
+        from = -1;
+      }
+    }
+    var run = whole.length ? whole[t.page === pages ? whole.length - 1 : 0] : null;
+    if (!run) return stop("not_drawn", "the page is not on the editor's canvas");
+    var top = run[0], bottom = run[1], at = sides(Math.min(bottom, top + 4)), left = at[0], right = at[1];
     if (right - left < 100 || bottom - top < 100) return stop("not_drawn", "the page is not on the editor's canvas");
     var shot = jpeg([{ from: cv, x: left, y: top, w: right - left + 1, h: bottom - top + 1, dx: 0, dy: 0 }], right - left + 1, bottom - top + 1);
     shot.pages = pages;

@@ -281,6 +281,19 @@ test("frame function, Word: the page count waited for until it holds still, fit 
   assert.deepEqual(await frameFn(frameWindow({ editor: { ...editor, getCountPages: () => 3 } }, { id_viewer: viewer }).window, { kind: "word", page: 4, pages: 3 }), { error: { code: "no_page", message: "the document has 3 pages as the editor lays it out now" } });
 });
 
+test("frame function, Word: the last page, which the view shows at its bottom below the end of the page before, is the page drawn whole there", async () => {
+  // The page before ends at y 40 (its top is out of view), a gap, then the last page at y 60..279, a gap below.
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && (y <= 40 || (y >= 60 && y <= 279)) ? (y === 150 && x > 40 && x < 160 ? [0, 0, 0, 255] : WHITE) : GREY));
+  const editor = { getCountPages: () => 5, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };
+  let w = frameWindow({ editor }, { id_viewer: viewer });
+  assert.deepEqual((await frameFn(w.window, { kind: "word", page: 5, pages: 5 })).height, 220);
+  assert.deepEqual(w.drawn[0].args.slice(0, 4), [20, 60, 160, 220]);
+  // Any other page is the one at the top: here none is drawn whole there but the same one.
+  w = frameWindow({ editor }, { id_viewer: viewer });
+  await frameFn(w.window, { kind: "word", page: 4, pages: 5 });
+  assert.deepEqual(w.drawn[0].args.slice(0, 4), [20, 60, 160, 220], "the page cut off at the top is never taken");
+});
+
 test("frame function, Word: a large page is made smaller to 1,024 px on its longer side, or 1,568 with large; never larger", async () => {
   const viewer = canvas(1000, 1300, (x, y) => (x >= 50 && x <= 949 && y >= 10 && y <= 1281 ? WHITE : GREY));
   const editor = { getCountPages: () => 1, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };

@@ -112,7 +112,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   asked (`office_edit` changes the document), and its answer appears as its reply in the comment's thread. A reply you
   write in the thread goes to the same chat (only to the ones it mentions, where a thread has several); a reply or an
   edit that mentions another agent adds that one (an edit counts only the mentions it adds). Resolving and reopening keep the chat; deleting the comment removes
-  it, two minutes later by default (an undo in that time keeps it). The agent gets access to the document with the
+  it, two minutes later by default (an undo in that time keeps it; an answer that comes meanwhile is posted only after
+  an undo, since a reply would bring the comment back). The agent gets access to the document with the
   mention. Word and spreadsheets alike.
   An agent that may only read the document (a file in a folder it cannot write) still answers in the thread, through an
   editor that may only comment.

@@ -73,8 +73,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   lists the documents opens the list). The same document open in the panel and in the Office tab (or in two browser
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
-  as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`, `office_read`,
-  `office_edit` and `office_comments`. An agent sees the documents in its own folder (its home, or its project's) and
+  as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`,
+  `office_read`, `office_edit` and `office_comments`. An agent sees the documents in its own folder (its home, or its project's) and
   the ones it was granted by a mention; another agent's, and the files in another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
   goes into its folder and belongs to it, not to one of its chats. A file in its folder is read

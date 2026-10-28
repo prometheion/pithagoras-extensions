@@ -10,7 +10,10 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 
 ## What it needs
 
-- Pithagoras 0.3.0 or later.
+- Pithagoras 0.3.0 or later. For agents to answer comments and the editor's chat, a portal whose extension API has
+  `chats.start`, `chats.lastAnswer`, `chats.owner` and `http.person`
+  ([thecodacus/pithagoras#339](https://github.com/thecodacus/pithagoras/pull/339)); on an older one the rest of Office
+  works, and the Office page, the editor's bar and the agents' office tools say that agents do not answer there.
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
   It ships with the portal but is not on by default; installing this extension from npm brings it along.
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
@@ -51,9 +54,10 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   agent's home or a project's folder and belongs to that agent or project; there are no documents of nobody's. Every
   `.docx` and `.xlsx` in the agents' homes and the projects' folders (not the folders other chats work in, nor the rest
   of the workspace) is indexed when the extension starts, and again with **Rescan**, **in place**: the file is the
-  document, and editing it edits that file. **New document** on the Office tab makes it in the default agent's home
-  (the first agent, which the sidebar calls Home); the one in a chat's panel, and the agent's `office_create`, make it
-  in that chat's agent home or project folder. One whose file is
+  document, and editing it edits that file. **New document** on the Office tab makes it in the home of the agent New
+  starts your chats with (the first agent's, unless you picked another on its Agent page); the one in a chat's panel,
+  and the agent's `office_create`, make it in that chat's agent home or project folder, as the portal says whose the
+  chat is. One whose file is
   gone (a git checkout of another branch, say) stays listed for a week, marked, with its owner and grants, and is the
   same document again when the file comes back. Deleting one moves its real file into the library's trash
   (`.trash/<time>-<id>/` in the data folder), with `document.json`, which says where it was, and what was kept for
@@ -112,7 +116,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   an agent or a project from the list; it inserts `+Aegis` or `+project:Report` (OnlyOffice puts a `+` before what it
   inserts), and typing `@Aegis` or `@project:Report` by hand does the same (in the Comments panel on the left, which has
   no list, too; a name with spaces is matched as a whole, `@My Agent`). Each comment that mentions an agent or project
-  starts a chat of its own with it, which shows nowhere in the chat lists, given only that comment: the document's id,
+  starts a chat of its own with it, in that agent's home or project's folder, which shows nowhere in the chat lists and
+  needs no chat of yours with that agent, given only that comment: the document's id,
   the thread, and what you wrote. A reply or an edit that mentions an agent on a comment you did not make here (the
   file's own, another tool's) gives it your reply or what you added, never the comment's text as yours. The agent reads the comment's text and the document with its tools, does what you
   asked (`office_edit` changes the document), and its answer appears as its reply in the comment's thread. A reply you
@@ -129,11 +134,12 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   the left) goes to the agent or project the document belongs to (in whose folder it is), in one chat for the editing
   session; its answers come in the editor's chat as the agent's. Messages written while it is still answering reach it
   together as its next message. The chat goes a minute after the last person left the document (a reload in that time
-  keeps it), and when the Document Server starts again. An answer that fails, or a run cut off by a restart, says so
-  in the chat, as a comment's does in its thread.
-- **Nobody is asked from these chats**: they have no question tool, and a confirmation the agent's tools or the guard
-  would ask for stops that step at once; the agent is told that nobody can answer there and goes on without it (a
-  second time, its answer says it could not finish). The editor's bar shows how the agents stand in the document:
+  keeps it), and when the Document Server starts again. An answer that fails, or a run cut off by a restart of the
+  portal, says so in the chat, as a comment's does in its thread. An answer that came while Office itself restarted is
+  posted once it is back.
+- **Nobody is asked from these chats**: the portal holds them as chats nobody attends. They have no question tool, a
+  confirmation an extension's tool asks for is answered at once with no, and a call the guard would ask you about is
+  refused; the agent hears each refusal and goes on. The editor's bar shows how the agents stand in the document:
   answering, waiting for their turn, or why one could not answer.
 - **What counts as your words**: only what you did through the editor's own comment box, reply box and chat, on your
   page. A comment pasted in, brought back by undo, made by someone else, or already in the file starts nothing.
@@ -229,14 +235,15 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   may have written. A comment's chat is given the words of the comment it was made for as yours only where you made
   that comment in this portal's editor (your page saw you write it); on any other comment only your reply, or what
   your edit added, is yours. The comment's text, the text it is on, the thread's other replies and the document are
-  read with `office_comments` and `office_read`, as outside content. These chats are made in no mode, whatever mode
-  their parent chat is in (they take its tool switches, which the extension API cannot leave out). An answer that
-  ends while Office restarts is not posted: whether its chat read a suspected injection is not known then. A comment that reads like an order and is read that way can mark the chat, and
-  with it the task chat it hangs under; an answer of a marked chat is not posted in the document.
-- **Who can make an agent act through a comment**: anyone signed in to the portal (every login is the portal's
-  person), on any document they can open, and the mention gives that agent the document. Before the portal has logins
-  with fewer rights, the routes of comments and the editor's chat need a check per login, which the extension API
-  does not offer yet.
+  read with `office_comments` and `office_read`, as outside content. These chats are chats of their own, in Standard
+  mode with the tools a new chat of that folder has: none of your chats' modes or tool switches carry over. A comment
+  that reads like an order and is read that way can mark the chat; an answer of a marked chat is not posted in the
+  document, also one that ended while Office restarted (the portal keeps the mark with the chat).
+- **Who can make an agent act through a comment**: the portal's primary person. Every route asks the portal who is
+  behind the request: nobody signed in is refused, and a person in another role may look at the documents but not
+  change them, nor talk to the agents through comments or the editor's chat (what they write would reach an agent as
+  the primary person's words). Today every login to the portal is its primary person. The mention gives that agent the
+  document.
 - **Every post into a document is in the audit log**, with its document, thread and chat: each answer, each time it
   was posted again, a post whose outcome is not known (its editor closed or timed out while it ran), and a message of
   the editor's chat that failed after the ones before it went.
@@ -254,8 +261,8 @@ default you never changed is not written down, so a later version's default appl
 `state/sessions.json` (the chats of the editor's chat, by editing session). A document stays where it is, in its
 agent's home or project folder; only its entry is in the index. Documents an earlier version made in `docs/<id>/` of
 the data folder are moved once, at the first start of this one, into the folder of the agent or project that made
-them, else into the default agent's home, keeping their id, grants and revisions; a name taken there gets a number
-("Report (2)"), and each move is in the portal's log. One that cannot be moved yet (no default agent listed) is
+them, else into the default agent's home (the first agent's), keeping their id, grants and revisions; a name taken
+there gets a number ("Report (2)"), and each move is in the portal's log. One that cannot be moved yet (no default agent listed) is
 tried again at each Rescan and every half minute. The containers (`pithagoras-office-ds`, its
 relay `-relay` and the agents' editor `-agent`), the networks (`pithagoras-office-ds-net`, and `-agents` for the
 agents' editor) and the Document Server's volumes are Docker's, shown in Settings → Docker under this extension. The

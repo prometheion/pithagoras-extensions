@@ -203,12 +203,35 @@ export function folderForChat(chatId: string): string | undefined {
   return store.ownerFolder(store.canonical(portal().chats.folder(chatId)), docFolders()) ?? defaultHome();
 }
 
-/** What the person calls the agent or project a document belongs to (folders.label), or its folder's last part. */
+/** What the person calls the agent or project a document belongs to (folders.label), or its folder's last part; none
+ * for an entry of an earlier version that has no owner yet (the next scan gives it one, or takes it out). */
 function ownerName(folder: string): string {
+  if (typeof folder !== "string" || !folder) return "";
   try {
     return portal().folders.label(folder).name;
   } catch {
     return path.basename(folder);
+  }
+}
+
+/** The documents an earlier version made in the extension's own docs folder, moved into folders (store.migrateLibrary),
+ * each move logged. At boot, before the scan (which would otherwise find a moved file as a document of its own), and
+ * again at each Rescan and settle, so that one that could not be moved (no default agent's home listed yet, a folder
+ * that refused the file) is not left out of the library until the next start. */
+const moveFailures = new Set<string>(); // logged once each, not at every settle
+function moveLibrary(dd: string): void {
+  try {
+    for (const m of store.migrateLibrary(docFolders(), defaultHome(), dd)) {
+      const failure = "leftover" in m ? `${m.docId} ${m.leftover}` : "failed" in m ? `${m.docId} ${m.failed}` : null;
+      if (failure !== null && moveFailures.has(failure)) continue;
+      if (failure !== null) moveFailures.add(failure);
+      if ("moved" in m) logLine(`@pithagoras/office: "${m.title}" (${m.docId}) moved from the extension's docs folder to ${m.moved}`);
+      else if ("dropped" in m) logLine(`@pithagoras/office: "${m.title}" (${m.docId}) was in the extension's docs folder, its file is gone: left the index`);
+      else if ("leftover" in m) logLine(`@pithagoras/office: the old copy of ${m.docId} in the extension's docs folder could not be removed, tried again later: ${m.leftover}`);
+      else logLine(`@pithagoras/office: "${m.title}" (${m.docId}) could not be moved out of the extension's docs folder, tried again later: ${m.failed}`);
+    }
+  } catch (e) {
+    logLine(`@pithagoras/office: the documents of the docs folder could not be moved: ${(e as Error).message}`);
   }
 }
 
@@ -425,7 +448,7 @@ function registerRoutes(dd: string, secret: string): void {
     const agent = { ...(await container.agentImage()), tag: container.AGENT_IMAGE_TAG, browser: seat.health() };
     const limits = Object.fromEntries(Object.keys(LIMIT_BOUNDS).map((k) => [k, s[k as keyof typeof LIMIT_BOUNDS]]));
     // Each with the name the person knows its owner by: the agent's, or the project's place.
-    const named = docs.map((d) => ({ ...d, ownerName: ownerName(d.owner) }));
+    const named = docs.map((d) => ({ ...d, owner: d.owner ?? "", ownerName: ownerName(d.owner) }));
     res.json({ enabled: s.enabled, imageTag: s.imageTag, limits, limitBounds: LIMIT_BOUNDS, container: c, agent, docs: named, locks });
   });
 
@@ -475,6 +498,7 @@ function registerRoutes(dd: string, secret: string): void {
    * calls it. */
   r.post("/documents/rescan", json, async (_req, res) => {
     try {
+      moveLibrary(dd);
       const out = scan(dd);
       logLine(`workspace rescan: ${out.added} added, ${out.updated} refreshed${out.dropped.length ? `, ${out.dropped.length} out of every agent's home and project` : ""}`);
       res.json({ added: out.added, updated: out.updated });
@@ -1066,15 +1090,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   }
   // Documents an earlier version made in the extension's own docs folder: moved once into their owner's folder, else
   // the default agent's home. Before the scan, which would otherwise find a moved file as a document of its own.
-  try {
-    for (const m of store.migrateLibrary(docFolders(), defaultHome(), dd)) {
-      if ("moved" in m) logLine(`@pithagoras/office: "${m.title}" (${m.docId}) moved from the extension's docs folder to ${m.moved}`);
-      else if ("dropped" in m) logLine(`@pithagoras/office: "${m.title}" (${m.docId}) was in the extension's docs folder, its file is gone: left the index`);
-      else logLine(`@pithagoras/office: "${m.title}" (${m.docId}) could not be moved out of the extension's docs folder, tried again at the next start: ${m.failed}`);
-    }
-  } catch (e) {
-    logLine(`@pithagoras/office: the documents of the docs folder could not be moved: ${(e as Error).message}`);
-  }
+  moveLibrary(dd);
   wireDocchat(dd);
   callback.configure({ getState: () => container.readDsRecord(dd), getSecret: () => secret, getOrigin: () => container.dsOrigin(), root: dd, record: recordAudit });
   live.setMetaResolver((docId) => store.refresh(docId, dd)?.mtimeMs ?? null);
@@ -1130,6 +1146,7 @@ export default async function officeServer(portalObj: ServerPortal): Promise<() 
   let stopped = false;
   const timer = setInterval(() => {
     if (stopped) return;
+    moveLibrary(dd);
     try {
       for (const gone of settleKept(dd).prunedDocs) void docchat.documentGone(gone);
     } catch (e) {

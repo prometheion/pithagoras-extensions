@@ -79,10 +79,12 @@ test("createDoc: word and cell write parseable templates into the folder they be
   assert.equal(index.docs.length, 2);
 });
 
-test("createDoc: duplicate (same title + type) throws code 'exists'; same title different type is fine; a file of that name in the folder is never written over", async () => {
+test("createDoc: duplicate (same title + type in the folder) throws code 'exists'; same title different type is fine; a file of that name in the folder is never written over", async () => {
   const root = tmpRoot();
-  await createDoc({ title: "Report", type: "word", folder: homeIn(root) }, root);
-  await assert.rejects(async () => createDoc({ title: "Report", type: "word", folder: homeIn(root, "other") }, root), (err: NodeJS.ErrnoException) => err.code === "exists");
+  const report = await createDoc({ title: "Report", type: "word", folder: homeIn(root) }, root);
+  fs.rmSync(report.path); // gone for now (a checkout of another branch): its entry still holds the name
+  await assert.rejects(async () => createDoc({ title: "Report", type: "word", folder: homeIn(root) }, root), (err: NodeJS.ErrnoException) => err.code === "exists");
+  assert.equal((await createDoc({ title: "Report", type: "word", folder: homeIn(root, "other") }, root)).path, path.join(homeIn(root, "other"), "Report.docx"), "another folder's is its own");
   // a spreadsheet with the same title is a different document, not a duplicate
   const cell = await createDoc({ title: "Report", type: "cell", folder: homeIn(root) }, root);
   assert.equal(cell.ext, "xlsx");
@@ -656,7 +658,7 @@ test("scanWorkspace rescan BACKFILLS DocMeta.workspace on entries indexed before
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test("scanWorkspace: skips files whose basename cannot be a title or busts the size cap; a collision on title does not sink the sweep", () => {
+test("scanWorkspace: skips files whose basename cannot be a title or busts the size cap; a collision on title in one folder does not sink the sweep", () => {
   const root = tmpRoot();
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), "office-scan-bad-"));
   fs.writeFileSync(path.join(ws, "bad\tname.docx"), Buffer.from("control char in a title: skipped, not indexed"));
@@ -667,11 +669,12 @@ test("scanWorkspace: skips files whose basename cannot be a title or busts the s
   fs.closeSync(huge);
   fs.writeFileSync(path.join(ws, "same.docx"), Buffer.from("first"));
   const ws2 = fs.mkdtempSync(path.join(os.tmpdir(), "office-scan-bad2-"));
-  fs.writeFileSync(path.join(ws2, "same.docx"), Buffer.from("second -- same title in another folder: skipped by the guard"));
+  fs.writeFileSync(path.join(ws2, "same.docx"), Buffer.from("first of its folder"));
+  fs.writeFileSync(path.join(ws2, "same.DOCX"), Buffer.from("second -- the same title in the same folder: skipped by the guard"));
 
   const out = scanWorkspace([ws, ws2], root);
-  assert.deepEqual(out, { added: 1, updated: 0, dropped: [] }, "only 'same' from the first root survived: bad title, over cap and title collision are all quiet skips");
-  assert.equal(listDocs(root)[0].title, "same");
+  assert.deepEqual(out, { added: 2, updated: 0, dropped: [] }, "one 'same' of each folder: bad title, over cap and title collision are all quiet skips");
+  assert.deepEqual(listDocs(root).map((d) => d.title), ["same", "same"]);
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(ws2, { recursive: true, force: true });
 });
@@ -788,6 +791,48 @@ test("scanWorkspace: a document in no agent's home or project (a chat's folder a
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
+test("titles are unique in a folder, not across the library: two agents each keep a Notes.docx, and making one in another folder is not refused", async () => {
+  const root = tmpRoot();
+  const [a, b] = [homeIn(root, "a"), homeIn(root, "b")];
+  fs.writeFileSync(path.join(a, "Notes.docx"), "A's notes");
+  fs.writeFileSync(path.join(b, "Report.docx"), "B's report");
+  fs.writeFileSync(path.join(a, "Report.docx"), "A's report");
+  scanWorkspace([a, b], root);
+  assert.deepEqual(listDocs(root).map((d) => [d.title, d.owner]).sort(), [["Notes", a], ["Report", a], ["Report", b]], "each folder's own Report");
+  const made = await createDoc({ title: "Notes", type: "word", folder: b }, root);
+  assert.equal(made.path, path.join(b, "Notes.docx"), "B learns nothing of A's Notes, and gets its own");
+  await assert.rejects(createDoc({ title: "Notes", type: "word", folder: b }, root), (err: NodeJS.ErrnoException) => err.code === "exists" && !err.message.includes(a));
+  // A rename is refused only by a document of that title in the same folder.
+  const notesB = getDoc(made.docId, root)!;
+  const reportB = listDocs(root).find((d) => d.title === "Report" && d.owner === b)!;
+  await assert.rejects(async () => renameDoc(notesB.docId, "Report", root), (err: NodeJS.ErrnoException) => err.code === "exists");
+  assert.equal(renameDoc(reportB.docId, "Minutes", root).path, path.join(b, "Minutes.docx"));
+});
+
+test("scanWorkspace: an entry an earlier version scanned without an owner gets one also while its file is away, and leaves the index where no agent's home or project holds it", async () => {
+  const root = tmpRoot();
+  const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ownerless-")));
+  const [home, chat] = [path.join(ws, "home"), path.join(ws, "chat-folder")];
+  fs.mkdirSync(home);
+  fs.mkdirSync(chat);
+  fs.writeFileSync(path.join(home, "away.docx"), "in a home, gone for now");
+  fs.writeFileSync(path.join(chat, "lost.docx"), "in a chat's folder, gone");
+  scanWorkspace([home, chat], root);
+  const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
+  for (const d of index.docs) {
+    d.owner = null; // as an earlier version kept a scanned document
+    delete d.workspace;
+    fs.rmSync(d.path);
+  }
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
+  const lost = index.docs.find((d: { title: string }) => d.title === "lost").docId;
+  assert.deepEqual(scanWorkspace([], root).dropped, [], "no folders listed: nothing decided");
+  const out = scanWorkspace([home], root);
+  assert.deepEqual(out.dropped, [lost]);
+  assert.deepEqual(listDocs(root).map((d) => [d.title, d.owner, d.workspace]), [["away", home, "home"]], "no document without an owner");
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 /** An index as an earlier version left it: documents made in the extension's own docs folder, with no `path`. */
 function legacyLibrary(root: string, docs: { docId: string; title: string; owner: string | null; bytes?: string; grants?: unknown[] }[]): void {
   const entries = docs.map((d) => {
@@ -828,6 +873,32 @@ test("migrateLibrary: the person's documents of the docs folder move into the de
   assert.ok(!fs.existsSync(path.join(root, "docs")), "the docs folder is gone");
   assert.deepEqual(migrateLibrary([home, atlas], home, root), [], "once");
   assert.deepEqual(scanWorkspace([home, atlas], root), { added: 0, updated: 0, dropped: [] }, "the scan finds them as the documents they are");
+});
+
+test("migrateLibrary: an owner that names a folder inside an agent's home or a project (a chat's, from the chat-id era) goes to that home or project", async () => {
+  const root = tmpRoot();
+  const home = homeIn(root, "home");
+  const project = homeIn(root, "acme");
+  const sub = path.join(project, "frontend");
+  fs.mkdirSync(sub);
+  legacyLibrary(root, [{ docId: "spec-aaaaaa", title: "Spec", owner: sub, bytes: "the frontend's" }]);
+  const [moved] = migrateLibrary([home, project], home, root);
+  assert.deepEqual(moved, { docId: "spec-aaaaaa", title: "Spec", moved: path.join(project, "Spec.docx"), owner: project });
+});
+
+test("migrateLibrary: an old copy left in the docs folder after its document moved (a start cut off after the index write) is removed at the next run", async () => {
+  const root = tmpRoot();
+  const home = homeIn(root, "home");
+  legacyLibrary(root, [{ docId: "memo-aaaaaa", title: "Memo", owner: null, bytes: "memo" }]);
+  const snapshot = path.join(root, "old-copy");
+  fs.cpSync(path.join(root, "docs"), snapshot, { recursive: true });
+  migrateLibrary([home], home, root);
+  // As a start that wrote the index and was cut off before the old folder went.
+  fs.cpSync(snapshot, path.join(root, "docs"), { recursive: true });
+  fs.mkdirSync(path.join(root, "docs", "not-ours"));
+  assert.deepEqual(migrateLibrary([home], home, root), [], "nothing moved again");
+  assert.deepEqual(fs.readdirSync(path.join(root, "docs")), ["not-ours"], "the moved document's old copy is gone; a folder the index does not know stays");
+  assert.equal(getDoc("memo-aaaaaa", root)!.path, path.join(home, "Memo.docx"));
 });
 
 test("migrateLibrary: a name taken in the folder (by a file, or by a document's title) gets a number; a file gone leaves the index", async () => {

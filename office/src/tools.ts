@@ -466,7 +466,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_create",
     label: LABELS.office_create,
     guard: GUARDS.office_create,
-    description: "Make a new blank office document in your folder (your home, or the project's folder): type \"word\" (a .docx) or \"cell\" (an .xlsx spreadsheet), both starting empty, as \"<title>.docx\" or \"<title>.xlsx\"; fill it with office_edit, or the person opens it in the editor. It is yours, so every chat of your home sees it; other agents get access only when it mentions them in a comment. A title+type pair already taken, or a file of that name in your folder, is refused.",
+    description: "Make a new blank office document in your folder (your home, or the project's folder): type \"word\" (a .docx) or \"cell\" (an .xlsx spreadsheet), both starting empty, as \"<title>.docx\" or \"<title>.xlsx\"; fill it with office_edit, or the person opens it in the editor. It is yours, so every chat of your home sees it; other agents get access only when it mentions them in a comment. A document or file of that name already in your folder is refused.",
     promptSnippet: "Create a blank Word or spreadsheet document",
     executionMode: "sequential",
     parameters: {

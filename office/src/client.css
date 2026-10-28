@@ -301,8 +301,9 @@
 }
 
 /* ---- the sidebar panel's slim new-document row ----------------------------
-   The full page keeps its NewDocument form; beside a chat the same create flow (no owner: unowned docs are
-   shared) goes in one slim dashed row with an icon kind toggle, so the panel stays list-shaped. */
+   The full page keeps its NewDocument form; beside a chat the same create flow (it sends the chat: the document
+   is made in that chat's agent home or project folder and belongs to it) goes in one slim dashed row with an icon
+   kind toggle, so the panel stays list-shaped. */
 
 .po-newcompact {
   display: flex;

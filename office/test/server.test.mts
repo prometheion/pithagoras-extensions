@@ -647,6 +647,38 @@ test("boot: the documents an earlier version made in its own docs folder move in
   fs.rmSync(w.ws, { recursive: true, force: true });
 });
 
+test("a document of the docs folder that could not be moved at boot (no default agent's home listed yet) is moved by a Rescan, not only at the next start", async () => {
+  const w = workspace();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-rescan-move-"));
+  fs.mkdirSync(path.join(root, "docs", "memo-aaaaaa"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs", "memo-aaaaaa", "Memo.docx"), "memo");
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify({ version: 1, docs: [{ docId: "memo-aaaaaa", title: "Memo", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 4, mtimeMs: 1, owner: null, grants: [] }] }));
+  const listed = w.listed.filter((f) => !f.home);
+  const bt = await boot(root, fakeDocker(), w.chats, listed);
+  assert.equal(store.getDoc("memo-aaaaaa", root), null, "kept apart: no default home to move it to");
+  listed.push(w.listed.find((f) => f.home)!);
+  assert.equal((await bt.router.dispatch("POST", "/documents/rescan", {})).statusCode, 200);
+  assert.equal(store.getDoc("memo-aaaaaa", root)!.path, path.join(w.home, "Memo.docx"));
+  assert.equal(bt.logs.filter((l) => /memo-aaaaaa\) could not be moved/.test(l)).length, 1, bt.logs.join("\n"));
+  await bt.cleanup();
+  fs.rmSync(w.ws, { recursive: true, force: true });
+});
+
+test("/state answers for an entry an earlier version scanned with no owner yet, while no folder is listed to give it one", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-ownerless-state-"));
+  const home = homeIn(root, "gone-home");
+  const doc = await store.createDoc({ title: "Away", type: "word", folder: home }, root);
+  const index = JSON.parse(fs.readFileSync(path.join(root, "index.json"), "utf8"));
+  index.docs[0].owner = null;
+  fs.writeFileSync(path.join(root, "index.json"), JSON.stringify(index));
+  const bt = await boot(root, fakeDocker(), {}, []);
+  const res = await bt.router.dispatch("GET", "/state");
+  assert.equal(res.statusCode, 200);
+  const got = (res.body as { docs: { docId: string; owner: string; ownerName: string }[] }).docs.find((d) => d.docId === doc.docId)!;
+  assert.deepEqual([got.owner, got.ownerName], ["", ""]);
+  await bt.cleanup();
+});
+
 test("boot moves owners and grants that named a chat to that chat's folder", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-migrate-"));
   const doc = await store.createDoc({ title: "Owned before", type: "word", folder: homeIn(root) }, root);

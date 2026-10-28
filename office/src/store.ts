@@ -102,9 +102,14 @@ function writeIndex(root: string, index: IndexFile): void {
   fs.renameSync(tmp, dest);
 }
 
-/** Whether a title of that type is taken in the index, by a document or an entry still to be moved. */
-function titleTaken(index: IndexFile, title: string, ext: DocMeta["ext"], except?: string): boolean {
-  return [...index.docs, ...index.unplaced].some((d) => d.docId !== except && d.title === title && d.ext === ext);
+/** Whether a title of that type is taken in `folder`, by a document whose file is straight in it, or anywhere by an entry
+ * still to be moved (which folder it goes to is not known before the move). A title is the file's name, so two agents
+ * may each keep a "Notes.docx" in their own folders; only the same name twice in one folder clashes. A document made
+ * for an agent or project (`made`: createDoc, the move) is also refused a title one of that owner's documents has
+ * elsewhere in its folder, so that its own list never shows two of one name it made. */
+function titleTaken(index: IndexFile, title: string, ext: DocMeta["ext"], folder: string, except?: string, made = false): boolean {
+  const same = (d: { docId: string; title: string; ext: DocMeta["ext"] }) => d.docId !== except && d.title === title && d.ext === ext;
+  return index.docs.some((d) => same(d) && (path.dirname(d.path) === folder || (made && d.owner === folder))) || index.unplaced.some(same);
 }
 
 /** What puts a new file into an agent's or project's folder: `bytes` as `name` in `folder`, never over something there,
@@ -375,7 +380,9 @@ export function migrateOwners(folderOf: (chatId: string) => string | undefined, 
 export type LibraryMove =
   | { docId: string; title: string; moved: string; owner: string }
   | { docId: string; title: string; dropped: "file gone" }
-  | { docId: string; title: string; failed: string };
+  | { docId: string; title: string; failed: string }
+  /** Moved, but its old folder in the docs folder could not be removed (tried again at the next start). */
+  | { docId: string; title: string; leftover: string };
 
 /**
  * The documents an earlier version made in the extension's own docs folder (docs/<docId>/<title>.<ext>, `LibraryDoc`),
@@ -391,7 +398,8 @@ export function migrateLibrary(folders: string[], defaultHome: string | undefine
   const out: LibraryMove[] = [];
   for (const legacy of readIndex(root).unplaced) {
     const from = path.join(root, "docs", legacy.docId, `${legacy.title}.${legacy.ext}`);
-    const owner = legacy.owner !== null && folders.includes(legacy.owner) ? legacy.owner : defaultHome && canonical(defaultHome);
+    // The agent's or project's folder that holds its owner's (one of the chat-id era may name a chat's folder inside it).
+    const owner = (legacy.owner !== null && path.isAbsolute(legacy.owner) && ownerFolder(legacy.owner, folders)) || (defaultHome && canonical(defaultHome));
     try {
       let bytes: Buffer;
       try {
@@ -413,11 +421,11 @@ export function migrateLibrary(folders: string[], defaultHome: string | undefine
       for (let n = 2; ; n++) {
         const file = path.join(owner, `${title}.${legacy.ext}`);
         const there = fs.lstatSync(file, { throwIfNoEntry: false });
-        if (there?.isFile() && there.size === bytes.length && !titleTaken(index, title, legacy.ext, legacy.docId) && !index.docs.some((d) => d.path === file) && fs.readFileSync(file).equals(bytes)) {
+        if (there?.isFile() && there.size === bytes.length && !titleTaken(index, title, legacy.ext, owner, legacy.docId, true) && !index.docs.some((d) => d.path === file) && fs.readFileSync(file).equals(bytes)) {
           adopt = file; // as named, never resolved through a link put there since (placeDoc)
           break;
         }
-        if (!there && !titleTaken(index, title, legacy.ext, legacy.docId)) break;
+        if (!there && !titleTaken(index, title, legacy.ext, owner, legacy.docId, true)) break;
         const tag = ` (${n})`;
         title = legacy.title.slice(0, 200 - tag.length) + tag;
       }
@@ -432,10 +440,27 @@ export function migrateLibrary(folders: string[], defaultHome: string | undefine
       index.unplaced = index.unplaced.filter((d) => d.docId !== legacy.docId);
       index.docs.push(doc);
       writeIndex(root, index);
-      fs.rmSync(path.join(root, "docs", legacy.docId), { recursive: true, force: true });
       out.push({ docId: doc.docId, title: doc.title, moved: doc.path, owner });
     } catch (e) {
       out.push({ docId: legacy.docId, title: legacy.title, failed: (e as Error).message });
+    }
+  }
+  // The old folder of each document that moved, now or at a start before that was cut off after its index write (or
+  // whose removal failed then): only those, by an id the index has as a document.
+  let left: string[] = [];
+  try {
+    left = fs.readdirSync(path.join(root, "docs"));
+  } catch {
+    // no docs folder (any more)
+  }
+  if (left.length) {
+    const placed = new Set(readIndex(root).docs.map((d) => d.docId));
+    for (const docId of left.filter((id) => placed.has(id))) {
+      try {
+        fs.rmSync(path.join(root, "docs", docId), { recursive: true, force: true });
+      } catch (e) {
+        out.push({ docId, title: docId, leftover: (e as Error).message });
+      }
     }
   }
   // The docs folder itself, once nothing is left in it.
@@ -496,7 +521,7 @@ export async function createDoc(input: { title: string; type: "word" | "cell"; f
   const bytes = ext === "docx" ? await templateDocx() : await templateXlsx(); // BEFORE the index round-trip: no await may sit between readIndex and writeIndex, or a concurrent create would have its write clobbered
   const folder = canonical(input.folder);
   const index = readIndex(rootDir);
-  if (titleTaken(index, input.title, ext)) throw Object.assign(new Error(`a document titled "${input.title}" already exists`), { code: "exists" });
+  if (titleTaken(index, input.title, ext, folder, undefined, true)) throw Object.assign(new Error(`a document titled "${input.title}" is already in ${folder}`), { code: "exists" });
   if (fs.lstatSync(path.join(folder, `${input.title}.${ext}`), { throwIfNoEntry: false })) {
     throw Object.assign(new Error(`a file named "${input.title}.${ext}" is already in ${folder}`), { code: "exists" });
   }
@@ -549,7 +574,7 @@ export function renameDoc(docId: string, newTitle: string, root = dataDir()): Do
   const index = readIndex(rootDir);
   const doc = index.docs.find((d) => d.docId === docId);
   if (!doc) throw notFound(`no document with id ${docId}`);
-  if (newTitle !== doc.title && [...index.docs, ...index.unplaced].some((d) => d.docId !== docId && d.title === newTitle)) {
+  if (newTitle !== doc.title && titleTaken(index, newTitle, doc.ext, path.dirname(doc.path), docId)) {
     throw Object.assign(new Error(`a document titled "${newTitle}" already exists`), { code: "exists" });
   }
   // Renamed inside the file's OWN folder: next to where it already is (same parent, new name).
@@ -708,7 +733,7 @@ function indexOne(real: string, rootDir: string, owner: string, workspace?: stri
   }
   const now = Date.now();
   const index = readIndex(rootDir);
-  if (index.docs.some((d) => d.path === real) || titleTaken(index, title, extRaw)) {
+  if (index.docs.some((d) => d.path === real) || titleTaken(index, title, extRaw, path.dirname(real))) {
     throw Object.assign(new Error(`a document titled "${title}" (${extRaw}) is already in the library`), { code: "exists" });
   }
   const doc: DocMeta = {
@@ -851,14 +876,20 @@ export function scanWorkspace(roots: string[], root = dataDir()): { added: numbe
       throw err; // a real failure (index corrupt, disk full) IS a rescan failure
     }
   }
-  // What no root holds any more, while its file is there: out of the index (see above).
+  // What no root holds any more, while its file is there: out of the index (see above). An entry an earlier version
+  // scanned has no owner: it gets the root that holds it also while its file is away (the walk above gives one only to
+  // the files it finds), and leaves the index where none does, file or not, since a document belongs to someone.
   const outside = new Set<string>();
+  const ownerless = new Map<string, string>();
   if (resolvedRoots.length) {
     for (const doc of initial.docs) {
-      if (ownerFolder(doc.path, resolvedRoots) === undefined && fs.lstatSync(doc.path, { throwIfNoEntry: false })) outside.add(doc.docId);
+      const holder = ownerFolder(doc.path, resolvedRoots);
+      if (holder === undefined) {
+        if (typeof doc.owner !== "string" || fs.lstatSync(doc.path, { throwIfNoEntry: false })) outside.add(doc.docId);
+      } else if (typeof doc.owner !== "string" && !byReal.get(doc.path)?.owner) ownerless.set(doc.docId, holder);
     }
   }
-  if (updated > 0 || outside.size) {
+  if (updated > 0 || outside.size || ownerless.size) {
     const index = readIndex(rootDir); // fresh: add-writes may have landed since `initial`
     let wrote = false;
     for (const [realPath, doc] of byReal) {
@@ -873,6 +904,14 @@ export function scanWorkspace(roots: string[], root = dataDir()): { added: numbe
       entry.owner = doc.owner;
       if (doc.workspace !== undefined) entry.workspace = doc.workspace;
       wrote = true;
+    }
+    for (const entry of index.docs) {
+      const holder = ownerless.get(entry.docId);
+      if (holder !== undefined && typeof entry.owner !== "string") {
+        entry.owner = holder;
+        if (entry.workspace === undefined) entry.workspace = workspaceOf(entry.path);
+        wrote = true;
+      }
     }
     if (outside.size) {
       index.docs = index.docs.filter((d) => !outside.has(d.docId));
@@ -1004,7 +1043,7 @@ export function saveConflictCopy(doc: DocMeta, bytes: Buffer, root = dataDir()):
   const index = readIndex(root);
   const stamp = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", ".");
   const folder = path.dirname(doc.path);
-  const taken = (title: string) => titleTaken(index, title, doc.ext) || fs.existsSync(path.join(folder, `${title}.${doc.ext}`));
+  const taken = (title: string) => titleTaken(index, title, doc.ext, folder) || fs.existsSync(path.join(folder, `${title}.${doc.ext}`));
   let title = "";
   for (let n = 1; !title || taken(title); n++) {
     const tag = ` (conflict ${stamp}${n > 1 ? ` ${n}` : ""})`;

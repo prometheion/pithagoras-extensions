@@ -21,8 +21,8 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
 - Recommended: 1 GB of RAM.
-  About 700 MiB were measured while one document is edited, and 770 MiB with three documents open in the agents'
-  editors (the most there are at once: about 540 MiB of it the agents' browser). The settings page shows the memory all of Office uses
+  About 700 MiB were measured while one document is edited, and 770-860 MiB with three documents open in the
+  agents' editors (the most there are at once: 540-620 MiB of it the agents' browser). The settings page shows the memory all of Office uses
   while it runs: the Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
   10 minutes after its last editor closed, and is capped at 3 GB. The figure is what `docker stats` shows: the
   containers' memory less the file cache the kernel can drop again.

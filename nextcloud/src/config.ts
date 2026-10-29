@@ -1,36 +1,53 @@
 /**
- * @pithagoras/nextcloud's own fields as pi holds them: flat keys in the agent's config file (PI_CODING_AGENT_DIR
- * or ~/.pi/agent), beside pi's own -- where they live, the portal's Extensions page lists them and restores them,
- * and a save here is a merged write over that file, nothing else of it touched.
+ * @pithagoras/nextcloud's own fields as pi holds them: keys in the agent's config file (PI_CODING_AGENT_DIR or
+ * ~/.pi/agent), beside pi's own -- where they live, the portal's Extensions page lists them and restores them, and a
+ * save here is a merged write over that file, nothing else of it touched.
  *
- * The four keys are read from a variable named after what it holds, as literals: the portal scans this package's
- * source for such reads to know which keys to show (see detectSettingKeys in @pithagoras/server) -- so nowhere
- * else in this package may another key be read off a name that ends in "settings".
+ * The keys are read from a variable named after what it holds, as literals: the portal scans this package's source
+ * for such reads to know which keys to show (see detectSettingKeys in @pithagoras/server) -- so nowhere else in this
+ * package may another key be read off a name that ends in "settings". The one current key is `instances`, a list of
+ * the Nextclouds this portal knows; the four flat keys beside it are what an earlier version saved and are still
+ * read here, to carry over as the first instance (see loadInstances), and go on the next save.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-/** The Nextcloud this extension talks to, and what its mcp.json entry keeps out of the chats' tool lists. */
-export interface NextcloudSettings {
+/** One Nextcloud this portal talks to: its login, what its entry in pi's config keeps out of the chats' tool lists,
+ * and where its /mcp endpoint lives -- a container this extension made (`own`), or one already running that it
+ * adopted by name (`adopted:<docker container name>`). */
+export interface NextcloudInstance {
+  /** The instance by its name: the entry in pi's mcp.json under it, and the prefix of that server's tools for the chats. */
+  name: string;
   /** The Nextcloud host the MCP server may talk to, as NEXTCLOUD_HOST: e.g. https://cloud.example.org. */
   url: string;
   /** A user of that host, as NEXTCLOUD_USERNAME. */
   username: string;
-  /** An app password of that user (Nextcloud Settings > Security > Devices & sessions), as NEXTCLOUD_PASSWORD. */
+  /** An app password of that user (Nextcloud Settings > Security > Devices & sessions), as NEXTCLOUD_PASSWORD. Set only, never answered back. */
   password: string;
-  /** Comma-separated tool-name globs the mcp.json entry excludes, matched against pi-mcp-adapter's names (<server>_<tool>). Empty takes the default. */
+  /** Comma-separated tool-name globs the mcp.json entry excludes, matched against pi-mcp-adapter's names (<instance>_<tool>). Empty takes the default. */
   mcpExcludeTools: string;
+  /** Where the /mcp endpoint lives: `own` -- a container this extension made and keeps, or `adopted:<name>` -- one that was already running. */
+  container: string;
 }
 
-/** What the keys hold where they are not set: no host or login yet, and a keep-out list that frees the chats' tool
- * lists of what this extension does not bring to its pages -- mail, news and collectives (v0.202.2 has no talk tools). */
-export const DEFAULT_SETTINGS: NextcloudSettings = {
-  url: "",
-  username: "",
-  password: "",
-  mcpExcludeTools: "nextcloud_nc_mail_*,nextcloud_nc_news_*,nextcloud_collectives_*",
-};
+/** The name the one instance of an earlier version carried in pi's config, so its migration lands where it stood. */
+export const DEFAULT_INSTANCE_NAME = "nextcloud";
+
+/** What a blank keep-out list takes of itself, for an instance by its name: mail, news and collectives kept out, as
+ * the chats' tool lists only want what this extension brings to its pages (v0.202.2 has no talk tools). */
+export function excludeDefault(name: string): string {
+  return `${name}_nc_mail_*,${name}_nc_news_*,${name}_collectives_*`;
+}
+
+/** Whether a name is one this extension may stand an instance up under: what pi's mcp.json takes as an entry's name. */
+export function isValidInstanceName(name: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9_-]*$/.test(name) && name.length <= 48;
+}
+
+/** Whether the container field says the endpoint is in a container that was already running, and if so by what name. */
+export const isAdopted = (container: string): boolean => container.startsWith("adopted:");
+export const adoptedName = (container: string): string => container.slice("adopted:".length);
 
 const FILE = "settings.json"; // pi's config file, by that name
 
@@ -50,37 +67,69 @@ function readAll(): Record<string, unknown> {
   return {};
 }
 
-/** The extension's own keys, as the file holds them over the defaults (a blank keep-out list takes the default). */
-export function loadSettings(): NextcloudSettings {
-  const settings = readAll();
+/** One entry of the list as the file holds it, read over its defaults; nothing where it names no instance. */
+function instanceFrom(raw: unknown): NextcloudInstance | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const o = raw as Record<string, unknown>;
   const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const name = text(o.name);
+  if (!name) return undefined;
+  const container = text(o.container);
   return {
-    url: text(settings.url),
-    username: text(settings.username),
-    password: text(settings.password),
-    mcpExcludeTools: text(settings.mcpExcludeTools) || DEFAULT_SETTINGS.mcpExcludeTools,
+    name,
+    url: text(o.url),
+    username: text(o.username),
+    password: text(o.password),
+    mcpExcludeTools: text(o.mcpExcludeTools) || excludeDefault(name),
+    container: container === "own" || (isAdopted(container) && adoptedName(container) !== "") ? container : "own",
   };
 }
 
-/** Set some of the keys (the rest of the file stays as it is) and return what the keys hold after. */
-export function saveSettings(patch: Partial<NextcloudSettings>): NextcloudSettings {
-  const all = readAll();
-  for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof NextcloudSettings)[]) {
-    const value = patch[key];
-    if (typeof value === "string") all[key] = value;
+/**
+ * The instances as the file holds them. Where it still has only what an earlier version saved -- its four flat keys
+ * -- they come over as the one implicit instance under the name that version's entry in pi's config carried, so a
+ * saved set keeps working unchanged; where nothing is saved at all, nothing stands (the pages say to add one).
+ */
+export function loadInstances(): NextcloudInstance[] {
+  const settings = readAll();
+  if (Array.isArray(settings.instances)) {
+    return (settings.instances as unknown[]).map(instanceFrom).filter((i): i is NextcloudInstance => i !== undefined);
   }
-  writeAtomic(path.join(dir(), FILE), Buffer.from(JSON.stringify(all, null, 2) + "\n", "utf8"));
-  return loadSettings();
+  const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const url = text(settings.url);
+  const username = text(settings.username);
+  const password = text(settings.password);
+  if (!url && !username && !password) return [];
+  return [
+    {
+      name: DEFAULT_INSTANCE_NAME,
+      url,
+      username,
+      password,
+      mcpExcludeTools: text(settings.mcpExcludeTools) || excludeDefault(DEFAULT_INSTANCE_NAME),
+      container: "own",
+    },
+  ];
 }
 
-/** Whether the keys name a Nextcloud to talk to: url, username and password all set. */
-export function configured(s: NextcloudSettings): boolean {
-  return Boolean(s.url && s.username && s.password);
+/** The instances set to the list (the rest of the file stays as it is; the flat keys an earlier version kept are
+ * dropped then, having come over as the first instance already), and what the list holds after. */
+export function saveInstances(list: NextcloudInstance[]): NextcloudInstance[] {
+  const all = readAll();
+  all.instances = list.map((inst) => ({ ...inst }));
+  for (const legacy of ["url", "username", "password", "mcpExcludeTools"]) delete all[legacy];
+  writeAtomic(path.join(dir(), FILE), Buffer.from(JSON.stringify(all, null, 2) + "\n", "utf8"));
+  return loadInstances();
+}
+
+/** Whether the instance names a Nextcloud to talk to: url, username and password all set. */
+export function configured(inst: NextcloudInstance): boolean {
+  return Boolean(inst.url && inst.username && inst.password);
 }
 
 /** The keep-out list as mcp.json takes it: trimmed, empty ones dropped. */
-export function excludeList(s: NextcloudSettings): string[] {
-  return s.mcpExcludeTools.split(",").map((part) => part.trim()).filter(Boolean);
+export function excludeList(inst: NextcloudInstance): string[] {
+  return inst.mcpExcludeTools.split(",").map((part) => part.trim()).filter(Boolean);
 }
 
 function writeAtomic(dest: string, bytes: Buffer): void {

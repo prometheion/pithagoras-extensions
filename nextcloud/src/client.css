@@ -316,3 +316,32 @@
   color: var(--fg-subtle);
   font-size: 0.72rem;
 }
+
+/* ---- instance switcher (more than one Nextcloud): which of them the pages talk to ---- */
+
+.nc-instance {
+  display: flex;
+  gap: 0.15rem;
+  padding-bottom: 0.35rem;
+}
+
+.nc-instance-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nc-instance-btn:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--raised);
+}
+
+.nc-instance-btn-on {
+  color: var(--accent);
+  font-weight: 600;
+}

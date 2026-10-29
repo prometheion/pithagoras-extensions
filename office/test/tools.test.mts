@@ -1187,7 +1187,7 @@ test("office_format: bad ops, a content op, a spreadsheet, Office stopped and a 
   assert.match(await refused(fmt(doc.docId, [{ format: "Total", set: { bold: true } }])), /^error:quote_ambiguous op 1: .*give nth .* Nothing was changed: read the document again with office_read and quote it as it stands\.$/);
 });
 
-test("office_read with formatting: the styles in use, the pages, headers, footers and footnotes first; each paragraph's own formatting in its brackets and its runs' under it; table styles; list items without their labels", async () => {
+test("office_read with formatting: the styles in use, the pages, headers, footers and footnotes first; each paragraph's own formatting in its brackets and its runs' under it; table styles; list items without their labels in the text, a numbered item's label in its brackets", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = (run) => {
@@ -1196,7 +1196,7 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
       blocks: [
         { p: "Quarterly report for Meridian Labs", look: { para: { align: "center", spaceBefore: 240 }, runs: [{ t: "Quarterly report", look: { font: "Arial", size: 28, bold: true, italic: true, underline: true, color: "#C81E1E", highlight: "yellow" } }, { t: "Meridian Labs", look: { link: "https://example.com/meridian", style: "Hyperlink" } }] } },
         { p: "first point", style: "List Paragraph", list: "bullet", level: 1 },
-        { p: "sub point", list: "number", level: 2, format: "lowerLetter", look: { para: { indentLeft: 720, firstLine: -360, line: { multiple: 1.5 } } } },
+        { p: "sub point", list: "number", level: 2, format: "lowerLetter", label: "c.", look: { para: { indentLeft: 720, firstLine: -360, line: { multiple: 1.5 } } } },
         { p: "There was a discrepancy here.", look: { notes: [{ at: "There was a discrepancy", note: " The audit of March." }], runs: [{ t: "x".repeat(100), look: { superscript: true } }], pictures: [[1800000, 1224000]] } },
         { table: [["Item", "Amount"], ["Ledger", "42"]], look: { style: "Grid Table 4 - Accent 1", headerRows: 1, merged: [{ row: 0, cell: 1, across: 2 }] } },
       ],
@@ -1225,7 +1225,7 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
       "[1] (center, space before 12pt) Quarterly report for Meridian Labs",
       '    "Quarterly report": Arial 14, bold, italic, underline, #C81E1E, highlight yellow; "Meridian Labs": style "Hyperlink", link https://example.com/meridian',
       "[2] (List Paragraph, bullet) first point",
-      "[3] (numbered lowerLetter, level 2, line spacing 1.5, indent left 1.27cm, hanging 0.64cm) sub point",
+      "[3] (numbered lowerLetter \"c.\", level 2, line spacing 1.5, indent left 1.27cm, hanging 0.64cm) sub point",
       "[4] There was a discrepancy here.",
       `    "${"x".repeat(77)}…": superscript; a picture 5 × 3.4 cm`,
       '[5] table (style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns)',

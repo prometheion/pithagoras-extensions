@@ -851,6 +851,13 @@ test("view.locate, Word: the page, the page count, and the page's blocks as offi
   assert.deepEqual(command("view.locate", doc.Api, { kind: "word", page: 4 }).error, { code: "no_page", message: "the document has 3 pages" });
 });
 
+test("view.locate, Word: the first page's text starts at the document's start, also where going to the page puts the cursor after a table of contents there", () => {
+  // Going to page 1 lands in c, after the TOC's entries a and b; page 2 starts at e.
+  const doc = laidOut(["a", "b", "c", "d", "e"], [2, 4]);
+  const one = command("view.locate", doc.Api, { kind: "word", page: 1 }).result;
+  assert.deepEqual([one.first, one.blocks.map((b: { p: string }) => b.p)], [1, ["a", "b", "c", "d", "e"]]);
+});
+
 test("view.locate, Word: a page in a long table gives the table's rows from the one the page starts in to the one the next page starts in, and says which", () => {
   // Paragraphs: 0 a, then a table of 40 rows of 2 cells (1-80), then 81 z. Pages start at a, in row 3 (paragraph 5),
   // in row 7 (paragraph 13), and at z.
@@ -1116,7 +1123,7 @@ function scriptedWord(spec: {
   const own = (where: string, kind?: "text" | "picture") => rec(`${where} content`, { GetElementsCount: () => 1, GetElement: () => rec(`${where} paragraph`, { GetClassType: () => "paragraph", ToJSON: () => JSON.stringify({ content: [{ type: "run", content: kind === "picture" ? [{ docPr: {} }] : ["Old header"] }] }) }) });
   const sections = (spec.sections ?? [{ header: spec.header }]).map((x, k) => {
     const label = k === 0 ? "" : `section${k + 1} `;
-    return rec(k === 0 ? "section" : `section${k + 1}`, { GetHeader: (_k: string, make: boolean) => (x.header || make ? own(`${label}header`, x.header) : null), GetFooter: (_k: string, make: boolean) => (make ? own(`${label}footer`) : null), GetPageWidth: () => (x.landscape ? 16838 : 11906), GetPageHeight: () => (x.landscape ? 11906 : 16838) });
+    return rec(k === 0 ? "section" : `section${k + 1}`, { GetHeader: (_k: string, make: boolean) => (x.header || make ? own(`${label}header`, x.header) : null), GetFooter: (_k: string, make: boolean) => (make ? own(`${label}footer`) : null), GetPageWidth: () => (x.landscape ? 16838 : 11906), GetPageHeight: () => (x.landscape ? 11906 : 16838), GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134 });
   });
   const hit = (q: string, at: number, extra: Record<string, unknown> = {}) => rec(`range(${q}${at ? `@${at}` : ""})`, { GetText: () => q, GetTextPr: () => ({ GetHighlight: () => (spec.highlighted?.includes(q) ? "yellow" : "none") }), GetAllParagraphs: () => [extra.para ?? paras[at]], GetStartPos: () => at * 1000, GetEndPos: () => at * 1000 + q.length, IntersectWith: () => ({ GetText: () => q }), ExpandTo: (r: any) => rec(`range(${q}..${r.GetText()})`, { GetAllParagraphs: () => [paras[at], ...r.GetAllParagraphs()], GetText: () => q, IntersectWith: () => ({ GetText: () => q }) }), ...extra });
   const doc = rec("doc", {
@@ -1134,12 +1141,13 @@ function scriptedWord(spec: {
       return found;
     },
     GetSections: () => sections,
+    GetFinalSection: () => sections[sections.length - 1],
     GetRange: (a: number, b: number) => rec(`doc.range(${a}, ${b})`),
     AddFootnote: () => (calls.push("doc.AddFootnote()"), rec("footnote", { GetElement: () => rec("footnote paragraph") })),
     GetAllComments: () => [],
     CreateSection: (p: { __label: string }) => (calls.push(`doc.CreateSection(${p.__label})`), rec("new section")),
   });
-  const Api = rec("Api", { GetDocument: () => doc, CreateTextPr: () => rec("textPr"), CreateParagraph: () => rec("new paragraph", { GetRange: () => rec("new paragraph's range") }) });
+  const Api = rec("Api", { GetDocument: () => doc, CreateTextPr: () => rec("textPr"), CreateParagraph: () => rec("new paragraph", { GetRange: () => rec("new paragraph's range"), GetSection: () => sections[0] }) });
   return { Api, calls, run: (ops: unknown[]) => command("word.format", Api, { ops }) };
 }
 
@@ -1210,6 +1218,7 @@ test("word.format: defineStyle makes a new style; an existing name is refused wi
   assert.equal(no.error.code, "style_exists");
   assert.match(no.error.message, /a style "Callout" already \(2 paragraphs use it\): give change: true/);
   assert.equal(w.calls.length, 0);
+  assert.match(scriptedWord({ paras: [{ text: "One", style: "Callout" }], styles: { Callout: "paragraph" } }).run([{ defineStyle: "Callout", type: "paragraph", text: { italic: true } }]).error.message, /a style "Callout" already \(1 paragraph uses it\)/);
   const changed = w.run([{ defineStyle: "Callout", type: "paragraph", change: true, text: { italic: true }, para: { indentLeft: 720 } }]);
   assert.deepEqual(changed.result, { ops: 1, styles: [{ style: "Callout", changed: true, paragraphs: 2 }], reflowed: true });
   assert.ok(w.calls.includes("style(Callout).text.SetItalic(true)") && w.calls.includes("style(Callout).para.SetIndLeft(720)"), w.calls.join("\n"));
@@ -1307,6 +1316,24 @@ test("word.format: a header that holds more than text is replaced only with repl
   const plain = scriptedWord({ paras: [{ text: "Body" }], header: "text" });
   plain.run([{ page: "Body", set: { header: [], size: { width: 11906, height: 16838 }, orientation: "landscape", margins: { top: 1, right: 2, bottom: 3, left: 4 }, differentFirstPage: true } }]);
   assert.deepEqual(plain.calls.filter((c) => c.startsWith("section")), ["section.SetPageSize(16838, 11906, false)", "section.SetPageMargins(4, 1, 2, 3)", "section.SetTitlePage(true)", 'section.RemoveHeader("default")']);
+});
+
+test("word.format: a table of contents in a portrait section before a landscape one is made while the last section has the TOC's section's width (the editor sets the entries' page-number tab by the last section's), which it gets back after", () => {
+  const w = scriptedWord({ paras: [{ text: "Title" }, { text: "Wide" }], sections: [{}, { landscape: true }] });
+  assert.deepEqual(w.run([{ toc: true, levels: 2 }]).result, { ops: 1, reflowed: true });
+  const made = w.calls.filter((c) => /^section2\.Set|AddField|UpdateAllTOC/.test(c));
+  assert.deepEqual(made, [
+    "section2.SetPageSize(11906, 11906, true)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    'new paragraph\'s range.AddField("TOC \\\\o \\"1-2\\" \\\\h \\\\z \\\\u")',
+    "doc.UpdateAllTOC(false)",
+    "section2.SetPageSize(16838, 11906, false)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+  ]);
+  // One section, or sections alike across: nothing changed for it.
+  const one = scriptedWord({ paras: [{ text: "Title" }] });
+  one.run([{ toc: true, levels: 2 }]);
+  assert.ok(!one.calls.some((c) => /SetPageSize|SetPageMargins/.test(c)), one.calls.join("\n"));
 });
 
 test("word.format: a page break and a table of contents go after their paragraph (a TOC at the start where none is given, as a TOC field); a footnote at the quote's end", () => {
@@ -1443,4 +1470,20 @@ test("word.read with formatting: what is set off or to zero is direct formatting
   assert.deepEqual(t1.look, { notes: [{ at: "cellnote", note: "Note in the cell.", row: 0, cell: 1 }] });
   assert.deepEqual(p3.look, { notes: [{ at: "Tail para", note: "Note at the tail." }] });
   assert.deepEqual(out.result.format.sections.map((x: { header?: unknown; headerAs?: number }) => [Boolean(x.header), x.headerAs]), [[true, undefined], [false, 1], [false, 1]]);
+});
+
+test("word.read with formatting: a numbered item carries its label as the editor numbers it, so a list going on and one starting again are told apart; a bullet and a read without formatting carry none", () => {
+  const numbering = (fmt: string) => {
+    const n: any = { ToJSON: () => JSON.stringify({ abstractNum: { a: { lvl: [{ numFmt: { val: fmt } }] } } }) };
+    n.GetLevel = () => ({ GetLevelIndex: () => 0, GetNumbering: () => n });
+    return n;
+  };
+  const steps = numbering("decimal"), again = numbering("decimal"), dots = numbering("bullet");
+  const para = (id: string, text: string, label: string, list: any) => ({ GetClassType: () => "paragraph", GetText: (o?: { Numbering?: boolean }) => `${o?.Numbering === false ? "" : label}${text}\r\n`, GetParaPr: () => ({ GetStyle: () => null }), GetStyle: () => null, GetInternalId: () => id, GetNumbering: () => list.GetLevel(0), GetAllDrawingObjects: () => [], ToJSON: () => JSON.stringify({ content: [{ type: "run", rPr: {}, content: [text] }] }), GetElementsCount: () => 0, GetElement: () => null });
+  const section = { GetPageWidth: () => 11906, GetPageHeight: () => 16838, GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134, GetHeader: () => null, GetFooter: () => null, ToJSON: () => "{}" };
+  const doc = { ...contentOf([para("p1", "Step two", "2.\t", steps), para("p2", "Step three", "3.\t", steps), para("p3", "Again one", "1.\t", again), para("p4", "Dot", "·\t", dots)]), GetAllStyles: () => [], GetAllImages: () => [], GetStyle: () => null, GetDefaultTextPr: () => ({ ToJSON: () => "{}" }), GetSections: () => [section], GetFootnotesFirstParagraphs: () => [] };
+  const out = command("word.read", { GetDocument: () => doc }, { formatting: true });
+  assert.deepEqual(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(out.result.blocks.map((b: { p: string; label?: string }) => [b.p, b.label]), [["Step two", "2."], ["Step three", "3."], ["Again one", "1."], ["Dot", undefined]]);
+  assert.deepEqual(command("word.read", { GetDocument: () => doc }, {}).result.blocks.map((b: { label?: string }) => b.label), [undefined, undefined, undefined, undefined]);
 });

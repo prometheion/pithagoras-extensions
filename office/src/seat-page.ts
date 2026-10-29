@@ -429,6 +429,9 @@ const WORD_READ = `function () {
           if (list) { block.list = list.kind; block.level = list.level + 1; if (list.format !== "bullet" && list.format !== "decimal") block.format = list.format; }
           if (formatting) {
             if (style) used[style] = true;
+            // A numbered item's label as the editor numbers it ("3."), so a list that goes on and one that starts
+            // again are told apart (the text has no labels).
+            if (list && list.kind === "number") { var labelled = clean(el.GetText()); if (labelled.length > text.length && labelled.slice(labelled.length - text.length) === text) block.label = labelled.slice(0, labelled.length - text.length).replace(/\\s+/g, " ").trim(); }
             var look = lookOf(el, names);
             (look.runs || []).forEach(function (r) { if (r.look.style) used[r.look.style] = true; });
             if (look.sectionEnd) { sections.push(blocks.length + 1); delete look.sectionEnd; }
@@ -653,7 +656,9 @@ const WORD_EDIT = `function () {
  *   column, 216 twips); `CreateStyle` with a name the document has gives the existing style; `GetStyle` matches the
  *   name only in its own case; a table's borders and a cell's are drawn "single" or "none" (the other kinds as none).
  * - `doc.AddTableOfContents` does nothing; a TOC field (`AddField`) and `UpdateAllTOC` make one, whose entries are
- *   paragraphs of the styles "toc 1" to "toc 9".
+ *   paragraphs of the styles "toc 1" to "toc 9". `AddField` sets the entries' right tab (dot leader, the page numbers)
+ *   at the width of the document's last section between its margins, wherever the TOC is, and later updates keep that
+ *   tab; a paragraph just added answers the last section to `GetSection` until `GetPosInParent` is asked.
  * - `doc.CreateSection(p)` ends p's section at p with a copy of it, which it answers; the section p was in goes on after
  *   the break, so the break's type (how a section starts) is set on that one. A section after a break has no header or
  *   footer of its own and shows the one before it; `GetHeader("default", true)` gives it an empty one of its own.
@@ -779,7 +784,7 @@ const WORD_FORMAT = `function () {
         if (have && !op.change) {
           var users = 0;
           collect(doc, []).forEach(function (x) { try { var st = x.p.GetStyle(); if (st && st.GetName() === (typeof have === "string" ? op.defineStyle : have.GetName())) users++; } catch (e) {} });
-          fail("style_exists", i, "the document has a style " + JSON.stringify(typeof have === "string" ? op.defineStyle : have.GetName()) + " already" + (type === "paragraph" ? " (" + users + " paragraph" + (users === 1 ? "" : "s") + " use it)" : "") + ": give change: true to change it, or another name");
+          fail("style_exists", i, "the document has a style " + JSON.stringify(typeof have === "string" ? op.defineStyle : have.GetName()) + " already" + (type === "paragraph" ? " (" + users + (users === 1 ? " paragraph uses it)" : " paragraphs use it)") : "") + ": give change: true to change it, or another name");
         }
         if (have && (typeof have === "string" ? have : have.GetType()) !== type) fail("bad_op", i, JSON.stringify(op.defineStyle) + " is a " + (typeof have === "string" ? have : have.GetType()) + " style already, not a " + op.type + " style");
         if (op.basedOn !== undefined) {
@@ -1062,8 +1067,26 @@ const WORD_FORMAT = `function () {
         else if (o.toc) doc.AddElement(0, np);
         else doc.Push(np);
         if (o.toc) {
+          // The editor sets the entries' right tab (where their page numbers stand) when the field is made, by the
+          // width of the document's last section, wherever the TOC is: one in a portrait section before a landscape
+          // one had its page numbers off the page. For the making, the last section takes the TOC's section's width
+          // and side margins, and then its own back. (np's place first: its section is the last one until it is
+          // asked.)
+          np.GetPosInParent();
+          var tocSec = np.GetSection(), fin = doc.GetFinalSection(), back = null;
+          var across = function (s) { return [s.GetPageWidth(), s.GetPageMarginLeft(), s.GetPageMarginRight()]; };
+          if (tocSec && fin && across(tocSec).join() !== across(fin).join()) {
+            var want = across(tocSec);
+            back = { w: fin.GetPageWidth(), h: fin.GetPageHeight(), top: fin.GetPageMarginTop(), right: fin.GetPageMarginRight(), bottom: fin.GetPageMarginBottom(), left: fin.GetPageMarginLeft() };
+            fin.SetPageSize(want[0], back.h, want[0] <= back.h);
+            fin.SetPageMargins(want[1], back.top, want[2], back.bottom);
+          }
           np.GetRange().AddField('TOC \\\\o "1-' + o.levels + '" \\\\h \\\\z \\\\u');
           doc.UpdateAllTOC(false);
+          if (back) {
+            fin.SetPageSize(back.w, back.h, back.w <= back.h);
+            fin.SetPageMargins(back.left, back.top, back.right, back.bottom);
+          }
         }
       }
     }
@@ -1540,7 +1563,8 @@ const VIEW_LOCATE = `function () {
       var range = doc.GetRangeBySelect(), paras = range ? range.GetAllParagraphs() : [];
       return (paras.length && of[paras[0].GetInternalId()]) || null;
     };
-    var first = startOf(page - 1), last = page < pages ? startOf(page) : { block: blocks.length - 1, row: -1 };
+    // The first page starts at the document's start: going to it puts the cursor after a table of contents there.
+    var first = page === 1 ? { block: 0, row: -1 } : startOf(page - 1), last = page < pages ? startOf(page) : { block: blocks.length - 1, row: -1 };
     doc.RemoveSelection();
     if (first === null) first = { block: 0, row: -1 };
     if (last === null || last.block < first.block) last = last === null ? { block: blocks.length - 1, row: -1 } : first;

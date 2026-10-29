@@ -379,7 +379,7 @@ type ParaLook = { align?: string; spaceBefore?: number; spaceAfter?: number; lin
 type NoteMark = { at: string; note: string; row?: number; cell?: number };
 type BlockLook = { para?: ParaLook; runs?: { t: string; look: RunLook }[]; notes?: NoteMark[]; pictures?: [number, number][] };
 type TableLook = { style?: string; headerRows?: number; merged?: { row: number; cell: number; across?: number; above?: true }[]; notes?: NoteMark[]; pictures?: true };
-type WordBlock = ({ p: string; style?: string; list?: "bullet" | "number"; level?: number; format?: string; look?: BlockLook } | { table: string[][]; row?: number; of?: number; look?: TableLook });
+type WordBlock = ({ p: string; style?: string; list?: "bullet" | "number"; level?: number; format?: string; label?: string; look?: BlockLook } | { table: string[][]; row?: number; of?: number; look?: TableLook });
 type WordFormat = {
   defaults?: RunLook;
   styles: { name: string; type: string; basedOn?: string; text?: RunLook; para?: ParaLook }[];
@@ -392,10 +392,11 @@ type WordBlocks = { blocks: WordBlock[]; truncated?: boolean; format?: WordForma
 
 const pt = (twips: number) => `${+(twips / 20).toFixed(1)}pt`;
 const cm = (twips: number) => `${+((twips / 1440) * 2.54).toFixed(2)}cm`;
-/** A list's words in a block's brackets: "bullet", "numbered", its numbering where it is not 1, 2, 3, its level. */
-function listWords(b: { list?: string; level?: number; format?: string }): string {
+/** A list's words in a block's brackets: "bullet", "numbered", its numbering where it is not 1, 2, 3, its label (a
+ * formatting read's: "3."), its level. */
+function listWords(b: { list?: string; level?: number; format?: string; label?: string }): string {
   if (!b.list) return "";
-  return `${b.list === "bullet" ? "bullet" : `numbered${b.format ? ` ${b.format}` : ""}`}${b.level && b.level > 1 ? `, level ${b.level}` : ""}`;
+  return `${b.list === "bullet" ? "bullet" : `numbered${b.format ? ` ${b.format}` : ""}${b.label ? ` ${JSON.stringify(b.label)}` : ""}`}${b.level && b.level > 1 ? `, level ${b.level}` : ""}`;
 }
 function runWords(l: RunLook): string {
   const out: string[] = [];

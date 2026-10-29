@@ -124,7 +124,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   the document's defaults and the styles in use (each as it is itself; what it inherits from another is not added),
   each section's page, margins, header and footer (or the earlier section's it shows), the footnotes and where each
   one's mark is (a table's in its cell), and each paragraph's and run's own formatting (not what its style gives it;
-  what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a table's style, header rows and merged cells; 50,000 characters of
+  what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a numbered item's number as the editor gives it (`(numbered "3.")`, so a list that
+  goes on and one that starts again are told apart), a table's style, header rows and merged cells; 50,000 characters of
   it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
   `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these

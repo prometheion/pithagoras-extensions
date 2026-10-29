@@ -54,7 +54,7 @@ export type ShotImage = { data: string; width: number; height: number; zoom?: nu
  *
  * Word: the layout is waited for until the page count holds still (it lands up to 0.7 s after an edit of 20 pages);
  * then "fit to page" and the page, and the page's rectangle found on the canvas `#id_viewer` (white on grey): the pages
- * in view down a line inside their left margin, the one drawn whole at the top (the last page's at the bottom: the
+ * in view as the runs of rows with white in them, the one drawn whole at the top (the last page's at the bottom: the
  * view does not scroll past the end), and its sides along a line just below its top (inside its top margin).
  * Co-authors' marks are switched off in the agent's editor first.
  * Sheets: the sheet shown (where it is still the one the locate named, and not hidden), the zoom set, and the range
@@ -122,16 +122,14 @@ export const FRAME_FN = `async function (t) {
       for (var x2 = W - 1; x2 >= 0 && r === -1; x2--) if (white(x2, y)) r = x2;
       return [l, r];
     };
-    // A line through some page: down the middle to the first white.
-    var some = -1, mid = W >> 1;
-    for (var y = 0; y < H && some === -1; y++) if (white(mid, y)) some = y;
-    if (some === -1) return stop("not_drawn", "the page is not on the editor's canvas");
-    // The pages in view, down a line just inside their left edge (in their margin): each white run with grey above
-    // and below it is a page drawn whole. The page gone to is at the top of the view, but the last page, which the
-    // view cannot scroll to the top, is at its bottom.
-    var edge = sides(some)[0] + 3, whole = [], from = -1;
+    // The pages in view: a row with white in it is on a page (its margins are white whatever its text), a row between
+    // pages is grey, so each run of rows with white, with grey above and below it, is a page drawn whole. (Not down one
+    // line inside a page's left margin: a wider page, a landscape section's, has its text there.) The page gone to is
+    // at the top of the view, but the last page, which the view cannot scroll to the top, is at its bottom.
+    var paper = function (y) { for (var x = 0; x < W; x += 2) if (white(x, y)) return true; return false; };
+    var whole = [], from = -1;
     for (var y2 = 0; y2 <= H; y2++) {
-      var on = y2 < H && white(edge, y2);
+      var on = y2 < H && paper(y2);
       if (on && from === -1) from = y2;
       if (!on && from !== -1) {
         if (from > 0 && y2 < H) whole.push([from, y2 - 1]);

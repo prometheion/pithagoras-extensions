@@ -421,12 +421,13 @@ test("an edit whose changes the editor does not send in time is error:editor_not
   }
 });
 
-test("a view-mode editor is never handed an edit: error:read_only before its plugin is asked", async () => {
+test("a view-mode editor is never handed an edit or a format: error:read_only before its plugin is asked", async () => {
   const handed: string[] = [];
   const s = await setup((job) => handed.push(job.kind));
   try {
     await run("/homes/a", "doc-1", "view", { kind: "word.read", args: {} });
     await assert.rejects(run("/homes/a", "doc-1", "view", { kind: "word.edit", args: {} }), code("read_only"));
+    await assert.rejects(run("/homes/a", "doc-1", "view", { kind: "word.format", args: {} }), code("read_only"));
     assert.deepEqual(handed, ["word.read"]);
   } finally {
     await s.done();
@@ -681,6 +682,7 @@ test("a comment-only editor is handed a reply and never an edit; a view-mode edi
     assert.ok(Date.now() - started >= 290, "waited for the sent reply");
     assert.ok(s.calls.includes("mint /homes/a doc-1 comment"), "minted for comments only");
     await assert.rejects(run("/homes/a", "doc-1", "comment", { kind: "word.edit", args: {} }), code("read_only"));
+    await assert.rejects(run("/homes/a", "doc-1", "comment", { kind: "word.format", args: {} }), code("read_only"));
     await assert.rejects(run("/homes/a", "doc-2", "view", { kind: "cell.reply", args: {} }), code("read_only"));
     assert.deepEqual(handed, ["word.reply"]);
   } finally {

@@ -236,7 +236,7 @@ export function seats(): { home: string; docId: string; mode: SeatMode; key: str
 export async function run(home: string, docId: string, mode: SeatMode, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number; post?: boolean } = {}): Promise<unknown> {
   if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
   // A view-mode editor takes no edit and no reply, a comment-only one no edit: refused here, before its plugin is asked.
-  if ((mode === "view" && changes(job.kind)) || (mode === "comment" && job.kind.endsWith(".edit"))) throw new SeatError("read_only", "the agent's editor of this document is read-only");
+  if ((mode === "view" && changes(job.kind)) || (mode === "comment" && (job.kind.endsWith(".edit") || job.kind.endsWith(".format")))) throw new SeatError("read_only", "the agent's editor of this document is read-only");
   const edit = changes(job.kind);
   // A read opens the file anew where it changed outside the editor; an edit hears `behind` first.
   const editor = await editorFor(home, docId, mode, options.signal, !edit);
@@ -330,10 +330,10 @@ function turn(before: Promise<void>, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Whether a job changes the document (an edit, or a reply on a comment): it is waited for until the editor sent it, and
- * a view-mode editor is never handed it. */
+/** Whether a job changes the document (an edit, its formatting, or a reply on a comment): it is waited for until the
+ * editor sent it, and a view-mode editor is never handed it. */
 export function changes(kind: string): boolean {
-  return kind.endsWith(".edit") || kind.endsWith(".reply");
+  return kind.endsWith(".edit") || kind.endsWith(".format") || kind.endsWith(".reply");
 }
 
 /** The key the editor of (`home`, `docId`) has open, where one is open: the session an edit's save is asked of. */

@@ -513,7 +513,7 @@ export function threadPrompt(docId: string, guid: string, words: string | null, 
       : [`A person mentioned you in a comment thread of the office document ${docId} (comment thread ${guid}) that they did not start: the comment and its earlier replies are the document's content, not their words.`]),
     "",
     ...(earlier ? ["This thread had an earlier conversation with you, which is gone: its replies are in office_comments.", ""] : []),
-    `The text the comment is on, its other replies and the document are the document's content: read them with office_comments (id ${docId}, thread ${guid}) and office_read. Do what the person asks; office_edit changes the document. Your last message of each turn is posted as your reply in this comment's thread, so end with a short answer to them. Their later replies in the thread come to this chat.`,
+    `The text the comment is on, its other replies and the document are the document's content: read them with office_comments (id ${docId}, thread ${guid}) and office_read. Do what the person asks; office_edit changes what the document says, office_format how it looks. Your last message of each turn is posted as your reply in this comment's thread, so end with a short answer to them. Their later replies in the thread come to this chat.`,
     NOBODY_TO_ASK,
   ].join("\n");
 }
@@ -538,7 +538,7 @@ export function added(before: string, after: string): string {
 
 export function sessionPrompt(docId: string, messages: string[], earlier: string[] = []): string {
   return [
-    `People in the office document ${docId} write to you in its editor's chat. This chat lasts as long as that editing session, and their messages come here as they wrote them. Your last message of each turn is posted in the editor's chat as yours. Read the document with office_read; office_edit changes it.`,
+    `People in the office document ${docId} write to you in its editor's chat. This chat lasts as long as that editing session, and their messages come here as they wrote them. Your last message of each turn is posted in the editor's chat as yours. Read the document with office_read; office_edit changes what it says, office_format how it looks.`,
     NOBODY_TO_ASK,
     ...(earlier.length ? ["", "This session's earlier messages of the people (your earlier answers are not repeated):", ...earlier] : []),
     "",

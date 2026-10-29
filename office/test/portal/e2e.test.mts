@@ -1114,6 +1114,200 @@ async function run(PITHAGORAS: string): Promise<void> {
     await writer.page.context().close();
   });
 
+  /** What a person's Word editor holds, as its own select-all gives it as HTML (the runs' look in their styles), without
+   * the editor's own copy of it in binary (which carries ids of its own). */
+  const personHtml = async (frame: import("@playwright/test").Frame) => String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); var h = e.pluginMethod_GetSelectedContent({ type: "html" }); e.asc_RemoveSelection && e.asc_RemoveSelection(); return h; })()`)).replace(/ class="docData;[^"]*"/g, "");
+  /** The style of the HTML element the text `text` starts in (the last style before it). */
+  const styleOf = (html: string, text: string) => {
+    const at = html.indexOf(text);
+    return at < 0 ? `(not found in ${html.slice(0, 2000)})` : ([...html.slice(0, at).matchAll(/style="([^"]*)"/g)].at(-1)?.[1] ?? `(no style before it: ${html.slice(Math.max(0, at - 400), at + 50)})`);
+  };
+
+  test("21. office_format in the real editor: one call with every op and key; office_read with formatting says them, a person's editor shows them at once, and the save holds them", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Formatted report", "word");
+    await tools.office_edit.execute("f0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Quarterly report for Meridian Labs" },
+        { after: "Quarterly report for Meridian Labs", paragraphs: ["Findings"], style: "Heading 1" },
+        { after: "Findings", paragraphs: ["Revenue grew. There was a discrepancy here.", "Water is H2O and energy is E=mc2.", "first point", "second point", "sub point", "Plain closing words.", "Strike me."] },
+        { after: "Strike me.", table: [["Item", "Amount", "Note"], ["Ledger", "42", "ok"]] },
+        { paragraphs: ["End text"] },
+      ],
+    });
+    // Formatting of its own on a text, which `clear` takes off below.
+    await tools.office_format.execute("f00", { id: doc, ops: [{ format: "Plain closing", set: { italic: true, underline: true, color: "#00AA00", fontSize: 16 } }] });
+    const person = await personOpens(doc);
+    const ops = [
+      { format: "Quarterly report", set: { font: "Arial", fontSize: 14, bold: true, italic: true, underline: true, color: "#C81E1E", highlight: "yellow", align: "center", spaceBefore: 12, spaceAfter: "6pt", keepWithNext: true } },
+      { format: "Meridian Labs", set: { link: "https://example.com/meridian" } },
+      { defineStyle: "Callout", basedOn: "Normal", set: { italic: true, color: "#005AA0", indentLeft: "1.27cm" } },
+      { defineStyle: "Mark", type: "character", set: { bold: true, color: "#006100" } },
+      { format: "Revenue grew", set: { style: "Callout", lineSpacing: 1.5, indentRight: "1cm", firstLine: "-0.5cm" } },
+      { format: "discrepancy", set: { style: "Mark" } },
+      { format: "2", nth: 1, set: { subscript: true } },
+      { format: "2", nth: 2, set: { superscript: true } },
+      { format: "first point", through: "second point", set: { list: "bullet" } },
+      { format: "sub point", set: { list: "number", level: 2, listStart: 3 } },
+      { format: "Strike me.", set: { strike: true, pageBreakBefore: true } },
+      { format: "Plain closing", set: { bold: true, clear: true } },
+      { formatTable: "Ledger", set: { tableStyle: "Grid Table 4 - Accent 1", width: "100%", columnWidths: ["7cm", "3cm", "3cm"], headerRows: 1, borders: { bottom: "single 1.5pt #C00000" } } },
+      { formatTable: "Ledger", cells: "B2", set: { fill: "#FFFF00", align: "right", valign: "center", rowHeight: "1cm", bold: true } },
+      { formatTable: "Item", cells: "B1:C1", set: { merge: true } },
+      { page: "*", set: { pageSize: "A4", orientation: "landscape", margins: "2cm", header: "Meridian Labs — Findings", footer: "Page {page} of {pages}", differentFirstPage: false } },
+      { footnote: "discrepancy", text: "The audit of March." },
+      { sectionBreak: "Plain closing words.", type: "nextPage" },
+      { after: "End text", pageBreak: true },
+      { toc: true, levels: 3 },
+    ];
+    const t0 = Date.now();
+    const made = (await tools.office_format.execute("f1", { id: doc, ops })).content[0].text;
+    console.log(`21. one call of ${ops.length} ops: ${made} (${Date.now() - t0} ms)`);
+    assert.match(made, /^Formatted "Formatted report" \(20 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Made the style "Callout"\. Made the style "Mark"\. The document reflowed; office_screenshot shows the pages\.$/);
+    const read = (await tools.office_read.execute("f2", { id: doc, formatting: true })).content[0].text;
+    console.log(`21. office_read with formatting:\n${read}`);
+    for (const want of [
+      /Styles in use: .*Callout \(paragraph, based on Normal: italic, #005AA0; indent left 1\.27cm\).*Mark \(character[^)]*: bold, #006100\)/,
+      /Section 1: A4 landscape, margins 2\/2\/2\/2 cm \(top\/right\/bottom\/left\)\. Header: "Meridian Labs — Findings"\. Footer: "Page \{page\} of \{pages\}"\./,
+      /Section 2 \(from \[\d+\]\): A4 landscape/,
+      /Footnotes: \[1\] in \[\d+\] after "Revenue grew\. There was a discrepancy": The audit of March\./,
+      /\] \(toc 1\) Findings\t\d/,
+      /\] \(center, space before 12pt, space after 6pt, keep with next\) Quarterly report for Meridian Labs\n {4}"Quarterly report": Arial 14, bold, italic, underline, #C81E1E, highlight yellow; "Meridian Labs": style "Hyperlink", link https:\/\/example\.com\/meridian/,
+      /\] \(Callout, line spacing 1\.5, indent right 1cm, hanging 0\.5cm\) Revenue grew\. There was a discrepancy here\.\n {4}"discrepancy": style "Mark"/,
+      /\] Water is H2O and energy is E=mc2\.\n {4}"2": subscript; "2": superscript/,
+      /\] \(bullet\) first point\n\[\d+\] \(bullet\) second point/,
+      /\] \(numbered lowerLetter "c\.", level 2\) sub point/,
+      /\] \(page break before\) Strike me\.\n {4}"Strike me\.": strike/,
+      /\] Plain closing words\.\n {4}"Plain closing": bold\n/,
+      /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,
+    ]) assert.match(read, want);
+    // The person's editor has it, without a reload.
+    const html = await personHtml(person.frame);
+    console.log(`21. the person's editor: "Quarterly report" ${JSON.stringify(styleOf(html, "Quarterly report"))}, "Plain closing" ${JSON.stringify(styleOf(html, "Plain closing"))}`);
+    // (Its HTML says bold and italic by tags of their own; the font, size, colour and highlight in the style.)
+    assert.match(styleOf(html, "Quarterly report"), /font-family:'Arial';font-size:14pt;background-color:#ffff00;color:#c81e1e/i);
+    assert.doesNotMatch(styleOf(html, "Plain closing"), /#00aa00|16pt/i, "clear took its own colour and size off");
+    // The save holds every part.
+    const xml = await partOf(doc, "word/document.xml");
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    const part = async (name: string) => (await zip.file(name)?.async("string")) ?? "";
+    const footer = (await Promise.all(Object.keys(zip.files).filter((n) => /^word\/footer\d*\.xml$/.test(n)).map(part))).join("");
+    const header = (await Promise.all(Object.keys(zip.files).filter((n) => /^word\/header\d*\.xml$/.test(n)).map(part))).join("");
+    assert.match(await part("word/styles.xml"), /<w:name w:val="Callout"\s*\/>[\s\S]*?<\/w:style>/);
+    assert.match(await part("word/styles.xml"), /w:type="character"[^>]*>(?:(?!<\/w:style>)[\s\S])*<w:name w:val="Mark"/);
+    assert.match(await part("word/numbering.xml"), /<w:numFmt w:val="bullet"\s*\/>/);
+    assert.match(xml, /<w:pgSz [^>]*w:orient="landscape"/);
+    assert.equal((xml.match(/<w:sectPr/g) ?? []).length, 2, "two sections");
+    assert.match(header, /Meridian Labs — Findings/);
+    assert.match(footer, /PAGE/);
+    assert.match(footer, /NUMPAGES/);
+    assert.match(await part("word/footnotes.xml"), /The audit of March\./);
+    assert.match(xml, /<w:instrText[^>]*>TOC \\o &quot;1-3&quot;/);
+    assert.match(xml, /<w:tblStyle w:val="[^"]+"\s*\/>/);
+    assert.match(xml, /<w:gridSpan w:val="2"\s*\/>/);
+    assert.match(xml, /<w:tblHeader\s*\/>/);
+    assert.match(xml, /<w:vertAlign w:val="superscript"\s*\/>/);
+    assert.match(xml, /<w:vertAlign w:val="subscript"\s*\/>/);
+    assert.match(xml, /<w:highlight w:val="yellow"\s*\/>/);
+    assert.match(xml, /<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*Meridian Labs/, "the link is there");
+    assert.match(xml, /<w:br w:type="page"/);
+    assert.match(xml, /<w:gridCol w:w="3969"\s*\/>/, "7 cm, in twips (SetColumnWidth takes EMU)");
+
+    // The link off again: its runs leave it, and its style with them.
+    await tools.office_format.execute("f3", { id: doc, ops: [{ format: "Meridian Labs", set: { link: "" } }] });
+    const unlinked = await partOf(doc, "word/document.xml");
+    assert.doesNotMatch(unlinked, /<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*Meridian Labs/, "no link around the text");
+    assert.doesNotMatch((await tools.office_read.execute("f4", { id: doc, formatting: true })).content[0].text, /"Meridian Labs": [^\n]*(Hyperlink|link)/);
+    await person.page.context().close();
+  });
+
+  test("22. after a table of contents and a header that repeat a heading, the heading is still quoted (the body's only); a repeat needs nth; a call that fails at its last op leaves the document as it was, in the person's editor and the save", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Quoted", "word");
+    await tools.office_edit.execute("q0", { id: doc, ops: [{ quote: "New document", replacement: "Report" }, { after: "Report", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", paragraphs: ["Total", "Total", "Alpha text here."] }, { after: "Alpha text here.", table: [["c11", "c12", "c13"], ["c21", "c22", "c23"]] }] });
+    await tools.office_format.execute("q1", { id: doc, ops: [{ toc: true }, { page: "*", set: { header: "Findings, in the header" } }, { formatTable: "c12", cells: "B1:C1", set: { merge: true } }] });
+    const italic = await tools.office_format.execute("q2", { id: doc, ops: [{ format: "Findings", set: { italic: true } }] });
+    assert.match(italic.content[0].text, /^Formatted "Quoted" \(1 op\)/, "the heading is the one place: not the TOC's entry, not the header");
+    assert.match(await tools.office_edit.execute("q3", { id: doc, ops: [{ quote: "Total", replacement: "Sum" }] }).then(() => "", (e: Error) => e.message), /^error:quote_ambiguous .*2 times.*give nth/);
+    await tools.office_edit.execute("q4", { id: doc, ops: [{ quote: "Total", nth: 2, replacement: "Sum" }] });
+    const read = (await tools.office_read.execute("q5", { id: doc, formatting: true })).content[0].text;
+    assert.match(read, /\(Heading 1\) Findings\n {4}"Findings": italic\n\[\d+\] Total\n\[\d+\] Sum\n/);
+    // A call whose last op cannot be made once the ops before it are (its quote is parted by the footnote op 3 puts
+    // in it, which the check, made on the document as it stands, cannot see): the editor's Undo takes the whole call
+    // back, the footnote with it.
+    const person = await personOpens(doc);
+    const before = { read: (await tools.office_read.execute("q6", { id: doc, formatting: true })).content[0].text, html: await personHtml(person.frame), xml: await partOf(doc, "word/document.xml") };
+    const t0 = Date.now();
+    const failed = await tools.office_format.execute("q7", { id: doc, ops: [{ format: "Alpha", set: { bold: true, highlight: "yellow" } }, { format: "Report", set: { fontSize: 30 } }, { footnote: "Alpha", text: "A note the Undo takes back." }, { format: "Alpha text", set: { italic: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    console.log(`22. a call failing at its last op: ${failed} (${Date.now() - t0} ms)`);
+    assert.match(failed, /^error:quote_not_found op 4: /);
+    await delay(3000);
+    assert.equal((await tools.office_read.execute("q8", { id: doc, formatting: true })).content[0].text, before.read, "the agent's editor is as it was");
+    assert.equal(await personHtml(person.frame), before.html, "so is the person's");
+    await tools.office_edit.execute("q9", { id: doc, ops: [{ quote: "Sum", replacement: "Sum." }] });
+    const saved = await partOf(doc, "word/document.xml");
+    assert.doesNotMatch(saved, /<w:highlight w:val="yellow"/, "the next save has nothing of the failed call");
+    assert.doesNotMatch(saved, /<w:footnoteReference/, "nor its footnote");
+    await person.page.context().close();
+  });
+
+  test("23. after the first review: a call that fails having changed nothing leaves the agent's earlier edits (here, its merge refused against the grid); a section break's type starts the section after it; a section's inherited header is read and taken off; formatting set off or to zero is read; each footnote at its own mark, a cell's too; part of a link is refused; a size alone keeps landscape", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Reviewed", "word");
+    await tools.office_edit.execute("r0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Alpha words" },
+        { after: "Alpha words", paragraphs: ["S one text"] },
+        { after: "S one text", paragraphs: ["Heading words"], style: "Heading 1" },
+        { after: "Heading words", paragraphs: ["Indented item"] },
+        { after: "Indented item", table: [["c11", "c12", "c13"], ["c21", "cellnote", "c23"]] },
+        { paragraphs: ["Tail para", "S two text"] },
+      ],
+    });
+    await tools.office_format.execute("r1", { id: doc, ops: [{ formatTable: "c11", cells: "B1:C1", set: { merge: true } }] });
+    assert.match((await tools.office_edit.execute("r2", { id: doc, ops: [{ quote: "Alpha words", replacement: "Beta words" }] })).content[0].text, /saved as revision/);
+    const person = await personOpens(doc);
+    // B1 spans two columns, so A1:B2 is no rectangle of the grid. Refused, and the edit before it stays: in the agent's
+    // editor, the person's and the save (before the review, the plugin's Undo took that edit back).
+    const failed = await tools.office_format.execute("r3", { id: doc, ops: [{ formatTable: "c11", cells: "A1:B2", set: { merge: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    console.log(`23. a merge that is no rectangle: ${failed}`);
+    assert.match(failed, /^error:bad_op op 1: the cells to merge are no rectangle of the table's grid/);
+    await delay(3000);
+    assert.match((await tools.office_read.execute("r4", { id: doc })).content[0].text, /\n\[1\] Beta words\n/);
+    assert.match(await personHtml(person.frame), /Beta words/);
+    await tools.office_edit.execute("r5", { id: doc, ops: [{ quote: "Tail para", replacement: "Tail para." }] });
+    assert.match(await partOf(doc, "word/document.xml"), /Beta words/);
+    assert.doesNotMatch(await partOf(doc, "word/document.xml"), /Alpha words/);
+
+    // Set off and to zero, over a style's; footnotes in a cell and after it; part of a link.
+    await tools.office_format.execute("r6", { id: doc, ops: [{ defineStyle: "Indented", set: { indentLeft: "1.27cm" } }, { format: "Indented item", set: { style: "Indented" } }, { format: "Beta words", set: { link: "https://example.com/beta" } }] });
+    await tools.office_format.execute("r7", { id: doc, ops: [{ format: "Indented item", set: { indentLeft: 0 } }, { format: "Heading", set: { bold: false } }, { footnote: "cellnote", text: "Note in the cell." }, { footnote: "Tail para", text: "Note at the tail." }] });
+    const part = await tools.office_format.execute("r8", { id: doc, ops: [{ format: "Beta", set: { link: "" } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    assert.match(part, /^error:bad_op op 1: the quote is part of the link "Beta words", and a link changes or goes off whole/);
+    const looks = (await tools.office_read.execute("r9", { id: doc, formatting: true })).content[0].text;
+    console.log(`23. office_read with formatting:\n${looks}`);
+    assert.match(looks, /\] \(Indented, indent left 0cm\) Indented item\n/);
+    assert.match(looks, /\] \(Heading 1\) Heading words\n {4}"Heading": not bold\n/);
+    assert.match(looks, /\nFootnotes: \[1\] in \[\d+\] cell B2 after "cellnote": Note in the cell\.; \[2\] in \[\d+\] after "Tail para": Note at the tail\.\n/);
+
+    // A section break's type is how the section after it starts; that section shows the header before it until it
+    // has one of its own, and "" gives it an empty one.
+    await tools.office_format.execute("r10", { id: doc, ops: [{ sectionBreak: "S one text", type: "continuous" }, { page: "Beta words", set: { header: "Head one", orientation: "landscape" } }] });
+    const xml = await partOf(doc, "word/document.xml");
+    const sects = [...xml.matchAll(/<w:sectPr[\s\S]*?<\/w:sectPr>/g)].map((m) => m[0]);
+    assert.equal(sects.length, 2, "two sections");
+    assert.match(sects[1], /<w:type w:val="continuous"\s*\/>/, "the section after the break starts continuous");
+    assert.doesNotMatch(sects[0], /w:val="continuous"/, "the one before it starts as it did");
+    const inherited = (await tools.office_read.execute("r11", { id: doc, formatting: true })).content[0].text;
+    assert.match(inherited, /\nSection 1: [^\n]*landscape[^\n]* Header: "Head one"\.\n/);
+    assert.match(inherited, /\nSection 2 \(from \[\d+\]\): [^\n]* Header: section 1's \(none of its own\)\.\n/);
+    await tools.office_format.execute("r12", { id: doc, ops: [{ page: "S two text", set: { header: "" } }, { page: "Beta words", set: { pageSize: "Letter" } }] });
+    const after = (await tools.office_read.execute("r13", { id: doc, formatting: true })).content[0].text;
+    console.log(`23. after the header was taken off section 2:\n${after.split("\n\n")[1]}`);
+    assert.match(after, /\nSection 1: Letter landscape[^\n]* Header: "Head one"\.\n/, "a size alone kept landscape");
+    assert.match(after, /\nSection 2 \(from \[\d+\]\): [^\n]* Header: ""\.\n/, "an empty header of its own");
+    await person.page.context().close();
+  });
+
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Stopped", "word");
     await tools.office_edit.execute("s1", { id: doc, ops: [{ paragraphs: ["Saved before the stop"] }] });

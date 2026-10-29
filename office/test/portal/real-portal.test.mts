@@ -16,6 +16,7 @@ import { parseDocx } from "../../src/ooxml.ts";
 import { templateDocx, within } from "../../src/store.ts";
 import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
 import { jpegSize, SHOT_MAX_BYTES, SHOT_SIDE } from "../../src/cdp.ts";
+import { PI_TOOLS, portalEnv, realModelMay, realModelProxy } from "./real-model.mts";
 
 /**
  * Office in a real portal, end to end: the portal's own server (`core/server/dist/index.js` of PITHAGORAS_DIR, built),
@@ -41,6 +42,12 @@ import { jpegSize, SHOT_MAX_BYTES, SHOT_SIDE } from "../../src/cdp.ts";
  * the homes and projects; a document an earlier version kept in the extension's own docs folder (one is put there
  * before the portal starts) was moved into the default agent's home; the editor's chat of a document made on the tab is
  * answered by the default agent.
+ *
+ * Case q is office_format end to end on a document the agent made: one call with headings, a new style, a list that
+ * goes on and one that starts again, a table's style, header row and merged cells, header and footer with the page
+ * numbers, a landscape section, a page break, a footnote and a TOC, seen live in a person's editor, in the saved
+ * file's parts, in office_read with formatting and in office_screenshot's pictures; an existing style and a pictured
+ * header refused without change and replace; a call failing at its last op taken back while the person types on.
  *
  * Case n is office_screenshot from a chat: a model that says it takes pictures (scripted-eye) gets a Word page and a
  * sheet range of its agent's documents, each one JPEG within the caps (the very bytes pi gave the model, which the
@@ -117,7 +124,12 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
 
   // The chat's model is the script: `scripted` reads text only, `scripted-eye` (case n's) says it takes pictures too,
   // so pi gives it a tool's image parts.
-  writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", input: ["text"], contextWindow: 32768, maxTokens: 4096 }, { id: "scripted-eye", name: "scripted-eye", input: ["text", "image"], contextWindow: 32768, maxTokens: 4096 }] } } }));
+  // Case p's real model, where one is given (OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL): reached through a proxy of
+  // the test's own, which keeps every request the portal sends it (the tool calls and their results are in them).
+  // Its key stays in this process (the proxy adds it); the portal is started without any OFFICE_REAL_MODEL_* (portalEnv).
+  const real = process.env.OFFICE_REAL_MODEL_URL && process.env.OFFICE_REAL_MODEL ? await realModelProxy(process.env.OFFICE_REAL_MODEL_URL, process.env.OFFICE_REAL_MODEL_KEY, realModelMay) : null;
+  const realProvider = real ? { real: { baseUrl: real.url, api: "openai-completions", apiKey: "proxied", models: [{ id: process.env.OFFICE_REAL_MODEL, name: process.env.OFFICE_REAL_MODEL, input: process.env.OFFICE_REAL_MODEL_IMAGES === "1" ? ["text", "image"] : ["text"], contextWindow: Number(process.env.OFFICE_REAL_MODEL_CONTEXT ?? 65536), maxTokens: 8192 }] } } : {};
+  writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", input: ["text"], contextWindow: 32768, maxTokens: 4096 }, { id: "scripted-eye", name: "scripted-eye", input: ["text", "image"], contextWindow: 32768, maxTokens: 4096 }] }, ...realProvider } }));
   writeFileSync(path.join(piAgent, "settings.json"), JSON.stringify({ defaultProvider: "scripted", defaultModel: "scripted" }));
   // The portal runs `pi` for installs, as a real install has it on PATH: the one of its own packages.
   writeFileSync(path.join(bin, "pi"), `#!/bin/sh\nexec node "${PITHAGORAS}/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "$@"\n`, { mode: 0o755 });
@@ -141,7 +153,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   const entry = path.join(PITHAGORAS, "core/server/dist/index.js");
   if (mode === "host") {
     children.push(spawn(process.execPath, [model, String(modelPort), log], { stdio: ["ignore", portalOut, portalOut] }));
-    children.push(spawn(process.execPath, [entry], { cwd: PITHAGORAS, env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", portalOut, portalOut] }));
+    children.push(spawn(process.execPath, [entry], { cwd: PITHAGORAS, env: { ...portalEnv(process.env), ...env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", portalOut, portalOut] }));
   } else {
     // A container of its own: its own network namespace, the portal's port published on 127.0.0.1, the folders it
     // reads and writes mounted where they are on the machine, Docker's socket as both Compose files give it.
@@ -213,6 +225,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await browser?.close().catch(() => {});
     if (!keep) await json(`${at}/container/remove`, { method: "POST", body: JSON.stringify({ data: true }) }).catch(() => {});
     for (const child of children) child.kill();
+    real?.close();
     if (mode === "container") execFileSync("docker", ["rm", "-f", portalName], { stdio: "ignore" });
     if (keep) return;
     // The portal's log outlives the run where OFFICE_E2E_LOG names a file for it.
@@ -1353,6 +1366,382 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     console.log(`n. from a page in the agents' browser: ${JSON.stringify(fromPage)}`);
     for (const [what, how] of Object.entries(fromPage)) assert.match(how, what.endsWith(" ws") ? /^(refused|no answer)$/ : /^failed/, what);
     await personCloses(page);
+  });
+
+  test("o: office_format from a chat: a scripted model formats a report (a style, a list, a table, the page, a footnote) and reads its formatting; the person's Office page shows it live; a picture of the page from a model that takes pictures", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    const word = await newDoc("Formatted from a chat", "word");
+    const { page, frame } = await personOpens(word, "word");
+    const [wrote, formatted, read] = await say(eye, [
+      { name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Quarterly report" }, { after: "Quarterly report", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", paragraphs: ["Revenue grew. There was a discrepancy.", "North region", "South region"] }, { after: "South region", table: [["Region", "Revenue"], ["North", "120"]] }] } },
+      {
+        name: "office_format",
+        arguments: {
+          id: word,
+          ops: [
+            { format: "Quarterly report", set: { fontSize: 20, bold: true, color: "#C81E1E", align: "center" } },
+            { defineStyle: "Callout", set: { italic: true, indentLeft: "1cm" } },
+            { format: "Revenue grew", set: { style: "Callout" } },
+            { format: "North region", through: "South region", set: { list: "bullet" } },
+            { formatTable: "Region", set: { tableStyle: "Grid Table 4 - Accent 1", headerRows: 1, width: "100%" } },
+            { page: "*", set: { margins: "2cm", footer: "Page {page} of {pages}" } },
+            { footnote: "discrepancy", text: "Checked in March." },
+          ],
+        },
+      },
+      { name: "office_read", arguments: { id: word, formatting: true } },
+    ]);
+    console.log(`o. ${wrote}\no. ${formatted}\no. ${read}`);
+    assert.match(formatted, /\nFormatted "Formatted from a chat" \(7 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Made the style "Callout"\. The document reflowed/);
+    assert.match(read, /"Quarterly report": 20, bold, #C81E1E/);
+    assert.match(read, /\(Callout\) Revenue grew\./);
+    assert.match(read, /\(bullet\) North region\n\[\d+\] \(bullet\) South region/);
+    assert.match(read, /table \(style "Grid Table 4 - Accent 1", header row 1\)/);
+    assert.match(read, /Footer: "Page \{page\} of \{pages\}"/);
+    assert.match(read, /Footnotes: \[1\] in \[\d+\] after "Revenue grew\. There was a discrepancy": Checked in March\./);
+    // The person's editor, not reloaded, has the look (its own select-all, as HTML).
+    const html = String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); return e.pluginMethod_GetSelectedContent({ type: "html" }); })()`));
+    // (Its HTML says bold by a tag of its own; the size and colour in the style of the text's element.)
+    const at = html.indexOf("Quarterly report");
+    assert.match([...html.slice(0, at).matchAll(/style="([^"]*)"/g)].at(-1)?.[1] ?? "", /font-size:20pt;color:#c81e1e/i);
+    await notReloaded(page, frame);
+    const shot = await ran(eye, [{ name: "office_screenshot", arguments: { id: word } }]);
+    assert.match(shot.results[0], /Page 1 of \d+ of "Formatted from a chat"/);
+    pictureOf(shot, 0, "formatted-page");
+    // The tool's card in the chat (the Office extension's) says what the call did.
+    await personCloses(page);
+  });
+
+  /** The last `<w:p>` of `xml` that holds `text` (a heading's in the body, after its TOC entry). */
+  const paraXml = (xml: string, text: string) => {
+    const at = xml.lastIndexOf(text);
+    assert.ok(at >= 0, `${JSON.stringify(text)} is in the part`);
+    const from = Math.max(xml.lastIndexOf("<w:p>", at), xml.lastIndexOf("<w:p ", at));
+    return xml.slice(from, xml.indexOf("</w:p>", at));
+  };
+  /** The id styles.xml gives the style named `name` (in any case: the file names the built-in ones in lower case). */
+  const styleIdOf = (styles: string, name: string) => {
+    for (const m of styles.matchAll(/<w:style\b[^>]*w:styleId="([^"]+)"[^>]*>([\s\S]*?)<\/w:style>/g)) if (new RegExp(`<w:name w:val="${name}"`, "i").test(m[2])) return m[1];
+    assert.fail(`no style ${JSON.stringify(name)} in styles.xml`);
+  };
+  /** A Word document whose header holds a picture (a PNG of one pixel, 1.27 cm square) after the text "Logo". */
+  const picturedHeaderDocx = async () => {
+    const zip = new JSZip();
+    const ns = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"`;
+    const rels = (...r: string[]) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${r.join("")}</Relationships>`;
+    const R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>`);
+    zip.file("_rels/.rels", rels(`<Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/>`));
+    zip.file("word/_rels/document.xml.rels", rels(`<Relationship Id="rId1" Type="${R}/header" Target="header1.xml"/>`));
+    zip.file("word/_rels/header1.xml.rels", rels(`<Relationship Id="rId1" Type="${R}/image" Target="media/logo.png"/>`));
+    zip.file("word/media/logo.png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"));
+    const size = `cx="457200" cy="457200"`;
+    zip.file("word/header1.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${ns}><w:p><w:r><w:t xml:space="preserve">Logo </w:t></w:r><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent ${size}/><wp:docPr id="1" name="Logo"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="logo.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext ${size}/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>`);
+    zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body><w:p><w:r><w:t>Under a pictured header</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rId1"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="709" w:footer="709" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+    return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  };
+
+  /**
+   * q: office_format end to end on a Word document the agent made: from a chat (scripted model), headings and a new
+   * paragraph style, a numbered list that goes on and one that starts again, a table with a style, a header row and
+   * merged cells, a header and a footer with the page number and count, a landscape section, a page break, a footnote
+   * and a table of contents, in one call. The person's editor, open on it, has them at once; the save (the call's
+   * forcesave) holds them in document.xml, styles.xml, numbering.xml, the header and footer parts and footnotes.xml;
+   * office_read with formatting says them; office_screenshot's pictures of its pages show them. An existing style
+   * without change: true and a header holding a picture without replace: true are refused. A call whose last op fails
+   * after the ops before it were made leaves the document as it was, while the person types in it during the call, and
+   * the person keeps what they typed.
+   */
+  test("q: office_format end to end from a chat on a Word document of the agent's: headings, a new style, a list going on and one starting again, a table with style, header row and merged cells, header and footer with page numbers, a landscape section, a page break, a footnote and a TOC; live in a person's editor, in the save, in office_read and in office_screenshot; refusals; a failing call taken back while the person types on", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    // The results without the marks pi puts around a tool's outside content (their ids differ from call to call).
+    const unwrap = (r: string) => r.replace(/^<<<untrusted:([0-9a-f]+)>>>[^\n]*\n([\s\S]*)\n<<<\/untrusted:\1>>>$/, "$2");
+    const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]) => (await ran(chatId, calls)).results.map(unwrap);
+    const [created] = await say(eye, [{ name: "office_create", arguments: { title: "Formatted end to end", type: "word" } }]);
+    console.log(`q. ${created}`);
+    const made = (await state()).docs.find((d) => d.title === "Formatted end to end");
+    assert.ok(made, "the agent made the document");
+    assert.equal(made.owner, realpathSync(env.AGENT_HOME), "the agent's own: in its home");
+    assert.ok(within(made.owner, made.path));
+    const word = made.docId;
+    const { page, frame } = await personOpens(word, "word");
+    const [wrote] = await say(eye, [
+      {
+        name: "office_edit",
+        arguments: {
+          id: word,
+          ops: [
+            { quote: "New document", replacement: "Quarterly report" },
+            { after: "Quarterly report", paragraphs: ["Overview", "Sales grew in every area. One number was revised.", "Plan", "Step one", "Step two", "Step three", "Again one", "Again two", "Figures"] },
+            { after: "Figures", table: [["Region", "Revenue"], ["North", "120"], ["Total of both", ""]] },
+            { paragraphs: ["All amounts are unaudited.", "Appendix", "Wide appendix text.", "Closing words."] },
+          ],
+        },
+      },
+    ]);
+    assert.match(wrote, /^Edited "Formatted end to end" \(4 ops\)/);
+    assert.ok(await until(async () => (await personText(frame)).includes("Closing words."), 10_000), "the person's editor has the text");
+    const pagesBefore = Number(await frame.evaluate("window.Asc.editor.getCountPages()"));
+    const ops = [
+      { format: "Quarterly report", set: { fontSize: 20, bold: true, align: "center" } },
+      { format: "Overview", set: { style: "Heading 1" } },
+      { format: "Plan", set: { style: "Heading 1" } },
+      { format: "Figures", set: { style: "Heading 2" } },
+      { format: "Appendix", set: { style: "Heading 1" } },
+      { defineStyle: "Callout", set: { italic: true, color: "#1F4E79", indentLeft: "1cm" } },
+      { format: "Sales grew", set: { style: "Callout" } },
+      { format: "Step one", through: "Step two", set: { list: "number" } },
+      // Right after the list: it goes on (3.).
+      { format: "Step three", set: { list: "number" } },
+      // Right after it too, but started again (1., 2.).
+      { format: "Again one", through: "Again two", set: { list: "number", listStart: 1 } },
+      { formatTable: "Region", set: { tableStyle: "Grid Table 4 - Accent 1", headerRows: 1, width: "100%" } },
+      { formatTable: "Total of both", cells: "A3:B3", set: { merge: true } },
+      { after: "Again two", pageBreak: true },
+      { sectionBreak: "All amounts are unaudited.", type: "nextPage" },
+      { page: "*", set: { margins: "2cm", header: "Meridian Labs — internal", footer: "Page {page} of {pages}" } },
+      { page: "Wide appendix text", set: { orientation: "landscape" } },
+      { footnote: "revised", text: "Revised in March." },
+      { toc: true, levels: 2 },
+    ];
+    const t0 = Date.now();
+    const [formatted, read] = await say(eye, [
+      { name: "office_format", arguments: { id: word, ops } },
+      { name: "office_read", arguments: { id: word, formatting: true } },
+    ]);
+    console.log(`q. office_format (${Date.now() - t0} ms with the read): ${formatted}\nq. office_read with formatting:\n${read}`);
+    assert.match(formatted, new RegExp(`^Formatted "Formatted end to end" \\(${ops.length} ops\\), saved as revision [\\d.]+\\. 1 person in the document saw it live\\. Made the style "Callout"\\. The document reflowed`));
+
+    // office_read with formatting says each of them.
+    for (const want of [
+      /Styles in use: [^\n]*Callout \(paragraph[^)]*: italic, #1F4E79; indent left 1cm\)/,
+      /Section 1: \S+ portrait, margins 2\/2\/2\/2 cm \(top\/right\/bottom\/left\)\. Header: "Meridian Labs — internal"\. Footer: "Page \{page\} of \{pages\}"\./,
+      /Section 2 \(from \[\d+\]\): \S+ landscape, margins 2\/2\/2\/2 cm/,
+      // (The place is the text before the mark, its last 40 characters or so.)
+      /Footnotes: \[1\] in \[8\] after "…[^"\n]*One number was revised": Revised in March\./,
+      /\[8\] \(Callout\) Sales grew/,
+      /\] \(toc 1\) Overview\t\d/,
+      /\] \(toc 2\) Figures\t\d/,
+      /\] \(center\) Quarterly report\n {4}"Quarterly report": 20, bold\n/,
+      /\] \(Heading 1\) Overview\n\[\d+\] \(Callout\) Sales grew in every area\. One number was revised\.\n\[\d+\] \(Heading 1\) Plan\n/,
+      /\] \(numbered "1\."\) Step one\n\[\d+\] \(numbered "2\."\) Step two\n\[\d+\] \(numbered "3\."\) Step three\n\[\d+\] \(numbered "1\."\) Again one\n\[\d+\] \(numbered "2\."\) Again two\n/,
+      /\] \(Heading 2\) Figures\n\[\d+\] table \(style "Grid Table 4 - Accent 1", header row 1, A3 spans 2 columns\)\n\| Region \| Revenue \|\n\| North \| 120 \|\n\| Total of both( \/ )? \|\n/,
+      /\] \(Heading 1\) Appendix\n/,
+    ]) assert.match(read, want);
+
+    // The person's editor, not reloaded, has them: the pages the break, the section and the TOC made, the title's
+    // size, the style's colour, and the lists' numbers as it numbers them.
+    let pages = 0;
+    assert.ok(await until(async () => (pages = Number(await frame.evaluate("window.Asc.editor.getCountPages()"))) >= pagesBefore + 2, 10_000), `the person's editor has the new pages: ${pagesBefore} -> ${pages}`);
+    const html = String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); var h = e.pluginMethod_GetSelectedContent({ type: "html" }); e.asc_RemoveSelection && e.asc_RemoveSelection(); return h; })()`));
+    const styleBefore = (text: string) => [...html.slice(0, html.indexOf(text)).matchAll(/style="([^"]*)"/g)].at(-1)?.[1] ?? "";
+    const numbered = String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); var t = e.pluginMethod_GetSelectedText({ Numbering: true, NewLineSeparator: "\\n", ParaSeparator: "\\n" }); e.asc_RemoveSelection && e.asc_RemoveSelection(); return t; })()`));
+    console.log(`q. the person's editor: ${pagesBefore} -> ${pages} pages; "Quarterly report" ${JSON.stringify(styleBefore("Quarterly report"))}; "Sales grew" ${JSON.stringify(styleBefore("Sales grew"))}; its text with numbers: ${JSON.stringify(numbered)}`);
+    assert.match(styleBefore("Quarterly report"), /font-size:20pt/i);
+    assert.match(styleBefore("Sales grew"), /color:#1f4e79/i);
+    assert.match(numbered, /1\.\s*Step one\s+2\.\s*Step two\s+3\.\s*Step three\s+1\.\s*Again one\s+2\.\s*Again two/);
+    await notReloaded(page, frame);
+
+    // The save holds them: the parts of the .docx, unzipped.
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(word)));
+    const part = async (name: string) => (await zip.file(name)?.async("string")) ?? "";
+    const parts = async (pattern: RegExp) => (await Promise.all(Object.keys(zip.files).filter((n) => pattern.test(n)).map(part))).join("\n");
+    const xml = await part("word/document.xml");
+    const styles = await part("word/styles.xml");
+    const header = await parts(/^word\/header\d*\.xml$/);
+    const footer = await parts(/^word\/footer\d*\.xml$/);
+    console.log(`q. the save: ${Object.keys(zip.files).filter((n) => !n.endsWith("/")).join(", ")}`);
+    for (const [text, style] of [["Overview", "heading 1"], ["Plan", "heading 1"], ["Appendix", "heading 1"], ["Figures", "heading 2"], ["Sales grew", "Callout"]]) assert.match(paraXml(xml, `>${text}`), new RegExp(`<w:pStyle w:val="${styleIdOf(styles, style)}"\\s*/>`), `${text} in ${style}`);
+    const callout = /<w:style\b[^>]*>(?:(?!<\/w:style>)[\s\S])*<w:name w:val="Callout"\s*\/>(?:(?!<\/w:style>)[\s\S])*<\/w:style>/.exec(styles)?.[0] ?? "";
+    assert.match(callout, /<w:i\s*\/>/);
+    assert.match(callout, /<w:color w:val="1F4E79"\s*\/>/i);
+    assert.match(callout, /<w:ind [^>]*w:left="567"/, "1 cm, in twips");
+    const numId = (text: string) => /<w:numId w:val="(\d+)"\s*\/>/.exec(paraXml(xml, `>${text}`))?.[1];
+    const lists = ["Step one", "Step two", "Step three", "Again one", "Again two"].map(numId);
+    console.log(`q. the lists' numIds: ${JSON.stringify(lists)}`);
+    assert.ok(lists.every(Boolean), "each item is in a list");
+    assert.equal(new Set(lists.slice(0, 3)).size, 1, "Step three goes on in the steps' list");
+    assert.equal(lists[3], lists[4]);
+    assert.notEqual(lists[3], lists[0], "Again one starts a list of its own");
+    const table = xml.slice(xml.indexOf("<w:tbl>"), xml.indexOf("</w:tbl>"));
+    assert.match(table, /<w:tblStyle w:val="[^"]+"\s*\/>/);
+    assert.match(table, /<w:tblHeader\s*\/>/);
+    assert.match(table, /<w:gridSpan w:val="2"\s*\/>/);
+    assert.match(header, /Meridian Labs — internal/);
+    assert.match(footer, /PAGE/);
+    assert.match(footer, /NUMPAGES/);
+    const sections = xml.match(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g) ?? [];
+    assert.equal(sections.length, 2, "two sections");
+    assert.doesNotMatch(sections[0], /w:orient="landscape"/, "the first one portrait");
+    assert.match(sections[1], /<w:pgSz [^>]*w:orient="landscape"/, "the second landscape");
+    assert.match(xml, /Again two<\/w:t>(?:(?!<w:t[ >])[\s\S])*<w:br w:type="page"[^>]*\/>/, "a page break right after Again two");
+    assert.match(xml, /<w:footnoteReference /);
+    assert.match(await part("word/footnotes.xml"), /Revised in March\./);
+    assert.match(xml, /<w:instrText[^>]*>\s*TOC \\o &quot;1-2&quot;/);
+    // The entries' page numbers at the right margin of the TOC's (portrait) section: A4, 2 cm margins, 9,638 twips
+    // across; not at the landscape section's 14,570, off the page.
+    const tabs = [...xml.matchAll(/<w:tab w:val="right" w:leader="dot" w:pos="(\d+)"/g)].map((m) => m[1]);
+    assert.ok(tabs.length >= 4 && tabs.every((t) => t === "9638"), `the TOC's tabs: ${JSON.stringify(tabs)}`);
+
+    // office_screenshot's pictures of the pages (OFFICE_E2E_SHOTS keeps them).
+    const shot = await ran(eye, [
+      { name: "office_screenshot", arguments: { id: word, page: 1 } },
+      { name: "office_screenshot", arguments: { id: word, quote: "Figures" } },
+      { name: "office_screenshot", arguments: { id: word, quote: "Wide appendix text" } },
+    ]);
+    shot.results = shot.results.map(unwrap);
+    console.log(`q. office_screenshot:\n${shot.results.join("\n---\n")}`);
+    assert.match(shot.results[0], /^Page 1 of 3 of "Formatted end to end"[^\n]*\n\n\[1\] \(toc 1\) Overview\t1\n/, "page 1's text from its start, the TOC's entries first");
+    assert.match(shot.results[1], /^Page 2 of \d+ of "Formatted end to end"/);
+    assert.match(shot.results[2], /^Page 3 of \d+ of "Formatted end to end"/);
+    const portrait = pictureOf(shot, 0, "q-page-1");
+    pictureOf(shot, 1, "q-page-2");
+    const landscape = pictureOf(shot, 2, "q-page-3");
+    // Each page whole: A4's sides, 1 : 1.414, portrait and landscape.
+    assert.ok(Math.abs(portrait.height / portrait.width - 1.414) < 0.03 && Math.abs(landscape.width / landscape.height - 1.414) < 0.03, `page 1 portrait, page 3 landscape, each whole: ${portrait.width}x${portrait.height}, ${landscape.width}x${landscape.height}`);
+
+    // Refused: an existing style without change: true (and taken with it).
+    const [again, changed] = await say(eye, [
+      { name: "office_format", arguments: { id: word, ops: [{ defineStyle: "Callout", set: { bold: true } }] } },
+      { name: "office_format", arguments: { id: word, ops: [{ defineStyle: "Callout", change: true, set: { color: "#1F4E79", italic: true } }] } },
+    ]);
+    console.log(`q. defineStyle again: ${again}\nq. with change: ${changed}`);
+    assert.match(again, /error:style_exists op 1: the document has a style "Callout" already \(1 paragraph uses it\): give change: true to change it, or another name/);
+    assert.match(changed, /Changed the style "Callout" \(1 paragraph uses it\)\./);
+
+    // A call whose last op fails once the ops before it are made (its quote is parted by the footnote op 3 puts in
+    // it), while the person types a line of their own: the editor's Undo takes the agent's call back, and only it.
+    await frame.locator("#editor_sdk").click({ position: { x: 400, y: 300 } });
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await delay(500);
+    await page.keyboard.type("Typed by the person:", { delay: 25 });
+    await delay(2500);
+    const [before] = await say(eye, [{ name: "office_read", arguments: { id: word, formatting: true } }]);
+    assert.match(before, /\] Typed by the person:\n/);
+    const more = " and more words, typed while the agent works on the document";
+    let typedAt = 0;
+    const typing = page.keyboard.type(more, { delay: 80 }).then(() => (typedAt = Date.now()));
+    await delay(400);
+    const t1 = Date.now();
+    const [failed] = await say(eye, [
+      {
+        name: "office_format",
+        arguments: { id: word, ops: [{ format: "Closing words", set: { highlight: "yellow" } }, { format: "Quarterly report", set: { fontSize: 30 } }, { footnote: "Closing", text: "A note the Undo takes back." }, { format: "Closing words", set: { italic: true } }] },
+      },
+    ]);
+    const answeredAt = Date.now();
+    await typing;
+    console.log(`q. a call failing at its last op, ${t1 - (typedAt - more.length * 80)} ms into the person's typing, answered after ${answeredAt - t1} ms, ${typedAt - answeredAt} ms before the typing ended: ${failed}`);
+    assert.match(failed, /error:quote_not_found op 4: /);
+    assert.ok(answeredAt < typedAt, "the call ran while the person typed");
+    await delay(3000);
+    const [afterwards] = await say(eye, [{ name: "office_read", arguments: { id: word, formatting: true } }]);
+    // (The person's words are a block and a run of their own: both named by them.)
+    assert.equal(afterwards, before.split("Typed by the person:").join(`Typed by the person:${more}`), "the document is as it was, with the person's words");
+    const personHas = await personText(frame);
+    await frame.evaluate("window.Asc.editor.asc_RemoveSelection && window.Asc.editor.asc_RemoveSelection()");
+    assert.ok(personHas.includes(`Typed by the person:${more}`), `the person's editor has their words: ${JSON.stringify(personHas.slice(-200))}`);
+    await notReloaded(page, frame);
+    // The person leaves; the save has their words and nothing of the failed call.
+    await personCloses(page);
+    let saved = "";
+    assert.ok(await until(async () => (saved = parseDocx(readFileSync(await fileOf(word))).text).includes(`Typed by the person:${more}`), 90_000, 1000), `the file has the person's words: ${JSON.stringify(saved.slice(-300))}`);
+    const last = await JSZip.loadAsync(readFileSync(await fileOf(word)));
+    const lastXml = (await last.file("word/document.xml")?.async("string")) ?? "";
+    assert.doesNotMatch(lastXml, /<w:highlight w:val="yellow"/, "no highlight of the failed call");
+    assert.doesNotMatch(lastXml, /<w:sz w:val="60"\s*\/>/, "nor its size");
+    assert.equal((lastXml.match(/<w:footnoteReference /g) ?? []).length, 1, "nor its footnote");
+    assert.doesNotMatch((await last.file("word/footnotes.xml")?.async("string")) ?? "", /A note the Undo takes back/);
+    await noConflictCopy("Formatted end to end");
+
+    // A header that holds a picture is replaced only with replace: true.
+    await say(eye, [{ name: "office_create", arguments: { title: "Pictured header", type: "word" } }]);
+    const pictured = (await state()).docs.find((d) => d.title === "Pictured header")!.docId;
+    writeFileSync(await fileOf(pictured), await picturedHeaderDocx());
+    const [seen, kept, replaced] = await say(eye, [
+      { name: "office_read", arguments: { id: pictured, formatting: true } },
+      { name: "office_format", arguments: { id: pictured, ops: [{ page: "*", set: { header: "Plain words" } }] } },
+      { name: "office_format", arguments: { id: pictured, ops: [{ page: "*", set: { header: "Plain words", replace: true } }] } },
+    ]);
+    console.log(`q. the pictured header: ${seen}\nq. without replace: ${kept}\nq. with replace: ${replaced}`);
+    assert.match(seen, /Header: "Logo ?" \(and more than text: pictures or tables\)/);
+    assert.match(kept, /error:bad_op op 1: the header holds more than text \(a picture, a table or a field\): give replace: true to replace it all/);
+    assert.match(replaced, /^Formatted "Pictured header" \(1 op\), saved as revision/);
+    const plain = await JSZip.loadAsync(readFileSync(await fileOf(pictured)));
+    const heads = (await Promise.all(Object.keys(plain.files).filter((n) => /^word\/header\d*\.xml$/.test(n)).map((n) => plain.file(n)!.async("string")))).join("\n");
+    assert.match(heads, /Plain words/);
+    assert.doesNotMatch(heads, /<w:drawing>|Logo/, "the picture went with replace: true");
+  });
+
+  /**
+   * p: a real model (one OpenAI-compatible model, named by the environment) runs a fixed task through the office tools,
+   * and the run's tool calls are counted: how many, how many refused and with which codes, and which keys of the ops it
+   * got wrong, so the tool texts can be changed until a run has no refusal the text could have prevented. Skipped
+   * unless OFFICE_REAL_MODEL_URL (its API's base, ending in /v1) and OFFICE_REAL_MODEL (its id) are set;
+   * OFFICE_REAL_MODEL_KEY is its API key where it needs one, OFFICE_REAL_MODEL_IMAGES=1 says it takes pictures,
+   * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls;
+   * the last request the model got goes beside it (`<report>.request.json`), with its own words and the pictures it saw.
+   * The model gets the office tools alone, and its key never reaches the portal (real-model.mts).
+   */
+  test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)" }, async () => {
+    const made = await json(`${origin}/api/sessions`, { method: "POST", body: "{}" });
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    const chatId = made.body.id as string;
+    const set = await json(`${origin}/api/sessions/${chatId}/config`, { method: "POST", body: JSON.stringify({ provider: "real", modelId: process.env.OFFICE_REAL_MODEL }) });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    // The chat has the office tools alone: no shell and no file tools for a hosted model on this machine, where the
+    // portal runs with the sandbox off. Switched off for it: pi's own and every other tool a chat of the default agent
+    // has, as the portal saw them registered (in a scripted chat first, where none has run yet). The proxy refuses any
+    // request that offers another all the same.
+    await say(await chat(), []);
+    const listed = (await json(`${origin}/api/sessions/${chatId}/tools`)).body as { tools: { name: string }[] };
+    assert.ok(listed.tools.some((t) => t.name === "office_format"), JSON.stringify(listed));
+    const off = [...new Set([...PI_TOOLS, ...listed.tools.map((t) => t.name)])].filter((name) => !realModelMay(name));
+    const switched = await json(`${origin}/api/sessions/${chatId}/tools`, { method: "PUT", body: JSON.stringify({ off }) });
+    assert.equal(switched.status, 200, JSON.stringify(switched.body));
+    const task = [
+      'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
+      '1. A title line "Quarterly report 2026", centred, 20 pt, bold, dark red.',
+      '2. A heading "Summary" (Heading 1) with a paragraph of two sentences under it; make the words "record quarter" in it bold and yellow-highlighted.',
+      '3. A heading "Highlights" with three bulleted points under it, and one second-level point under the second.',
+      '4. A heading "Figures" with a table of three columns (Region, Revenue, Change) and four rows, its header row repeating, in the table style "Grid Table 4 - Accent 1", the Revenue column right-aligned.',
+      '5. A style "Note" (italic, grey #666666, indented 1 cm) for a closing paragraph "Figures are unaudited.", with a footnote on "unaudited" saying "Audit due in March.".',
+      '6. A4 landscape pages with 2 cm margins, a header "Meridian Labs — internal" and a footer "Page X of Y" with the real page numbers.',
+      "7. A table of contents at the start.",
+      "Then read the document with its formatting and fix anything that is not as asked. Answer with one line when done.",
+    ].join("\n");
+    real!.requests.length = 0;
+    const t0 = Date.now();
+    const sent = await json(`${origin}/api/sessions/${chatId}/prompt`, { method: "POST", body: JSON.stringify({ message: task }) });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    await until(async () => (await json(`${origin}/api/sessions/${chatId}`)).body?.status === "running", 60_000, 500);
+    assert.ok(await until(async () => (await json(`${origin}/api/sessions/${chatId}`)).body?.status !== "running", 1_700_000, 2000), "the run ended in time");
+    // The calls and their results, as the last request the model got holds them.
+    const last = real!.requests.at(-1) as { messages?: { role: string; content?: unknown; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[] } | undefined;
+    const messages = last?.messages ?? [];
+    const results = new Map(messages.filter((m) => m.role === "tool").map((m) => [m.tool_call_id, typeof m.content === "string" ? m.content : JSON.stringify(m.content)]));
+    const calls = messages.flatMap((m) => m.tool_calls ?? []).map((c) => ({ name: c.function.name, args: c.function.arguments, result: results.get(c.id) ?? "" }));
+    const refusals = calls.filter((c) => /^(<<<[^\n]*\n)?error:/.test(c.result.replace(/^\s+/, "")) || /error:[a-z_]+ /.test(c.result.slice(0, 200)));
+    const codes: Record<string, number> = {};
+    for (const r of refusals) {
+      const code = /error:([a-z_]+)/.exec(r.result)?.[1] ?? "?";
+      codes[code] = (codes[code] ?? 0) + 1;
+    }
+    const report = { model: process.env.OFFICE_REAL_MODEL, seconds: Math.round((Date.now() - t0) / 1000), requests: real!.requests.length, calls: calls.length, byTool: calls.reduce((m: Record<string, number>, c) => ((m[c.name] = (m[c.name] ?? 0) + 1), m), {}), refused: refusals.length, codes, refusals: refusals.map((r) => ({ name: r.name, args: r.args.slice(0, 600), result: r.result.slice(0, 600) })) };
+    console.log(`p. ${JSON.stringify(report, null, 1)}`);
+    if (process.env.OFFICE_REAL_MODEL_REPORT) {
+      writeFileSync(process.env.OFFICE_REAL_MODEL_REPORT, JSON.stringify({ ...report, all: calls }, null, 1));
+      writeFileSync(`${process.env.OFFICE_REAL_MODEL_REPORT}.request.json`, JSON.stringify(last ?? {}));
+    }
+    assert.deepEqual(real!.refused, [], "no request offered the model a tool other than the office tools");
+    assert.ok(real!.requests.length > 0 && real!.requests.every((r) => ((r as { tools?: { function?: { name?: string } }[] }).tools ?? []).every((t) => realModelMay(String(t.function?.name)))));
+    // What the run made: the document, formatted, in the default agent's home.
+    const doc = (await state()).docs.find((d) => d.title === "Quarterly report");
+    assert.ok(doc, "the model made the document");
+    assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
+    const xml = await partOf(doc!.docId, "word/document.xml");
+    console.log(`p. the saved document: TOC ${/TOC \\o/.test(xml)}, table style ${/<w:tblStyle /.test(xml)}, header rows ${/<w:tblHeader/.test(xml)}, landscape ${/w:orient="landscape"/.test(xml)}, footnote ${/<w:footnoteReference/.test(xml)}, highlight ${/<w:highlight w:val="yellow"/.test(xml)}, lists ${/<w:numPr>/.test(xml)}`);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

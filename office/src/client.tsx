@@ -212,6 +212,7 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
     create: t("Created a document"),
     read: t("Read a document"),
     edit: t("Edited a document"),
+    format: t("Formatted a document"),
     comments: t("Read the comments of a document"),
     list: t("Listed the office documents"),
     screenshot: t("Looked at a document"),
@@ -228,7 +229,7 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
   } else if (d.id) {
     const ext = d.ext ?? state?.docs.find((x) => x.docId === d.id)?.ext;
     facts.push(ext ? `${name ?? d.id}.${ext}` : name ?? d.id);
-    if (d.action === "edit") {
+    if (d.action === "edit" || d.action === "format") {
       facts.push(typeof d.from === "number" && typeof d.to === "number" ? t("Revision {from} to {to}", { from: d.from, to: d.to }) : typeof d.to === "number" ? t("Revision {n}", { n: d.to }) : "");
       facts.push(typeof d.ops === "number" ? (d.ops === 1 ? t("1 edit") : t("{n} edits", { n: d.ops })) : "");
     } else if (d.action === "screenshot") {
@@ -311,7 +312,7 @@ export default function office(given: Portal): void {
   });
 
   // A call of one of the tools, in place of the portal's card for a finished one that names its document.
-  for (const tool of ["office_list", "office_create", "office_read", "office_edit", "office_comments", "office_screenshot"]) {
+  for (const tool of ["office_list", "office_create", "office_read", "office_edit", "office_format", "office_comments", "office_screenshot"]) {
     portal.slots.register("chat.tool", { id: tool, tool, component: OfficeCall });
   }
 

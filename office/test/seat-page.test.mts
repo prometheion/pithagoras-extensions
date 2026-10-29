@@ -1042,6 +1042,8 @@ function scriptedWord(spec: {
   throwOn?: string;
   /** Quotes the search does not find though the text has them (a footnote's mark parts them). */
   parted?: string[];
+  /** Quotes whose text is highlighted (ApiTextPr.GetHighlight is "none" for the others). */
+  highlighted?: string[];
 }) {
   const calls: string[] = [];
   const show = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? `[${v.map(show).join(", ")}]` : typeof v === "object" && v && (v as { __label?: string }).__label ? String((v as { __label: string }).__label) : JSON.stringify(v));
@@ -1116,7 +1118,7 @@ function scriptedWord(spec: {
     const label = k === 0 ? "" : `section${k + 1} `;
     return rec(k === 0 ? "section" : `section${k + 1}`, { GetHeader: (_k: string, make: boolean) => (x.header || make ? own(`${label}header`, x.header) : null), GetFooter: (_k: string, make: boolean) => (make ? own(`${label}footer`) : null), GetPageWidth: () => (x.landscape ? 16838 : 11906), GetPageHeight: () => (x.landscape ? 11906 : 16838) });
   });
-  const hit = (q: string, at: number, extra: Record<string, unknown> = {}) => rec(`range(${q}${at ? `@${at}` : ""})`, { GetText: () => q, GetAllParagraphs: () => [extra.para ?? paras[at]], GetStartPos: () => at * 1000, GetEndPos: () => at * 1000 + q.length, IntersectWith: () => ({ GetText: () => q }), ExpandTo: (r: any) => rec(`range(${q}..${r.GetText()})`, { GetAllParagraphs: () => [paras[at], ...r.GetAllParagraphs()], GetText: () => q, IntersectWith: () => ({ GetText: () => q }) }), ...extra });
+  const hit = (q: string, at: number, extra: Record<string, unknown> = {}) => rec(`range(${q}${at ? `@${at}` : ""})`, { GetText: () => q, GetTextPr: () => ({ GetHighlight: () => (spec.highlighted?.includes(q) ? "yellow" : "none") }), GetAllParagraphs: () => [extra.para ?? paras[at]], GetStartPos: () => at * 1000, GetEndPos: () => at * 1000 + q.length, IntersectWith: () => ({ GetText: () => q }), ExpandTo: (r: any) => rec(`range(${q}..${r.GetText()})`, { GetAllParagraphs: () => [paras[at], ...r.GetAllParagraphs()], GetText: () => q, IntersectWith: () => ({ GetText: () => q }) }), ...extra });
   const doc = rec("doc", {
     ...contentOf(body),
     GetStyle: (name: string) => styles[name] ?? null,
@@ -1231,12 +1233,17 @@ test("word.format: a link is taken off by moving its runs out of it, which lose 
 });
 
 test("word.format: clear takes the text's own formatting off with null setters, and a run's character style at the run", () => {
-  const w = scriptedWord({ paras: [{ text: "Alpha" }] });
+  const w = scriptedWord({ paras: [{ text: "Alpha" }, { text: "Beta" }], highlighted: ["Alpha"] });
   w.run([{ format: "Alpha", text: { clear: true, bold: true } }]);
   const said = w.calls.filter((c) => c.startsWith("range(Alpha)"));
   assert.deepEqual(said.slice(0, 3), ["range(Alpha).SetBold(null)", "range(Alpha).SetItalic(null)", "range(Alpha).SetUnderline(null)"]);
   assert.ok(said.includes('range(Alpha).SetHighlight("none")'));
   assert.equal(said.at(-1), "range(Alpha).SetBold(true)", "what the op sets comes after the clearing");
+  // A text without a highlight is given no "none" (a highlight of its own, which office_read would show).
+  const from = w.calls.length;
+  w.run([{ format: "Beta", text: { clear: true } }]);
+  assert.ok(w.calls.slice(from).includes("range(Beta@1).SetBold(null)"), w.calls.slice(from).join("\n"));
+  assert.ok(!w.calls.slice(from).some((c) => c.includes("SetHighlight")), w.calls.slice(from).join("\n"));
 });
 
 test("word.format: a list goes on the list of the same kind right before it, else a new one starts; listStart always starts one there; none takes it off", () => {

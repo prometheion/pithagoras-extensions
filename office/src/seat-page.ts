@@ -644,7 +644,8 @@ const WORD_EDIT = `function () {
  * - `ApiRange.SetStyle` sets the paragraph's style even when it is given a character style, so a character style goes
  *   on through `SetTextPr` with a text property of that style; a paragraph style through each paragraph's `SetStyle`.
  * - A text setter given null takes that direct formatting off (bold, italic, underline, strike, colour, size, font,
- *   super- and subscript, caps, spacing, position); a highlight is taken off by "none". The character style of a run
+ *   super- and subscript, caps, spacing, position); a highlight only by "none" (null leaves it), which the file then
+ *   holds as a highlight of its own. The character style of a run
  *   comes off only by the run's own `SetStyle(null)`.
  * - A link is taken off by moving its runs out of it (`SetLink("")` leaves an empty link with the Hyperlink style);
  *   its runs keep that style until `SetStyle(null)`.
@@ -832,7 +833,9 @@ const WORD_FORMAT = `function () {
     // Text keys on a range (and the paragraphs it touches).
     var clearText = function (range, paras) {
       ["SetBold", "SetItalic", "SetUnderline", "SetStrikeout", "SetDoubleStrikeout", "SetColor", "SetFontSize", "SetFontFamily", "SetVertAlign", "SetCaps", "SetSmallCaps", "SetSpacing", "SetPosition", "SetShd"].forEach(function (m) { range[m](null); });
-      range.SetHighlight("none");
+      // A highlight comes off only as "none", which is a highlight of its own (it hides a style's): set only where the
+      // text has one (GetHighlight is "none" where it has none, undefined where it is mixed).
+      if (range.GetTextPr().GetHighlight() !== "none") range.SetHighlight("none");
       // A run's character style comes off at the run (not one inside a link: that is the link's look).
       paras.forEach(function (p) {
         for (var e = 0; e < p.GetElementsCount(); e++) {

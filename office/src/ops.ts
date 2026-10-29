@@ -408,8 +408,10 @@ function formatOp(op: unknown, i: number): FormatOp {
   const shapes = FORMAT_SHAPES.filter((k) => k !== "set" && k in op);
   if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its quote the value of its first key ({${shapes[1]}: "<quote>", …})` : ""}`, i);
   const shape = shapes[0];
+  // An op that sets nothing given an empty `set` all the same (a model's habit): nothing to refuse.
+  const empty = !["format", "defineStyle", "formatTable", "page"].includes(shape) && isObject(op.set) && Object.keys(op.set).length === 0;
   const only = (keys: string[]) => {
-    const extra = Object.keys(op).filter((k) => !keys.includes(k));
+    const extra = Object.keys(op).filter((k) => !keys.includes(k) && !(empty && k === "set"));
     if (extra.length) throw bad(`${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of {${keys.join(", ")}}`);
   };
   const quote = (key: string) => {
@@ -673,7 +675,8 @@ function tableSet(set: Record<string, unknown>, bad: Bad): { table?: TableSet } 
     });
   }
   if (set.headerRows !== undefined) {
-    const v = set.headerRows;
+    // true is the one header row a model means by it.
+    const v = set.headerRows === true ? 1 : set.headerRows === false ? 0 : set.headerRows;
     if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 1000) throw bad("set.headerRows is how many rows from the top repeat on each page as the header (0: none)");
     out.headerRows = v;
   }

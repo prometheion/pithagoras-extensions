@@ -304,8 +304,9 @@ test("office_format (Word): every op and set key, given in the agent's words, re
     { pageBreak: true },
     { after: "Findings", nth: 2, pageBreak: true },
     { footnote: "discrepancy", text: "The audit of March." },
-    { toc: true },
+    { toc: true, set: {} },
     { after: "Title", toc: true, levels: 2 },
+    { formatTable: "Ledger", set: { headerRows: true } },
   ]);
   assert.equal(job.kind, "word.format");
   assert.deepEqual(job.args.ops, [
@@ -337,7 +338,10 @@ test("office_format (Word): every op and set key, given in the agent's words, re
     { footnote: "discrepancy", text: "The audit of March." },
     { toc: true, levels: 3 },
     { after: "Title", toc: true, levels: 2 },
+    { formatTable: "Ledger", table: { headerRows: 1 } },
   ]);
+  // An op that takes no set refuses one that sets something.
+  assert.throws(() => formatJob("docx", [{ toc: true, set: { bold: true } }]), refused("bad_op", 0));
 });
 
 test("office_format refuses what does not hold before anything is sent, naming the op and what it takes", () => {

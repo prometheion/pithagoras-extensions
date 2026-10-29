@@ -347,6 +347,17 @@ test("frame function, Word: the last page, which the view shows at its bottom be
   assert.deepEqual(w.drawn[0].args.slice(0, 4), [20, 60, 160, 220], "the page cut off at the top is never taken");
 });
 
+test("frame function, Word: a landscape page after a portrait one is found whole, though its text runs where the narrower page has its margin", async () => {
+  // The portrait page before ends at y 40 (x 60..139, its top out of view), a gap, then the landscape last page at
+  // y 60..200 (x 10..189), lines of text across it at y 80..90 (x 30..170), through x 63, inside the portrait's margin.
+  const viewer = canvas(200, 230, (x, y) => (y <= 40 && x >= 60 && x <= 139 ? WHITE : y >= 60 && y <= 200 && x >= 10 && x <= 189 ? (y >= 80 && y <= 90 && x >= 30 && x <= 170 ? [0, 0, 0, 255] : WHITE) : GREY));
+  const editor = { getCountPages: () => 3, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };
+  const w = frameWindow({ editor }, { id_viewer: viewer });
+  const out = await frameFn(w.window, { kind: "word", page: 3, pages: 3 });
+  assert.deepEqual([out.width, out.height], [180, 141]);
+  assert.deepEqual(w.drawn[0].args.slice(0, 4), [10, 60, 180, 141], "the whole landscape page, from its top");
+});
+
 test("frame function, Word: a large page is made smaller to 1,024 px on its longer side, or 1,568 with large; never larger", async () => {
   const viewer = canvas(1000, 1300, (x, y) => (x >= 50 && x <= 949 && y >= 10 && y <= 1281 ? WHITE : GREY));
   const editor = { getCountPages: () => 1, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };

@@ -5,28 +5,56 @@
 // may end in `{"say": "<text>"}`, which is then its answer in place of "Done". `SLOW#<ms>` in the message holds the
 // script's first answer back that long (a run that is still going while more messages come). Each line also names the
 // scripts the chat's earlier messages carried (`seen`, what the model has of the chat's history) and the message's text
-// (`prompt`), so the test sees what a chat was given and in which prompt.
+// (`prompt`), so the test sees what a chat was given and in which prompt. The pictures a request carries after a tool
+// result (pi gives a model that takes images a tool's image parts as a message of the person's right after it, "Attached
+// image(s) from tool result:") are written to `<log>.images/<sha256>.<ext>`, and the line names them (`images`, each with
+// the number of the tool result it came with), so the test sees the very bytes the model got.
 //
 //   node scripted-model.mjs <port> <log>
 //
 // A plain .mjs with nothing but Node in it: the test runs it beside a portal on the machine, and inside the portal's
 // own container for a portal in Docker, where only the portal's own loopback reaches it.
 import http from "node:http";
-import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 
 const [port, log] = process.argv.slice(2);
 const textOf = (content) => (typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p?.text ?? "").join("") : "");
+/** The pictures of a message: `data:` URLs of its image parts. */
+const picturesOf = (content) => (Array.isArray(content) ? content.filter((p) => p?.type === "image_url" && typeof p.image_url?.url === "string").map((p) => p.image_url.url) : []);
+
+/** A picture the model was given, kept as a file by its hash: its file, type and size. */
+function keep(url) {
+  const found = /^data:([\w/+.-]+);base64,(.*)$/s.exec(url);
+  if (!found) return { file: null, mimeType: null, bytes: 0 };
+  const bytes = Buffer.from(found[2], "base64");
+  const dir = `${log}.images`;
+  mkdirSync(dir, { recursive: true });
+  const file = `${dir}/${createHash("sha256").update(bytes).digest("hex")}.${found[1] === "image/jpeg" ? "jpg" : "bin"}`;
+  if (!existsSync(file)) writeFileSync(file, bytes);
+  return { file, mimeType: found[1], bytes: bytes.length };
+}
 
 /** What the request asks for: the script of its last message from the person, and the tool results after it. */
 function reading(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role !== "user") continue;
+    // A tool result's pictures, which pi gives as a message of the person's: part of the script's run, not a message.
+    if (picturesOf(messages[i].content).length && !/SCRIPT#/.test(textOf(messages[i].content))) continue;
     const found = /SCRIPT#([\w-]+) <<<([\s\S]*?)>>>/.exec(textOf(messages[i].content));
     if (!found) return undefined;
-    const results = messages.slice(i + 1).filter((m) => m.role === "tool").map((m) => textOf(m.content));
+    const after = messages.slice(i + 1);
+    const results = after.filter((m) => m.role === "tool").map((m) => textOf(m.content));
+    // Each picture with the tool result it follows (counted from 0).
+    const images = [];
+    let tools = 0;
+    for (const m of after) {
+      if (m.role === "tool") tools++;
+      else if (m.role === "user") for (const url of picturesOf(m.content)) images.push({ result: tools - 1, ...keep(url) });
+    }
     const seen = messages.filter((m) => m.role === "user").flatMap((m) => [...textOf(m.content).matchAll(/SCRIPT#([\w-]+)/g)].map((x) => x[1]));
     const slow = /SLOW#(\d+)/.exec(textOf(messages[i].content));
-    return { id: found[1], calls: JSON.parse(found[2]), results, seen, prompt: textOf(messages[i].content).slice(-4000), slow: slow ? Number(slow[1]) : 0 };
+    return { id: found[1], calls: JSON.parse(found[2]), results, images, seen, prompt: textOf(messages[i].content).slice(-4000), slow: slow ? Number(slow[1]) : 0 };
   }
   return undefined;
 }
@@ -52,7 +80,7 @@ http
     const next = script && script.results.length < script.calls.length ? script.calls[script.results.length] : undefined;
     const said = typeof next?.say === "string" ? next.say : undefined;
     const step = said === undefined ? next : undefined;
-    appendFileSync(log, `${JSON.stringify({ at: Date.now(), id: script?.id ?? null, results: script?.results ?? [], call: step ?? null, final: !!script && !step, tools: (ask.tools ?? []).map((t) => t.function?.name), seen: script?.seen ?? [], prompt: script?.prompt ?? "" })}\n`);
+    appendFileSync(log, `${JSON.stringify({ at: Date.now(), id: script?.id ?? null, results: script?.results ?? [], images: script?.images ?? [], call: step ?? null, final: !!script && !step, tools: (ask.tools ?? []).map((t) => t.function?.name), seen: script?.seen ?? [], prompt: script?.prompt ?? "" })}\n`);
     if (script?.slow && !script.results.length) await new Promise((resolve) => setTimeout(resolve, script.slow));
     const deltas = step
       ? [chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: `call_${n}`, type: "function", function: { name: step.name, arguments: JSON.stringify(step.arguments) } }] }), chunk({}, "tool_calls")]

@@ -391,7 +391,8 @@ that the agent's commands rely on); they are opt-in, as they need Docker Engine 
 `real-portal.test.mts` proves the same in a real portal: the portal's own server started from that folder (built with
 `npm run build` there), Docker for extensions and Office installed into it through `POST /api/packages`, a person in
 the real Office page in Chromium, and the agent's office tools called from a chat whose model is a script
-(`scripted-model.mjs`, no model server needed). `OFFICE_PORTAL_MODE=container` runs the portal in a container of its
+(`scripted-model.mjs`, no model server needed; one of its two models says it takes pictures, and keeps the pictures
+pi gives it, so `office_screenshot`'s JPEGs are checked as a model gets them). `OFFICE_PORTAL_MODE=container` runs the portal in a container of its
 own (Node's alpine image, with this machine's Docker socket), on a network of its own:
 
 ```sh

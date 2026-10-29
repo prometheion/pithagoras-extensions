@@ -1167,6 +1167,19 @@ test("office_format: the ops go to the agent's editor as one word.format job, th
   assert.match(s.seen.records.at(-1)!.reason, new RegExp(`^office_format: 2 op\\(s\\) \\(style, page\\) on ${doc.docId} by /f/atlas; saved as revision ${to}$`));
 });
 
+test("office_edit and office_format say that the table of contents was updated where the editor brought one up to date", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ ops: 1, toc: true });
+  const edited = (await tool(s, "office_edit").execute("e1", { id: doc.docId, ops: [{ after: "New document", paragraphs: ["Outlook"], style: "Heading 1" }] })) as ToolResult;
+  assert.match(edited.content[0].text, /^Edited "Report" \(1 op\), saved as revision \d+\. Updated the table of contents\.$/);
+  const formatted = (await tool(s, "office_format").execute("f1", { id: doc.docId, ops: [{ format: "Outlook", set: { bold: true } }] })) as ToolResult;
+  assert.match(formatted.content[0].text, /^Formatted "Report" \(1 op\), saved as revision \d+\. Updated the table of contents\.$/);
+  s.seat.answer = () => ({ ops: 1 });
+  const plain = (await tool(s, "office_edit").execute("e2", { id: doc.docId, ops: [{ quote: "Outlook", replacement: "View" }] })) as ToolResult;
+  assert.doesNotMatch(plain.content[0].text, /table of contents/);
+});
+
 test("office_format: bad ops, a content op, a spreadsheet, Office stopped and a read-only file are refused before anything is sent; a call not taken back whole is partial and in the audit log", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);

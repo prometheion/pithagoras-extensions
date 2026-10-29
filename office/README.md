@@ -109,7 +109,11 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   only when the call says `change: true`, and the answer counts the paragraphs that use it), tables (a table style,
   width, column widths, header rows, borders, cell fills, alignment, row heights, merged cells), the page (size,
   orientation, margins, headers and footers with the page number and count, a first page of its own), sections,
-  page breaks, footnotes and a table of contents. Each op names its place by a quote, as `office_edit`'s do. A call
+  page breaks, footnotes and a table of contents. A table of contents follows the document: every `office_edit` and
+  `office_format` call that changes a document holding one brings its entries and page numbers up to date as the last
+  part of the same step (so a failed call's Undo takes that back too), and its answer says so; what was changed by
+  hand in the entries is overwritten then, as Word's own update does. Each op names its place by a quote, as
+  `office_edit`'s do. A call
   is made whole or not at all: everything it names is checked first (quotes, styles, tables and cells, what a header
   holds), and a call that fails after it changed something is taken back by the editor's own Undo, as one step. A
   header or footer that holds more than text (a picture, a table, a field other than the page number and count) is
@@ -382,9 +386,8 @@ agents' editor.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
 - `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
-  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A table of
-  contents lists the headings as the editor finds them when it is made, and is not brought up to date by later
-  calls; a link lies inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out cell fills and borders and what a
+  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A link lies
+  inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out cell fills and borders and what a
   table that holds a picture looks like (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the

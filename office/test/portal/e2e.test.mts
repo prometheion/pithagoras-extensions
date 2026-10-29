@@ -1308,6 +1308,70 @@ async function run(PITHAGORAS: string): Promise<void> {
     await person.page.context().close();
   });
 
+  test("24. a table of contents follows the agent's calls: a heading added and text that pushes a heading to the next page by office_edit, a heading made body text by office_format; the entries and page numbers are those the editor lays out, also past a landscape section, in the read and the save", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Contents", "word");
+    // Lines that wrap on a portrait page and not on a landscape one: the landscape section's pages, counted at the
+    // portrait width, would be more.
+    const wide = Array.from({ length: 60 }, (_, n) => `Wide line ${n + 1}: words enough to wrap once on a portrait page and not on a landscape one.`);
+    await tools.office_edit.execute("t0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Report" },
+        { after: "Report", paragraphs: ["Overview"], style: "Heading 1" },
+        { after: "Overview", paragraphs: ["First words."] },
+        { after: "First words.", paragraphs: ["Planning ahead"], style: "Heading 1" },
+        { after: "Planning ahead", paragraphs: ["Plan words."] },
+        { paragraphs: ["Wide part"], style: "Heading 1" },
+        { paragraphs: wide },
+        { paragraphs: ["Appendix"], style: "Heading 1" },
+        { paragraphs: ["Closing words."] },
+      ],
+    });
+    const made = (await tools.office_format.execute("t1", { id: doc, ops: [{ sectionBreak: "Plan words.", type: "nextPage" }, { page: "Wide part", set: { orientation: "landscape" } }, { toc: true, levels: 2 }] })).content[0].text;
+    assert.doesNotMatch(made, /Updated the table of contents/, "a TOC the call made");
+    /** The TOC's entries as office_read gives them, and each heading's page as the editor lays it out (the page
+     * office_screenshot finds the heading on; no heading's text is in another paragraph). */
+    const entries = async (label: string) => {
+      const read = (await tools.office_read.execute(`t-${label}`, { id: doc })).content[0].text;
+      const listed = [...read.matchAll(/^\[\d+\] \(toc 1\) (.+)\t(\d+)$/gm)].map((m) => [m[1], Number(m[2])] as [string, number]);
+      const laid: [string, number][] = [];
+      for (const [heading] of listed) laid.push([heading, (await shoot(`24. ${label} ${heading}`, { id: doc, quote: heading })).out.details.page as number]);
+      console.log(`24. ${label}: the TOC ${JSON.stringify(listed)}, the pages ${JSON.stringify(laid)}`);
+      return { listed, laid };
+    };
+    const first = await entries("made");
+    assert.deepEqual(first.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(first.listed, first.laid);
+    const planWas = first.laid[1][1];
+
+    // A heading added, and text after it that pushes "Planning ahead" onto a later page.
+    const filler = Array.from({ length: 45 }, (_, n) => `Risk line ${n + 1}.`);
+    const edited = (await tools.office_edit.execute("t2", { id: doc, ops: [{ after: "First words.", paragraphs: ["Risks"], style: "Heading 1" }, { after: "Risks", paragraphs: filler }] })).content[0].text;
+    console.log(`24. office_edit: ${edited}`);
+    assert.match(edited, /saved as revision [\d.]+\. Updated the table of contents\.$/);
+    const second = await entries("after the edit");
+    assert.deepEqual(second.listed.map((e) => e[0]), ["Overview", "Risks", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(second.listed, second.laid);
+    assert.ok(second.laid[2][1] > planWas, `"Planning ahead" went from page ${planWas} to ${second.laid[2][1]}`);
+
+    // The save: the entries with those page numbers, each one's page-number tab at the TOC's own section's width.
+    const xml = await partOf(doc, "word/document.xml");
+    const paras = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((m) => m[0]);
+    const textOf = (p: string) => [...p.replace(/<w:pPr>[\s\S]*?<\/w:pPr>/, "").matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:tab\/>/g)].map((m) => (m[0] === "<w:tab/>" ? "\t" : m[1])).join("");
+    const saved = paras.map((p) => [p, /^(.+)\t(\d+)$/.exec(textOf(p))] as const).filter(([, m]) => m);
+    assert.deepEqual(saved.map(([, m]) => [m![1], Number(m![2])]), second.laid, "the saved entries");
+    const sect = /<w:sectPr[\s\S]*?<\/w:sectPr>/.exec(xml)![0];
+    const width = Number(/<w:pgSz [^>]*w:w="(\d+)"/.exec(sect)![1]) - Number(/<w:pgMar [^>]*w:left="(\d+)"/.exec(sect)![1]) - Number(/<w:pgMar [^>]*w:right="(\d+)"/.exec(sect)![1]);
+    for (const [p] of saved) assert.match(p, new RegExp(`<w:tab w:val="right" w:leader="dot" w:pos="${width}"`), "the tab at the portrait section's width");
+
+    // office_format: a heading made body text leaves the TOC.
+    const formatted = (await tools.office_format.execute("t3", { id: doc, ops: [{ format: "Risks", set: { style: "Normal" } }] })).content[0].text;
+    assert.match(formatted, /Updated the table of contents\.$/);
+    const third = await entries("after the format");
+    assert.deepEqual(third.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(third.listed, third.laid);
+  });
+
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Stopped", "word");
     await tools.office_edit.execute("s1", { id: doc, ops: [{ paragraphs: ["Saved before the stop"] }] });

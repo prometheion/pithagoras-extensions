@@ -1038,7 +1038,7 @@ test("the plugin locates a Word page once the page count held still; a spreadshe
 function scriptedWord(spec: {
   /** A paragraph's link covers `linkText` (all of the paragraph's text where none is given); in a table, its cell is in
    * row `row` (from 0), with the cell's `tcPr` as the table's JSON has it; `section` is its section (from 0). */
-  paras: { text: string; style?: string; list?: { kind: "bullet" | "number"; level?: number; num?: string }; link?: string; linkText?: string; table?: string; row?: number; tcPr?: Record<string, unknown>; section?: number }[];
+  paras: { text: string; style?: string; list?: { kind: "bullet" | "number"; level?: number; num?: string }; link?: string; linkText?: string; table?: string; row?: number; tcPr?: Record<string, unknown>; section?: number; instr?: string }[];
   elsewhere?: Record<string, ("header" | "toc")[]>;
   styles?: Record<string, "paragraph" | "run" | "table">;
   /** The style each style is based on, by name (in its JSON, by id). */
@@ -1102,6 +1102,8 @@ function scriptedWord(spec: {
       GetElementsCount: () => elements.length,
       GetElement: (k: number) => elements[k],
       GetAllDrawingObjects: () => [],
+      // A field's instruction in the paragraph's JSON (a TOC without entries holds its field so).
+      ...(p.instr ? { ToJSON: () => JSON.stringify({ content: [{ type: "run", content: [{ type: "fldChar", fldCharType: "begin" }, { type: "instrText", instr: p.instr }] }, { type: "run", content: [p.text] }] }) } : {}),
     });
     return para;
   });
@@ -1148,7 +1150,7 @@ function scriptedWord(spec: {
     CreateSection: (p: { __label: string }) => (calls.push(`doc.CreateSection(${p.__label})`), rec("new section")),
   });
   const Api = rec("Api", { GetDocument: () => doc, CreateTextPr: () => rec("textPr"), CreateParagraph: () => rec("new paragraph", { GetRange: () => rec("new paragraph's range"), GetSection: () => sections[0] }) });
-  return { Api, calls, run: (ops: unknown[]) => command("word.format", Api, { ops }) };
+  return { Api, calls, run: (ops: unknown[]) => command("word.format", Api, { ops }), edit: (ops: unknown[]) => command("word.edit", Api, { ops }) };
 }
 
 test("word.format: text and paragraph keys go to the quote's range and its paragraphs; a character style through a text property, never ApiRange.SetStyle; a paragraph style on the paragraphs", () => {
@@ -1318,22 +1320,67 @@ test("word.format: a header that holds more than text is replaced only with repl
   assert.deepEqual(plain.calls.filter((c) => c.startsWith("section")), ["section.SetPageSize(16838, 11906, false)", "section.SetPageMargins(4, 1, 2, 3)", "section.SetTitlePage(true)", 'section.RemoveHeader("default")']);
 });
 
-test("word.format: a table of contents in a portrait section before a landscape one is made while the last section has the TOC's section's width (the editor sets the entries' page-number tab by the last section's), which it gets back after", () => {
+test("word.format: a table of contents in a portrait section before a landscape one is made while the last section has the TOC's section's width (the editor sets the entries' page-number tab by the last section's), which it gets back after; its page numbers are counted then", () => {
   const w = scriptedWord({ paras: [{ text: "Title" }, { text: "Wide" }], sections: [{}, { landscape: true }] });
   assert.deepEqual(w.run([{ toc: true, levels: 2 }]).result, { ops: 1, reflowed: true });
-  const made = w.calls.filter((c) => /^section2\.Set|AddField|UpdateAllTOC/.test(c));
+  const made = w.calls.filter((c) => /^section2\.Set|AddField|UpdateAllTOC|Api\.Save/.test(c));
   assert.deepEqual(made, [
     "section2.SetPageSize(11906, 11906, true)",
     "section2.SetPageMargins(1134, 1134, 1134, 1134)",
     'new paragraph\'s range.AddField("TOC \\\\o \\"1-2\\" \\\\h \\\\z \\\\u")',
+    "section2.SetPageSize(16838, 11906, false)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    // The entries again while the last section is as wide as the TOC's (a new entry takes its tab so), then the page
+    // numbers with the last section as it is: counted with the other width, its pages came out one too many.
+    "section2.SetPageSize(11906, 11906, true)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
     "doc.UpdateAllTOC(false)",
     "section2.SetPageSize(16838, 11906, false)",
     "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    "doc.UpdateAllTOC(true)",
+    "Api.Save()",
   ]);
   // One section, or sections alike across: nothing changed for it.
   const one = scriptedWord({ paras: [{ text: "Title" }] });
   one.run([{ toc: true, levels: 2 }]);
   assert.ok(!one.calls.some((c) => /SetPageSize|SetPageMargins/.test(c)), one.calls.join("\n"));
+  assert.deepEqual(one.calls.filter((c) => /UpdateAllTOC/.test(c)), ["doc.UpdateAllTOC(false)", "doc.UpdateAllTOC(true)"]);
+});
+
+test("a table of contents follows every office_edit and office_format call that changed its document: its entries and page numbers, in the same command before the save, with the last section as wide as the TOC's for the entries", () => {
+  const doc = () => scriptedWord({ paras: [{ text: "Findings\t1", style: "toc 1" }, { text: "Findings", style: "Heading 1" }, { text: "Body text" }, { text: "Wide", section: 1 }], sections: [{}, { landscape: true }] });
+  const toc = (calls: string[]) => calls.filter((c) => /^section2\.Set|UpdateAllTOC|Api\.Save/.test(c));
+  const after = [
+    "section2.SetPageSize(11906, 11906, true)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    "doc.UpdateAllTOC(false)",
+    "section2.SetPageSize(16838, 11906, false)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    "doc.UpdateAllTOC(true)",
+    "Api.Save()",
+  ];
+  const edit = doc();
+  assert.deepEqual(edit.edit([{ after: "Body text", paragraphs: ["Outlook"], style: "Heading 1" }]).result, { ops: 1, toc: true });
+  assert.deepEqual(toc(edit.calls), after);
+  const format = doc();
+  assert.deepEqual(format.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1, toc: true });
+  assert.deepEqual(toc(format.calls), after);
+  // A TOC that lists no entries yet: the field's own paragraph, with the editor's text for it.
+  const empty = scriptedWord({ paras: [{ text: "No table of contents entries found.", instr: 'TOC \\o "1-2" \\h \\z \\u' }, { text: "Body text" }] });
+  assert.deepEqual(empty.edit([{ quote: "Body", replacement: "Main" }]).result, { ops: 1, toc: true });
+  assert.deepEqual(empty.calls.filter((c) => /UpdateAllTOC/.test(c)), ["doc.UpdateAllTOC(false)", "doc.UpdateAllTOC(true)"]);
+  // No TOC (that text typed by a person is no TOC): nothing is updated, and the answer says nothing of it.
+  const none = scriptedWord({ paras: [{ text: "No table of contents entries found." }, { text: "Body text" }] });
+  assert.deepEqual(none.edit([{ quote: "Body", replacement: "Main" }]).result, { ops: 1 });
+  assert.deepEqual(none.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1 });
+  assert.ok(!none.calls.some((c) => /UpdateAllTOC/.test(c)), none.calls.join("\n"));
+  // A call that fails is not followed by an update: the plugin's Undo takes back exactly that call.
+  const failed = doc();
+  assert.equal(failed.edit([{ quote: "nowhere", replacement: "x" }]).error.code, "quote_not_found");
+  const late = scriptedWord({ paras: [{ text: "Findings\t1", style: "toc 1" }, { text: "Body text" }], throwOn: "range(Body text@1).SetItalic" });
+  const out = late.run([{ format: "Body text", text: { bold: true } }, { format: "Body text", text: { italic: true } }]);
+  assert.equal(out.touched, true);
+  assert.ok(![...failed.calls, ...late.calls].some((c) => /UpdateAllTOC|Api\.Save/.test(c)), late.calls.join("\n"));
 });
 
 test("word.format: a page break and a table of contents go after their paragraph (a TOC at the start where none is given, as a TOC field); a footnote at the quote's end", () => {

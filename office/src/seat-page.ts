@@ -195,6 +195,64 @@ function pick(doc, quote, nth, i, what) {
 }
 `;
 
+/**
+ * The table of contents follows the document (inside word.edit and word.format, after WORD_COLLECT_SRC): at the end of
+ * every call that changed a document holding one, in the same command, so the plugin's Undo of a failed call still
+ * takes back exactly that call. What DS 10.0 does that it relies on (probed with its docbuilder, and e2e 24):
+ * - `UpdateAllTOC(false)` makes the entries again from the headings, `UpdateAllTOC(true)` only their page numbers;
+ *   each lays the whole document out first. With no TOC in the document either does nothing.
+ * - An entry's right tab (the dot leader and the page number) is taken from the TOC's entries as they are, and only
+ *   where it has none yet (just made, or none found before) from the width of the document's last section, wherever
+ *   the TOC is. So the last section takes the TOC's section's width for the making and the full update (`asLast`),
+ *   and the page numbers are counted again once it has its own back: counted while it had the other width, the
+ *   pages of a landscape section after a portrait TOC came out one too many.
+ * - A TOC without entries holds the editor's text "No table of contents entries found." in the paragraph of its
+ *   field (the TOC field's instruction in its JSON); a TOC with entries starts with an entry ("toc 1" ...).
+ */
+const WORD_TOC_SRC = `
+// The TOC's first paragraph in the body: its first entry, or the field's own paragraph where it lists none; null
+// where the document holds no TOC.
+function tocAt(doc) {
+  var all = collect(doc, []);
+  for (var i = 0; i < all.length; i++) {
+    if (all[i].toc) return all[i].p;
+    if (all[i].text !== "No table of contents entries found.") continue;
+    var runs = JSON.parse(all[i].p.ToJSON()).content || [];
+    for (var r = 0; r < runs.length; r++) {
+      var items = runs[r].content || [];
+      for (var x = 0; x < items.length; x++) if (items[x] && items[x].type === "instrText" && /^\\s*TOC\\b/i.test(String(items[x].instr))) return all[i].p;
+    }
+  }
+  return null;
+}
+// Gives the document's last section the width and side margins of p's section (where they differ), and answers what
+// gives it its own back.
+function asLast(doc, p) {
+  p.GetPosInParent();
+  var sec = p.GetSection(), fin = doc.GetFinalSection();
+  var across = function (s) { return [s.GetPageWidth(), s.GetPageMarginLeft(), s.GetPageMarginRight()]; };
+  if (!sec || !fin || across(sec).join() === across(fin).join()) return function () {};
+  var want = across(sec), back = { w: fin.GetPageWidth(), h: fin.GetPageHeight(), top: fin.GetPageMarginTop(), right: fin.GetPageMarginRight(), bottom: fin.GetPageMarginBottom(), left: fin.GetPageMarginLeft() };
+  fin.SetPageSize(want[0], back.h, want[0] <= back.h);
+  fin.SetPageMargins(want[1], back.top, want[2], back.bottom);
+  return function () {
+    fin.SetPageSize(back.w, back.h, back.w <= back.h);
+    fin.SetPageMargins(back.left, back.top, back.right, back.bottom);
+  };
+}
+// Brings the TOC up to date (\`at\`: one this command made, else the document's): its entries, then their page numbers.
+// Answers whether there was one.
+function freshToc(doc, at) {
+  var p = at || tocAt(doc);
+  if (!p) return false;
+  var back = asLast(doc, p);
+  doc.UpdateAllTOC(false);
+  back();
+  doc.UpdateAllTOC(true);
+  return true;
+}
+`;
+
 /** The most text the read commands give, in characters: what office_read shows at most (its own cap), and so far below
  * the size a plugin's result may have (seat.LIMITS.maxDone) that a long document never fails its read. */
 export const MAX_READ_TEXT = 200_000;
@@ -545,6 +603,7 @@ const WORD_EDIT = `function () {
   ${OWN_POINT_SRC}
   ${WORD_COLLECT_SRC}
   ${WORD_QUOTE_SRC}
+  ${WORD_TOC_SRC}
   ${WORD_MODEL_SRC}
   ${COMMENT_SRC}
   var touched = false, moved = [];
@@ -627,9 +686,13 @@ const WORD_EDIT = `function () {
         } else for (var e = 0; e < made.length; e++) doc.Push(made[e]);
       }
     }
+    var toc = freshToc(doc);
     // Sent to the Document Server now, not at the editor's next pause: the forcesave after the edit saves it.
     Api.Save();
-    return { result: moved.length ? { ops: ops.length, moved: moved } : { ops: ops.length } };
+    var result = { ops: ops.length };
+    if (moved.length) result.moved = moved;
+    if (toc) result.toc = true;
+    return { result: result };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };
     if (touched) ownPoint(doc);
@@ -655,10 +718,11 @@ const WORD_EDIT = `function () {
  * - `ApiTable.SetColumnWidth` takes and gives English Metric Units (635 to the twip; 2000 came out as the narrowest
  *   column, 216 twips); `CreateStyle` with a name the document has gives the existing style; `GetStyle` matches the
  *   name only in its own case; a table's borders and a cell's are drawn "single" or "none" (the other kinds as none).
- * - `doc.AddTableOfContents` does nothing; a TOC field (`AddField`) and `UpdateAllTOC` make one, whose entries are
- *   paragraphs of the styles "toc 1" to "toc 9". `AddField` sets the entries' right tab (dot leader, the page numbers)
- *   at the width of the document's last section between its margins, wherever the TOC is, and later updates keep that
- *   tab; a paragraph just added answers the last section to `GetSection` until `GetPosInParent` is asked.
+ * - `doc.AddTableOfContents` does nothing; a TOC field (`AddField`) makes one with its entries, paragraphs of the
+ *   styles "toc 1" to "toc 9". `AddField` sets the entries' right tab (dot leader, the page numbers) at the width of
+ *   the document's last section between its margins, wherever the TOC is, and later updates keep that tab
+ *   (WORD_TOC_SRC, which brings every TOC up to date at the end of the call); a paragraph just added answers the last
+ *   section to `GetSection` until `GetPosInParent` is asked.
  * - `doc.CreateSection(p)` ends p's section at p with a copy of it, which it answers; the section p was in goes on after
  *   the break, so the break's type (how a section starts) is set on that one. A section after a break has no header or
  *   footer of its own and shows the one before it; `GetHeader("default", true)` gives it an empty one of its own.
@@ -669,9 +733,10 @@ const WORD_FORMAT = `function () {
   ${OWN_POINT_SRC}
   ${WORD_COLLECT_SRC}
   ${WORD_QUOTE_SRC}
+  ${WORD_TOC_SRC}
   var touched = false;
   try {
-    var doc = Api.GetDocument(), ops = Asc.scope.args.ops, made = {}, said = [], reflowed = false;
+    var doc = Api.GetDocument(), ops = Asc.scope.args.ops, made = {}, said = [], reflowed = false, madeToc = null;
     var JC = { left: "left", center: "center", right: "right", justify: "both" };
     var fail = function (code, i, message) { throw { code: code, op: i, message: "op " + (i + 1) + ": " + message }; };
     // A style by name: the document's (any case), or one an earlier op of this call makes (its type, "paragraph" or
@@ -1067,33 +1132,24 @@ const WORD_FORMAT = `function () {
         else if (o.toc) doc.AddElement(0, np);
         else doc.Push(np);
         if (o.toc) {
-          // The editor sets the entries' right tab (where their page numbers stand) when the field is made, by the
+          // The editor makes the entries with the field, their right tab (where their page numbers stand) by the
           // width of the document's last section, wherever the TOC is: one in a portrait section before a landscape
           // one had its page numbers off the page. For the making, the last section takes the TOC's section's width
-          // and side margins, and then its own back. (np's place first: its section is the last one until it is
-          // asked.)
-          np.GetPosInParent();
-          var tocSec = np.GetSection(), fin = doc.GetFinalSection(), back = null;
-          var across = function (s) { return [s.GetPageWidth(), s.GetPageMarginLeft(), s.GetPageMarginRight()]; };
-          if (tocSec && fin && across(tocSec).join() !== across(fin).join()) {
-            var want = across(tocSec);
-            back = { w: fin.GetPageWidth(), h: fin.GetPageHeight(), top: fin.GetPageMarginTop(), right: fin.GetPageMarginRight(), bottom: fin.GetPageMarginBottom(), left: fin.GetPageMarginLeft() };
-            fin.SetPageSize(want[0], back.h, want[0] <= back.h);
-            fin.SetPageMargins(want[1], back.top, want[2], back.bottom);
-          }
+          // and side margins, and then its own back (WORD_TOC_SRC); the page numbers are counted at the end.
+          var back = asLast(doc, np);
           np.GetRange().AddField('TOC \\\\o "1-' + o.levels + '" \\\\h \\\\z \\\\u');
-          doc.UpdateAllTOC(false);
-          if (back) {
-            fin.SetPageSize(back.w, back.h, back.w <= back.h);
-            fin.SetPageMargins(back.left, back.top, back.right, back.bottom);
-          }
+          back();
+          madeToc = madeToc || np;
         }
       }
     }
+    var toc = freshToc(doc, madeToc);
     Api.Save();
     var result = { ops: ops.length };
     if (said.length) result.styles = said;
     if (reflowed) result.reflowed = true;
+    // A TOC this call made is not said to be updated: the call made it.
+    if (toc && !madeToc) result.toc = true;
     return { result: result };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };

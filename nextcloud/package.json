@@ -20,6 +20,7 @@
   ],
   "scripts": {
     "build": "node build.mjs && tsc --noEmit -p .",
+    "test": "node --import tsx --test test/*.test.mts",
     "prepack": "npm run build"
   },
   "keywords": [

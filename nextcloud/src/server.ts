@@ -16,22 +16,32 @@ import { loadInstances, saveInstances, configured, excludeList, isValidInstanceN
 import { mcpClient } from "./ncmcp";
 import { ensureOwn, releaseOwn, containerState, discoverSafe, instanceAddress, planOwn, IMAGE, OwnPlan, Discovered } from "./container";
 
-/** What a save is doing on the person's behalf right now, one run at a time -- and what it says of its last failure. */
-let applying: { description: string; work: Promise<void> } | undefined;
+/** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
+ * ask at once they stand in a row: each run waits for the one before it, so every run sees finished runs only, never
+ * half of another. */
+let applying: { description: string } | undefined;
+let applyRow: Promise<unknown> = Promise.resolve(); // the end of that row: every new run is hooked to it
 let lastError: string | undefined;
 
-async function apply(description: string, work: () => Promise<void>): Promise<void> {
-  const self = { description, work: work() };
-  applying = self;
-  try {
-    await self.work;
-    if (applying === self) lastError = undefined;
-  } catch (error) {
-    if (applying === self) lastError = (error as Error).message;
-    throw error;
-  } finally {
-    if (applying === self) applying = undefined;
-  }
+function apply(description: string, work: () => Promise<void>): Promise<void> {
+  const self = { description };
+  const turn = applyRow.then(async () => {
+    applying = self;
+    try {
+      await work();
+      if (applying === self) lastError = undefined;
+    } catch (error) {
+      if (applying === self) lastError = (error as Error).message;
+      throw error; // to the one who asked for this run; the row goes on without it
+    } finally {
+      if (applying === self) applying = undefined;
+    }
+  });
+  applyRow = turn.then(
+    () => undefined,
+    () => undefined, // a failed run is not the end of the row: the next still gets its turn
+  );
+  return turn;
 }
 
 /** What an instance says of itself where the settings page wants to read it: everything but the password. */
@@ -42,15 +52,23 @@ function view(inst: NextcloudInstance): Record<string, unknown> {
 /** Bring every instance's container and its entry in pi's config to where the keys ask for them; a no-op where all
  * is well. An own one gets its life of a made container (remade where it no longer matches, started where it
  * stopped); an adopted one only its entry, as long as its container runs with a port published -- and an entry is
- * cleared where the instance behind it is gone or unconfigured, so pi's config keeps saying what is true. */
+ * cleared where the instance behind it is gone or unconfigured, so pi's config keeps saying what is true. The keys
+ * are read where the run starts, not where it was asked for: a run standing in the row works on what stands now.
+ *
+ * What an entry in pi's config takes -- url, lifecycle and excludeTools beside trusted -- is pi-mcp-adapter's own
+ * vocabulary, checked by eye against its source, as that API has no types of its own. */
 function ensureApplied(): Promise<void> {
-  const insts = loadInstances();
+  const asked = loadInstances();
   return apply(
-    insts.some(configured) ? "bringing the containers and their entries in pi's config to where they are asked" : "removing the containers this extension made and its entries",
+    asked.some(configured) ? "bringing the containers and their entries in pi's config to where they are asked" : "removing the containers this extension made and its entries",
     async () => {
       const d = docker();
       if (!d) throw new Error("Docker for extensions is not available to this portal");
+      const insts = loadInstances();
       const plans = planOwn(insts);
+      let portsChanged = false;
+      for (const plan of plans.values()) if (plan.inst.port !== plan.port) { plan.inst.port = plan.port; portsChanged = true; }
+      if (portsChanged) saveInstances(insts); // the planned ports stand saved from now on: a later save does not shift them
       const discovery = await discoverSafe();
       for (const inst of insts) {
         if (configured(inst)) continue; // what stands asks for nothing: it goes, entry as well.

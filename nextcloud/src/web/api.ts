@@ -64,7 +64,8 @@ export interface ToolResult {
 
 const call = async <T>(path: string, init?: RequestInit): Promise<T> => portal.api.json<T>(portal.api.url(path), init);
 
-/** Which instance the pages talk to right now: set by the switcher, and what every tool call is sent with. */
+/** Which instance the pages talk to right now: set by the switcher, and what every tool call is sent with. One for
+ * the whole portal on purpose -- every open panel of this user's shares the single active instance. */
 let currentInstance: string | undefined;
 export const setCurrentInstance = (name: string | undefined): void => {
   currentInstance = name;

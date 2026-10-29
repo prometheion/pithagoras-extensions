@@ -48,28 +48,42 @@ function slug(name: string): string {
 }
 
 /** How an own instance stands where the list of instances says it does: its container by its name, and the loopback
- * port of its server. Ports are the base plus the instance's place among the own ones in the list's order; the name
- * of the one an earlier version carried stands as it did, the rest get their slug of the instance's name beside the
- * base -- a second with the same slug gets its place in the list after it. */
+ * port of its server. A port that is already saved with the instance (see planOwn's caller keep it there) stands as
+ * long as it is a real port no other instance claims; the rest take the lowest free ports at and above the base.
+ * Adding, removing or reordering the others then does not shift what already stands -- a container is remade where
+ * its own data changed, never where its neighbor went. The name of the one an earlier version carried stands as it
+ * did, the rest get their slug of the instance's name beside the base -- and two slugs that came to one stand apart
+ * by number. */
 export interface OwnPlan {
   inst: NextcloudInstance;
   containerName: string;
   port: number;
 }
 
+function place(plans: Map<string, OwnPlan>, takenNames: Set<string>, takenPorts: Set<number>, inst: NextcloudInstance, port: number): void {
+  let name = inst.name === DEFAULT_INSTANCE_NAME ? CONTAINER_BASE : `${CONTAINER_BASE}-${slug(inst.name) || "extra"}`;
+  while (takenNames.has(name)) name = `${name}-${plans.size + 1}`; // two slugs that came to one: apart by number
+  takenNames.add(name);
+  takenPorts.add(port);
+  plans.set(inst.name, { inst, containerName: name, port });
+}
+
 export function planOwn(insts: NextcloudInstance[]): Map<string, OwnPlan> {
   const plans = new Map<string, OwnPlan>();
-  const taken = new Set<string>();
-  let ownIndex = 0;
+  const takenNames = new Set<string>();
+  const takenPorts = new Set<number>();
+  const unplaced: NextcloudInstance[] = [];
   for (const inst of insts) {
     if (isAdopted(inst.container)) continue;
-    let name = inst.name === DEFAULT_INSTANCE_NAME ? CONTAINER_BASE : `${CONTAINER_BASE}-${slug(inst.name) || "extra"}`;
-    while (taken.has(name)) name = `${name}-${ownIndex + 1}`; // two slugs that came to one: apart by place
-    taken.add(name);
-    const port = PORT + ownIndex;
+    const port = typeof inst.port === "number" && Number.isInteger(inst.port) && inst.port > 0 && inst.port <= 65535 ? inst.port : undefined;
+    if (port === undefined || takenPorts.has(port)) unplaced.push(inst); // its saved port is not one it may keep: a fresh one below
+    else place(plans, takenNames, takenPorts, inst, port);
+  }
+  for (const inst of unplaced) {
+    let port = PORT;
+    while (takenPorts.has(port)) port++;
     if (port > 65535) throw new Error(`Too many own containers: the ports above ${PORT} run out.`);
-    plans.set(inst.name, { inst, containerName: name, port });
-    ownIndex++;
+    place(plans, takenNames, takenPorts, inst, port);
   }
   return plans;
 }
@@ -89,12 +103,14 @@ export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: nu
   };
 }
 
-/** A container that stands in a name: taken over where it is nobody's, refused as one with a name of another. */
+/** A container that stands in a name: taken as its own where this extension made it, refused anywhere else. One that
+ * is nobody's is never taken over on the way past -- adopting somebody else's container by accident would end in a
+ * remake of theirs. */
 async function claim(docker: Docker, name: string): Promise<boolean> {
   const found = await docker.containers.get(name);
   if (!found) return false;
-  if (found.owner === "") await docker.containers.adopt(name);
-  else if (found.owner !== ownName()) throw new Error(`A container named ${name} is ${found.owner}'s, not Nextcloud's. Rename or remove it first.`);
+  if (found.owner !== ownName())
+    throw new Error(`A container named ${name} is not this extension's${found.owner ? ` -- it is ${found.owner}'s` : " and no one's"}. Rename or remove it first, or adopt it on purpose on the Nextcloud page in Settings.`);
   return true;
 }
 

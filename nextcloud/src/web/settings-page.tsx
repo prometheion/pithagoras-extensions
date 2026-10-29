@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, sayError, NextcloudStatus, InstanceView, DiscoveredContainer } from "./api";
+import { isValidInstanceName } from "../instance-name";
 
 /** The page in Settings: the instances (name, host, login, app password, keep-out list, and where each one's /mcp
  * endpoint lives -- a container this extension made, or one it adopted by name), a save per instance that brings its
@@ -190,7 +191,7 @@ export default function NextcloudSettings() {
 function InstanceCard({ card, busy, drafts, save, remove, onChange, status, discovered, discoverNote }: { card: Draft; busy: boolean; drafts: Draft[]; save(e: React.FormEvent): void; remove(): void; onChange(patch: Partial<Draft>): void; status?: { mode: string; containerName: string; state: string; mcp: { registered: boolean; on: boolean; url?: string }; health: { ok: boolean; server?: { name: string; version: string }; error?: string } }; discovered: DiscoveredContainer[] | null; discoverNote?: string }) {
   portal.locale.use();
   const name = card.name.trim();
-  const nameOk = /^[A-Za-z][A-Za-z0-9_-]*$/.test(name) && name.length <= 48;
+  const nameOk = isValidInstanceName(name); // the same rule the server keeps: one place for it, not two
   const nameTakenByAnother = name !== "" && drafts.some((d) => d !== card && d.name.trim() === name);
   const adopted = card.container.startsWith("adopted:");
   return (

@@ -29,6 +29,9 @@ export interface NextcloudInstance {
   mcpExcludeTools: string;
   /** Where the /mcp endpoint lives: `own` -- a container this extension made and keeps, or `adopted:<name>` -- one that was already running. */
   container: string;
+  /** The loopback port its server listens on in its own container, kept where the keys so that adding, removing or
+   * renaming another instance does not shift it (see planOwn). Unset until the first save plans it. */
+  port?: number;
 }
 
 /** The name the one instance of an earlier version carried in pi's config, so its migration lands where it stood. */
@@ -40,10 +43,9 @@ export function excludeDefault(name: string): string {
   return `${name}_nc_mail_*,${name}_nc_news_*,${name}_collectives_*`;
 }
 
-/** Whether a name is one this extension may stand an instance up under: what pi's mcp.json takes as an entry's name. */
-export function isValidInstanceName(name: string): boolean {
-  return /^[A-Za-z][A-Za-z0-9_-]*$/.test(name) && name.length <= 48;
-}
+/** The name rules, shared with the pages (this file's node imports keep them out of it); re-exported from here so
+ * the server half reads them as it did before. */
+export { isValidInstanceName, INSTANCE_NAME_MAX } from "./instance-name";
 
 /** Whether the container field says the endpoint is in a container that was already running, and if so by what name. */
 export const isAdopted = (container: string): boolean => container.startsWith("adopted:");
@@ -75,6 +77,7 @@ function instanceFrom(raw: unknown): NextcloudInstance | undefined {
   const name = text(o.name);
   if (!name) return undefined;
   const container = text(o.container);
+  const port = typeof o.port === "number" && Number.isInteger(o.port) && o.port > 0 && o.port <= 65535 ? o.port : undefined;
   return {
     name,
     url: text(o.url),
@@ -82,6 +85,7 @@ function instanceFrom(raw: unknown): NextcloudInstance | undefined {
     password: text(o.password),
     mcpExcludeTools: text(o.mcpExcludeTools) || excludeDefault(name),
     container: container === "own" || (isAdopted(container) && adoptedName(container) !== "") ? container : "own",
+    port,
   };
 }
 

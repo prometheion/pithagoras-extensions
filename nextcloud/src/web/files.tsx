@@ -121,7 +121,13 @@ export default function FilesAndSharing() {
     // before they come into memory at all.
     const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
     if (Math.floor(b64.length / 4) * 3 - pad > MAX_INLINE_BYTES) throw new Error(t("This file is larger than this panel reads inline."));
-    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    let raw: string;
+    try {
+      raw = atob(b64);
+    } catch {
+      throw new Error(t("The file did not answer in a way this panel reads."));
+    }
+    const bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
     const url = URL.createObjectURL(new Blob([bytes], { type: row.contentType ?? "application/octet-stream" }));
     const anchor = document.createElement("a");
     anchor.href = url;

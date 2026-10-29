@@ -56,7 +56,8 @@ export default function Collectives() {
       .catch((error) => setProblem(sayError(error)));
   };
 
-  useEffect(loadCollectives, [instance]);
+  // the panel remounts this tab for another instance (client.tsx keys it by one), so a first load is all there is
+  useEffect(() => { loadCollectives(); }, []);
 
   const selectCollective = (id: number) => {
     setCollectiveId(id);

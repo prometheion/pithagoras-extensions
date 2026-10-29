@@ -398,6 +398,8 @@ export default function Calendar() {
               loadTodos(name || null);
             } else {
               setCalendarName(name);
+              // a new calendar means new days too: the [day] effect alone would hold on to the previous one's events
+              loadEvents(day, name || null);
             }
           }}
         >

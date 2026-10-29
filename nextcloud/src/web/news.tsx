@@ -60,7 +60,8 @@ export default function News() {
       .catch((error) => setProblem(sayError(error)));
   };
 
-  useEffect(loadFeeds, [instance]);
+  // the panel remounts this tab for another instance (client.tsx keys it by one), so a first load is all there is
+  useEffect(() => { loadFeeds(); }, []);
 
   const selectFeed = (id: number) => {
     setFeedId(id);

@@ -104,7 +104,8 @@ export default function Mail() {
       .catch((error) => setProblem(sayError(error)));
   };
 
-  useEffect(loadAccounts, [instance]);
+  // the panel remounts this tab for another instance (client.tsx keys it by one), so a first load is all there is
+  useEffect(() => { loadAccounts(); }, []);
 
   const selectAccount = (id: number) => {
     setAccountId(id);

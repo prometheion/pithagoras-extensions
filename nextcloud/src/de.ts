@@ -58,6 +58,8 @@ export const de = {
   // Einstellungen
   "This extension runs the Nextcloud MCP server for each of its instances -- in a container it made and keeps, or one already running that it adopted by name -- and registers every instance in pi's config for the chats. Each instance needs a host and an app password.":
     "Diese Erweiterung betreibt den Nextcloud-MCP-Server für jede ihrer Instanzen – in einem Container, den sie angelegt und weiterpflegt, oder in einem, der schon lief und den sie nach Namen übernommen hat –, und trägt jede Instanz für die Chats in der Konfiguration von pi ein. Jede Instanz braucht einen Host und ein App-Passwort.",
+  "Each save marks its entry as persistent and trusted, so agents may call the instance's tools without asking; Remove or removing the extension takes the entry back again.":
+    "Jedes Speichern markiert den Eintrag als dauerhaft und vertraut, damit Agenten die Tools der Instanz ohne Rückfrage rufen dürfen; Entfernen oder Deinstallation nimmt den Eintrag wieder heraus.",
   "No instance yet: add your first Nextcloud below.": "Noch keine Instanz: Lege unten dein erstes Nextcloud an.",
   "Taken over from pi's config": "Übernommen aus der Konfiguration von pi",
   "Add an instance": "Instanz hinzufügen",

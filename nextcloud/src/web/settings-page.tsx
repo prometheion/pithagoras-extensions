@@ -153,6 +153,9 @@ export default function NextcloudSettings() {
       <p className="text-sm text-fg-muted">
         {t("This extension runs the Nextcloud MCP server for each of its instances -- in a container it made and keeps, or one already running that it adopted by name -- and registers every instance in pi's config for the chats. Each instance needs a host and an app password.")}
       </p>
+      <p className="text-sm text-fg-muted">
+        {t("Each save marks its entry as persistent and trusted, so agents may call the instance's tools without asking; Remove or removing the extension takes the entry back again.")}
+      </p>
 
       {status?.migrated && status.migrated.length > 0 && (
         <section className="space-y-1 rounded border p-3 text-sm">

@@ -69,13 +69,11 @@ export const api = {
   saveInstance: (fields: Record<string, unknown>) =>
     call<{ instances: InstanceView[]; task?: string }>("/instances", {
       method: "POST",
-      headers: { "content-type": "application/json" },
       body: JSON.stringify(fields),
     }),
   removeInstance: (name: string) =>
     call<{ instances: InstanceView[]; task?: string }>("/instances/remove", {
       method: "POST",
-      headers: { "content-type": "application/json" },
       body: JSON.stringify({ name }),
     }),
   start: () => call<NextcloudStatus>("/start", { method: "POST" }),
@@ -83,7 +81,6 @@ export const api = {
   tool: (name: string, args: Record<string, unknown> = {}, instance?: string) =>
     call<ToolResult>("/tool", {
       method: "POST",
-      headers: { "content-type": "application/json" },
       body: JSON.stringify({ name, args, instance }),
     }),
 };

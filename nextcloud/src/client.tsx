@@ -69,6 +69,13 @@ function NextcloudPanel({ panel }: PanelProps) {
     if (names.length && (!selected || !names.includes(selected))) setSelected(names[0]);
   }, [status, selected]);
   const held = instances.find((inst) => inst.name === selected) ?? (instances.length ? instances[0] : undefined);
+  // The tabs that stand for the instance held: what its endpoint provides of each family beside what its choices
+  // turned on -- asked live by the status, so a tab goes away where its server does not have it. Before any early
+  // return: a hook after one stands in fewer renders than the others, and React throws where their count changed.
+  const offered = TABS.filter((def) => tabOffered(def, held?.capabilities?.available, held?.capabilities?.on ?? {}));
+  useEffect(() => {
+    if (offered.length && !offered.some((def) => def.id === tab)) setTab(offered[0].id);
+  }, [held]);
   // Where the status has not stood yet, nothing is offered at all: a tab mounted before its instance is known
   // would call for one there is none of, and its red answer flashes where there is nothing to say.
   if (!status)
@@ -77,12 +84,6 @@ function NextcloudPanel({ panel }: PanelProps) {
         <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
       </div>
     );
-  // The tabs that stand for the instance held: what its endpoint provides of each family beside what its choices
-  // turned on -- asked live by the status, so a tab goes away where its server does not have it.
-  const offered = TABS.filter((def) => tabOffered(def, held?.capabilities?.available, held?.capabilities?.on));
-  useEffect(() => {
-    if (offered.length && !offered.some((def) => def.id === tab)) setTab(offered[0].id);
-  }, [held]);
   if (status.instances.length === 0) {
     return (
       <div className="p-3">

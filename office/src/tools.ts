@@ -294,6 +294,12 @@ function failed(e: unknown): unknown {
 const SHEET_OP_MS = 20_000;
 const MAX_EDIT_MS = 120_000;
 
+/** What a Word edit or format may add to the time it takes in the agent's editor, per 100 kB of the document's file:
+ * each brings a table of contents up to date (seat-page.ts, WORD_TOC_SRC), and each update lays the whole document
+ * out (measured in the Document Server's builder, 600 pages of text in a file of 140 kB: about 6 s an update, 9 s the
+ * first; the toc op's own AddField 4 s more). MAX_EDIT_MS at most in all. */
+const WORD_LAYOUT_MS = 20_000;
+
 /** Of what pi hands a tool's execute last (its ExtensionContext), what office_screenshot reads: the chat's model, and
  * whether it takes pictures (`input`). */
 type ToolContext = { model?: { id?: string; name?: string; input?: unknown } };
@@ -808,12 +814,15 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // The revision as it is now: an edit queued behind another starts from that one's.
       const from = refresh(doc.docId, rootDir())?.mtimeMs ?? doc.mtimeMs;
       const n = job.args.ops.length;
-      // An op that makes, moves or deletes a sheet waits for the Document Server's answer (seat-page.ts, cellEdit).
+      // An op that makes, moves or deletes a sheet waits for the Document Server's answer (seat-page.ts, cellEdit); a
+      // Word call lays a long document out.
       const sheetOps = job.kind === "cell.edit" ? job.args.ops.filter((op) => !("range" in op)).length : 0;
+      const bytes = refresh(doc.docId, rootDir())?.sizeBytes ?? doc.sizeBytes;
+      const extraMs = job.kind === "cell.edit" ? SHEET_OP_MS * sheetOps : Math.ceil((WORD_LAYOUT_MS * bytes) / 100_000);
       const what = `${tool}: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
       let made: unknown;
       try {
-        made = await seats().run(home, doc.docId, "edit", job, { signal, ...(sheetOps ? { timeoutMs: Math.min(seat.LIMITS.jobMs + SHEET_OP_MS * sheetOps, MAX_EDIT_MS) } : {}) });
+        made = await seats().run(home, doc.docId, "edit", job, { signal, ...(extraMs ? { timeoutMs: Math.min(seat.LIMITS.jobMs + extraMs, MAX_EDIT_MS) } : {}) });
       } catch (e) {
         // Cut off: a sheet the call deletes waits hidden under another name until the end (seat-page.ts, cellEdit).
         if (e instanceof seat.SeatError && (e.code === "timeout" || e.code === "editor_closed") && job.kind === "cell.edit" && job.args.ops.some((op) => "deleteSheet" in op)) {
@@ -829,10 +838,13 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // the chats of those threads, go on under the comments' new GUIDs.
       const movedComments = Array.isArray((made as { moved?: unknown } | null)?.moved) ? ((made as { moved: [string, string][] }).moved) : [];
       if (movedComments.length) docchat.moved(doc.docId, movedComments);
-      const movedSaid = movedComments.length ? ` ${movedComments.length === 1 ? "1 comment was" : `${movedComments.length} comments were`} moved onto your new text.` : "";
+      // Of them, those a person had put on entries of a table of contents, which its update made anew (WORD_TOC_SRC).
+      const tocMoved = Math.min(Number((made as { tocMoved?: unknown } | null)?.tocMoved) || 0, movedComments.length);
+      const ownMoved = movedComments.length - tocMoved;
+      const movedSaid = ownMoved ? ` ${ownMoved === 1 ? "1 comment was" : `${ownMoved} comments were`} moved onto your new text.` : "";
       const looks = job.kind === "word.format" ? formatSaid(made) : "";
       // The table of contents follows every change of the document (seat-page.ts, WORD_TOC_SRC).
-      const tocSaid = (made as { toc?: unknown } | null)?.toc === true ? " Updated the table of contents." : "";
+      const tocSaid = (made as { toc?: unknown } | null)?.toc === true || tocMoved ? ` Updated the table of contents${tocMoved ? ` (${tocMoved === 1 ? "1 comment on its entries was" : `${tocMoved} comments on its entries were`} moved onto the new entries)` : ""}.` : "";
       const watching = usersOf(doc.docId).length;
       const key = seats().keyOf(home, doc.docId);
       const outcome: SaveAfterEdit = key ? await (cfg.save ?? ((k: string) => saveNow(k)))(key) : "failed";

@@ -196,42 +196,62 @@ function pick(doc, quote, nth, i, what) {
 `;
 
 /**
- * The table of contents follows the document (inside word.edit and word.format, after WORD_COLLECT_SRC): at the end of
- * every call that changed a document holding one, in the same command, so the plugin's Undo of a failed call still
- * takes back exactly that call. What DS 10.0 does that it relies on (probed with its docbuilder, and e2e 24):
- * - `UpdateAllTOC(false)` makes the entries again from the headings, `UpdateAllTOC(true)` only their page numbers;
- *   each lays the whole document out first. With no TOC in the document either does nothing.
- * - An entry's right tab (the dot leader and the page number) is taken from the TOC's entries as they are, and only
- *   where it has none yet (just made, or none found before) from the width of the document's last section, wherever
- *   the TOC is. So the last section takes the TOC's section's width for the making and the full update (`asLast`),
- *   and the page numbers are counted again once it has its own back: counted while it had the other width, the
- *   pages of a landscape section after a portrait TOC came out one too many.
- * - A TOC without entries holds the editor's text "No table of contents entries found." in the paragraph of its
- *   field (the TOC field's instruction in its JSON); a TOC with entries starts with an entry ("toc 1" ...).
+ * The table of contents follows the document (inside word.edit and word.format, after WORD_COLLECT_SRC and
+ * COMMENT_SRC): at the end of every call that changed a document holding one, in the same command, so the plugin's
+ * Undo of a failed call still takes back exactly that call. What DS 10.0 does that it relies on (probed with its
+ * docbuilder, and e2e 24):
+ * - `UpdateAllTOC(false)` makes every TOC's entries again from the headings (new paragraphs), `UpdateAllTOC(true)` only
+ *   their page numbers; each lays the whole document out first (about 6 s for 600 pages in docbuilder). With no TOC in
+ *   the document either does nothing, and so do paragraphs styled as entries that are no TOC's (one made into text).
+ * - An entry's right tab (the dot leader and the page number) is taken from the TOC's entries as they are, a new level's
+ *   too, and only where it has none yet (just made, or none found before) from the width of the document's last section,
+ *   wherever the TOC is. So the last section takes the width of such a TOC's section for the making and the full update
+ *   (`asLast`), and the page numbers are counted again once it has its own back: counted while it had the other width,
+ *   the pages of a landscape section after a portrait TOC came out one too many.
+ * - A TOC with entries starts with an entry ("toc 1" ...). A TOC without entries is a paragraph of the text the editor
+ *   gives it, in the editor's language ("No table of contents entries found.", as in an English Word). The builder shows
+ *   a TOC field in no JSON (a paragraph's, a run's or the document's; made by the editor or by Word, with entries or
+ *   none), so neither is told from its look-alike before the update: the update makes a TOC's paragraphs anew (new
+ *   internal ids) and leaves the others as they are.
+ * - An update of a TOC whose entries go from none to some, or of one listing a single entry, leaves an empty paragraph
+ *   after it, which the next update takes away again.
+ * - The full update takes away the comments on entries with the old entries. A comment's quote is right only while its
+ *   text is there (after, GetQuoteText answered "etails" for "Details").
  */
 const WORD_TOC_SRC = `
-// The TOC's first paragraph in the body: its first entry, or the field's own paragraph where it lists none; null
-// where the document holds no TOC.
-function tocAt(doc) {
-  var all = collect(doc, []);
+// The TOCs of the body in reading order, each by its first paragraph: an entry and the entries right after it, or
+// (\`empty\`) the paragraph of one that lists none, by the text the editor and Word give it in English. Either may be no
+// TOC (entries made into text, the sentence typed): freshToc tells by the update.
+function tocsOf(doc) {
+  var all = collect(doc, []), out = [];
   for (var i = 0; i < all.length; i++) {
-    if (all[i].toc) return all[i].p;
-    if (all[i].text !== "No table of contents entries found.") continue;
-    var runs = JSON.parse(all[i].p.ToJSON()).content || [];
-    for (var r = 0; r < runs.length; r++) {
-      var items = runs[r].content || [];
-      for (var x = 0; x < items.length; x++) if (items[x] && items[x].type === "instrText" && /^\\s*TOC\\b/i.test(String(items[x].instr))) return all[i].p;
-    }
+    if (all[i].toc) { if (!i || !all[i - 1].toc) out.push({ p: all[i].p, id: all[i].p.GetInternalId() }); }
+    else if (all[i].text === "No table of contents entries found.") out.push({ p: all[i].p, id: all[i].p.GetInternalId(), empty: true });
   }
-  return null;
+  return out;
 }
-// Gives the document's last section the width and side margins of p's section (where they differ), and answers what
-// gives it its own back.
+// Whether the body has a paragraph a TOC lists: one with an outline level, its own or its style's (the headings).
+function headed(doc) {
+  var levels = {};
+  var level = function (pr) { try { return typeof pr.GetOutlineLvl() === "number"; } catch (e) { return false; } };
+  return collect(doc, []).some(function (x) {
+    if (x.toc) return false;
+    if (level(x.p.GetParaPr())) return true;
+    var st = null;
+    try { st = x.p.GetStyle(); } catch (e) { st = null; }
+    if (!st) return false;
+    var name = st.GetName();
+    if (levels[name] === undefined) levels[name] = level(st.GetParaPr());
+    return levels[name];
+  });
+}
+// Gives the document's last section the width and side margins of p's section where they differ, and answers what
+// gives it its own back; null where they are alike, and nothing changed.
 function asLast(doc, p) {
   p.GetPosInParent();
   var sec = p.GetSection(), fin = doc.GetFinalSection();
   var across = function (s) { return [s.GetPageWidth(), s.GetPageMarginLeft(), s.GetPageMarginRight()]; };
-  if (!sec || !fin || across(sec).join() === across(fin).join()) return function () {};
+  if (!sec || !fin || across(sec).join() === across(fin).join()) return null;
   var want = across(sec), back = { w: fin.GetPageWidth(), h: fin.GetPageHeight(), top: fin.GetPageMarginTop(), right: fin.GetPageMarginRight(), bottom: fin.GetPageMarginBottom(), left: fin.GetPageMarginLeft() };
   fin.SetPageSize(want[0], back.h, want[0] <= back.h);
   fin.SetPageMargins(want[1], back.top, want[2], back.bottom);
@@ -240,16 +260,58 @@ function asLast(doc, p) {
     fin.SetPageMargins(back.left, back.top, back.right, back.bottom);
   };
 }
-// Brings the TOC up to date (\`at\`: one this command made, else the document's): its entries, then their page numbers.
-// Answers whether there was one.
-function freshToc(doc, at) {
-  var p = at || tocAt(doc);
-  if (!p) return false;
-  var back = asLast(doc, p);
+// An entry's heading text (before its tab and page number) as a range, found by the editor's search in that entry;
+// the whole paragraph where it is not found so.
+function entryText(doc, p) {
+  var t = textOf(p).split("\\t")[0], hits = t ? doc.Search(t, true) || [] : [];
+  for (var h = 0; h < hits.length; h++) { var hp = hits[h].GetAllParagraphs()[0]; if (hp && hp.GetInternalId() === p.GetInternalId()) return hits[h]; }
+  return p.GetRange();
+}
+// Brings every TOC up to date: the entries again, with the last section as wide as the first TOC without entries
+// whose section differs (its new entries take their tab so; a TOC with entries keeps its own), then the page numbers
+// where the last section had another width meanwhile (here, or for the call's own toc op: \`swapped\`). \`made\`: a
+// TOC this command made, \`last\` where by its last op: its entries are as AddField made them after every other op,
+// so where it is the document's only TOC only their page numbers are counted (AddField gives 0): one layout, not
+// two, and none of the empty paragraph the full update of a TOC of one entry leaves after it. A comment on an entry
+// is made again on the new entry (the one holding its text, else the one at its place, else the TOC's first
+// paragraph), with its author, time, state and replies; \`moved\` gets each move. Answers whether a TOC was brought
+// up to date, and how many comments it moved.
+function freshToc(doc, made, swapped, moved, last) {
+  var tocs = tocsOf(doc);
+  // The one this command made, should it not be found so: with entries where there are headings.
+  if (!tocs.length && made) tocs = [{ p: made, id: made.GetInternalId(), empty: !headed(doc) }];
+  if (!tocs.length) return { toc: false, moved: 0 };
+  // TOCs that list nothing and still have nothing to list: no update (each update of one adds an empty paragraph
+  // after it, or takes the one before away again).
+  if (tocs.every(function (x) { return x.empty; }) && !headed(doc)) return { toc: false, moved: 0 };
+  if (made && last && tocs.length === 1) { doc.UpdateAllTOC(true); return { toc: false, moved: 0 }; }
+  var entries = function () { return collect(doc, []).filter(function (x) { return x.toc; }); };
+  var was = entries(), held = {}, all = doc.GetAllComments() || [];
+  for (var c = 0; c < all.length; c++) held[String(all[c].GetId())] = { d: described(all[c]), old: hexId(all[c]) };
+  var back = null;
+  for (var t = 0; t < tocs.length && !back; t++) if (tocs[t].empty) back = asLast(doc, tocs[t].p);
   doc.UpdateAllTOC(false);
-  back();
-  doc.UpdateAllTOC(true);
-  return true;
+  if (back) back();
+  if (back || swapped) doc.UpdateAllTOC(true);
+  var now = entries(), ids = {};
+  collect(doc, []).forEach(function (x) { ids[x.p.GetInternalId()] = true; });
+  // The update makes a TOC's paragraphs anew; one it left as it was is no TOC (entries made into text, the sentence
+  // typed), which no update reaches.
+  var fresh = tocs.some(function (x) { return !ids[x.id]; });
+  var left = {}, n = 0;
+  (doc.GetAllComments() || []).forEach(function (x) { left[String(x.GetId())] = true; });
+  for (var id in held) {
+    if (left[id]) continue;
+    var d = held[id].d, target = null, q = d.quote;
+    if (q) {
+      var hits = doc.Search(q, true) || [];
+      for (var h = 0; h < hits.length && !target; h++) { var hp = hits[h].GetAllParagraphs()[0]; if (hp && isToc(hp)) target = hits[h]; }
+      for (var k = 0; k < was.length && !target; k++) if (was[k].text.indexOf(q) !== -1 && now.length) target = entryText(doc, now[Math.min(k, now.length - 1)].p);
+    }
+    if (!target) { var first = now.length ? now[0].p : (tocsOf(doc)[0] || {}).p; target = first ? entryText(doc, first) : null; }
+    if (target && remade(d, held[id].old, target, moved)) n++;
+  }
+  return { toc: fresh, moved: n };
 }
 `;
 
@@ -632,6 +694,20 @@ function described(c) {
   return { author: String(c.GetAuthorName() || ""), userId: String(c.GetUserId() || ""), time: Number(c.GetTimeUTC()) || 0, solved: Boolean(c.IsSolved()), quote: clip(quote, 2000), text: clip(c.GetText(), 20000), replies: replies };
 }
 function hexId(c) { var id = Number(c.GetId()); return isFinite(id) && id >= 0 ? ("00000000" + id.toString(16)).slice(-8) : String(c.GetId()); }
+// A comment (as described) that went with its text, made again on \`target\` (a range) with its author, time, state and
+// replies; \`moved\` gets its thread's old GUID and new. Answers whether it was made.
+function remade(d, old, target, moved) {
+  var made = target.AddComment(d.text, d.author, d.userId);
+  if (!made) return false;
+  try { made.SetTimeUTC(d.time); } catch (e) {}
+  try { made.SetSolved(d.solved); } catch (e) {}
+  for (var r = 0; r < d.replies.length; r++) {
+    try { made.AddReply(d.replies[r].text, d.replies[r].author, d.replies[r].userId); } catch (e) {}
+    try { var reply = made.GetReply(r); if (reply && d.replies[r].time) reply.SetTimeUTC(d.replies[r].time); } catch (e) {}
+  }
+  moved.push([old, hexId(made)]);
+  return true;
+}
 `;
 
 /**
@@ -663,19 +739,7 @@ const WORD_EDIT = `function () {
   var comments = function () { var out = {}; (doc.GetAllComments() || []).forEach(function (c) { out[String(c.GetId())] = c; }); return out; };
   var keep = function (before, target) {
     var now = comments();
-    for (var id in before) {
-      if (now[id] || !target) continue;
-      var d = described(before[id]), old = hexId(before[id]);
-      var made = target.AddComment(d.text, d.author, d.userId);
-      if (!made) continue;
-      try { made.SetTimeUTC(d.time); } catch (e) {}
-      try { made.SetSolved(d.solved); } catch (e) {}
-      for (var r = 0; r < d.replies.length; r++) {
-        try { made.AddReply(d.replies[r].text, d.replies[r].author, d.replies[r].userId); } catch (e) {}
-        try { var reply = made.GetReply(r); if (reply && d.replies[r].time) reply.SetTimeUTC(d.replies[r].time); } catch (e) {}
-      }
-      moved.push([old, hexId(made)]);
-    }
+    for (var id in before) if (!now[id] && target) remade(described(before[id]), hexId(before[id]), target, moved);
   };
   try {
     var doc = Api.GetDocument(), ops = Asc.scope.args.ops;
@@ -736,12 +800,14 @@ const WORD_EDIT = `function () {
         } else for (var e = 0; e < made.length; e++) doc.Push(made[e]);
       }
     }
-    var toc = freshToc(doc);
+    // Every op of an edit changes the text (a replacement too, which the editor makes by deleting and writing).
+    var toc = freshToc(doc, null, false, moved);
     // Sent to the Document Server now, not at the editor's next pause: the forcesave after the edit saves it.
     Api.Save();
     var result = { ops: ops.length };
     if (moved.length) result.moved = moved;
-    if (toc) result.toc = true;
+    if (toc.toc) result.toc = true;
+    if (toc.moved) result.tocMoved = toc.moved;
     return { result: result };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };
@@ -784,9 +850,10 @@ const WORD_FORMAT = `function () {
   ${WORD_COLLECT_SRC}
   ${WORD_QUOTE_SRC}
   ${WORD_TOC_SRC}
+  ${COMMENT_SRC}
   var touched = false;
   try {
-    var doc = Api.GetDocument(), ops = Asc.scope.args.ops, made = {}, said = [], reflowed = false, madeToc = null;
+    var doc = Api.GetDocument(), ops = Asc.scope.args.ops, made = {}, said = [], reflowed = false, madeToc = null, tocSwapped = false, moved = [];
     var JC = { left: "left", center: "center", right: "right", justify: "both" };
     var fail = function (code, i, message) { throw { code: code, op: i, message: "op " + (i + 1) + ": " + message }; };
     // A style by name: the document's (any case), or one an earlier op of this call makes (its type, "paragraph" or
@@ -1071,6 +1138,48 @@ const WORD_FORMAT = `function () {
       pieces.forEach(function (x) { if (x.text !== undefined) first.AddText(x.text); else if (x.field === "page") first.AddPageNumber(); else first.AddPagesCount(); });
     };
 
+    // What an op may change, as it stands, to tell a call that changed nothing (each op setting what is set already),
+    // which makes no update of a TOC: a paragraph's or table's JSON with its runs of one look joined (the editor parts
+    // a run at a quote's ends even where it sets what the run has), a section's or style's JSON. null where that is not
+    // cheap to tell (a picture, very many paragraphs, a very large table), which counts as a change.
+    var joined = function (node, out) {
+      var kids = node && node.content;
+      if (kids && !Array.isArray(kids)) kids = [kids];
+      (kids || []).forEach(function (x) {
+        if (x && x.type === "run") {
+          var t = (x.content || []).map(function (c) { return typeof c === "string" ? c : JSON.stringify(c); }).join(""), key = JSON.stringify(x.rPr || null), last = out[out.length - 1];
+          if (!t) return;
+          if (last && last.key === key) last.t += t; else out.push({ key: key, t: t });
+        } else if (x && typeof x === "object") {
+          var own = {};
+          for (var k in x) if (k !== "content") own[k] = x[k];
+          out.push(JSON.stringify(own));
+          joined(x, out);
+          out.push("/");
+        } else out.push(JSON.stringify(x));
+      });
+      return out;
+    };
+    var printOf = function (el) {
+      var json = String(el.ToJSON());
+      if (json.length > 200000) return null;
+      var j = JSON.parse(json), own = {};
+      for (var k in j) if (k !== "content") own[k] = j[k];
+      return JSON.stringify(own) + JSON.stringify(joined(j, []));
+    };
+    var printsOf = function (paras) {
+      if (paras.length > 200) return null;
+      var out = [];
+      for (var k = 0; k < paras.length; k++) {
+        try { if ((paras[k].GetAllDrawingObjects() || []).length) return null; } catch (e) {}
+        out.push(printOf(paras[k]));
+      }
+      return out.join("\\n");
+    };
+    var setupOf = function (secs) { return secs.map(function (sec) { return [sec.GetPageWidth(), sec.GetPageHeight(), sec.GetPageMarginTop(), sec.GetPageMarginRight(), sec.GetPageMarginBottom(), sec.GetPageMarginLeft(), sec.ToJSON()].join(); }).join("\\n"); };
+    var changed = false;
+    var differs = function (was, now) { if (was === null || was !== now()) changed = true; };
+
     // The edit: each op found again and made.
     for (var i2 = 0; i2 < ops.length; i2++) {
       var o = ops[i2];
@@ -1080,7 +1189,7 @@ const WORD_FORMAT = `function () {
           var to = bodyHits(doc, o.through, bodyIndex(doc)).filter(function (x) { return x.at > h.at || (x.at === h.at && x.pos >= h.pos); })[0];
           range = range.ExpandTo(to.range);
         }
-        var paras = range.GetAllParagraphs();
+        var paras = range.GetAllParagraphs(), lookWas = printsOf(paras);
         touched = true;
         if (o.text && o.text.style !== undefined && styleOf(o.text.style, "text", i2).GetType() === "paragraph") { textOn(range, { style: o.text.style }, paras, i2); }
         if (o.para) { paras.forEach(function (p) { paraOn(p, o.para); }); if (o.para.list || o.para.level !== undefined || o.para.listStart !== undefined) listOn(paras, o.para); if (o.para.pageBreakBefore) reflowed = true; }
@@ -1089,14 +1198,16 @@ const WORD_FORMAT = `function () {
           for (var key in o.text) if (key !== "style" || styleOf(o.text.style, "text", i2).GetType() === "run") rest[key] = o.text[key];
           textOn(range, rest, paras, i2);
         }
+        differs(lookWas, function () { return printsOf(paras); });
       } else if (o.defineStyle !== undefined) {
-        var type2 = o.type === "character" ? "run" : "paragraph", st = styleNamed(doc, o.defineStyle), was = Boolean(st);
+        var type2 = o.type === "character" ? "run" : "paragraph", st = styleNamed(doc, o.defineStyle), was = Boolean(st), styleWas = st ? String(st.ToJSON()) : null;
         touched = true;
         if (!st) st = doc.CreateStyle(o.defineStyle, type2);
         if (o.basedOn !== undefined) st.SetBasedOn(styleOf(o.basedOn, type2, i2));
         prOn(st.GetTextPr(), o.text);
         if (o.para && type2 === "paragraph") paraOn(st.GetParaPr(), o.para);
         made[o.defineStyle.toLowerCase()] = st;
+        differs(styleWas, function () { return String(st.ToJSON()); });
         if (was) {
           var count = 0;
           collect(doc, []).forEach(function (x) { try { var s2 = x.p.GetStyle(); if (s2 && s2.GetName() === st.GetName()) count++; } catch (e) {} });
@@ -1104,7 +1215,7 @@ const WORD_FORMAT = `function () {
           reflowed = true;
         } else said.push({ style: st.GetName(), made: true });
       } else if (o.formatTable !== undefined) {
-        var tb = tableOf(o, i2), cs = cellsOf(tb, o, i2), t2 = o.table || {}, c2 = o.cell || {};
+        var tb = tableOf(o, i2), cs = cellsOf(tb, o, i2), t2 = o.table || {}, c2 = o.cell || {}, tableWas = printOf(tb);
         touched = true;
         if (t2.tableStyle !== undefined) tb.SetStyle(styleOf(t2.tableStyle, "table", i2));
         if (t2.width) { if (t2.width.percent !== undefined) tb.SetWidth("percent", t2.width.percent); else tb.SetWidth("twips", t2.width.twips); }
@@ -1139,8 +1250,10 @@ const WORD_FORMAT = `function () {
         });
         if (c2.rowHeight !== undefined) { var seen = {}; cs.forEach(function (x) { if (!seen[x.r]) { seen[x.r] = true; x.row.SetHeight("atLeast", c2.rowHeight); } }); }
         if (c2.merge && !tb.MergeCells(cs.map(function (x) { return x.cell; }))) fail("failed", i2, "the editor did not merge the cells (they are no rectangle of the table's grid: one of them spans columns or rows)");
+        differs(c2.merge ? null : tableWas, function () { return printOf(tb); });
       } else if (o.page !== undefined) {
-        var ss = sectionsOf(o, i2), ps = o.set;
+        // A header or footer set counts as a change (what it holds is not compared).
+        var ss = sectionsOf(o, i2), ps = o.set, setupWas = ps.header || ps.footer ? null : setupOf(ss);
         touched = true;
         reflowed = true;
         ss.forEach(function (sec, k) {
@@ -1156,17 +1269,20 @@ const WORD_FORMAT = `function () {
           if (ps.header) setHeader(sec, "header", ps.header, o.page === "*" ? k : -1);
           if (ps.footer) setHeader(sec, "footer", ps.footer, o.page === "*" ? k : -1);
         });
+        differs(setupWas, function () { return setupOf(ss); });
       } else if (o.sectionBreak !== undefined) {
         // CreateSection ends the paragraph's section there with a copy of it (what it answers), and the section the
         // paragraph was in goes on after the break: its type is how the new section starts.
         var sp = pick(doc, o.sectionBreak, o.nth, i2, "quote").last, goesOn = sp.GetSection();
         touched = true;
+        changed = true;
         reflowed = true;
         doc.CreateSection(sp);
         goesOn.SetType(o.type);
       } else if (o.footnote !== undefined) {
         var fh = pick(doc, o.footnote, o.nth, i2, "quote"), end = fh.range.GetEndPos();
         touched = true;
+        changed = true;
         doc.GetRange(end, end).Select();
         var note = doc.AddFootnote();
         doc.RemoveSelection();
@@ -1175,6 +1291,7 @@ const WORD_FORMAT = `function () {
       } else {
         var anchor2 = o.after !== undefined ? pick(doc, o.after, o.nth, i2, "quote").last : null, np = Api.CreateParagraph();
         touched = true;
+        changed = true;
         reflowed = true;
         if (o.pageBreak) np.AddPageBreak();
         // A table of contents goes at the start where no place is given; a page break at the end.
@@ -1188,18 +1305,22 @@ const WORD_FORMAT = `function () {
           // and side margins, and then its own back (WORD_TOC_SRC); the page numbers are counted at the end.
           var back = asLast(doc, np);
           np.GetRange().AddField('TOC \\\\o "1-' + o.levels + '" \\\\h \\\\z \\\\u');
-          back();
+          if (back) { back(); tocSwapped = true; }
           madeToc = madeToc || np;
         }
       }
     }
-    var toc = freshToc(doc, madeToc);
+    // A call that changed nothing brings no TOC up to date (that would be a change of its own).
+    var toc = changed ? freshToc(doc, madeToc, tocSwapped, moved, ops.length > 0 && ops[ops.length - 1].toc === true) : { toc: false, moved: 0 };
     Api.Save();
     var result = { ops: ops.length };
+    if (!changed) result.changed = false;
     if (said.length) result.styles = said;
-    if (reflowed) result.reflowed = true;
+    if (reflowed && changed) result.reflowed = true;
     // A TOC this call made is not said to be updated: the call made it.
-    if (toc && !madeToc) result.toc = true;
+    if (toc.toc && !madeToc) result.toc = true;
+    if (moved.length) result.moved = moved;
+    if (toc.moved) result.tocMoved = toc.moved;
     return { result: result };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };

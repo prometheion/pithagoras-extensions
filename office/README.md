@@ -112,7 +112,13 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   page breaks, footnotes and a table of contents. A table of contents follows the document: every `office_edit` and
   `office_format` call that changes a document holding one brings its entries and page numbers up to date as the last
   part of the same step (so a failed call's Undo takes that back too), and its answer says so; what was changed by
-  hand in the entries is overwritten then, as Word's own update does. Each op names its place by a quote, as
+  hand in the entries is overwritten then, as Word's own update does. A comment on an entry is made again on the new
+  entry (the one with its text, else the one at its place), with its author, time, state and replies, so its thread
+  and its chat go on; the answer says that too. A table of contents that lists nothing yet is found by the editor's
+  English text for it ("No table of contents entries found.", as Office's editors and an English Word write it): one
+  made in a Word of another language is not brought up to date until it lists something. With two tables of contents
+  that list nothing yet in sections of different widths, the second one's new entries take their page-number tab at
+  the first one's width. Each update lays the whole document out, about 6 seconds for 600 pages. Each op names its place by a quote, as
   `office_edit`'s do. A call
   is made whole or not at all: everything it names is checked first (quotes, styles, tables and cells, what a header
   holds), and a call that fails after it changed something is taken back by the editor's own Undo, as one step. A

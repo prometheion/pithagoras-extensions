@@ -658,6 +658,22 @@ test("office_edit (spreadsheet): sheet ops go in the same job, with time for the
   assert.equal(s.seat.runs.length, 2);
 });
 
+test("office_edit and office_format of Word have time by the size of the document's file (each lays a long document out to bring its table of contents up to date), two minutes at most", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Long", type: "word", folder: "/f/atlas" }, s.root);
+  const file = getDoc(doc.docId, s.root)!.path;
+  const sized = async (bytes: number) => {
+    fs.writeFileSync(file, Buffer.alloc(bytes, 1));
+    await tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "a", replacement: "b" }] });
+    await tool(s, "office_format").execute("f", { id: doc.docId, ops: [{ format: "b", set: { bold: true } }] });
+    return s.seat.runs.slice(-2).map((r) => r.timeoutMs);
+  };
+  // 20 s a job, and 20 s for each 100 kB: 600 pages of text are about 140 kB.
+  assert.deepEqual(await sized(140_000), [48_000, 48_000]);
+  assert.deepEqual(await sized(10_000), [22_000, 22_000]);
+  assert.deepEqual(await sized(5_000_000), [120_000, 120_000]);
+});
+
 test("office_edit (spreadsheet): many sheet ops get two minutes at most; one cut off that deletes a sheet says what may be left of it", async () => {
   const s = setup();
   const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
@@ -1006,6 +1022,25 @@ test("office_edit: comments its edit would have taken away are moved onto the ne
   assert.match(res.content[0].text, /1 comment was moved onto your new text\./);
   assert.deepEqual(res.details.moved, [["626360df", "7164b85f"]]);
   assert.deepEqual(Object.keys(docchat.threadsOf(doc.docId)), ["7164b85f"]);
+  docchat.__resetDocchatForTests();
+});
+
+test("office_format: a comment on an entry of the table of contents that its update made anew is moved onto the new entry; its thread follows, and the answer says so apart from comments moved onto the call's own text", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Contents", type: "word", folder: "/f/atlas" }, s.root);
+  docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
+  fs.mkdirSync(path.join(s.root, "state", "threads"), { recursive: true });
+  fs.writeFileSync(path.join(s.root, "state", "threads", `${doc.docId}.json`), JSON.stringify({ version: 1, threads: { "626360df": { createdAt: 1, text: "rename this", inFile: true, agents: {} } }, uiSeen: [] }));
+  s.seat.answer = (run) => (run.kind === "word.format" ? { ops: 1, toc: true, moved: [["626360df", "7164b85f"]], tocMoved: 1 } : {});
+  const res = (await tool(s, "office_format").execute("f", { id: doc.docId, ops: [{ format: "Overview", set: { bold: true } }] })) as ToolResult;
+  assert.match(res.content[0].text, /saved as revision \d+\. Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+  assert.doesNotMatch(res.content[0].text, /onto your new text/);
+  assert.deepEqual(res.details.moved, [["626360df", "7164b85f"]]);
+  assert.deepEqual(Object.keys(docchat.threadsOf(doc.docId)), ["7164b85f"]);
+  // With one of the edit's own besides: each said for itself.
+  s.seat.answer = (run) => (run.kind === "word.edit" ? { ops: 1, toc: true, moved: [["00000001", "00000002"], ["00000003", "00000004"]], tocMoved: 1 } : {});
+  const both = (await tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "a", replacement: "b" }] })) as ToolResult;
+  assert.match(both.content[0].text, /1 comment was moved onto your new text\. Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
   docchat.__resetDocchatForTests();
 });
 

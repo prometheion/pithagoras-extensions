@@ -356,8 +356,10 @@ const PAGE_KEYS = ["pageSize", "orientation", "margins", "header", "footer", "di
 const STYLE_TEXT_KEYS = TEXT_KEYS.filter((k) => !["link", "style", "clear"].includes(k));
 const STYLE_PARA_KEYS = PARA_KEYS.filter((k) => !["list", "level", "listStart"].includes(k));
 
-/** The highlight colours the editor has (ApiRange.SetHighlight; any other name sets none, measured in DS 10.0). */
+/** The highlight colours the editor has (ApiRange.SetHighlight; any other name sets none, measured in DS 10.0), and
+ * each one's colour as the builder reads it back. */
 export const HIGHLIGHTS = ["yellow", "green", "cyan", "magenta", "blue", "red", "darkBlue", "darkCyan", "darkGreen", "darkMagenta", "darkRed", "darkYellow", "darkGray", "lightGray", "black", "white"];
+const HIGHLIGHT_HEX = ["#FFFF00", "#00FF00", "#00FFFF", "#FF00FF", "#0000FF", "#FF0000", "#00008B", "#008B8B", "#006400", "#800080", "#8B0000", "#808000", "#A9A9A9", "#D3D3D3", "#000000", "#FFFFFF"];
 /** Paper sizes by name, in twips (portrait). */
 export const PAGE_SIZES: Record<string, [number, number]> = { A3: [16838, 23811], A4: [11906, 16838], A5: [8391, 11906], Letter: [12240, 15840], Legal: [12240, 20160] };
 /** The largest length taken anywhere (a page side of 22 inches, Word's own limit), in twips. */
@@ -536,8 +538,10 @@ function textSet(set: Record<string, unknown>, bad: Bad, keys: string[]): { text
     out.color = c;
   }
   if (has("highlight")) {
-    const name = typeof set.highlight === "string" ? [...HIGHLIGHTS, "none"].find((h) => h.toLowerCase() === (set.highlight as string).toLowerCase()) : undefined;
-    if (!name) throw bad(`set.highlight is one of ${HIGHLIGHTS.join(", ")}, or "none"`);
+    // A name, or the colour of one ("#FFFF00" is yellow): a model given colours as "#RRGGBB" says it so.
+    const given = typeof set.highlight === "string" ? set.highlight.trim().toLowerCase() : "";
+    const name = [...HIGHLIGHTS, "none"].find((h) => h.toLowerCase() === given) ?? HIGHLIGHTS[HIGHLIGHT_HEX.findIndex((x) => x.toLowerCase() === given)];
+    if (!name) throw bad(`set.highlight is one of ${HIGHLIGHTS.join(", ")}, or "none" (or the colour of one: "#FFFF00" is yellow)`);
     out.highlight = name;
   }
   if (has("link")) {

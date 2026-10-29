@@ -292,6 +292,7 @@ test("office_format (Word): every op and set key, given in the agent's words, re
     { format: "annual report", through: "end", nth: 2, set: { font: "Arial", fontSize: 10.5, bold: true, italic: false, underline: true, strike: false, superscript: true, color: "#C81E1E", highlight: "Yellow", link: "https://example.com/a", style: "Callout", clear: true, align: "justify", spaceBefore: 12, spaceAfter: "6pt", lineSpacing: 1.5, indentLeft: "1.27cm", indentRight: 0, firstLine: "-0.5cm", list: "number", level: 2, listStart: 3, pageBreakBefore: true, keepWithNext: false } },
     { format: "x", set: { subscript: true, color: "auto", link: "", lineSpacing: "14pt" } },
     { format: "x", set: { superscript: false, highlight: "none" } },
+    { format: "x", set: { highlight: "#ffff00" } },
     { defineStyle: "Callout", basedOn: "Normal", set: { italic: true, color: "#005AA0", indentLeft: "1.27cm", spaceAfter: 6 } },
     { defineStyle: "Mark", type: "character", change: true, set: { bold: true } },
     { formatTable: "Ledger", set: { tableStyle: "Grid Table 4 - Accent 1", width: "100%", columnWidths: ["7cm", 85], headerRows: 1, borders: "all", fill: "#FFFF00", valign: "center", bold: true } },
@@ -319,6 +320,7 @@ test("office_format (Word): every op and set key, given in the agent's words, re
     },
     { format: "x", text: { vertAlign: "subscript", color: "auto", link: "" }, para: { lineSpacing: { line: 280, rule: "exact" } } },
     { format: "x", text: { vertAlign: "baseline", highlight: "none" } },
+    { format: "x", text: { highlight: "yellow" } },
     { defineStyle: "Callout", type: "paragraph", basedOn: "Normal", text: { italic: true, color: { r: 0, g: 90, b: 160 } }, para: { spaceAfter: 120, indentLeft: 720 } },
     { defineStyle: "Mark", type: "character", change: true, text: { bold: true } },
     {
@@ -383,6 +385,7 @@ test("office_format refuses what does not hold before anything is sent, naming t
   no([{ format: "a", set: { fontSize: 0 } }], /set.fontSize is the size in points/);
   no([{ format: "a", set: { color: "red" } }], /set.color is "#RRGGBB" or "auto"/);
   no([{ format: "a", set: { highlight: "purple" } }], /set.highlight is one of yellow, green/);
+  no([{ format: "a", set: { highlight: "#FFFF01" } }], /or the colour of one: "#FFFF00" is yellow/);
   no([{ format: "a", set: { link: "javascript:alert(1)" } }], /http, https or mailto/);
   no([{ format: "a", set: { link: "ftp://x.org/f" } }], /http, https or mailto/);
   no([{ format: "a", set: { superscript: true, subscript: true } }], /superscript or subscript, not both/);

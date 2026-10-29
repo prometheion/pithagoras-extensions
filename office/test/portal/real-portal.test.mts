@@ -1681,7 +1681,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
    * unless OFFICE_REAL_MODEL_URL (its API's base, ending in /v1) and OFFICE_REAL_MODEL (its id) are set;
    * OFFICE_REAL_MODEL_KEY is its API key where it needs one, OFFICE_REAL_MODEL_IMAGES=1 says it takes pictures,
    * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls;
-   * the last request the model got goes beside it (`<report>.request.json`), with its own words and the pictures it saw.
+   * the last request the model got goes beside it (`<report>.request.json`), with its own words and the pictures it saw,
+   * and the saved document (`<report>.docx`).
    * The model gets the office tools alone, and its key never reaches the portal (real-model.mts).
    */
   test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)" }, async () => {
@@ -1739,6 +1740,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     // What the run made: the document, formatted, in the default agent's home.
     const doc = (await state()).docs.find((d) => d.title === "Quarterly report");
     assert.ok(doc, "the model made the document");
+    // The saved document beside the report, for a look at its parts after the run.
+    if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(`${process.env.OFFICE_REAL_MODEL_REPORT}.docx`, readFileSync(await fileOf(doc!.docId)));
     assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
     const xml = await partOf(doc!.docId, "word/document.xml");
     console.log(`p. the saved document: TOC ${/TOC \\o/.test(xml)}, table style ${/<w:tblStyle /.test(xml)}, header rows ${/<w:tblHeader/.test(xml)}, landscape ${/w:orient="landscape"/.test(xml)}, footnote ${/<w:footnoteReference/.test(xml)}, highlight ${/<w:highlight w:val="yellow"/.test(xml)}, lists ${/<w:numPr>/.test(xml)}`);

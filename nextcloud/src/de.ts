@@ -61,8 +61,8 @@ export const de = {
   "Each save marks its entry as persistent and trusted, so agents may call the instance's tools without asking; Remove or removing the extension takes the entry back again.":
     "Jedes Speichern markiert den Eintrag als dauerhaft und vertraut, damit Agenten die Tools der Instanz ohne Rückfrage rufen dürfen; Entfernen oder Deinstallation nimmt den Eintrag wieder heraus.",
   "No instance yet: add your first Nextcloud below.": "Noch keine Instanz: Lege unten dein erstes Nextcloud an.",
-  "Taken over from pi's config": "Übernommen aus der Konfiguration von pi",
-  "Add an instance": "Instanz hinzufügen",
+  "Which instance is picked": "Welche Instanz ist gewählt",
+  "New instance": "Neue Instanz",
   "Name": "Bezeichnung",
   "e.g. nextcloud_uni": "z. B. nextcloud_uni",
   "Letters, numbers, dashes and underscores; it must start with a letter.":
@@ -89,20 +89,17 @@ export const de = {
   "Made in Nextcloud under Settings, Security, Devices & sessions. It is only ever set, never shown back.":
     "Wird in Nextcloud unter Einstellungen, Sicherheit, Geräte & Sitzungen angelegt. Es wird nur je gesetzt, nie wieder angezeigt.",
   "What this server offers to the chats and the pages": "Was dieser Server den Chats und den Seiten bietet",
-  "Where the server cannot give what a choice asks for, the choice stands greyed out: nothing it does not offer is offered.":
-    "Wo der Server nicht geben kann, was eine Wahl verlangt, steht die Wahl ausgegraut: Was er nicht anbietet, wird nicht angeboten.",
+  "A family off keeps its tools out of the chats and takes what shows it with. Where the server does not provide a family at all, it stands grey -- offered nowhere.":
+    "Ausgeschaltete Familien nehmen ihre Werkzeuge aus den Chats und damit auch das, was sie hier zeigen. Was der Server gar nicht bringt, steht grau -- nirgends angeboten.",
   "Saved.": "Gespeichert.",
   "Save and apply": "Speichern und anwenden",
   "Start again": "Neu starten",
   "Remove": "Entfernen",
   "Status": "Status",
   "Container": "Container",
-  "MCP entry in pi's config": "MCP-Eintrag in der Konfiguration von pi",
-  "present": "vorhanden",
-  "absent": "nicht vorhanden",
-  "Server at /mcp": "Server unter /mcp",
+  "entry present": "Eintrag vorhanden",
+  "entry absent": "Eintrag fehlt",
   "answering": "antwortet",
-  "not answering": "antwortet nicht",
   "Working: {task}": "Am Werk: {task}",
 
   // Dateien & Freigaben

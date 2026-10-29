@@ -16,7 +16,6 @@ export interface NextcloudStatus {
   configured: boolean; // at least one instance set completely
   task?: string; // what a save is doing on the person's behalf right now
   error?: string; // what the last of those said when it failed
-  migrated?: string[]; // what a first start took over from pi's config, one note each (English; shown as it stands)
 }
 
 /** What one instance says of itself in the status. */

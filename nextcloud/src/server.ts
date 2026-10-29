@@ -16,7 +16,6 @@ import { loadInstances, saveInstances, configured, isValidInstanceName, isAdopte
 import { CAPABILITIES, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
 import { ensureOwn, releaseOwn, containerState, discoverSafe, instanceAddress, planOwn, IMAGE, OwnPlan, Discovered } from "./container";
-import { migrateExistingMcpEntries } from "./migrate";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
  * ask at once they stand in a row: each run waits for the one before it, so every run sees finished runs only, never
@@ -24,7 +23,6 @@ import { migrateExistingMcpEntries } from "./migrate";
 let applying: { description: string } | undefined;
 let applyRow: Promise<unknown> = Promise.resolve(); // the end of that row: every new run is hooked to it
 let lastError: string | undefined;
-let migrated: string[] | undefined; // what a first start took over from pi's config, one note each -- for the settings page
 
 function apply(description: string, work: () => Promise<void>): Promise<void> {
   const self = { description };
@@ -190,11 +188,11 @@ async function status(): Promise<Record<string, unknown>> {
   try {
     plans = planOwn(insts);
   } catch (error) {
-    return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message, migrated };
+    return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message };
   }
   const discovery = await discoverSafe();
   const rows = await Promise.all(insts.map((inst) => instanceStatus(docker(), plans, discovery.containers, inst)));
-  return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError, migrated };
+  return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError };
 }
 
 const nextcloud: ServerHalf = async (portalArg) => {
@@ -352,17 +350,10 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
   });
 
-  // On every start: first take over what an install before knew nothing of (the existing entries in pi's config that
-  // stand on containers running the image, as they come over once), and then one pass toward where the instances ask
-  // for them (the entries were removed on stop, so this is how everything comes back after a restart of the portal);
-  // their failures are theirs alone to read in the status.
+  // On every start: one pass toward where the instances ask for their entries in pi's config (the entries were
+  // removed on stop, so this is how everything comes back after a restart of the portal); its failures are its own
+  // to read in the status.
   void (async () => {
-    try {
-      const notes = await migrateExistingMcpEntries(docker());
-      if (notes.length > 0) migrated = notes;
-    } catch {
-      // the takeover is best effort: where it could not run, what stood stands as it stood
-    }
     await ensureApplied().catch(() => {});
   })();
 

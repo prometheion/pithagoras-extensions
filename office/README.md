@@ -137,7 +137,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a numbered item's number as the editor gives it (`(numbered "3.")`, so a list that
   goes on and one that starts again are told apart), a table's style, header rows, merged cells and borders, and
   each cell's own fill, vertical alignment and borders with its paragraphs' and runs' own formatting (`B2: fill
-  #FFFF00, valign center; (right) "42": bold`, under the table's rows); 50,000 characters of it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
+  #FFFF00, valign center; (right) "42": bold`, under the table's rows; a table or a content control inside a cell is the
+  cell's text, its paragraphs counted and read with the cell's); 50,000 characters of it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
   `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these
   in one call (Excel's rules for names: at most 31 characters, none of `[]:*?/\`, no two alike in any case; one sheet

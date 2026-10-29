@@ -611,23 +611,23 @@ const WORD_READ = `function () {
             if (merged.length) tlook.merged = merged;
             var tborders = bordersOf(tj.tblPr && tj.tblPr.tblBorders);
             if (Object.keys(tborders).length) tlook.borders = tborders;
-            // Each cell's own look and its paragraphs' and runs' (a nested table's are not read), only where it sets
-            // something; a cell by its row and its place in the row (from 0), as merged gives them. Flat, one entry a
-            // cell paragraph (\`k\`, of \`of\`), the cell's own look on its first: the editor gives a command's answer
-            // back only where it is nested 10 deep at most (Asc.C3c in DS 10.0; deeper, the plugin gets undefined).
+            // Each cell's own look and its paragraphs' and runs', only where it sets something; a cell by its row and
+            // its place in the row (from 0), as merged gives them. Its paragraphs are counted as its text in the rows
+            // shows them (cellText): a nested table's and a content control's among them (a nested table's cells' own
+            // fill and borders are not read). Flat, one entry a cell paragraph (\`k\`, of \`of\`), the cell's own look
+            // on its first: the editor gives a command's answer back only where it is nested 10 deep at most (Asc.C3c
+            // in DS 10.0; deeper, the plugin gets undefined).
             var cellLooks = [];
             (tj.content || []).forEach(function (rj, ri) {
               (rj.content || []).forEach(function (cj, k) {
                 var own = cellLook(cj.tcPr), mine = [], n = 0, cc = null;
                 try { cc = el.GetRow(ri).GetCell(k).GetContent(); } catch (x) { cc = null; }
-                for (var e = 0; cc && e < cc.GetElementsCount(); e++) {
-                  var cp = cc.GetElement(e);
-                  if (cp.GetClassType() !== "paragraph") continue;
-                  var pl = lookOf(cp, names);
+                (cc ? collect(cc, []) : []).forEach(function (x) {
+                  var pl = lookOf(x.p, names);
                   (pl.runs || []).forEach(function (r) { if (r.look.style) used[r.look.style] = true; });
                   if (pl.para || pl.runs) mine.push({ row: ri, cell: k, k: n, para: pl.para, runs: pl.runs });
                   n++;
-                }
+                });
                 if (!mine.length && Object.keys(own).length) mine.push({ row: ri, cell: k });
                 mine.forEach(function (c1, j) {
                   if (j === 0) for (var key in own) c1[key] = own[key];

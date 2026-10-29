@@ -1671,6 +1671,31 @@ test("word.read with formatting: a table's own borders, and each cell's own fill
   assert.equal(command("word.read", { GetDocument: () => doc }, {}).result.blocks[0].look, undefined);
 });
 
+test("word.read with formatting: a cell's paragraphs are counted as its text in the rows shows them, a nested table's and a content control's among them, and each is read", () => {
+  const run = (rPr: Record<string, unknown>, text: string) => ({ type: "run", rPr, content: [text] });
+  const cellPara = (id: string, text: string, rPr: Record<string, unknown> = {}) => ({ GetClassType: () => "paragraph", GetText: () => `${text}\r\n`, GetParaPr: () => ({ GetStyle: () => null }), GetStyle: () => null, GetInternalId: () => id, GetNumbering: () => null, GetAllDrawingObjects: () => [], ToJSON: () => JSON.stringify({ content: [run(rPr, text)] }), GetElementsCount: () => 0, GetElement: () => null });
+  const inner = { GetClassType: () => "table", GetRowsCount: () => 1, GetRow: () => ({ GetCellsCount: () => 1, GetCell: () => ({ GetContent: () => contentOf([cellPara("x", "x")]) }) }) };
+  const control = { GetClassType: () => "blockLvlSdt", GetContent: () => contentOf([cellPara("c", "c", { i: true })]) };
+  // One cell: "a", a nested table holding "x", "b" in bold, and a content control holding "c" in italic.
+  const content = [cellPara("a", "a"), inner, cellPara("b", "b", { b: true }), control];
+  const table = {
+    GetClassType: () => "table",
+    GetInternalId: () => "t1",
+    GetRowsCount: () => 1,
+    GetRow: () => ({ GetCellsCount: () => 1, GetCell: () => ({ GetContent: () => contentOf(content) }) }),
+    ToJSON: () => JSON.stringify({ content: [{ content: [{ tcPr: {}, content: { content: [] } }] }] }),
+  };
+  const section = { GetPageWidth: () => 11906, GetPageHeight: () => 16838, GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134, GetHeader: () => null, GetFooter: () => null, ToJSON: () => "{}" };
+  const doc = { ...contentOf([table]), GetAllStyles: () => [], GetAllImages: () => [], GetStyle: () => null, GetDefaultTextPr: () => ({ ToJSON: () => "{}" }), GetSections: () => [section], GetFootnotesFirstParagraphs: () => [] };
+  const out = command("word.read", { GetDocument: () => doc }, { formatting: true });
+  assert.deepEqual(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(out.result.blocks[0].table, [["a / x / b / c"]]);
+  assert.deepEqual(out.result.blocks[0].look.cells, [
+    { row: 0, cell: 0, k: 2, of: 4, runs: [{ t: "b", look: { bold: true } }] },
+    { row: 0, cell: 0, k: 3, of: 4, runs: [{ t: "c", look: { italic: true } }] },
+  ]);
+});
+
 test("word.read with formatting: a numbered item carries its label as the editor numbers it, so a list going on and one starting again are told apart; a bullet and a read without formatting carry none", () => {
   const numbering = (fmt: string) => {
     const n: any = { ToJSON: () => JSON.stringify({ abstractNum: { a: { lvl: [{ numFmt: { val: fmt } }] } } }) };

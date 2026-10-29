@@ -654,19 +654,26 @@ const WORD_FORMAT = `function () {
       return t;
     };
 
-    // The check: every op on the document as it stands, nothing changed.
+    // The check: every op on the document as it stands, nothing changed (the paragraphs an earlier op of the call puts
+    // in a list count as in one).
+    var listing = {};
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i];
       if (op.format !== undefined) {
-        var hit = pick(doc, op.format, op.nth, i, "quote");
+        var hit = pick(doc, op.format, op.nth, i, "quote"), span = [hit.para];
         if (op.through !== undefined) {
           var on = bodyHits(doc, op.through, bodyIndex(doc)).filter(function (h) { return h.at > hit.at || (h.at === hit.at && h.pos >= hit.pos); });
           if (!on.length) fail("quote_not_found", i, "\\"through\\" " + JSON.stringify(op.through) + " is not in the body after " + JSON.stringify(op.format));
+          span = hit.range.ExpandTo(on[0].range).GetAllParagraphs();
         }
         if (op.text && op.text.link && op.through !== undefined && on[0].at !== hit.at) fail("bad_op", i, "a link lies inside one paragraph: format its text alone");
         if (op.text && op.text.style) styleOf(op.text.style, "text", i, true);
         var lst = op.para || {};
-        if ((lst.level !== undefined || lst.listStart !== undefined) && !lst.list && !listed(hit.para)) fail("bad_op", i, JSON.stringify(op.format) + " is in no list: give list (\\"bullet\\" or \\"number\\") with level or listStart");
+        if (lst.list) span.forEach(function (p) { listing[p.GetInternalId()] = lst.list !== "none"; });
+        // A level or a new start for a paragraph in no list: in the list right before it, where there is one.
+        var inList = function (p) { var k = listing[p.GetInternalId()]; return k !== undefined ? k : Boolean(listed(p)); };
+        var before = hit.para.GetPrevious && hit.para.GetPrevious();
+        if ((lst.level !== undefined || lst.listStart !== undefined) && !lst.list && !inList(hit.para) && !(before && before.GetClassType() === "paragraph" && inList(before))) fail("bad_op", i, JSON.stringify(op.format) + " is in no list, nor is the paragraph before it: give list (\\"bullet\\" or \\"number\\") with level or listStart");
       } else if (op.defineStyle !== undefined) {
         var type = op.type === "character" ? "run" : "paragraph", have = made[op.defineStyle.toLowerCase()] || styleNamed(doc, op.defineStyle);
         if (have && !op.change) {
@@ -788,12 +795,11 @@ const WORD_FORMAT = `function () {
     // always a new one, starting there).
     var listOn = function (paras, pp) {
       if (pp.list === "none") return paras.forEach(function (p) { p.SetNumbering(null); });
-      var first = listed(paras[0]), kind = pp.list || (first && first.kind), level = pp.level !== undefined ? pp.level : first ? first.level : 0, numbering = null;
-      if (!pp.list && pp.listStart === undefined) return paras.forEach(function (p) { var l = listed(p); if (l) p.SetNumbering(l.numbering.GetLevel(level)); });
-      if (pp.listStart === undefined) {
-        var prev = paras[0].GetPrevious && paras[0].GetPrevious(), before = prev && prev.GetClassType() === "paragraph" ? listed(prev) : null;
-        numbering = before && before.kind === kind ? before.numbering : first && first.kind === kind ? first.numbering : null;
-      }
+      var prev = paras[0].GetPrevious && paras[0].GetPrevious(), before = prev && prev.GetClassType() === "paragraph" ? listed(prev) : null;
+      // A level alone, of a paragraph in no list: it goes in the list right before it (the check made sure of one).
+      var first = listed(paras[0]) || (!pp.list ? before : null), kind = pp.list || (first && first.kind), level = pp.level !== undefined ? pp.level : first ? first.level : 0, numbering = null;
+      if (!pp.list && pp.listStart === undefined) return paras.forEach(function (p) { var l = listed(p) || first; if (l) p.SetNumbering(l.numbering.GetLevel(level)); });
+      if (pp.listStart === undefined) numbering = before && before.kind === kind ? before.numbering : first && first.kind === kind ? first.numbering : null;
       if (!numbering) {
         numbering = doc.CreateNumbering(kind === "bullet" ? "bullet" : "numbered");
         if (pp.listStart !== undefined) numbering.GetLevel(level).SetStart(pp.listStart);

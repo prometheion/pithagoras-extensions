@@ -1237,8 +1237,14 @@ test("word.format: a list goes on the list of the same kind right before it, els
   w.calls.length = 0;
   w.run([{ format: "one", para: { list: "none" } }]);
   assert.deepEqual(w.calls.filter((c) => /Numbering/.test(c)), ["para(one).SetNumbering(null)"]);
-  // A level without a list is refused for a paragraph in none.
-  assert.match(w.run([{ format: "three", para: { level: 2 } }]).error.message, /is in no list: give list/);
+  // A level without a list is refused for a paragraph in none, after one in none.
+  assert.match(w.run([{ format: "three", para: { level: 2 } }]).error.message, /is in no list, nor is the paragraph before it: give list/);
+  // After a list, a level alone puts it in that list (a sub-point); so does an earlier op of the same call.
+  w.calls.length = 0;
+  assert.deepEqual(w.run([{ format: "two", para: { level: 1 } }]), { result: { ops: 1 } });
+  assert.deepEqual(w.calls.filter((c) => /Numbering/.test(c)), ["para(two).SetNumbering(numbering(b1).level(1))"]);
+  const call = scriptedWord({ paras: [{ text: "alpha" }, { text: "beta" }] });
+  assert.deepEqual(call.run([{ format: "alpha", through: "beta", para: { list: "bullet" } }, { format: "beta", para: { level: 1 } }]).error, undefined);
 });
 
 test("word.format: a table's style, widths in the builder's EMU, header rows, borders and a cell range's merge; cells past the table refused before anything", () => {

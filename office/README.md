@@ -448,7 +448,8 @@ OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras OFFICE_REAL_MODEL_URL=<its API, end
   node --import tsx --test --test-timeout=1800000 --test-name-pattern='^(the portal|p: )' test/portal/real-portal.test.mts
 ```
 
-(from `office/`; the pattern runs the portal's set-up and case p alone).
+(from `office/`; the pattern runs the portal's set-up and case p alone). With a report named, the last request the
+model got is kept beside it (`calls.json.request.json`): what the model wrote and the pictures office_screenshot gave it.
 
 `scripts/make-fixtures.mjs` makes `fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node
 scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ but not what

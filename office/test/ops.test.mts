@@ -370,7 +370,13 @@ test("office_format refuses what does not hold before anything is sent, naming t
   no([{ defineStyle: "N", type: "character", basedOn: 3, set: { bold: true } }], /basedOn is the name of a character style/);
   no([{ page: "a", set: { bold: true } }], /not a key of page setup/);
   // Shapes.
-  no([{ through: "b", set: { bold: true } }], /must be exactly one of/);
+  no([{ through: "b", set: { bold: true } }], /must be exactly one of .* \(it has none of them\): through goes in \{format: "<quote>", through, set\}, whose first key names its place$/);
+  // A real model's op without its first key (ten times in a run): the refusal writes out the op its keys belong to.
+  no([{ cells: "B1:B4", set: { align: "right" } }], /\(it has none of them\): cells goes in \{formatTable: "<text in the table>", cells, set\}, whose first key names its place$/);
+  no([{ set: { align: "right" } }], /\(it has none of them\): set goes in \{format: "<quote>", set\}, \{formatTable: "<text in the table>", set\} or \{page: "<quote>" or "\*", set\}/);
+  no([{ levels: 2 }], /levels goes in \{toc: true, levels\}/);
+  no([{ text: "Audit due." }], /text goes in \{footnote: "<quote>", text\}/);
+  no([{ basedOn: "Normal", set: { italic: true } }], /basedOn goes in \{defineStyle: "<style name>", basedOn, set\}/);
   no([{ format: "a", page: "b", set: {} }], /it has format and page/);
   no([{ format: "unaudited", footnote: true, text: "x" }], /\(it has format and footnote\): each is an op of its own, its quote the value of its first key \(\{footnote: "<quote>", …\}\)$/);
   no([{ format: "a" }], /set is an object of what to set/);

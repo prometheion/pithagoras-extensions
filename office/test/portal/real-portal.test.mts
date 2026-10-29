@@ -1680,7 +1680,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
    * got wrong, so the tool texts can be changed until a run has no refusal the text could have prevented. Skipped
    * unless OFFICE_REAL_MODEL_URL (its API's base, ending in /v1) and OFFICE_REAL_MODEL (its id) are set;
    * OFFICE_REAL_MODEL_KEY is its API key where it needs one, OFFICE_REAL_MODEL_IMAGES=1 says it takes pictures,
-   * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls.
+   * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls;
+   * the last request the model got goes beside it (`<report>.request.json`), with its own words and the pictures it saw.
    * The model gets the office tools alone, and its key never reaches the portal (real-model.mts).
    */
   test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)" }, async () => {
@@ -1729,7 +1730,10 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     }
     const report = { model: process.env.OFFICE_REAL_MODEL, seconds: Math.round((Date.now() - t0) / 1000), requests: real!.requests.length, calls: calls.length, byTool: calls.reduce((m: Record<string, number>, c) => ((m[c.name] = (m[c.name] ?? 0) + 1), m), {}), refused: refusals.length, codes, refusals: refusals.map((r) => ({ name: r.name, args: r.args.slice(0, 600), result: r.result.slice(0, 600) })) };
     console.log(`p. ${JSON.stringify(report, null, 1)}`);
-    if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(process.env.OFFICE_REAL_MODEL_REPORT, JSON.stringify({ ...report, all: calls }, null, 1));
+    if (process.env.OFFICE_REAL_MODEL_REPORT) {
+      writeFileSync(process.env.OFFICE_REAL_MODEL_REPORT, JSON.stringify({ ...report, all: calls }, null, 1));
+      writeFileSync(`${process.env.OFFICE_REAL_MODEL_REPORT}.request.json`, JSON.stringify(last ?? {}));
+    }
     assert.deepEqual(real!.refused, [], "no request offered the model a tool other than the office tools");
     assert.ok(real!.requests.length > 0 && real!.requests.every((r) => ((r as { tools?: { function?: { name?: string } }[] }).tools ?? []).every((t) => realModelMay(String(t.function?.name)))));
     // What the run made: the document, formatted, in the default agent's home.

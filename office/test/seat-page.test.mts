@@ -1126,6 +1126,12 @@ test("frozen panes as DS names them: the first row alone reads \"1:1\", so offic
   const moved = await plugin(book, formatting([{ freeze: "C4" }]));
   assert.deepEqual(moved.result, { ops: 1, cells: 0 }, JSON.stringify(moved));
   assert.deepEqual(s1.frozen, { cols: 2, rows: 3 });
+  // (Unfrozen in a command of its own before: in the editor an Unfreeze in the freeze's command takes the new one off.)
+  assert.ok(book.state.commands >= 4);
+  // Taken back so too: through no freeze, to the cell freeze before.
+  const back = await plugin(book, formatting([{ freeze: "D5" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(back.undone, true, JSON.stringify(back));
+  assert.deepEqual(s1.frozen, { cols: 2, rows: 3 });
   // A person freezes elsewhere after the agent's freeze at a cell landed: theirs stays.
   const person = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].frozen = { cols: 0, rows: 5 }; } });
   const kept = await plugin(person, formatting([{ freeze: "C4" }, { format: "Z99", set: { bold: true } }]));

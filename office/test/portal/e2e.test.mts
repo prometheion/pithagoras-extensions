@@ -1368,7 +1368,13 @@ async function run(PITHAGORAS: string): Promise<void> {
     return { sheet, cell, strings: await part("xl/sharedStrings.xml") };
   };
   const failing = async (call: Promise<unknown>) => call.then((r) => `answered: ${(r as { content: { text: string }[] }).content[0].text}`, (e: Error) => e.message);
-  const readSheet = async (doc: string) => (await tools.office_read.execute("x-read", { id: doc, formatting: true })).content[0].text.split("\n\n").slice(1).join("\n\n");
+  const readSheet = async (doc: string, sheet?: string) => (await tools.office_read.execute("x-read", { id: doc, formatting: true, ...(sheet ? { sheet } : {}) })).content[0].text.split("\n\n").slice(1).join("\n\n");
+  // An op that fails in its step, which the check before the first step cannot foresee (it foresees superscript on a
+  // number, say): a format beyond the used range of the sheet "Fail" grows it, so that whole rows that met none of it
+  // in the check count 26,000 used cells in their step. Each call takes a band of rows of its own (`k`), past the
+  // ones the calls before grew the used range to.
+  const failOps = (k: number) => [{ sheet: "Fail", format: `Z${(k + 2) * 1000}`, set: { bold: true } }, { sheet: "Fail", format: `${(k + 1) * 1000 + 1}:${(k + 2) * 1000}`, set: { italic: true } }];
+  const failSaid = /^error:bad_op op \d+: the call formats more than 20,000 cells/;
 
   test("24. office_format in a real spreadsheet: one call with every op and key; office_read with formatting says what can be read, the person's editor shows it at once, and the save holds it all", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Invoice", "cell");
@@ -1380,6 +1386,9 @@ async function run(PITHAGORAS: string): Promise<void> {
         { range: "A4:D6", values: [["Paper", 2, 4.5, "=B4*C4"], ["Ink", 1, 30, "=B5*C5"], ["Pens", 10, 1.2, "=B6*C6"]] },
         { range: "A7:D7", values: [["Total", "", "", "=SUM(D4:D6)"]] },
         { range: "A9:A10", values: [["H2O"], ["A note long enough to wrap in its cell"]] },
+        // A superscript, and cells formatted and then cleared (merges too): their values stay.
+        { range: "B9", values: [["m2"]] },
+        { range: "G9:I9", values: [["c1", "c2", "m"]] },
       ],
     });
     const person = await personOpens(doc);
@@ -1390,6 +1399,11 @@ async function run(PITHAGORAS: string): Promise<void> {
       { format: "C4:D7", set: { numberFormat: "#,##0.00" } },
       { format: "A7:D7", set: { bold: true, borders: { top: "double #000000" } } },
       { format: "A9", set: { subscript: true } },
+      { format: "B9", set: { superscript: true } },
+      { format: "G9:H9", set: { numberFormat: "0.00", bold: true, fill: "#FF0000", borders: "all", align: "right" } },
+      { format: "G9:H9", set: { clear: true } },
+      { format: "I9:J9", set: { merge: true, fill: "#00FF00" } },
+      { format: "I9:J9", set: { clear: true } },
       { format: "A10", set: { wrap: true, italic: true, underline: true, strike: true } },
       { format: "B3", set: { rotation: 45 } },
       { format: "F1", set: { bold: true, fontSize: 14 } },
@@ -1402,7 +1416,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     const t0 = Date.now();
     const made = (await tools.office_format.execute("i1", { id: doc, ops })).content[0].text;
     console.log(`24. one call of ${ops.length} ops: ${made} (${Date.now() - t0} ms)`);
-    assert.match(made, /^Formatted "Invoice" \(13 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\.$/);
+    assert.match(made, /^Formatted "Invoice" \(18 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\.$/);
     const read = await readSheet(doc);
     console.log(`24. office_read with formatting:\n${read}`);
     for (const want of [
@@ -1413,6 +1427,8 @@ async function run(PITHAGORAS: string): Promise<void> {
       /B3 bold, #FFFFFF, fill #1F4E79, rotated 45°/,
       /"#,##0\.00"/,
       /A9 subscript/,
+      /B9 superscript/,
+      /\nG9: "c1"\nH9: "c2"\nI9: "m"\n/,
       /A10 italic, strike, underline, wrap/,
       /F1 14, bold/,
       /\nMerged: A1:D1\.\n/,
@@ -1436,7 +1452,17 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.match(saved.cell("A7").borders, /top double/);
     assert.match(saved.cell("A10").alignment, /wrapText="1"/);
     assert.match(saved.cell("A10").font, /<i\/>[\s\S]*<strike\/>|<strike\/>[\s\S]*<i\/>/);
-    assert.match(saved.strings, /<vertAlign val="subscript"\/>[\s\S]*?<t>H2O<\/t>|<t>H2O<\/t>/);
+    // Set on a cell's whole text, the subscript (and the superscript) is saved as the cell's own font, not as a run of
+    // rich text: the strings hold the plain texts.
+    console.log(`24. saved A9 font ${saved.cell("A9").font}, B9 font ${saved.cell("B9").font}; strings ${saved.strings.match(/<si>(?:(?!<\/si>)[\s\S])*?(?:H2O|m2)(?:(?!<\/si>)[\s\S])*?<\/si>/g)?.join(" ")}`);
+    assert.match(saved.cell("A9").font, /<vertAlign val="subscript"\/>/);
+    assert.match(saved.cell("B9").font, /<vertAlign val="superscript"\/>/);
+    // Clear took every format off, the merge too; the values stayed (the read above).
+    for (const ref of ["G9", "H9", "I9"]) {
+      const c = saved.cell(ref);
+      assert.deepEqual([c.numFmt, c.fill, c.borders, c.alignment, /<b\/>/.test(c.font)], ["General", "none", "", "", false], `${ref} ${JSON.stringify(c)}`);
+    }
+    assert.doesNotMatch(saved.sheet, /<mergeCell ref="I9:J9"\/>/);
     assert.match(saved.sheet, /<mergeCell ref="A1:D1"\/>/);
     // (A freeze has once reached the file only with the save after the call's: the Document Server got it after the
     // call's other changes. It is in the next one.)
@@ -1448,6 +1474,13 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.match(saved.sheet, /<col [^>]*min="1" max="1"[^>]*width="20\.\d*"|<col [^>]*width="20\.\d*"[^>]*min="1" max="1"/);
     assert.match(saved.sheet, /<col [^>]*hidden="1"[^>]*min="5" max="5"|<col [^>]*min="5" max="5"[^>]*hidden="1"/);
     assert.match(saved.sheet, /<row r="3"[^>]* ht="30"/);
+    // A freeze at a cell where the panes are frozen at a cell already moves them (the builder alone leaves them).
+    for (const [at, want] of [["B2", "row 1 and column A"], ["C4", "rows 1-3 and columns A-B"]]) {
+      await tools.office_format.execute(`i-${at}`, { id: doc, ops: [{ freeze: at }] });
+      const frozen = /\nFrozen: .*$|$/.exec(await readSheet(doc))![0];
+      console.log(`24. freeze at ${at}: ${frozen.trim() || "(none)"}`);
+      assert.equal(frozen, `\nFrozen: ${want}.`);
+    }
     await person.page.context().close();
   });
 
@@ -1457,8 +1490,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     // The calls before the matrix: a merge and a freeze that stay.
     await tools.office_format.execute("m1", { id: doc, ops: [{ format: "A6:B6", set: { merge: true } }, { format: "A1:C1", set: { italic: true } }] });
     const person = await personOpens(doc);
+    // The sheet the failing ops grow (failOps), made once the person is in Sheet1: their editor stays there.
+    await tools.office_edit.execute("m-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
     const cells = ["A1", "B1", "C1", "A2", "B2", "C2", "A5", "A6"];
-    const fail = { format: "C3", set: { subscript: true } };
     const cases: { name: string; tool: "office_format" | "office_edit"; ops: unknown[]; partial?: RegExp }[] = [
       { name: "readable keys", tool: "office_format", ops: [{ format: "A1:C2", set: { numberFormat: "0.00", font: "Arial", fontSize: 14, bold: true, italic: false, underline: true, strike: true, color: "#FF0000", fill: "#00FF00", wrap: true, rotation: 30 } }] },
       { name: "superscript", tool: "office_format", ops: [{ format: "A5", set: { superscript: true } }] },
@@ -1474,9 +1508,9 @@ async function run(PITHAGORAS: string): Promise<void> {
       { name: "clear", tool: "office_format", ops: [{ format: "A1:C1", set: { clear: true } }], partial: /The editor cannot read back the alignment and borders of "Sheet1"!A1:C1 \(op 1\), which stay as this call set them\.$/ },
     ];
     const timings: string[] = [];
-    for (const c of cases) {
-      const before = { read: await readSheet(doc), person: await personCells(person.frame, cells) };
-      const ops = c.tool === "office_format" ? [...c.ops, fail] : c.ops;
+    for (const [k, c] of cases.entries()) {
+      const before = { read: await readSheet(doc, "Sheet1"), person: await personCells(person.frame, cells) };
+      const ops = c.tool === "office_format" ? [...c.ops, ...failOps(k)] : c.ops;
       const t0 = Date.now();
       const said = await failing(tools[c.tool].execute(`m-${c.name}`, { id: doc, ops }));
       timings.push(`${c.name} ${Date.now() - t0} ms`);
@@ -1484,10 +1518,10 @@ async function run(PITHAGORAS: string): Promise<void> {
       if (c.partial) {
         assert.match(said, /^error:partial op \d+: /, c.name);
         assert.match(said.replace(/ Part of this call may be in the document: .*$/, ""), c.partial, c.name);
-      } else assert.match(said, c.tool === "office_format" ? /^error:bad_op op \d+: subscript takes text, and "Sheet1"!C3 holds a number/ : /^error:bad_value op 3: /, c.name);
+      } else assert.match(said, c.tool === "office_format" ? failSaid : /^error:bad_value op 3: /, c.name);
       // (A column width or row height put back is the column's or row's own from then on: the builder sets none back to
       // the sheet's default. The used range the read names may then reach further, with nothing more in it.)
-      const after = await readSheet(doc);
+      const after = await readSheet(doc, "Sheet1");
       const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
       if (after !== before.read) console.log(`25. ${c.name}: the read's used range ${/Sheet "Sheet1" \(([^)]*)\)/.exec(before.read)?.[1]} -> ${/Sheet "Sheet1" \(([^)]*)\)/.exec(after)?.[1]}`);
       assert.equal(used(after), used(before.read), `${c.name}: the agent's editor reads as before`);
@@ -1499,6 +1533,12 @@ async function run(PITHAGORAS: string): Promise<void> {
       else assert.ok(same, `${c.name}: the person's editor is as it was (differ: ${differs.map((a) => `${a} ${before.person[a]} -> ${seen[a]}`).join("; ")})`);
     }
     console.log(`25. failing calls: ${timings.join(", ")}`);
+    // The mistake the check foresees (superscript on a number) is refused before the first op changes anything: the
+    // alignment op before it, which could not be put back, is not made (B2 stays right-aligned in the save below).
+    const foreseen = await failing(tools.office_format.execute("m-foreseen", { id: doc, ops: [{ format: "A1:B2", set: { align: "center", borders: "outside" } }, { format: "C3", set: { subscript: true } }] }));
+    console.log(`25. foreseen: ${foreseen}`);
+    assert.match(foreseen, /^error:bad_op op 2: subscript takes text, and "Sheet1"!C3 holds a number/);
+    assert.doesNotMatch(foreseen, /taken back/);
     // The save: none of the failed calls' readable formats; the earlier call's merge and italic; what stayed of the last two.
     await tools.office_edit.execute("m-save", { id: doc, ops: [{ range: "Z50", values: [["saved"]] }] });
     const saved = await savedSheet(doc);
@@ -1538,9 +1578,10 @@ async function run(PITHAGORAS: string): Promise<void> {
     // call's first op made A1:B1 not bold. B1 stays as the person left it (bold, and the call's fill on it), A1 is as
     // it was.
     await tools.office_format.execute("k2", { id: doc, ops: [{ format: "A1:B1", set: { bold: true } }] });
+    await tools.office_edit.execute("k-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
     const steps = Array.from({ length: 150 }, (_, k) => ({ format: "H1:H100", set: { italic: k % 2 === 0 } }));
     const t0 = Date.now();
-    const formatting = failing(tools.office_format.execute("k3", { id: doc, ops: [{ format: "A1:B1", set: { bold: false, fill: "#FF0000" } }, ...steps, { format: "C1", set: { subscript: true } }] }));
+    const formatting = failing(tools.office_format.execute("k3", { id: doc, ops: [{ format: "A1:B1", set: { bold: false, fill: "#FF0000" } }, ...steps, ...failOps(0)] }));
     const plain = await personCell(person.frame, "A2");
     assert.ok(await until(async () => /"FontBold":false/.test(await personCell(person.frame, "B1")) && (await personCell(person.frame, "B1")) !== plain, 10_000), "the person sees the call's first op");
     console.log(`26. the person sees the first op ${Date.now() - t0} ms into the call`);
@@ -1548,9 +1589,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     await person.page.keyboard.press("Control+B");
     const said2 = await formatting;
     console.log(`26. the format taken back around the person's (${Date.now() - t0} ms): ${said2}`);
-    assert.match(said2, /^error:partial op 152: .* Kept as a person changed them after this call: B1 of "Sheet1"\./);
+    assert.match(said2, /^error:partial op 153: .* Kept as a person changed them after this call: B1 of "Sheet1"\./);
     await delay(1500);
-    const looks = await readSheet(doc);
+    const looks = await readSheet(doc, "Sheet1");
     console.log(`26. after:\n${looks}`);
     assert.match(looks, /\nFormats: A1 bold; B1 bold, fill #FF0000\.(\n|$)/, "A1 as it was, B1 as the person left it");
     await person.page.context().close();

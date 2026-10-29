@@ -1698,8 +1698,10 @@ const CELL_STEP = `function () {
       if (!cols && !rows) panes.Unfreeze();
       else if (!cols) panes.FreezeRows(rows);
       else if (!rows) panes.FreezeColumns(cols);
-      // A freeze at a cell where one is already does nothing (the builder's SetFreezePanesType): unfrozen first.
-      else { panes.Unfreeze(); ws.GetRange(colName(cols) + (rows + 1)).Select(); Api.SetFreezePanesType("cell"); }
+      // The builder's SetFreezePanesType("cell") takes off a freeze of rows or columns alone and freezes at the
+      // selection, but does nothing where the panes are frozen at a cell already (the freeze step unfreezes them in a
+      // command before: in the editor an Unfreeze in the same command makes it take the new freeze off again).
+      else { ws.GetRange(colName(cols) + (rows + 1)).Select(); Api.SetFreezePanesType("cell"); }
       if (was && was !== ws.GetName() && Api.GetSheet(was)) Api.GetSheet(was).SetActive();
     };
     if (op.writes !== undefined) {
@@ -1831,17 +1833,17 @@ const CELL_STEP = `function () {
       if (op.height !== undefined) lall.SetRowHeight(op.height);
       if (op.autofit) lall.AutoFit(lkind === "rows", lkind === "columns");
       if (op.hidden !== undefined) lall.SetHidden(op.hidden);
-      // An autofit's size lands in the editor after the command (measured in DS 10.0): the plugin reads what it left in
-      // a command of its own after this one (\`settle\`).
-      var lleft = lineState();
+      // An autofit's size lands in the editor a moment after the command (measured in DS 10.0): the plugin reads what it
+      // left in commands of its own after this one, until the sizes differ from these (\`settle\`).
+      var lleft = lineState(), lnow = lleft.size.slice();
       if (op.autofit) lleft.size = lleft.size.map(function () { return null; });
       // A hidden column reads no width (0): one this op sized cannot get its width back.
       var blind = [];
       if (lkind === "columns" && (op.width !== undefined || op.autofit)) for (var h = 0; h < op.count; h++) if (lbefore.hidden[h]) blind.push(colName(op.from + h));
-      return { result: { inverse: { restoreLines: { sheet: lws.GetName(), kind: lkind, from: op.from, count: op.count, before: lbefore, left: lleft }, real: true }, settle: op.autofit ? true : undefined, unreadable: blind.length ? { op: i, what: ["width"], where: where(lws, "column" + (blind.length > 1 ? "s " : " ") + blind.join(", ")) } : undefined } };
+      return { result: { inverse: { restoreLines: { sheet: lws.GetName(), kind: lkind, from: op.from, count: op.count, before: lbefore, left: lleft }, real: true }, settle: op.autofit ? { sizes: lnow } : undefined, unreadable: blind.length ? { op: i, what: ["width"], where: where(lws, "column" + (blind.length > 1 ? "s " : " ") + blind.join(", ")) } : undefined } };
     }
-    // What an autofit or a freeze at a cell left, read once it landed (the command after theirs): what their inverse
-    // compares with, so that a person's change after them wins there too.
+    // What an autofit or a freeze at a cell left, read once it landed (after their command): what their inverse compares
+    // with, so that a person's change after them wins there too.
     if (op.settle !== undefined) {
       var st = op.settle;
       if (st.restoreLines) {
@@ -1868,11 +1870,16 @@ const CELL_STEP = `function () {
       var zws = sheetOf(op);
       if (!zws.GetVisible()) return { error: hiddenFreeze(i, zws.GetName()) };
       var zbefore = frozenOf(zws);
+      // Frozen at a cell already: unfrozen in this command, frozen at the new cell in the next (see freeze).
+      if (op.cols && op.rows && zbefore.cols && zbefore.rows) {
+        freeze(zws, 0, 0);
+        return { result: { inverse: { refreeze: zws.GetName(), cols: zbefore.cols, rows: zbefore.rows, left: { cols: 0, rows: 0 }, real: true }, then: { sheet: zws.GetName(), freeze: op.freeze, cols: op.cols, rows: op.rows, real: true } } };
+      }
       freeze(zws, op.cols, op.rows);
-      // A freeze at a cell (through the selection) shows in the panes after the command (measured in DS 10.0): the
-      // plugin reads what it left in a command of its own after this one (\`settle\`).
+      // A freeze at a cell (through the selection) shows in the panes a moment after the command (measured in DS 10.0):
+      // the plugin reads what it left in commands of its own after this one, until it shows (\`settle\`).
       var cellFreeze = Boolean(op.cols && op.rows);
-      return { result: { inverse: { refreeze: zws.GetName(), cols: zbefore.cols, rows: zbefore.rows, left: cellFreeze ? null : frozenOf(zws), real: true }, settle: cellFreeze ? true : undefined } };
+      return { result: { inverse: { refreeze: zws.GetName(), cols: zbefore.cols, rows: zbefore.rows, left: cellFreeze ? null : frozenOf(zws), real: true }, settle: cellFreeze ? { frozen: { cols: op.cols, rows: op.rows } } : undefined } };
     }
     if (op.refreeze !== undefined) {
       var bws = named(op.refreeze), bnow = frozenOf(bws);
@@ -1986,6 +1993,9 @@ const CELL_STEP = `function () {
 /** The commands of a spreadsheet edit, which the plugin runs in turn (cellEdit). */
 export const CELL_EDIT_COMMANDS = { check: CELL_CHECK, step: CELL_STEP, sheets: CELL_SHEETS, save: CELL_SAVE };
 
+/** How often, and how far apart in ms, the plugin reads what an autofit or a freeze at a cell left until it shows: up
+ * to 2 s (cellEdit's `settle`). */
+export const SETTLE = { tries: 10, ms: 200 };
 /** How often, and how far apart in ms, the plugin looks whether a change to the sheets is made: up to 10 s per change. */
 export const SHEET_WAIT = { tries: 100, ms: 100 };
 
@@ -2407,15 +2417,22 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
           undo.push(r.inverse);
           undoOps.push(op.writes ? op.writes.map(function (w) { return w.index; }) : [i]);
         }
-        // What an autofit or a freeze at a cell left lands after its command: read in the next one, for the inverse.
-        if (r.settle && r.inverse) return call(cell.step, { op: { settle: r.inverse, real: true }, index: i, pending: pending }, false, function (s) {
-          var left = s.result || {};
-          if (r.inverse.restoreLines && left.size) r.inverse.restoreLines.left.size = left.size;
-          if (r.inverse.refreeze !== undefined && left.frozen) r.inverse.left = left.frozen;
-          made(r);
-        });
+        if (r.settle && r.inverse) return settle(r, 0);
         made(r);
       });
+      // What an autofit or a freeze at a cell left lands a moment after its command: read until it shows (sizes other
+      // than right after it, the frozen panes asked for), for the inverse to compare with. A freeze that does not show
+      // in time is not compared; sizes that stay are what the autofit left.
+      function settle(r, tries) {
+        call(cell.step, { op: { settle: r.inverse, real: true }, index: i, pending: pending }, false, function (s) {
+          var left = s.result || {}, z = r.settle;
+          var shown = z.sizes ? Boolean(left.size) && left.size.some(function (v, k) { return v !== z.sizes[k]; }) : Boolean(left.frozen) && left.frozen.cols === z.frozen.cols && left.frozen.rows === z.frozen.rows;
+          if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
+          if (r.inverse.restoreLines && left.size) r.inverse.restoreLines.left.size = left.size;
+          if (r.inverse.refreeze !== undefined && shown) r.inverse.left = left.frozen;
+          made(r);
+        });
+      }
       function made(r) {
         if (r.pending) {
           pending.push(r.pending);

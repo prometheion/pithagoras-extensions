@@ -107,9 +107,11 @@ export default function FilesAndSharing() {
       .catch((error) => setFileProblem(sayError(error)));
   };
 
+  // Where the view stands drives the listing itself: a folder chosen or a crumb walked back to re-pulls its rows,
+  // and the first pull is the one at the root.
   useEffect(() => {
-    loadListing("");
-  }, []);
+    loadListing(path);
+  }, [path]);
 
   const download = async (row: FileRow): Promise<void> => {
     if (row.size !== undefined && row.size > MAX_INLINE_BYTES) throw new Error(t("This file is larger than this panel reads inline."));

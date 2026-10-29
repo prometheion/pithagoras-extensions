@@ -94,16 +94,16 @@ function NextcloudPanel({ panel }: PanelProps) {
   return (
     <div className="space-y-2 p-2">
       {instances.length > 1 && (
-        <div className="nc-instance" role="tablist" aria-label={t("Which of the Nextclouds the pages talk to")}>
+        <select
+          className="nc-instance-select"
+          value={held?.name ?? selected ?? ""}
+          onChange={(e) => setSelected(e.target.value)}
+          aria-label={t("Which of the Nextclouds the pages talk to")}
+        >
           {instances.map((inst) => (
-            <InstanceButton
-              key={inst.name}
-              active={inst.name === (held?.name ?? selected)}
-              onClick={() => setSelected(inst.name)}
-              label={inst.name}
-            />
+            <option key={inst.name} value={inst.name}>{inst.name}</option>
           ))}
-        </div>
+        </select>
       )}
       <div className="nc-tabs" role="tablist">
         {offered.map((def) => {
@@ -150,15 +150,6 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick(
     >
       {icon}
       <span>{label}</span>
-    </button>
-  );
-}
-
-/** One of the instances in the switcher: its name, chosen as pressed. */
-function InstanceButton({ active, onClick, label }: { active: boolean; onClick(): void; label: string }) {
-  return (
-    <button type="button" role="tab" aria-selected={active} className={`nc-instance-btn${active ? " nc-instance-btn-on" : ""}`} onClick={onClick}>
-      {label}
     </button>
   );
 }

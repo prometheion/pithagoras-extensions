@@ -1176,7 +1176,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       /\] \(Callout, line spacing 1\.5, indent right 1cm, hanging 0\.5cm\) Revenue grew\. There was a discrepancy here\.\n {4}"discrepancy": style "Mark"/,
       /\] Water is H2O and energy is E=mc2\.\n {4}"2": subscript; "2": superscript/,
       /\] \(bullet\) first point\n\[\d+\] \(bullet\) second point/,
-      /\] \(numbered lowerLetter, level 2\) sub point/,
+      /\] \(numbered lowerLetter "c\.", level 2\) sub point/,
       /\] \(page break before\) Strike me\.\n {4}"Strike me\.": strike/,
       /\] Plain closing words\.\n {4}"Plain closing": bold\n/,
       /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,

@@ -36,24 +36,45 @@ export const SHOT_TAKEN_BYTES = 1.5 * SHOT_MAX_BYTES;
 /** The most the client takes of the editor's answer, and the portal of the client's output, in characters: such a
  * picture as base64 and a little more. Docker's exec gives the output whole, so the client stops a larger answer. */
 export const SHOT_MAX_CHARS = Math.ceil((SHOT_TAKEN_BYTES * 4) / 3) + 4096;
+/**
+ * How long a Word picture waits for the document's pictures to load, at most, and what it leaves of the script's
+ * deadline for the page itself. The editor opens a document without its pictures and fetches them after (from the
+ * Document Server, through the relay): a few MB come in well under a second on one machine, so 6 s is a slow disk or
+ * a busy Document Server, and leaves the page's own picture (under a second) and the page count's settle room inside
+ * SHOT_MS. Past it the page is taken as it is, and the answer says how many pictures had not come.
+ */
+export const PICTURES_MS = 6000;
+export const PICTURES_SPARE_MS = 2500;
 
 /** What the locate command (seat-page.ts) says is to be shown, as the frame function takes it. */
 export type ShotTarget =
   | { kind: "word"; page: number; pages: number }
   | { kind: "cell"; index: number; name: string; c1: number; r1: number; c2: number; r2: number; centre: [number, number]; away: [number, number]; zoom: number; frozen?: [number, number]; hidden?: { cols: number[]; rows: number[] } };
 
-/** A picture: base64 JPEG and its size, and what the editor showed (a sheet's zoom, a document's settled pages). */
-export type ShotImage = { data: string; width: number; height: number; zoom?: number; pages?: number };
+/** The document's pictures when a Word page was taken: how many were still loading (after PICTURES_MS) and how many
+ * the editor could not load; null where the editor's image loader was not found, so nobody knows. */
+export type ShotPictures = { loading: number; failed: number } | null;
+
+/** A picture: base64 JPEG and its size, and what the editor showed (a sheet's zoom, a document's settled pages and
+ * its pictures). */
+export type ShotImage = { data: string; width: number; height: number; zoom?: number; pages?: number; pictures?: ShotPictures };
 
 /**
  * What runs in the agent's editor's frame, as `Runtime.callFunctionOn` calls it with one argument, `t` (a ShotTarget
- * with `large`, `until` (the deadline, ms since the epoch), `settleMs`, `settleMaxMs`, and the picture's limits).
+ * with `large`, `until` (the deadline, ms since the epoch), `settleMs`, `settleMaxMs`, `picturesMs`, `picturesSpareMs`,
+ * and the picture's limits).
  * It moves only the agent's own view (page, zoom, scroll, selection), then draws what the editor's canvas shows into a
  * canvas of its own and answers that as a JPEG; or `{error: {code, message}}`. A second shot of the same editor that
  * begins meanwhile ends this one (`superseded`), as does the deadline, both checked after every wait.
  *
- * Word: the layout is waited for until the page count holds still (it lands up to 0.7 s after an edit of 20 pages);
- * then "fit to page" and the page, and the page's rectangle found on the canvas `#id_viewer` (white on grey): the pages
+ * Word: the layout is waited for until the page count holds still (it lands up to 0.7 s after an edit of 20 pages),
+ * and the document's pictures until none is loading (`picturesMs` at most, and never into the last `picturesSpareMs`
+ * of the deadline): the editor shows a document before its pictures have come and draws nothing where one is missing.
+ * Its image loader has no exported name (DS 10.0 minifies it), so it is found by its shape: the one object among
+ * `AscCommon`'s that holds the editor's API and a map of `{src, Image}` entries (names the compiler keeps, as the
+ * browser's own); an entry is loading while its `<img>` is not complete, and failed where the loader set it to null.
+ * Which pictures are on the page no exported name tells, so all of the document's are waited for. Then "fit to page"
+ * and the page, and the page's rectangle found on the canvas `#id_viewer` (white on grey): the pages
  * in view as the runs of rows with white in them, the one drawn whole at the top (the last page's at the bottom: the
  * view does not scroll past the end), and its sides along a line just below its top (inside its top margin).
  * Co-authors' marks are switched off in the agent's editor first.
@@ -92,6 +113,38 @@ export const FRAME_FN = `async function (t) {
     if ((url.length - url.indexOf(",") - 1) * 3 / 4 > t.maxBytes) url = out.toDataURL("image/jpeg", t.quality.low);
     return { data: url.slice(url.indexOf(",") + 1), width: out.width, height: out.height };
   }
+  // The document's pictures as the editor's image loader has them, or null where no such loader is found (or looking
+  // at its objects threw).
+  function pictures() {
+    try { return loader(); } catch (e) { return null; }
+  }
+  function loader() {
+    var api = window.editor, common = window.AscCommon, maps = [];
+    if (!api || !common) return null;
+    var entry = function (e) { return e !== null && typeof e === "object" && typeof e.src === "string" && "Image" in e; };
+    Object.keys(common).forEach(function (k) {
+      var v = common[k];
+      if (!v || typeof v !== "object") return;
+      var keys = Object.keys(v);
+      if (!keys.some(function (p) { return v[p] === api; })) return;
+      keys.forEach(function (p) {
+        var m = v[p];
+        if (!m || typeof m !== "object" || Array.isArray(m) || m === api) return;
+        var all = Object.keys(m);
+        if (all.length && all.every(function (s) { return entry(m[s]); })) maps.push(m);
+      });
+    });
+    if (!maps.length) return null;
+    var out = { loading: 0, failed: 0 };
+    maps.forEach(function (m) {
+      Object.keys(m).forEach(function (s) {
+        var img = m[s].Image;
+        if (img === null) out.failed++;
+        else if (img && !img.complete) out.loading++;
+      });
+    });
+    return out;
+  }
   async function word() {
     var api = window.editor;
     if (!api || typeof api.getCountPages !== "function") return stop("not_ready", "the editor is not ready");
@@ -103,6 +156,18 @@ export const FRAME_FN = `async function (t) {
         var now = api.getCountPages();
         if (now !== pages) { pages = now; since = Date.now(); }
       }
+    }
+    var pics = pictures();
+    if (pics && pics.loading) {
+      var end = Math.min(Date.now() + t.picturesMs, t.until - t.picturesSpareMs);
+      while (pics && pics.loading && Date.now() < end) {
+        await sleep(50);
+        alive();
+        pics = pictures();
+      }
+      // A picture that came is drawn by its own load event, which asks the editor for a new frame.
+      await drawn();
+      alive();
     }
     if (t.page > pages) return stop("no_page", "the document has " + pages + " page" + (pages === 1 ? "" : "s") + " as the editor lays it out now");
     try { api.asc_setDrawCollaborationMarks(false); } catch (e) {}
@@ -142,6 +207,7 @@ export const FRAME_FN = `async function (t) {
     if (right - left < 100 || bottom - top < 100) return stop("not_drawn", "the page is not on the editor's canvas");
     var shot = jpeg([{ from: cv, x: left, y: top, w: right - left + 1, h: bottom - top + 1, dx: 0, dy: 0 }], right - left + 1, bottom - top + 1);
     shot.pages = pages;
+    shot.pictures = pics ? { loading: pics.loading, failed: pics.failed } : null;
     return shot;
   }
   async function cell() {
@@ -395,11 +461,11 @@ export async function shot(editorId: string, target: ShotTarget & { large?: bool
     port: deps.port ?? CDP_PORT,
     editorId,
     ms: SHOT_MS,
-    target: { ...target, large: Boolean(target.large), side: SHOT_SIDE, quality: SHOT_QUALITY, maxBytes: SHOT_MAX_BYTES, settleMs: 300, settleMaxMs: 5000 },
+    target: { ...target, large: Boolean(target.large), side: SHOT_SIDE, quality: SHOT_QUALITY, maxBytes: SHOT_MAX_BYTES, settleMs: 300, settleMaxMs: 5000, picturesMs: PICTURES_MS, picturesSpareMs: PICTURES_SPARE_MS },
   };
   const res = await deps.exec(["node", "--no-warnings", "-e", CDP_SRC, JSON.stringify(spec)], EXEC_MS);
   if (res.timedOut) throw new ShotError("timeout", `the picture took longer than ${EXEC_MS / 1000} s`);
-  const out = readFrame(res.output) as { error?: { code?: string; message?: string }; data?: unknown; width?: unknown; height?: unknown; zoom?: unknown; pages?: unknown };
+  const out = readFrame(res.output) as { error?: { code?: string; message?: string }; data?: unknown; width?: unknown; height?: unknown; zoom?: unknown; pages?: unknown; pictures?: unknown };
   if (out.error) throw new ShotError(String(out.error.code ?? "failed"), String(out.error.message ?? "the picture failed"));
   if (typeof out.data !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(out.data) || typeof out.width !== "number" || typeof out.height !== "number") throw new ShotError("failed", "the picture's channel gave no picture");
   // The picture as the editor's frame gave it is the document's side: taken only as a JPEG of the size it says, and
@@ -409,7 +475,14 @@ export async function shot(editorId: string, target: ShotTarget & { large?: bool
   const side = (n: number) => Number.isInteger(n) && n >= 1 && n <= SHOT_SIDE.large;
   const size = jpegSize(bytes);
   if (!size || !side(out.width) || !side(out.height) || size.width !== out.width || size.height !== out.height) throw new ShotError("failed", "the editor gave no JPEG picture of the size it says");
-  return { data: out.data, width: out.width, height: out.height, ...(typeof out.zoom === "number" ? { zoom: out.zoom } : {}), ...(typeof out.pages === "number" ? { pages: out.pages } : {}) };
+  return { data: out.data, width: out.width, height: out.height, ...(typeof out.zoom === "number" ? { zoom: out.zoom } : {}), ...(typeof out.pages === "number" ? { pages: out.pages } : {}), ...("pictures" in out ? { pictures: picturesOf(out.pictures) } : {}) };
+}
+
+/** The pictures' counts as the editor's frame gave them: whole numbers, else not known (null). */
+function picturesOf(p: unknown): ShotPictures {
+  const count = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 1_000_000;
+  const o = p as { loading?: unknown; failed?: unknown } | null;
+  return o && typeof o === "object" && count(o.loading) && count(o.failed) ? { loading: o.loading as number, failed: o.failed as number } : null;
 }
 
 /** A JPEG's width and height, from its frame header (SOF); null where `bytes` is no JPEG or has none. */

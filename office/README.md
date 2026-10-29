@@ -114,7 +114,10 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   call (a few seconds). Where you stopped Office, `office_read` reads the saved file and says so, and `office_edit` is
   refused until it runs again: there is no other way to write.
   **The agent sees what it made**: `office_screenshot` gives it a picture (JPEG) of a document as its own editor shows
-  it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still; or
+  it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still and
+  drawn once the document's pictures have loaded (the editor shows a document before its pictures come, and draws
+  nothing where one is missing: the picture waits up to 6 s for them, and where one has still not come, or could not
+  be loaded, takes the page as it is and says so to the agent); or
   a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
   refused beyond that with the largest range from its first cell that fits (about 23 columns by 41 rows of default
   cells at 100 %, 30 by 55 at 75 %); hidden rows and columns are left out. By default a sheet's used range from A1, as
@@ -353,7 +356,9 @@ agents' editor.
   busy is refused (`error:busy`).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
-  editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most.
+  editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most. A Word picture
+  waits for all of the document's pictures, not only the page's (the editor does not say which are on a page), so a
+  slow picture elsewhere in the document delays it, up to 6 s. A sheet's picture does not wait for pictures.
 
 ## Licences
 

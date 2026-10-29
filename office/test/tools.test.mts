@@ -1096,6 +1096,28 @@ test("office_screenshot: a page's part of a long table says which rows it is; te
   assert.equal(cells.content[0].text, 'Sheet "S" A1:Z200 at 75 %, as your editor shows it now. Its hidden rows and columns are not in the picture, and their cells are not listed. Its cells:\n\nA1: 1\n(not all of the cells it shows are listed: a picture gives 20,000 characters of text at most; office_read gives them)');
 });
 
+test("office_screenshot: a Word page taken with the document's pictures still loading, not loadable or not known says so in its first line, never silently; all drawn says nothing", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  const t = tool(s, "office_screenshot");
+  const take = async (pictures: unknown) => {
+    s.seat.shot = () => ({ located: { page: 1, pages: 2, first: 1, blocks: [{ p: "Hello" }], view: { kind: "word", page: 1, pages: 2 } }, image: { data: "/9j/4AAQ", width: 724, height: 1024, pages: 2, pictures } });
+    return (await t.execute("c", { id: doc.docId })) as { content: any[]; details: any };
+  };
+  const head = `Page 1 of 2 of "Report" (id ${doc.docId}), as your editor shows it now.`;
+  let out = await take({ loading: 0, failed: 0 });
+  assert.equal(out.content[0].text, `${head} Its text:\n\n[1] Hello`);
+  assert.deepEqual(out.details, { action: "screenshot", id: doc.docId, page: 1, pages: 2, width: 724, height: 1024, bytes: 6 });
+  out = await take({ loading: 1, failed: 0 });
+  assert.equal(out.content[0].text, `${head} 1 of the document's pictures was still loading after a wait of up to 6 s, so it is missing from the picture if on this page: take it again in a moment. Its text:\n\n[1] Hello`);
+  assert.deepEqual([out.details.picturesLoading, out.details.picturesFailed], [1, 0]);
+  out = await take({ loading: 3, failed: 2 });
+  assert.match(out.content[0].text, /now\. 3 of the document's pictures were still loading after a wait of up to 6 s, so they are missing from the picture if on this page: take it again in a moment\. 2 of the document's pictures could not be loaded by the editor, so they are missing from the picture if on this page\. Its text:/);
+  out = await take(null);
+  assert.match(out.content[0].text, /now\. Whether the document's pictures had all loaded could not be checked: one may be missing from the picture\. Its text:/);
+  assert.equal(out.details.pictures, "unknown");
+});
+
 test("office_screenshot: a model that cannot see pictures is error:no_images before anything is done; one whose input is not known is shown the picture", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);

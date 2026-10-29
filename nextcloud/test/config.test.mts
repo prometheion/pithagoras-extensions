@@ -42,7 +42,6 @@ test("the flat keys of an earlier version come over as its one instance, and lea
     assert.equal(inst.username, "user");
     assert.equal(inst.password, "pw");
     assert.deepEqual(inst.capabilities, {}); // an unrecognized keep-out list comes over as no choices
-    assert.equal(inst.container, "own");
     assert.equal(configured(inst), true);
 
     // The store stands in this module's own data folder from the first load -- and pi's config file is no longer read of again.
@@ -60,14 +59,13 @@ test("the flat keys of an earlier version come over as its one instance, and lea
 
 test("a save keeps what it is given and only that: a second instance with its port stands as saved", () => {
   withHome(() => {
-    const a = { name: "nextcloud", url: "https://a.example.org", username: "u", password: "p", container: "own" };
-    const b = { name: "uni", url: "https://b.example.org", username: "u", password: "p", capabilities: { mail: false, news: false }, container: "adopted:somebox", port: 8123 };
+    const a = { name: "nextcloud", url: "https://a.example.org", username: "u", password: "p" };
+    const b = { name: "uni", url: "https://b.example.org", username: "u", password: "p", capabilities: { mail: false, news: false }, port: 8123 };
     saveInstances([a, b]);
     const loaded = loadInstances();
     assert.equal(loaded.length, 2);
     assert.equal(loaded[0].name, "nextcloud");
     assert.ok(!(loaded[0] as Record<string, unknown>).capabilities); // nothing named stands unset
-    assert.equal(loaded[1].container, "adopted:somebox");
     assert.equal(loaded[1].port, 8123); // the saved port comes over
     assert.deepEqual(loaded[1].capabilities, { mail: false, news: false }); // its choices stand as saved
     assert.equal(configured(loaded[1]), true);
@@ -79,11 +77,13 @@ test("an earlier version's saved list comes over entry by entry, and leaves pi's
     fs.mkdirSync(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
     fs.writeFileSync(
       path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"),
-      JSON.stringify({ instances: [{ url: "https://x" }, { name: "ok", container: "adopted:" }, { name: "fine", port: -2 }] }),
+      JSON.stringify({ instances: [{ url: "https://x" }, { name: "ok", container: "adopted:somebox" }, { name: "fine", port: -2 }] }),
     );
     const insts = loadInstances();
     assert.equal(insts.length, 2);
-    assert.equal(insts[0].container, "own"); // an entry that names no instance is dropped; a container field it does not know comes home to own
+    // an entry that names no instance is dropped; an old container field of a saved version comes over unset -- the
+    // instance takes its own container by name from the plan instead
+    assert.equal((insts[0] as Record<string, unknown>).container, undefined);
     assert.equal(insts[1].port, undefined); // a port that is not a real one stands unset
     const afterLoad: Record<string, unknown> = JSON.parse(fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), "utf8"));
     assert.equal("instances" in afterLoad, false); // the list came over and left there

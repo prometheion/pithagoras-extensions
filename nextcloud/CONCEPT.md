@@ -11,7 +11,7 @@ One extension that **installs and runs the Nextcloud MCP server** for you and gi
 
 ### Current setup (what this replaces)
 
-Simeon already runs two manual containers (`127.0.0.1:18000→8000` for `piggidragon@tbug.elyros.de`, `127.0.0.1:18001→8000` for `piggidragon-uni@…`) plus a hand-written `/root/.pi/agent/mcp.json`. v1 targets **one instance** (the main account); multi-instance is a follow-up. The extension can optionally **adopt** an existing container (`dockerFor.adopt`) to migrate without downtime — see §9.
+Simeon already runs two manual containers (`127.0.0.1:18000→8000` for `piggidragon@tbug.elyros.de`, `127.0.0.1:18001→8000` for `piggidragon-uni@…`) plus a hand-written `/root/.pi/agent/mcp.json`; the built extension replaces all of it, multi-instance (decided §10). **Decided (2026-07, on Simeon's feedback): no adoption** — each instance owns exactly one container this extension made and keeps, as `@pithagoras/understory` does for itself; the two manual containers become redundant and are left to be removed by hand.
 
 ## 2. Architecture
 
@@ -137,7 +137,7 @@ await portal.mcp.set({
 
 ## 7. Settings (user-visible)
 
-As built, the settings are not these raw keys but **instances** (a list of name/url/username/password/capabilities/container) kept in the extension's own data folder (`dataDir()/settings.json`, see `src/config.ts`) and edited on a dedicated settings page. The flat keys below were the original design; what is left of them is that an earlier version's entries are migrated once at the first start and then leave pi's config file. Existing entries in pi's mcp.json that point at running containers of the image are adopted on their own at the first start, with a note shown on the settings page (`src/migrate.ts`).
+As built, the settings are not these raw keys but **instances** (a list of name/url/username/password/capabilities/port) kept in the extension's own data folder (`dataDir()/settings.json`, see `src/config.ts`) and edited on a dedicated settings page. The flat keys below were the original design; what is left of them is that an earlier version's entries are migrated once at the first start and then leave pi's config file. An old saved `container` field (the abandoned adoption choice) is dropped on read — the instance's container comes from its own plan (`src/container.ts`) instead.
 
 Auto-restored settings page (static defaults in code, per the package-source heuristic — keep defaults as literals so restore sees them):
 
@@ -161,11 +161,11 @@ Status block on the same page: container state, MCP server health, "pi is connec
 
 1. **Phase 1 — plumbing + reads**: scaffold (`@pithagoras/nextcloud`), docker lifecycle §3, mcp registration §6, settings page §7, tool-proxy REST API; panels: Shopping List, Cookbook (simplest, read+tick), Notes.
 2. **Phase 2 — the big tabs**: Files (+Shares), Deck, Calendar, Contacts with their CRUD forms.
-3. **Phase 3 — integrations**: core change A (Files source hook), optional adoption of Simeon's existing 18000/18001 containers (`dockerFor.adopt`), multi-instance support if the uni account stays a need.
+3. **Phase 3 — integrations**: core change A (Files source hook).
 
 ## 10. Open questions
 
 - ~~Multi-instance from day one or Phase 3?~~ **Decided: multi-instance, done** — every instance gets its own container, its loopback port at and above 8000, and its own entry in pi's config under its name; the panel switches over them.
-- ~~Adopt existing containers on install, or always own a fresh one?~~ **Decided: both** — an instance owns a made container by default and can take over any found container running the image instead (adopted ones are never touched).
+- ~~Adopt existing containers on install, or always own a fresh one?~~ **Decided: no adoption** (2026-07, Simeon's feedback: "das where its mcp endpoint lives kann weg") — every instance owns exactly one container the extension made and keeps; the adopted/discovery mechanism (the `container` field, `GET /discover`, the settings select) is gone.
 - Core change B: confirm current masking behavior of the generated settings page before scoping.
 - ~~Calendar tab UX: month grid vs day list~~ **Decided: day list** — what Phase 2 built.

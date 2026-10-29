@@ -1,9 +1,9 @@
 /**
  * @pithagoras/nextcloud's server half (the built server.js behind package.json's pithagoras.server field): keeps
- * one Nextcloud MCP server running per instance -- in a container this extension made and kept, or in one that was
- * already running and the instance adopted by name -- registers every instance as its own entry in pi's mcp.json
- * for the chats, and gives the client a small REST of it: the instances, what runs on the machine to adopt, the
- * state of all of it, and one tool call that goes straight to the chosen instance's server and back.
+ * one Nextcloud MCP server running per instance -- each in a container this extension made and keeps, as understory
+ * keeps its own -- registers every instance as its own entry in pi's mcp.json for the chats, and gives the client a
+ * small REST of it: the instances, the state of all of it, and one tool call that goes straight to the chosen
+ * instance's server and back.
  *
  * Stateless by design: every route re-reads the keys (the agent's config file) and finds out from Docker itself
  * where things stand; nothing of it is lost where this process was, and two reads never see different worlds. What
@@ -12,10 +12,10 @@
  */
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { setPortal, portal, docker } from "./host";
-import { loadInstances, saveInstances, configured, isValidInstanceName, isAdopted, adoptedName, NextcloudInstance } from "./config";
+import { loadInstances, saveInstances, configured, isValidInstanceName, NextcloudInstance } from "./config";
 import { CAPABILITIES, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
-import { ensureOwn, releaseOwn, containerState, discoverSafe, instanceAddress, planOwn, IMAGE, OwnPlan, Discovered } from "./container";
+import { ensureOwn, releaseOwn, containerState, instanceAddress, planOwn, IMAGE, OwnPlan } from "./container";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
  * ask at once they stand in a row: each run waits for the one before it, so every run sees finished runs only, never
@@ -55,14 +55,13 @@ function view(inst: NextcloudInstance): Record<string, unknown> {
     ...(inst.capabilities !== undefined ? { capabilities: { ...inst.capabilities } } : {}),
     passwordSet: inst.password !== "",
     configured: configured(inst),
-    container: inst.container,
   };
 }
 
 /** Bring every instance's container and its entry in pi's config to where the keys ask for them; a no-op where all
- * is well. An own one gets its life of a made container (remade where it no longer matches, started where it
- * stopped); an adopted one only its entry, as long as its container runs with a port published -- and an entry is
- * cleared where the instance behind it is gone or unconfigured, so pi's config keeps saying what is true. The keys
+ * is well. Each configured one gets its life of a made container (remade where it no longer matches, started where
+ * it stopped); an entry is cleared where the instance behind it is gone or unconfigured, so pi's config keeps saying
+ * what is true. The keys
  * are read where the run starts, not where it was asked for: a run standing in the row works on what stands now.
  *
  * What an entry in pi's config takes -- url, lifecycle and excludeTools beside trusted -- is pi-mcp-adapter's own
@@ -79,37 +78,16 @@ function ensureApplied(): Promise<void> {
       let portsChanged = false;
       for (const plan of plans.values()) if (plan.inst.port !== plan.port) { plan.inst.port = plan.port; portsChanged = true; }
       if (portsChanged) saveInstances(insts); // the planned ports stand saved from now on: a later save does not shift them
-      const discovery = await discoverSafe();
       for (const inst of insts) {
         if (configured(inst)) continue; // what stands asks for nothing: it goes, entry as well.
-        if (!isAdopted(inst.container)) {
-          const name = plans.get(inst.name)?.containerName;
-          if (name) await releaseOwn(d, name);
-        }
+        const name = plans.get(inst.name)?.containerName;
+        if (name) await releaseOwn(d, name);
         await portal().mcp.set(inst.name, undefined);
       }
       for (const inst of insts) {
         if (!configured(inst)) continue;
-        if (isAdopted(inst.container)) {
-          const name = adoptedName(inst.container);
-          let state: string;
-          try {
-            state = await containerState(d, name);
-          } catch {
-            state = "unavailable"; // Docker not to be had right now: the entry stands where it stood
-            continue;
-          }
-          const address = instanceAddress(plans, discovery.containers, inst);
-          if (state !== "running" || !address) {
-            // The container stopped or has no published port for the loopback: nothing answers there while it is.
-            await portal().mcp.set(inst.name, undefined);
-            continue;
-          }
-          await portal().mcp.set(inst.name, { ...carryOver(portal().mcp.get(inst.name)?.entry), url: address, lifecycle: "persistent", excludeTools: excludeGlobs(inst) }, { trusted: true });
-          continue;
-        }
         const plan = plans.get(inst.name);
-        if (!plan) continue; // cannot stand: no own plan for it (too many own instances), and the status says so
+        if (!plan) continue; // cannot stand: no plan for it (too many instances), and the status says so
         await ensureOwn(d, plan);
         await portal().mcp.set(inst.name, { ...carryOver(portal().mcp.get(inst.name)?.entry), url: `http://127.0.0.1:${plan.port}/mcp`, lifecycle: "persistent", excludeTools: excludeGlobs(inst) }, { trusted: true });
       }
@@ -128,10 +106,10 @@ function carryOver(entry: Record<string, unknown> | undefined): Record<string, u
 
 /** What one instance says of itself in the status: its container, its entry in pi's config, and whether its server
  * answers at all. */
-async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: Map<string, OwnPlan>, discovered: Discovered[], inst: NextcloudInstance): Promise<Record<string, unknown>> {
-  const name = isAdopted(inst.container) ? adoptedName(inst.container) : (plans.get(inst.name)?.containerName ?? "");
+async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: Map<string, OwnPlan>, inst: NextcloudInstance): Promise<Record<string, unknown>> {
+  const name = plans.get(inst.name)?.containerName ?? "";
   const state = await containerState(d, name);
-  const address = instanceAddress(plans, discovered, inst);
+  const address = instanceAddress(plans, inst);
   let mcp: { registered: boolean; on: boolean; url?: string };
   try {
     const entry = await portal().mcp.get(inst.name);
@@ -147,7 +125,7 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
   } else if (state !== "running") {
     health = { ok: false, error: state === "absent" ? "the container is not running" : `the container ${state}` };
   } else if (!address) {
-    health = { ok: false, error: "no published port for the loopback found on the adopted container" };
+    health = { ok: false, error: "no plan stands for its container yet" };
   } else {
     try {
       const server = await mcpClient(address).ping();
@@ -166,7 +144,7 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
       // the endpoint did not list its tools right now: availability stays unknown for this pass
     }
   }
-  return { name: inst.name, mode: isAdopted(inst.container) ? "adopted" : "own", containerName: name, state, address, mcp, health, configured: configured(inst), ...(capabilities !== undefined ? { capabilities } : {}) };
+  return { name: inst.name, containerName: name, state, address, mcp, health, configured: configured(inst), ...(capabilities !== undefined ? { capabilities } : {}) };
 }
 
 /** The names of one endpoint's tools, asked live and answered from memory for a while: the capability check stands
@@ -190,8 +168,7 @@ async function status(): Promise<Record<string, unknown>> {
   } catch (error) {
     return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message };
   }
-  const discovery = await discoverSafe();
-  const rows = await Promise.all(insts.map((inst) => instanceStatus(docker(), plans, discovery.containers, inst)));
+  const rows = await Promise.all(insts.map((inst) => instanceStatus(docker(), plans, inst)));
   return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError };
 }
 
@@ -223,7 +200,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
     const insts = loadInstances();
     let inst = insts.find((i) => i.name === name);
     if (!inst) {
-      inst = { name, url: "", username: "", password: "", container: "own" };
+      inst = { name, url: "", username: "", password: "" };
       insts.push(inst);
     }
     for (const key of ["url", "username", "password"] as const) {
@@ -238,15 +215,6 @@ const nextcloud: ServerHalf = async (portalArg) => {
       // A family on stands nowhere in the saved map: only the offs are kept, so a missing map reads as everything on.
       inst.capabilities = Object.keys(next).length > 0 ? next : undefined;
     }
-    const container = typeof given.container === "string" ? given.container.trim() : "";
-    if (container) {
-      if (container !== "own" && !(isAdopted(container) && adoptedName(container))) return res.status(400).json({ error: `the container choice is "own" or one of the names found on the machine` });
-      if (inst && inst.container !== container && inst.container === "own") {
-        // The instance leaves its own container for an adopted one: the made one goes with it.
-        await releaseOwn(docker(), planOwn(insts).get(name)?.containerName ?? "");
-      }
-      inst!.container = container;
-    }
     const saved = saveInstances(insts);
     let task: string | undefined;
     try {
@@ -257,14 +225,14 @@ const nextcloud: ServerHalf = async (portalArg) => {
     res.json({ instances: saved.map(view), task });
   });
 
-  /** One instance gone: its entry out of pi's config, and its own container with it -- an adopted one untouched. */
+  /** One instance gone: its entry out of pi's config, and its container with it. */
   r.post("/instances/remove", json, async (req, res) => {
     const body = req.body as Record<string, unknown>;
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const insts = loadInstances();
     const gone = insts.find((i) => i.name === name);
     if (!gone) return res.status(400).json({ error: "no such instance" });
-    if (configured(gone) && !isAdopted(gone.container)) {
+    if (configured(gone)) {
       try {
         await releaseOwn(docker(), planOwn(insts).get(name)?.containerName ?? "");
       } catch {
@@ -281,16 +249,6 @@ const nextcloud: ServerHalf = async (portalArg) => {
     res.json({ instances: saved.map(view), task });
   });
 
-  /** The containers that run the image, running and stopped alike: to adopt one of them under an instance. */
-  r.get("/discover", async (_req, res) => {
-    const discovery = await discoverSafe();
-    const insts = loadInstances();
-    res.json({
-      containers: discovery.containers.map((c) => ({ ...c, takenBy: insts.find((i) => isAdopted(i.container) && adoptedName(i.container) === c.name)?.name })),
-      note: discovery.error,
-    });
-  });
-
   /** One more pass toward where the instances ask for it: a no-op where all is well; what it does as its task. */
   r.post("/start", json, async (_req, res) => {
     try {
@@ -301,8 +259,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
   });
 
-  /** The containers this extension made gone and the entries in pi's config cleared; the keys stay, and an adopted
-   * container stays running where it ran. */
+  /** The containers this extension made gone and the entries in pi's config cleared; the keys stay. */
   r.post("/reset", json, async (_req, res) => {
     try {
       await apply("removing the containers this extension made and its entries in pi's config", async () => {
@@ -310,10 +267,8 @@ const nextcloud: ServerHalf = async (portalArg) => {
         const insts = loadInstances();
         const plans = planOwn(insts);
         for (const inst of insts) {
-          if (!isAdopted(inst.container)) {
-            const name = plans.get(inst.name)?.containerName;
-            if (name) await releaseOwn(d, name);
-          }
+          const name = plans.get(inst.name)?.containerName;
+          if (name) await releaseOwn(d, name);
           await portal().mcp.set(inst.name, undefined);
         }
       });
@@ -341,8 +296,8 @@ const nextcloud: ServerHalf = async (portalArg) => {
     } catch (error) {
       return res.status(502).json({ error: (error as Error).message });
     }
-    const address = instanceAddress(plans, (await discoverSafe()).containers, inst);
-    if (!address) return res.status(502).json({ error: isAdopted(inst.container) ? `the adopted container ${adoptedName(inst.container)} has no published port for the loopback` : `the container of ${inst.name} is not running` });
+    const address = instanceAddress(plans, inst);
+    if (!address) return res.status(502).json({ error: `the container of ${inst.name} is not running` });
     try {
       res.json(await mcpClient(address).callTool(name, args));
     } catch (error) {
@@ -359,7 +314,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
 
   return () => {
     // Where a stop or a removal takes the package: the containers it made go with it, and its entries out of pi's
-    // config; an adopted container stays as it is, and the keys stay, so the next start brings everything back.
+    // config; the keys stay, so the next start brings everything back.
     void (async () => {
       const d = docker();
       if (!d) return;
@@ -368,13 +323,11 @@ const nextcloud: ServerHalf = async (portalArg) => {
       try {
         plans = planOwn(insts);
       } catch {
-        // too many own instances for the ports: nothing to release by its planned name
+        // too many instances for the ports: nothing to release by its planned name
       }
       for (const inst of insts) {
-        if (!isAdopted(inst.container)) {
-          const name = plans.get(inst.name)?.containerName;
-          if (name) await releaseOwn(d, name);
-        }
+        const name = plans.get(inst.name)?.containerName;
+        if (name) await releaseOwn(d, name);
         await portal().mcp.set(inst.name, undefined);
       }
     })().catch(() => {});

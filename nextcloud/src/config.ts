@@ -16,9 +16,11 @@ import { dataDir } from "./host";
 import { CAPABILITIES, capabilitiesFromExcludeText } from "./capabilities";
 
 /** One Nextcloud this portal talks to: its login, how the capability families of its MCP server stand with it --
- * turned off in its entry in pi's config and in its pages where it chose so, everything on otherwise -- and where
- * its /mcp endpoint lives: a container this extension made (`own`), or one already running that it adopted by name
- * (`adopted:<docker container name>`). */
+ * turned off in its entry in pi's config and in its pages where it chose so, everything on otherwise. Every
+ * instance holds its own container (this extension's image, marked with its name), on the port saved for it here:
+ * once chosen the port stays with the instance, unset takes the next free one at the planning. An entry of an older
+ * version that named a container it had adopted is read in as an ordinary one -- what the endpoint was told to run
+ * in there no longer stands. */
 export interface NextcloudInstance {
   /** The instance by its name: the entry in pi's mcp.json under it, and the prefix of that server's tools for the chats. */
   name: string;
@@ -31,8 +33,6 @@ export interface NextcloudInstance {
   /** The capability families turned off for this instance, by family id; a family that stands none is on -- what an
    * endpoint provides at all is found from its tool list, not here (see capabilities). */
   capabilities?: Record<string, boolean>;
-  /** Where the /mcp endpoint lives: `own` -- a container this extension made and keeps, or `adopted:<name>` -- one that was already running. */
-  container: string;
   /** The loopback port its server listens on in its own container, kept where the keys so that adding, removing or
    * renaming another instance does not shift it (see planOwn). Unset until the first save plans it. */
   port?: number;
@@ -44,10 +44,6 @@ export const DEFAULT_INSTANCE_NAME = "nextcloud";
 /** The name rules, shared with the pages (this file's node imports keep them out of it); re-exported from here so
  * the server half reads them as it did before. */
 export { isValidInstanceName, INSTANCE_NAME_MAX } from "./instance-name";
-
-/** Whether the container field says the endpoint is in a container that was already running, and if so by what name. */
-export const isAdopted = (container: string): boolean => container.startsWith("adopted:");
-export const adoptedName = (container: string): string => container.slice("adopted:".length);
 
 const FILE = "settings.json"; // the store file, by that name in this module's data folder
 
@@ -101,7 +97,6 @@ function instanceFrom(raw: unknown): NextcloudInstance | undefined {
   const text = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
   const name = text(o.name);
   if (!name) return undefined;
-  const container = text(o.container);
   const port = typeof o.port === "number" && Number.isInteger(o.port) && o.port > 0 && o.port <= 65535 ? o.port : undefined;
   const capabilities =
     capabilitiesFrom(o.capabilities) ?? (text(o.mcpExcludeTools) !== "" ? capabilitiesFromExcludeText(name, text(o.mcpExcludeTools)) : undefined);
@@ -111,7 +106,6 @@ function instanceFrom(raw: unknown): NextcloudInstance | undefined {
     username: text(o.username),
     password: text(o.password),
     ...(capabilities !== undefined ? { capabilities } : {}),
-    container: container === "own" || (isAdopted(container) && adoptedName(container) !== "") ? container : "own",
     port,
   };
 }
@@ -149,7 +143,6 @@ function instancesFromLegacy(legacy: Record<string, unknown>): NextcloudInstance
       username,
       password,
       ...(text(legacy.mcpExcludeTools) !== "" ? { capabilities: capabilitiesFromExcludeText(DEFAULT_INSTANCE_NAME, text(legacy.mcpExcludeTools)) } : {}),
-      container: "own",
     },
   ];
 }

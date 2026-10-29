@@ -1,7 +1,7 @@
 /**
  * What the browser half asks of its server half: the routes under the address the portal gives the package
  * (portal.api.url, mounted by the portal at /api/x/@pithagoras/nextcloud, session-gated there), one per instance
- * beside the status and discovery. A request made while the server half is not running is refused as one the server
+ * beside the status. A request made while the server half is not running is refused as one the server
  * refused is. Which of the instances a tool call goes to is what its panel holds (InstanceContext): each open
  * panel keeps its own choice, and every tool call is sent with it.
  */
@@ -21,7 +21,6 @@ export interface NextcloudStatus {
 /** What one instance says of itself in the status. */
 export interface InstanceStatus {
   name: string;
-  mode: "own" | "adopted";
   containerName: string;
   state: string; // absent | running | stopped | created | ... Docker's word for it
   address?: string; // where its /mcp endpoint stands, where it does at all
@@ -41,16 +40,6 @@ export interface InstanceView {
   capabilities?: Record<string, boolean>;
   passwordSet?: boolean;
   configured: boolean;
-  container: string; // "own" or "adopted:<docker container name>"
-}
-
-/** A container that runs the image, as GET /discover found it on the machine. */
-export interface DiscoveredContainer {
-  name: string;
-  image: string;
-  status: string; // Docker's own words for how it stands
-  endpoint?: string; // its /mcp at the loopback, where it publishes port 8000 there
-  takenBy?: string; // an instance already adopts it
 }
 
 /** A content part of a tool call's answer, raw from the server. */
@@ -89,7 +78,6 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name }),
     }),
-  discover: () => call<{ containers: DiscoveredContainer[]; note?: string }>("/discover"),
   start: () => call<NextcloudStatus>("/start", { method: "POST" }),
   reset: () => call<{ ok: true }>("/reset", { method: "POST" }),
   tool: (name: string, args: Record<string, unknown> = {}, instance?: string) =>

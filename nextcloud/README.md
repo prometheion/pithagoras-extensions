@@ -39,15 +39,9 @@ port at the loopback of the portal's network, and its own entry in pi's config u
 `nextcloud` tool talks to exactly the instance the registration names. The panel beside your chat shows a switcher
 over the instances above its tabs: whichever it holds is what every tab there shows and changes.
 
-Already running this image yourself — with your own name, ports or settings? Adopt that container instead of making a
-new one: on the instance's card choose the found container in place of *own*. The extension then only registers the
-server in pi's config; it never starts, stops, amends or removes an adopted one, and what you set yourself stays as
-you set it. And where pi's config already carries entries that point at such running containers — MCP servers you ran
-before this extension existed — the first start takes them over on its own: each of those entries becomes an instance
-that adopts the container behind it, with its keep-out list coming over as its capability choices and, where the
-container carries them, the
-host, user name and app password from its environment. The settings page shows what came over; your other tuning of
-those entries (the debug flag and the like) stays, and nothing else moves.
+Already running this image yourself? Those containers are not touched by the extension at all: every instance starts
+its own container beside them, so the ones you ran come to stand redundant — remove them on your own where you are
+done with them.
 
 The settings page also shows every capability this extension knows about — the tool families of its tabs, one choice
 each: files and sharing beside each other, mail, news, collectives among them. Each choice turns that family's tools
@@ -56,9 +50,8 @@ does not provide a family at all (its server answers without those tools), the c
 out wherever it would reach. What the endpoint provides is found from its own tool list every time the status looks,
 so nothing an earlier version never offered is invented, and a server that starts to offer more shows it on its own.
 
-**Remove** takes an instance away: its entry in pi's config always goes, and its own container with it — an adopted one
-untouched. The settings stay where they were shown on the page, so putting the instance back starts it without typing
-anything new. Uninstalling the extension does the same removal for every instance.
+**Remove** takes an instance away: its entry in pi's config always goes, and its container with it. The settings stay
+where they were shown on the page, so putting the instance back starts it without typing anything new. Uninstalling the extension does the same removal for every instance.
 
 ## What you get
 

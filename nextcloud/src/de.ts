@@ -18,9 +18,7 @@ export const de = {
   "This Nextcloud ({name}) is not set up completely yet: fill it in on the Nextcloud page in Settings.":
     "Dieses Nextcloud ({name}) ist noch nicht ganz eingerichtet: Fülle es auf der Nextcloud-Seite in den Einstellungen aus.",
   "Which of the Nextclouds the pages talk to": "Welches der Nextclouds die Seiten ansprechen",
-  "adopted": "übernommen",
-  "own": "eigener",
-  "Loading…": "Wird geladen …",
+  "Loading…": "Wird geladen ",
 
   // Einkaufsliste
   "The lists could not be read: {error}": "Die Listen konnten nicht gelesen werden: {error}",
@@ -56,8 +54,8 @@ export const de = {
   "Remove this note for good?": "Diese Notiz endgültig entfernen?",
 
   // Einstellungen
-  "This extension runs the Nextcloud MCP server for each of its instances -- in a container it made and keeps, or one already running that it adopted by name -- and registers every instance in pi's config for the chats. Each instance needs a host and an app password.":
-    "Diese Erweiterung betreibt den Nextcloud-MCP-Server für jede ihrer Instanzen – in einem Container, den sie angelegt und weiterpflegt, oder in einem, der schon lief und den sie nach Namen übernommen hat –, und trägt jede Instanz für die Chats in der Konfiguration von pi ein. Jede Instanz braucht einen Host und ein App-Passwort.",
+  "This extension runs the Nextcloud MCP server for each of its instances -- each in a container it made and keeps, as understory does -- and registers every instance in pi's config for the chats. Each instance needs a host and an app password.":
+    "Diese Erweiterung betreibt den Nextcloud-MCP-Server für jede ihrer Instanzen – je in einem Container, den sie angelegt und weiterpflegt wie understory –, und trägt jede Instanz für die Chats in der Konfiguration von pi ein. Jede Instanz braucht einen Host und ein App-Passwort.",
   "Each save marks its entry as persistent and trusted, so agents may call the instance's tools without asking; Remove or removing the extension takes the entry back again.":
     "Jedes Speichern markiert den Eintrag als dauerhaft und vertraut, damit Agenten die Tools der Instanz ohne Rückfrage rufen dürfen; Entfernen oder Deinstallation nimmt den Eintrag wieder heraus.",
   "No instance yet: add your first Nextcloud below.": "Noch keine Instanz: Lege unten dein erstes Nextcloud an.",
@@ -68,19 +66,11 @@ export const de = {
   "Letters, numbers, dashes and underscores; it must start with a letter.":
     "Buchstaben, Zahlen, Gedankenstriche und Unterstriche; es muss mit einem Buchstaben beginnen.",
   "Another instance carries this name already.": "Eine andere Instanz führt diesen Namen schon.",
-  "Where its /mcp endpoint runs": "Wo ihr /mcp-Endpunkt läuft",
-  "Make a new container and keep it": "Einen neuen Container anlegen und behalten",
-  "An adopted container is never made again, pulled or removed by this extension; it only says where it runs.":
-    "Einen übernommenen Container legt diese Erweiterung nie neu an, zieht ihn nicht und entfernt ihn nicht; sie sagt nur, wo er läuft.",
-  "No container of this image was found on this machine right now.":
-    "Auf diesem Rechner wurde gerade kein Container dieses Images gefunden.",
-  "own container": "eigener Container",
-  "adopted container": "übernommener Container",
-  "Remove the instance {name}? Its own container, where it has one, goes with it; an adopted one stays running.":
-    "Die Instanz {name} entfernen? Ihr eigener Container geht mit ihr, wo sie einen hat; ein übernommener läuft weiter.",
+  "Remove the instance {name}? Its container goes with it.":
+    "Die Instanz {name} entfernen? Ihr Container geht mit ihr.",
   "Remove everything": "Alles entfernen",
-  "Remove the containers this extension made and its entries in pi's config? The settings stay, and an adopted container keeps running where it ran.":
-    "Die Container, die diese Erweiterung angelegt hat, und ihre Einträge in der Konfiguration von pi entfernen? Die Einstellungen bleiben, und ein übernommener Container läuft dort weiter, wo er lief.",
+  "Remove the containers this extension made and its entries in pi's config? The settings stay.":
+    "Die Container, die diese Erweiterung angelegt hat, und ihre Einträge in der Konfiguration von pi entfernen? Die Einstellungen bleiben.",
   "Nextcloud host": "Nextcloud-Host",
   "Username": "Benutzername",
   "App password": "App-Passwort",

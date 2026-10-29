@@ -15,10 +15,10 @@ import { api, InstanceContext, NextcloudStatus } from "./web/api";
  * working, on whichever of the instances the switcher in the header holds (the first where there is more than one).
  * Which tabs stand at all is found from the instance's endpoint: a family its server does not provide stands no tab,
  * and a family its choices turned off stands none either -- offered nowhere, kept out of the chats' tool lists with.
- * All of it through its own server half (the /api/x routes), which runs every instance's MCP server -- in a
- * container this extension made, or one it adopted -- and knows where things stand; nothing of the Nextcloud talks
- * to the browser itself. Plus its page in Settings: the instances, their containers (made or adopted), their
- * entries in pi's config, and how all stands.
+ * All of it through its own server half (the /api/x routes), which runs every instance's MCP server -- each in a
+ * container this extension made and keeps for it -- and knows where things stand; nothing of the Nextcloud talks
+ * to the browser itself. Plus its page in Settings: the instances, their containers, their entries in pi's config,
+ * and how all stands.
  */
 
 let ShoppingList: ComponentType;
@@ -99,7 +99,7 @@ function NextcloudPanel({ panel }: PanelProps) {
               key={inst.name}
               active={inst.name === (held?.name ?? selected)}
               onClick={() => setSelected(inst.name)}
-              label={`${inst.name}${inst.mode === "adopted" ? ` (${t("adopted")})` : ""}`}
+              label={inst.name}
             />
           ))}
         </div>
@@ -211,7 +211,7 @@ export default function nextcloud(given: Portal): void {
     id: "nextcloud",
     title: msg("Nextcloud"),
     icon: LuCloud,
-    search: [{ title: msg("Nextcloud"), words: "nextcloud mcp instances instance adopt adopted container containers port image app password host capabilities mail news collectives" }],
+    search: [{ title: msg("Nextcloud"), words: "nextcloud mcp instances instance container containers port image app password host capabilities mail news collectives" }],
     component: () => (
       <Suspense fallback={<SettingsFallback />}>
         <SettingsPage />

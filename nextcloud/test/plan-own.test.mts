@@ -1,4 +1,4 @@
-/** What planOwn says of the own instances: their containers and their loopback ports -- stable across adds, removes
+/** What planOwn says of every instance: its container and its loopback port -- stable across adds, removes
  * and reorders of the other instances, and apart where two slugs came to one. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -6,7 +6,7 @@ import { planOwn, PORT, CONTAINER_BASE } from "../src/container.ts";
 import type { NextcloudInstance } from "../src/config.ts";
 
 function inst(name: string, over: Partial<NextcloudInstance> = {}): NextcloudInstance {
-  return { name, url: "https://cloud.example.org", username: "user", password: "pw", mcpExcludeTools: "", container: "own", ...over };
+  return { name, url: "https://cloud.example.org", username: "user", password: "pw", ...over };
 }
 
 test("the default instance stands under the base name on the base port", () => {
@@ -15,17 +15,20 @@ test("the default instance stands under the base name on the base port", () => {
   assert.equal(plans.get("nextcloud")?.port, PORT);
 });
 
-test("a second own instance gets its slug of the name and the next port", () => {
+test("a second instance gets its slug of the name and the next port", () => {
   const plans = planOwn([inst("nextcloud"), inst("uni")]);
   assert.equal(plans.get("uni")?.containerName, `${CONTAINER_BASE}-uni`);
   assert.equal(plans.get("uni")?.port, PORT + 1);
 });
 
-test("adopted instances take no container and no port", () => {
-  const plans = planOwn([inst("a"), inst("b", { container: "adopted:somebox" }), inst("c")]);
-  assert.equal(plans.has("b"), false);
+test("every instance takes a container and a port, in the list's order", () => {
+  const plans = planOwn([inst("a"), inst("b"), inst("c")]);
+  assert.equal(plans.get("a")?.containerName, `${CONTAINER_BASE}-a`);
+  assert.equal(plans.get("b")?.containerName, `${CONTAINER_BASE}-b`);
   assert.equal(plans.get("c")?.containerName, `${CONTAINER_BASE}-c`);
-  assert.equal(plans.get("c")?.port, PORT + 1);
+  assert.equal(plans.get("a")?.port, PORT);
+  assert.equal(plans.get("b")?.port, PORT + 1);
+  assert.equal(plans.get("c")?.port, PORT + 2);
 });
 
 test("two slugs that come to one name stand apart by number", () => {

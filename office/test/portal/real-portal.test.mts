@@ -1774,7 +1774,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc!.docId)));
     const sheet = (await zip.file("xl/worksheets/sheet1.xml")?.async("string")) ?? "";
     const styles = (await zip.file("xl/styles.xml")?.async("string")) ?? "";
-    console.log(`p2. the saved sheet: merged ${/<mergeCell ref="A1:D1"/.test(sheet)}, frozen ${/<pane [^>]*ySplit="3"[^>]*state="frozen"/.test(sheet)}, fill ${/1F4E79/i.test(styles)}, number format ${/#,##0\.00/.test(styles)}, double border ${/style="double"/.test(styles)}, column A ${/<col [^>]*min="1" max="1"[^>]*width="25/.test(sheet) || /<col [^>]*width="25[^"]*"[^>]*min="1" max="1"/.test(sheet)}, row 3 ${/<row r="3"[^>]* ht="30"/.test(sheet)}, sum ${/<f>SUM\(D4:D8\)<\/f>/.test(sheet)}`);
+    console.log(`p2. the saved sheet: merged ${/<mergeCell ref="A1:D1"/.test(sheet)}, frozen ${/<pane [^>]*ySplit="3"[^>]*state="frozen"/.test(sheet)}, fill ${/1F4E79/i.test(styles)}, number format ${/#,##0\.00|numFmtId="4"/.test(styles)}, double border ${/style="double"/.test(styles)}, column A ${/<col [^>]*min="1" max="1"[^>]*width="25/.test(sheet) || /<col [^>]*width="25[^"]*"[^>]*min="1" max="1"/.test(sheet)}, row 3 ${/<row r="3"[^>]* ht="30"/.test(sheet)}, sum ${/<f>SUM\(D4:D8\)<\/f>/.test(sheet)}`);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

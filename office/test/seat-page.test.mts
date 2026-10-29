@@ -461,7 +461,7 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       },
       GetColumnWidth: () => sh.widths[b.c1] ?? 8.43,
       SetColumnWidth: (w: number) => { for (let c = b.c1; c <= b.c2; c++) sh.widths[c] = w; },
-      GetRowHeight: () => sh.heights[b.r1] ?? 15,
+      GetRowHeight: () => (b.r1 in sh.heights ? sh.heights[b.r1] : 15),
       SetRowHeight: (h: number) => { for (let r = b.r1; r <= b.r2; r++) sh.heights[r] = h; },
       GetHidden: () => (b.whole === "columns" ? sh.hiddenCols.includes(b.c1) : b.whole === "rows" ? sh.hiddenRows.includes(b.r1) : false),
       SetHidden: (v: boolean) => {
@@ -1018,6 +1018,8 @@ test("cell.read with formatting: the sheet's usual font, the cells that look oth
   s1.merges.push("A4:B4");
   s1.widths[0] = 18;
   s1.heights[3] = 30;
+  // A height the builder does not give is the usual one.
+  (s1.heights as Record<number, number | null>)[1] = null;
   s1.hiddenRows.push(2);
   s1.frozen = { cols: 0, rows: 1 };
   const out = book.run(COMMANDS["cell.read"].source, { formatting: true });

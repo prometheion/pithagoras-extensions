@@ -1335,6 +1335,8 @@ function sheetLook(ws, address, room) {
     if (usualSize !== null) counts[usualSize] = 0.5;
     for (var k = from; k <= to; k++) {
       var r = one(k), hidden = r.GetHidden() === true, s = size2(r);
+      // A size the builder does not give (null) is the usual one.
+      if (typeof s !== "number" && !hidden) continue;
       all.push([k, s, hidden]);
       if (!hidden) { counts[s] = (counts[s] || 0) + 1; if (usualSize === null || counts[s] > counts[usualSize]) usualSize = s; }
     }

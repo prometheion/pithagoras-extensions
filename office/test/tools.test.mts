@@ -1339,7 +1339,7 @@ test("office_read with formatting (spreadsheet): each sheet's cells, then how th
           ],
           merged: ["A3:D3"],
           cols: { usual: 8.43, own: [[0, 18], [1, 14], [3, 0, true], [4, 0, true]] },
-          rows: { usual: 15, own: [[0, 30], [4, 15, true], [5, 15, true], [6, 15, true], [10, 40]] },
+          rows: { usual: 15, own: [[0, 30], [4, 15, true], [5, 15, true], [6, 15, true], [10, 40], [11, null]] },
           frozen: { cols: 1, rows: 5 },
           cut: true,
         },
@@ -1354,7 +1354,7 @@ test("office_read with formatting (spreadsheet): each sheet's cells, then how th
     'Formats: A5:D5 Arial 12, bold, #FFFFFF, fill #1F4E79; B6:C9, B11 "#,##0.00 \\"€\\""; A10 italic, strike, underline double, superscript, wrap, rotated 90°; A11 vertical.',
     "Merged: A3:D3.",
     "Columns: A 18, B 14, D-E hidden (others 8.43).",
-    "Rows: 1 30pt, 5-7 hidden, 11 40pt (others 15pt).",
+    "Rows: 1 30pt, 5-7 hidden, 11 40pt, 12 as the sheet's (others 15pt).",
     "Frozen: rows 1-5 and column A.",
     "(its formatting is cut here: a read gives 50,000 characters of it at most; read one sheet with sheet, or look with office_screenshot)",
   ].join("\n"));

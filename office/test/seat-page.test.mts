@@ -805,9 +805,9 @@ test("a Word reply through the comment methods names the comment made anew by th
 /**
  * A Word document of `texts` (a list is a table of one row, `{rows}` one of those rows), laid out so that page k starts
  * in paragraph `starts[k]` (an index into the document's paragraphs in reading order, a table's cells among them);
- * `hits` what the editor's search finds of a quote, each on its page (from 0).
+ * `hits` what the editor's search finds of a quote, each on its page (from 0), or in a header.
  */
-function laidOut(texts: (string | string[] | { rows: string[][] })[], starts: number[], hits: Record<string, number[]> = {}) {
+function laidOut(texts: (string | string[] | { rows: string[][] })[], starts: number[], hits: Record<string, (number | "header")[]> = {}) {
   let id = 0;
   const paras: { GetInternalId: () => string }[] = [];
   const para = (text: string) => {
@@ -829,7 +829,8 @@ function laidOut(texts: (string | string[] | { rows: string[][] })[], starts: nu
   const doc = {
     ...contentOf(elements),
     GetPageCount: () => starts.length,
-    Search: (q: string) => (hits[q] ?? []).map((page) => ({ GetStartPage: () => page })),
+    // A hit on a page is in the paragraph that page starts with; one in a header is in none of the body's.
+    Search: (q: string) => (hits[q] ?? []).map((page, k) => (page === "header" ? { GetAllParagraphs: () => [{ GetInternalId: () => "header" }], GetStartPos: () => 0 } : { GetStartPage: () => page, GetAllParagraphs: () => [paras[starts[page]] ?? paras[0]], GetStartPos: () => k })),
     GoToPage: (k: number) => (did.push(`page ${k}`), (at = starts[k])),
     MoveCursorRight: (n: number, select: boolean) => did.push(`right ${n} ${select}`),
     GetRangeBySelect: () => ({ GetAllParagraphs: () => [paras[at]] }),
@@ -880,8 +881,8 @@ test("view.locate, Word: a page's text stops at the most a picture gives, also i
   assert.deepEqual([cut.truncated, cut.blocks.length, cut.blocks[0].p.length], [true, 1, MAX_SHOWN_TEXT]);
 });
 
-test("view.locate, Word: a quote's page, the nth time it is found; a quote found more than once needs nth; one not found is refused", () => {
-  const doc = laidOut(["a", "b", "c"], [0, 1, 2], { once: [1], thrice: [0, 1, 2] });
+test("view.locate, Word: a quote's page, the nth time it is found in the body (not in a header); a quote found more than once needs nth; one not found is refused", () => {
+  const doc = laidOut(["a", "b", "c"], [0, 1, 2], { once: ["header", 1], thrice: [0, 1, 2] });
   assert.equal(command("view.locate", doc.Api, { kind: "word", quote: "once" }).result.page, 2);
   assert.equal(command("view.locate", doc.Api, { kind: "word", quote: "thrice", nth: 3 }).result.page, 3);
   assert.deepEqual(command("view.locate", doc.Api, { kind: "word", quote: "thrice" }).error, { code: "quote_ambiguous", message: 'the quote "thrice" is in the document 3 times: give nth (from 1) or quote more of it' });
@@ -1033,6 +1034,8 @@ function scriptedWord(spec: {
   styles?: Record<string, "paragraph" | "run" | "table">;
   header?: "text" | "picture";
   throwOn?: string;
+  /** Quotes the search does not find though the text has them (a footnote's mark parts them). */
+  parted?: string[];
 }) {
   const calls: string[] = [];
   const show = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? `[${v.map(show).join(", ")}]` : typeof v === "object" && v && (v as { __label?: string }).__label ? String((v as { __label: string }).__label) : JSON.stringify(v));
@@ -1106,7 +1109,7 @@ function scriptedWord(spec: {
     CreateStyle: (name: string, type: string) => (calls.push(`doc.CreateStyle(${JSON.stringify(name)}, ${JSON.stringify(type)})`), style(name, type)),
     CreateNumbering: (kind: string) => (calls.push(`doc.CreateNumbering(${JSON.stringify(kind)})`), numbering(`new${++made}`, kind)),
     Search: (q: string) => {
-      const found = spec.paras.flatMap((p, i) => (p.text.includes(q) ? [hit(q, i)] : []));
+      const found = spec.parted?.includes(q) ? [] : spec.paras.flatMap((p, i) => (p.text.includes(q) ? [hit(q, i)] : []));
       for (const where of spec.elsewhere?.[q] ?? []) {
         const stray = where === "toc" ? rec("toc entry", { GetInternalId: () => "toc", GetStyle: () => styles["toc 1"] }) : rec("header paragraph", { GetInternalId: () => "header" });
         found.unshift(hit(q, 0, { para: stray }));
@@ -1307,4 +1310,10 @@ test("the plugin takes back a word.format that failed after it changed something
   assert.deepEqual([late.error.code, late.undone, methods], ["failed", true, ["Undo"]]);
   const early = await bridge({ kind: "word.format", args: { ops: [] } }, () => ({ error: { code: "bad_op", op: 0, message: "op 1: no style" }, touched: false }), (name) => (methods.push(name), true));
   assert.deepEqual([early.error.code, early.undone, methods], ["bad_op", undefined, ["Undo"]]);
+});
+
+test("word.format: a quote in the text that the editor's search does not find (a footnote's mark parts it) is refused with what to quote instead", () => {
+  const w = scriptedWord({ paras: [{ text: "Figures are unaudited." }], parted: ["Figures are unaudited."] });
+  assert.match(w.run([{ format: "Figures are unaudited.", text: { bold: true } }]).error.message, /is not in the document's body as the editor searches it \(it is in the text, parted by a footnote's mark or a field: quote the text before or after that\)$/);
+  assert.match(w.run([{ format: "nowhere", text: { bold: true } }]).error.message, /as the editor searches it$/);
 });

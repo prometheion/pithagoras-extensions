@@ -406,7 +406,7 @@ function formatOp(op: unknown, i: number): FormatOp {
   const content = ["quote", "replacement", "paragraphs", "table", "remove"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the document says): make it with office_edit, and its look here`);
   const shapes = FORMAT_SHAPES.filter((k) => k !== "set" && k in op);
-  if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})`, i);
+  if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its quote the value of its first key ({${shapes[1]}: "<quote>", …})` : ""}`, i);
   const shape = shapes[0];
   const only = (keys: string[]) => {
     const extra = Object.keys(op).filter((k) => !keys.includes(k));

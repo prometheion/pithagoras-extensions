@@ -1403,7 +1403,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const word = await newDoc("Formatted from a chat", "word");
     const { page, frame } = await personOpens(word, "word");
     const [wrote, formatted, read] = await say(eye, [
-      { name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Quarterly report" }, { after: "Quarterly report", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", paragraphs: ["Revenue grew. There was a discrepancy.", "North", "South"] }, { after: "South", table: [["Region", "Revenue"], ["North", "120"]] }] } },
+      { name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Quarterly report" }, { after: "Quarterly report", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", paragraphs: ["Revenue grew. There was a discrepancy.", "North region", "South region"] }, { after: "South region", table: [["Region", "Revenue"], ["North", "120"]] }] } },
       {
         name: "office_format",
         arguments: {
@@ -1412,7 +1412,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
             { format: "Quarterly report", set: { fontSize: 20, bold: true, color: "#C81E1E", align: "center" } },
             { defineStyle: "Callout", set: { italic: true, indentLeft: "1cm" } },
             { format: "Revenue grew", set: { style: "Callout" } },
-            { format: "North", through: "South", set: { list: "bullet" } },
+            { format: "North region", through: "South region", set: { list: "bullet" } },
             { formatTable: "Region", set: { tableStyle: "Grid Table 4 - Accent 1", headerRows: 1, width: "100%" } },
             { page: "*", set: { margins: "2cm", footer: "Page {page} of {pages}" } },
             { footnote: "discrepancy", text: "Checked in March." },
@@ -1422,10 +1422,10 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       { name: "office_read", arguments: { id: word, formatting: true } },
     ]);
     console.log(`o. ${wrote}\no. ${formatted}\no. ${read}`);
-    assert.match(formatted, /^Formatted "Formatted from a chat" \(7 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Made the style "Callout"\. The document reflowed/);
+    assert.match(formatted, /\nFormatted "Formatted from a chat" \(7 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Made the style "Callout"\. The document reflowed/);
     assert.match(read, /"Quarterly report": 20, bold, #C81E1E/);
     assert.match(read, /\(Callout\) Revenue grew\./);
-    assert.match(read, /\(bullet\) North/);
+    assert.match(read, /\(bullet\) North region\n\[\d+\] \(bullet\) South region/);
     assert.match(read, /table \(style "Grid Table 4 - Accent 1", header row 1\)/);
     assert.match(read, /Footer: "Page \{page\} of \{pages\}"/);
     assert.match(read, /Footnotes: \[1\] in \[\d+\] after "Revenue grew\. There was a discrepancy": Checked in March\./);

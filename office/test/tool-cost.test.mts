@@ -15,14 +15,16 @@ const tokens = (text: string) => Math.ceil(text.length / 4);
 const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.stringify(tool.parameters)) + (tool.promptSnippet ? tokens(`- ${tool.name}: ${tool.promptSnippet}`) : 0);
 
 /** The agreed cost of each tool, in tokens (office_screenshot: about 260 in the plan of #13, 254 as written: `large` says
- * that a picture is never larger than the editor draws it; office_format about 650 in the plan, 656 as written; office_read
- * 246 -> 301 with `formatting` and lists, office_edit 958 -> 974 with `nth` and any paragraph style). */
+ * that a picture is never larger than the editor draws it; office_format about 650 in the plan, 675 as written, after the
+ * real-model run of #13's PR 2 (an op's quote is its first key's value, with two examples); office_read 246 -> 301 with
+ * `formatting` and lists; office_edit 958 -> 974 with `nth` and any paragraph style; office_create 190 -> 200: a Word
+ * document starts with the paragraph "New document", which a model kept when it was told the document starts empty). */
 const AGREED: Record<string, number> = {
   office_list: 113,
-  office_create: 190,
+  office_create: 200,
   office_read: 301,
   office_edit: 974,
-  office_format: 656,
+  office_format: 675,
   office_comments: 181,
   office_screenshot: 254,
 };
@@ -47,5 +49,5 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 2669);
+  assert.equal(agreed, 2698);
 });

@@ -359,6 +359,7 @@ test("office_format refuses what does not hold before anything is sent, naming t
   // Shapes.
   no([{ through: "b", set: { bold: true } }], /must be exactly one of/);
   no([{ format: "a", page: "b", set: {} }], /it has format and page/);
+  no([{ format: "unaudited", footnote: true, text: "x" }], /\(it has format and footnote\): each is an op of its own, its quote the value of its first key \(\{footnote: "<quote>", …\}\)$/);
   no([{ format: "a" }], /set is an object of what to set/);
   no([{ format: "a", set: {} }], /set is an object/);
   no([{ format: "a", set: Object.fromEntries(Array.from({ length: MAX_SET_KEYS + 1 }, (_, k) => [`k${k}`, 1])) }], new RegExp(`at most ${MAX_SET_KEYS} keys`));

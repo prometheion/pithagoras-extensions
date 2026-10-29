@@ -181,7 +181,11 @@ function bodyHits(doc, quote, at) {
 }
 function pick(doc, quote, nth, i, what) {
   var hits = bodyHits(doc, quote, bodyIndex(doc)), q = JSON.stringify(quote), n = "op " + (i + 1) + ": ";
-  if (!hits.length) throw { code: "quote_not_found", op: i, message: n + "the " + what + " " + q + " is not in the document's body as the editor searches it" };
+  if (!hits.length) {
+    // In the text and not found by the search: a footnote's mark or a field inside it parts it for the editor's search.
+    var parted = collect(doc, []).some(function (x) { return !x.toc && x.text.indexOf(quote) !== -1; });
+    throw { code: "quote_not_found", op: i, message: n + "the " + what + " " + q + " is not in the document's body as the editor searches it" + (parted ? " (it is in the text, parted by a footnote's mark or a field: quote the text before or after that)" : "") };
+  }
   if (nth) {
     if (nth > hits.length) throw { code: "quote_not_found", op: i, message: n + "the " + what + " " + q + " is in the document " + hits.length + " time" + (hits.length === 1 ? "" : "s") + ", not " + nth };
     return hits[nth - 1];
@@ -1361,13 +1365,15 @@ export const VIEW_SETTLE = { ms: 300, max: 5_000, every: 50 };
  */
 const VIEW_LOCATE = `function () {
   ${WORD_COLLECT_SRC}
+  ${WORD_QUOTE_SRC}
   ${CELL_ADDRESS_SRC}
   ${SHEET_MODEL_SRC}
   var a = Asc.scope.args;
   function word() {
     var doc = Api.GetDocument(), pages = doc.GetPageCount(), page = a.page || 1;
     if (a.quote !== undefined) {
-      var hits = doc.Search(a.quote, true) || [], nth = a.nth || 1, q = JSON.stringify(a.quote);
+      // The body's text only, as office_edit's and office_format's quotes (WORD_QUOTE_SRC).
+      var hits = bodyHits(doc, a.quote, bodyIndex(doc)).map(function (h) { return h.range; }), nth = a.nth || 1, q = JSON.stringify(a.quote);
       if (!hits.length) throw { code: "quote_not_found", message: "the quote " + q + " is not in the document" };
       if (hits.length > 1 && !a.nth) throw { code: "quote_ambiguous", message: "the quote " + q + " is in the document " + hits.length + " times: give nth (from 1) or quote more of it" };
       if (nth > hits.length) throw { code: "quote_not_found", message: "the quote " + q + " is in the document " + hits.length + " time" + (hits.length === 1 ? "" : "s") + ", not " + nth };

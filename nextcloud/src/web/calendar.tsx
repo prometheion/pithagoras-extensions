@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError } from "./api";
+import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 import { SubTabs } from "./widgets";
 
 /** The Calendar tab: a day agenda over the days -- what is on the chosen day of which calendar, and where the next
@@ -52,6 +52,7 @@ const localInput = (iso: string | undefined, dateOnly = false): string => {
 
 export default function Calendar() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the calendar calls go
   const [view, setView] = useState<"events" | "todos">("events");
 
   // the calendars and which is open (the first one the server says is writable)
@@ -91,7 +92,7 @@ export default function Calendar() {
     setCalendars(null);
     setCalendarProblem(null);
     void api
-      .tool("nc_calendar_list_calendars")
+      .tool("nc_calendar_list_calendars", {}, instance)
       .then((result) => {
         const rows = (arrayOf(partText(result).data, "calendars") ?? []).map((c) => ({ name: String(c.name), displayName: String(c.display_name ?? c.name), readOnly: Boolean(c.read_only) }));
         setCalendars(rows);
@@ -113,7 +114,7 @@ export default function Calendar() {
     setEvents(null);
     setEventProblem(null);
     void api
-      .tool("nc_calendar_list_events", { calendar_name: name, start_date: dayKey, end_date: dayKey, limit: 50 })
+      .tool("nc_calendar_list_events", { calendar_name: name, start_date: dayKey, end_date: dayKey, limit: 50 }, instance)
       .then((result) => {
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).events : undefined;
@@ -147,7 +148,7 @@ export default function Calendar() {
     setEvent(null);
     setEventProblem2(null);
     void api
-      .tool("nc_calendar_get_event", { calendar_name: calendarName, event_uid: summary.uid })
+      .tool("nc_calendar_get_event", { calendar_name: calendarName, event_uid: summary.uid }, instance)
       .then((result) => {
         const data = partText(result).data;
         if (typeof data !== "object" || data === null) throw new Error(t("The event did not answer in a way this panel reads."));
@@ -214,7 +215,7 @@ export default function Calendar() {
     void (async () => {
       setBusy(true);
       try {
-        await api.tool("nc_calendar_update_event", args);
+        await api.tool("nc_calendar_update_event", args, instance);
         setEvent(null);
         loadEvents(day, calendarName);
       } catch (error) {
@@ -231,7 +232,7 @@ export default function Calendar() {
     void (async () => {
       setBusy(true);
       try {
-        await api.tool("nc_calendar_delete_event", { calendar_name: calendarName, event_uid: event.uid });
+        await api.tool("nc_calendar_delete_event", { calendar_name: calendarName, event_uid: event.uid }, instance);
         setEvent(null);
         loadEvents(day, calendarName);
       } catch (error) {
@@ -259,7 +260,7 @@ export default function Calendar() {
           const end = new Date(`${day}T${newEndAt}:00`);
           args.end_datetime = !Number.isNaN(end.getTime()) && end > start ? `${day}T${newEndAt}:00` : undefined;
         }
-        await api.tool("nc_calendar_create_event", args);
+        await api.tool("nc_calendar_create_event", args, instance);
         setNewTitle("");
         loadEvents(day, calendarName);
       } catch (error) {
@@ -275,7 +276,7 @@ export default function Calendar() {
     setTodos(null);
     setTodoProblem(null);
     void api
-      .tool("nc_calendar_list_todos", { calendar_name: name })
+      .tool("nc_calendar_list_todos", { calendar_name: name }, instance)
       .then((result) => {
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).todos : undefined;
@@ -303,7 +304,7 @@ export default function Calendar() {
     void (async () => {
       setBusy(true);
       try {
-        await api.tool("nc_calendar_complete_todo", { calendar_name: todoCal, todo_uid: todo.uid }); // its own now is the timestamp
+        await api.tool("nc_calendar_complete_todo", { calendar_name: todoCal, todo_uid: todo.uid }, instance); // its own now is the timestamp
         loadTodos(todoCal);
       } catch (error) {
         setTodoProblem(sayError(error));

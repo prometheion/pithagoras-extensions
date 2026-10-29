@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError } from "./api";
+import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 
 /** The Cookbook tab: the recipes by name and date, one chosen open to its ingredients and steps; a line to take a
  * recipe in from a page that carries schema.org. All of it as a tool call on the server. */
@@ -14,6 +14,7 @@ interface RecipeRow {
 
 export default function Cookbook() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the recipe calls go
   const [recipes, setRecipes] = useState<RecipeRow[] | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
@@ -24,7 +25,7 @@ export default function Cookbook() {
   const load = () => {
     setRecipes(null);
     void api
-      .tool("nc_cookbook_list_recipes")
+      .tool("nc_cookbook_list_recipes", {}, instance)
       .then((result) => {
         const rows = (arrayOf(partText(result).data, "recipes") ?? []).map((r) => ({
           id: String(r.id),
@@ -43,7 +44,7 @@ export default function Cookbook() {
     setChosen(id);
     setDetail(null);
     void api
-      .tool("nc_cookbook_get_recipe", { recipe_id: Number(id) })
+      .tool("nc_cookbook_get_recipe", { recipe_id: Number(id) }, instance)
       .then((result) => {
         const data = partText(result).data;
         if (typeof data === "object" && data !== null) setDetail(data as Record<string, unknown>);
@@ -58,7 +59,7 @@ export default function Cookbook() {
     setBusy(true);
     setProblem(null);
     try {
-      await api.tool("nc_cookbook_import_recipe", { url: target });
+      await api.tool("nc_cookbook_import_recipe", { url: target }, instance);
       setUrl("");
       load();
     } catch (error) {

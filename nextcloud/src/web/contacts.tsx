@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { LuPlus } from "react-icons/lu";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError } from "./api";
+import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 
 /** The Contacts tab: one address book chosen of the books; its contacts, with a search that runs over the words of
  * name, e-mail and phone; and one contact open to its detail -- the common fields read and changed (the name, one
@@ -34,6 +34,7 @@ interface ContactRow {
 
 export default function Contacts() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the contact calls go
   const [books, setBooks] = useState<BookRow[] | null>(null);
   const [bookProblem, setBookProblem] = useState<string | null>(null);
   const [bookUri, setBookUri] = useState<string | null>(null);
@@ -93,7 +94,7 @@ export default function Contacts() {
     setBooks(null);
     setBookProblem(null);
     void api
-      .tool("nc_contacts_list_addressbooks")
+      .tool("nc_contacts_list_addressbooks", {}, instance)
       .then((result) => {
         const found = (arrayOf(partText(result).data, "addressbooks") ?? []).map((b) => ({ uri: String(b.uri), displayName: String(b.displayname ?? b.uri) }));
         setBooks(found);
@@ -111,7 +112,7 @@ export default function Contacts() {
     setRows(null);
     setListProblem(null);
     void api
-      .tool(query.trim() !== "" ? "nc_contacts_search_contacts" : "nc_contacts_list_contacts", query.trim() !== "" ? { query: query.trim(), addressbook: uri } : { addressbook: uri })
+      .tool(query.trim() !== "" ? "nc_contacts_search_contacts" : "nc_contacts_list_contacts", query.trim() !== "" ? { query: query.trim(), addressbook: uri } : { addressbook: uri }, instance)
       .then((result) => {
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).contacts : undefined;
@@ -166,7 +167,7 @@ export default function Contacts() {
     void (async () => {
       setBusy(true);
       try {
-        await api.tool("nc_contacts_update_contact", { addressbook: bookUri, uid: contact.uid, contact_data: data, etag: contact.etag ?? "" });
+        await api.tool("nc_contacts_update_contact", { addressbook: bookUri, uid: contact.uid, contact_data: data, etag: contact.etag ?? "" }, instance);
         loadContacts(bookUri, search);
       } catch (error) {
         setContactProblem(sayError(error));
@@ -182,7 +183,7 @@ export default function Contacts() {
     void (async () => {
       setBusy(true);
       try {
-        await api.tool("nc_contacts_delete_contact", { addressbook: bookUri, uid: contact.uid });
+        await api.tool("nc_contacts_delete_contact", { addressbook: bookUri, uid: contact.uid }, instance);
         setContact(null);
         loadContacts(bookUri, search);
       } catch (error) {
@@ -204,7 +205,7 @@ export default function Contacts() {
       setBusy(true);
       try {
         const uid = `pithagoras-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        await api.tool("nc_contacts_create_contact", { addressbook: bookUri, uid, contact_data: data });
+        await api.tool("nc_contacts_create_contact", { addressbook: bookUri, uid, contact_data: data }, instance);
         setNewFn("");
         setNewEmail("");
         setNewPhone("");

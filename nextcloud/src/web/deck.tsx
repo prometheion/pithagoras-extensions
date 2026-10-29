@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { LuPlus } from "react-icons/lu";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError } from "./api";
+import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 
 /** The Deck tab: one board chosen of the boards; its stacks with their cards; and one card open to its detail --
  * read, renamed or reworded, due-dated, marked done, moved to another stack or taken away. What the deck tools
@@ -70,6 +70,7 @@ const mapCard = (c: Rec): CardMini => ({
 
 export default function Deck() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the deck calls go
   const [boards, setBoards] = useState<BoardRow[] | null>(null);
   const [boardProblem, setBoardProblem] = useState<string | null>(null);
   const [boardId, setBoardId] = useState<number | null>(null);
@@ -98,7 +99,7 @@ export default function Deck() {
     setBoards(null);
     setBoardProblem(null);
     void api
-      .tool("deck_get_boards")
+      .tool("deck_get_boards", {}, instance)
       .then((result) => {
         const rows = (arrayOf(partText(result).data, "boards") ?? []).map((b) => ({ id: Number(b.id), title: String(b.title ?? ""), color: strOf(b.color) }));
         setBoards(rows);
@@ -115,7 +116,7 @@ export default function Deck() {
     setStacks(null);
     setStackProblem(null);
     void api
-      .tool("deck_get_stacks", { board_id: id, include_cards: true })
+      .tool("deck_get_stacks", { board_id: id, include_cards: true }, instance)
       .then((result) => {
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).stacks : undefined;
@@ -144,7 +145,7 @@ export default function Deck() {
     setCardProblem(null);
     setMoveTo(null);
     void api
-      .tool("deck_get_card", { board_id: boardId, stack_id: stackId, card_id: mini.id })
+      .tool("deck_get_card", { board_id: boardId, stack_id: stackId, card_id: mini.id }, instance)
       .then((result) => {
         const data = partText(result).data;
         if (typeof data !== "object" || data === null) throw new Error(t("The card did not answer in a way this panel reads."));
@@ -201,14 +202,14 @@ export default function Deck() {
       changed = true;
     }
     if (!changed) return;
-    void act(() => api.tool("deck_update_card", args), () => openCard(cardInStack, card));
+    void act(() => api.tool("deck_update_card", args, instance), () => openCard(cardInStack, card));
   };
 
   // the tools stamp a completion date on; they give no word to take it off again
   const markDone = () => {
     if (card === null || cardInStack === null || boardId === null) return;
     void act(
-      () => api.tool("deck_update_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, done: new Date().toISOString() }),
+      () => api.tool("deck_update_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, done: new Date().toISOString() }, instance),
       () => openCard(cardInStack, card)
     );
   };
@@ -216,7 +217,7 @@ export default function Deck() {
   const moveCard = (targetStackId: number) => {
     if (card === null || cardInStack === null || boardId === null || targetStackId === cardInStack) return;
     void act(
-      () => api.tool("deck_reorder_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, order: 999, target_stack_id: targetStackId }),
+      () => api.tool("deck_reorder_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, order: 999, target_stack_id: targetStackId }, instance),
       () => {
         setCard(null);
         loadStacks(boardId);
@@ -228,7 +229,7 @@ export default function Deck() {
     if (card === null || cardInStack === null || boardId === null) return;
     if (!window.confirm(t("Take this card away for good?"))) return;
     void act(
-      () => api.tool("deck_delete_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id }),
+      () => api.tool("deck_delete_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id }, instance),
       () => {
         setCard(null);
         loadStacks(boardId);
@@ -242,7 +243,7 @@ export default function Deck() {
     if (newDescription !== "") args.description = newDescription;
     if (newDue !== "") args.duedate = `${newDue}:00`;
     void act(
-      () => api.tool("deck_create_card", args),
+      () => api.tool("deck_create_card", args, instance),
       () => {
         setNewTitle("");
         setNewDescription("");

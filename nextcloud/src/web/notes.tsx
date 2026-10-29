@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError } from "./api";
+import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 
 /** The Notes tab: the notes by a word, one chosen open to its text -- edited and saved (the etag travels with it,
  * so an edit made elsewhere is not quietly lost), or taken away. All of it as a tool call on the server. */
@@ -13,6 +13,7 @@ interface NoteRow {
 
 export default function Notes() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the note calls go
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<NoteRow[] | null>(null);
   const [chosenId, setChosenId] = useState<number | null>(null);
@@ -25,7 +26,7 @@ export default function Notes() {
   const search = (text: string) => {
     setResults(null);
     void api
-      .tool("nc_notes_search_notes", { query: text })
+      .tool("nc_notes_search_notes", { query: text }, instance)
       .then((result) => {
         const rows = (arrayOf(partText(result).data, "results") ?? []).map((r) => ({ id: Number(r.id), title: String(r.title ?? ""), category: typeof r.category === "string" ? r.category : undefined }));
         setResults(rows);
@@ -41,7 +42,7 @@ export default function Notes() {
     setChosenId(id);
     setNote(null);
     void api
-      .tool("nc_notes_get_note", { note_id: id })
+      .tool("nc_notes_get_note", { note_id: id }, instance)
       .then((result) => {
         const data = partText(result).data;
         if (typeof data === "object" && data !== null && typeof (data as Record<string, unknown>).etag === "string") {
@@ -61,7 +62,7 @@ export default function Notes() {
     setBusy(true);
     setProblem(null);
     try {
-      await api.tool("nc_notes_update_note", { note_id: chosenId, etag: note.etag, title: editedTitle, content: editedContent, category: null });
+      await api.tool("nc_notes_update_note", { note_id: chosenId, etag: note.etag, title: editedTitle, content: editedContent, category: null }, instance);
       open(chosenId); // the etag moved; read it back as it stands now
     } catch (error) {
       setProblem(sayError(error));
@@ -76,7 +77,7 @@ export default function Notes() {
     setBusy(true);
     setProblem(null);
     try {
-      await api.tool("nc_notes_delete_note", { note_id: chosenId });
+      await api.tool("nc_notes_delete_note", { note_id: chosenId }, instance);
       setChosenId(null);
       setNote(null);
       search(query);

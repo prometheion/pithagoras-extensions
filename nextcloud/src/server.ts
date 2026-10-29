@@ -12,7 +12,7 @@
  */
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { setPortal, portal, docker } from "./host";
-import { loadInstances, saveInstances, configured, excludeList, isValidInstanceName, isAdopted, adoptedName, excludeDefault, NextcloudInstance } from "./config";
+import { loadInstances, saveInstances, configured, excludeFor, isValidInstanceName, isAdopted, adoptedName, excludeDefault, NextcloudInstance } from "./config";
 import { mcpClient } from "./ncmcp";
 import { ensureOwn, releaseOwn, containerState, discoverSafe, instanceAddress, planOwn, IMAGE, OwnPlan, Discovered } from "./container";
 
@@ -95,13 +95,13 @@ function ensureApplied(): Promise<void> {
             await portal().mcp.set(inst.name, undefined);
             continue;
           }
-          await portal().mcp.set(inst.name, { url: address, lifecycle: "persistent", excludeTools: excludeList(inst) }, { trusted: true });
+          await portal().mcp.set(inst.name, { url: address, lifecycle: "persistent", excludeTools: excludeFor(inst) }, { trusted: true });
           continue;
         }
         const plan = plans.get(inst.name);
         if (!plan) continue; // cannot stand: no own plan for it (too many own instances), and the status says so
         await ensureOwn(d, plan);
-        await portal().mcp.set(inst.name, { url: `http://127.0.0.1:${plan.port}/mcp`, lifecycle: "persistent", excludeTools: excludeList(inst) }, { trusted: true });
+        await portal().mcp.set(inst.name, { url: `http://127.0.0.1:${plan.port}/mcp`, lifecycle: "persistent", excludeTools: excludeFor(inst) }, { trusted: true });
       }
     },
   );

@@ -136,6 +136,13 @@ export function excludeList(inst: NextcloudInstance): string[] {
   return inst.mcpExcludeTools.split(",").map((part) => part.trim()).filter(Boolean);
 }
 
+/** What the instance's entry in pi's config keeps out of its tools: what it named as a keep-out list -- and where
+ * it named none, the default one for its name (an empty field is "take the default", not "keep everything"). */
+export function excludeFor(inst: NextcloudInstance): string[] {
+  const list = excludeList(inst);
+  return list.length > 0 ? list : excludeDefault(inst.name).split(",").map((part) => part.trim()).filter(Boolean);
+}
+
 function writeAtomic(dest: string, bytes: Buffer): void {
   const dir = path.dirname(dest);
   fs.mkdirSync(dir, { recursive: true });

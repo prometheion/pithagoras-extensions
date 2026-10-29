@@ -2,9 +2,10 @@
  * What the browser half asks of its server half: the routes under the address the portal gives the package
  * (portal.api.url, mounted by the portal at /api/x/@pithagoras/nextcloud, session-gated there), one per instance
  * beside the status and discovery. A request made while the server half is not running is refused as one the server
- * refused is. The pages also hold which of the instances they are meant to talk to -- the switcher in the panel's
- * header sets it, and every tool call is sent with it.
+ * refused is. Which of the instances a tool call goes to is what its panel holds (InstanceContext): each open
+ * panel keeps its own choice, and every tool call is sent with it.
  */
+import { createContext, useContext } from "react";
 import { portal } from "../portal";
 
 /** What GET /status says of where things stand: every instance -- its container, its entry in pi's config, and
@@ -64,12 +65,11 @@ export interface ToolResult {
 
 const call = async <T>(path: string, init?: RequestInit): Promise<T> => portal.api.json<T>(portal.api.url(path), init);
 
-/** Which instance the pages talk to right now: set by the switcher, and what every tool call is sent with. One for
- * the whole portal on purpose -- every open panel of this user's shares the single active instance. */
-let currentInstance: string | undefined;
-export const setCurrentInstance = (name: string | undefined): void => {
-  currentInstance = name;
-};
+/** Which instance one open panel talks to, held by the panel and read by the tabs it remounts for it -- every tool
+ * call is sent with it. One choice per panel on purpose: two panels beside two chats may stand on different
+ * instances at once. */
+export const InstanceContext = createContext<string | undefined>(undefined);
+export const useNextcloudInstance = (): string | undefined => useContext(InstanceContext);
 
 export const api = {
   status: () => call<NextcloudStatus>("/status"),
@@ -89,11 +89,11 @@ export const api = {
   discover: () => call<{ containers: DiscoveredContainer[]; note?: string }>("/discover"),
   start: () => call<NextcloudStatus>("/start", { method: "POST" }),
   reset: () => call<{ ok: true }>("/reset", { method: "POST" }),
-  tool: (name: string, args: Record<string, unknown> = {}) =>
+  tool: (name: string, args: Record<string, unknown> = {}, instance?: string) =>
     call<ToolResult>("/tool", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, args, instance: currentInstance }),
+      body: JSON.stringify({ name, args, instance }),
     }),
 };
 

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadInstances, saveInstances, configured, excludeList, excludeDefault, isValidInstanceName, DEFAULT_INSTANCE_NAME } from "../src/config.ts";
+import { loadInstances, saveInstances, configured, excludeList, excludeFor, excludeDefault, isValidInstanceName, DEFAULT_INSTANCE_NAME } from "../src/config.ts";
 
 function withHome(fn: () => void): void {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "nextcloud-settings-"));
@@ -75,6 +75,18 @@ test("an entry that names no instance is dropped, and a container field it does 
     assert.equal(insts[0].container, "own");
     assert.equal(insts[1].port, undefined); // a port that is not a real one stands unset
   });
+});
+
+test("an empty keep-out field takes the default list for its name; a named one stands as named, trimmed", () => {
+  assert.ok(excludeFor({ name: "home", url: "", username: "", password: "", mcpExcludeTools: "", container: "own" }).length > 0);
+  assert.deepEqual(
+    excludeFor({ name: "home", url: "", username: "", password: "", mcpExcludeTools: "", container: "own" }),
+    excludeDefault("home").split(",").map((part) => part.trim()).filter(Boolean),
+  );
+  assert.deepEqual(
+    excludeFor({ name: "home", url: "", username: "", password: "", mcpExcludeTools: " home_nc_mail_*,  ", container: "own" }),
+    ["home_nc_mail_*"],
+  );
 });
 
 test("a name may take letters, numbers, dashes and underscores -- starting with a letter, at the length it needs", () => {

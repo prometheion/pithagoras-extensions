@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError } from "./api";
+import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 
 /** The Shopping List tab: the lists, one chosen by name; its items checked (tick), added by their name and taken
  * away one by one or in the checked ones at once. All of it as a tool call on the server, answered into these views. */
@@ -20,6 +20,7 @@ interface ItemRow {
 
 export default function ShoppingList() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the list calls go
   const [lists, setLists] = useState<ListRow[] | null>(null);
   const [listId, setListId] = useState<number | null>(null);
   const [items, setItems] = useState<ItemRow[] | null>(null);
@@ -30,7 +31,7 @@ export default function ShoppingList() {
   useEffect(() => {
     let gone = false;
     void api
-      .tool("nc_shopping_list_get_lists")
+      .tool("nc_shopping_list_get_lists", {}, instance)
       .then((result) => {
         if (gone) return;
         const rows = (arrayOf(partText(result).data, "lists") ?? []).map((l) => ({ id: Number(l.id), title: String(l.title ?? "") }));
@@ -46,7 +47,7 @@ export default function ShoppingList() {
   const loadItems = (id: number) => {
     setItems(null);
     void api
-      .tool("nc_shopping_list_get_items", { list_id: id })
+      .tool("nc_shopping_list_get_items", { list_id: id }, instance)
       .then((result) => {
         const rows = (arrayOf(partText(result).data, "items") ?? []).map((i) => ({
           id: Number(i.id),
@@ -81,15 +82,15 @@ export default function ShoppingList() {
     }
   };
 
-  const tick = (item: ItemRow, checked: boolean) => act(() => api.tool("nc_shopping_list_check_item", { list_id: listId, item_id: item.id, checked }));
+  const tick = (item: ItemRow, checked: boolean) => act(() => api.tool("nc_shopping_list_check_item", { list_id: listId, item_id: item.id, checked }, instance));
   const add = () => {
     const name = newItem.trim();
     if (name === "") return;
     setNewItem("");
-    void act(() => api.tool("nc_shopping_list_add_items", { list_id: listId, items: [{ name }] }));
+    void act(() => api.tool("nc_shopping_list_add_items", { list_id: listId, items: [{ name }] }, instance));
   };
-  const remove = (item: ItemRow) => void act(() => api.tool("nc_shopping_list_delete_item", { list_id: listId, item_id: item.id }));
-  const clearChecked = () => void act(() => api.tool("nc_shopping_list_clear_checked_items", { list_id: listId }));
+  const remove = (item: ItemRow) => void act(() => api.tool("nc_shopping_list_delete_item", { list_id: listId, item_id: item.id }, instance));
+  const clearChecked = () => void act(() => api.tool("nc_shopping_list_clear_checked_items", { list_id: listId }, instance));
 
   if (lists === null)
     return problem ? (

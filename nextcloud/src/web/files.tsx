@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { LuChevronRight, LuDownload, LuExternalLink, LuFileText, LuFolder } from "react-icons/lu";
 import { portal, t } from "../portal";
-import { api, partText, sayError } from "./api";
+import { api, partText, sayError, useNextcloudInstance } from "./api";
 import { SubTabs } from "./widgets";
 
 /** The Files & Sharing tab: its files view walks the WebDAV tree from the root down -- a folder is opened by
@@ -56,6 +56,7 @@ const formatBytes = (n: number): string => {
 
 export default function FilesAndSharing() {
   portal.locale.use();
+  const instance = useNextcloudInstance(); // the panel's current instance: where the file and share calls go
   const [view, setView] = useState<"files" | "shares">("files");
 
   // the files view: where it stands, what it shows, and one file read into the panel
@@ -82,7 +83,7 @@ export default function FilesAndSharing() {
     setRows(null);
     setFileProblem(null);
     void api
-      .tool("nc_webdav_list_directory", at === "" ? {} : { path: at })
+      .tool("nc_webdav_list_directory", at === "" ? {} : { path: at }, instance)
       .then((result) => {
         const data = partText(result).data;
         const files = typeof data === "object" && data !== null ? (data as Rec).files : undefined;
@@ -112,7 +113,7 @@ export default function FilesAndSharing() {
 
   const download = async (row: FileRow): Promise<void> => {
     if (row.size !== undefined && row.size > MAX_INLINE_BYTES) throw new Error(t("This file is larger than this panel reads inline."));
-    const result = await api.tool("nc_webdav_read_file", { path: row.path, parse_document: "raw" });
+    const result = await api.tool("nc_webdav_read_file", { path: row.path, parse_document: "raw" }, instance);
     const data = partText(result).data;
     const b64 = typeof data === "object" && data !== null ? strOf((data as Rec).content) : undefined;
     if (b64 === undefined) throw new Error(t("The file did not answer in a way this panel reads."));
@@ -157,18 +158,18 @@ export default function FilesAndSharing() {
     setPreviewProblem(null);
     try {
       if (ct === "application/pdf") {
-        const result = await api.tool("nc_webdav_read_file", { path: row.path });
+        const result = await api.tool("nc_webdav_read_file", { path: row.path }, instance);
         const data = partText(result).data;
         const body = typeof data === "object" && data !== null ? strOf((data as Rec).content) ?? "" : "";
         setPreview({ row, kind: "pdf", body });
       } else if (isImage(ct)) {
-        const result = await api.tool("nc_webdav_read_file", { path: row.path, parse_document: "raw" });
+        const result = await api.tool("nc_webdav_read_file", { path: row.path, parse_document: "raw" }, instance);
         const data = partText(result).data;
         const b64 = typeof data === "object" && data !== null ? strOf((data as Rec).content) : undefined;
         if (b64 === undefined) throw new Error(t("The file did not answer in a way this panel reads."));
         setPreview({ row, kind: "image", dataUrl: `data:${ct};base64,${b64}` });
       } else {
-        const result = await api.tool("nc_webdav_read_file", { path: row.path });
+        const result = await api.tool("nc_webdav_read_file", { path: row.path }, instance);
         const data = partText(result).data;
         const body = typeof data === "object" && data !== null ? strOf((data as Rec).content) ?? "" : "";
         setPreview({ row, kind: "text", body });
@@ -203,7 +204,7 @@ export default function FilesAndSharing() {
     setShares(null);
     setShareProblem(null);
     void api
-      .tool("nc_share_list", sharedWithMe ? { shared_with_me: true } : {})
+      .tool("nc_share_list", sharedWithMe ? { shared_with_me: true } : {}, instance)
       .then((result) => {
         const data = partText(result).data;
         let list: unknown = data;
@@ -241,7 +242,7 @@ export default function FilesAndSharing() {
     setBusy(true);
     setShareProblem(null);
     try {
-      await api.tool("nc_share_create", { path: at, share_with: with_, share_type: form.shareType, permissions: permissionValue() });
+      await api.tool("nc_share_create", { path: at, share_with: with_, share_type: form.shareType, permissions: permissionValue() }, instance);
       setForm({ ...form, path: "", shareWith: "" });
       loadShares();
     } catch (error) {
@@ -257,7 +258,7 @@ export default function FilesAndSharing() {
     setBusy(true);
     setShareProblem(null);
     try {
-      await api.tool("nc_share_delete", { share_id: id });
+      await api.tool("nc_share_delete", { share_id: id }, instance);
       loadShares();
     } catch (error) {
       setShareProblem(sayError(error));
@@ -273,7 +274,7 @@ export default function FilesAndSharing() {
     setShareProblem(null);
     setLinkResult(null);
     try {
-      const result = await api.tool("nc_share_create_public_link", { path: at, expires_in_minutes: Number(linkMinutes) > 0 ? Number(linkMinutes) : 30 });
+      const result = await api.tool("nc_share_create_public_link", { path: at, expires_in_minutes: Number(linkMinutes) > 0 ? Number(linkMinutes) : 30 }, instance);
       const data = partText(result).data;
       if (typeof data === "object" && data !== null && typeof (data as Rec).url === "string") {
         setLinkResult({ url: (data as Rec).url as string, downloadUrl: strOf((data as Rec).download_url) });

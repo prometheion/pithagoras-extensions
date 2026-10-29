@@ -5,7 +5,7 @@ import type { PanelProps, Portal } from "@pithagoras/extension-api";
 import { LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuFiles, LuKanban, LuListChecks } from "react-icons/lu";
 import { msg, portal, setPortal, t } from "./portal";
 import { de } from "./de";
-import { api, setCurrentInstance, NextcloudStatus } from "./web/api";
+import { api, InstanceContext, NextcloudStatus } from "./web/api";
 
 /**
  * @pithagoras/nextcloud: its browser half. One panel beside every chat -- the Nextcloud of the keys on this portal,
@@ -50,9 +50,6 @@ function NextcloudPanel({ panel }: PanelProps) {
     const names = status.instances.map((inst) => inst.name);
     if (names.length && (!selected || !names.includes(selected))) setSelected(names[0]);
   }, [status, selected]);
-  useEffect(() => {
-    setCurrentInstance(selected);
-  }, [selected]);
   const held = instances.find((inst) => inst.name === selected) ?? (instances.length ? instances[0] : undefined);
   if (status && !status.configured) {
     return (
@@ -89,8 +86,10 @@ function NextcloudPanel({ panel }: PanelProps) {
           {t("This Nextcloud ({name}) is not set up completely yet: fill it in on the Nextcloud page in Settings.", { name: held.name })}
         </p>
       ) : (
-        // The open tab remounts where the instance changes: what it shows belongs to that one and no other.
+        // The open tab remounts where the instance changes: what it shows belongs to that one and no other, and
+        // the tabs read the instance their calls go to from here.
         <div key={held?.name ?? selected ?? "none"}>
+          <InstanceContext.Provider value={held?.name}>
           {tab === "shopping-list" ? (
             <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
               <ShoppingList />
@@ -120,6 +119,7 @@ function NextcloudPanel({ panel }: PanelProps) {
               <Contacts />
             </Suspense>
           )}
+          </InstanceContext.Provider>
         </div>
       )}
     </div>

@@ -1303,7 +1303,7 @@ test("word.edit: a quote is found in the body only, a list item's label is no pa
   assert.equal(edit([{ quote: "Total", replacement: "Sum" }]).error.code, "quote_ambiguous");
   assert.equal(edit([{ quote: "·\tpoint", replacement: "x" }]).error.code, "quote_not_found", "the label is not text");
   assert.equal(edit([{ paragraphs: ["x"], style: "Mark" }]).error.message, 'op 1: "Mark" is a run style, and new paragraphs take a paragraph style');
-  assert.match(edit([{ paragraphs: ["x"], style: "Heading 7" }]).error.message, /no style "Heading 7"/);
+  assert.match(edit([{ paragraphs: ["x"], style: "Heading 7" }]).error.message, /no style "Heading 7" \(office_read with formatting lists the styles in use; office_format makes a new one with defineStyle, and a list with set.list\)$/);
   w.calls.length = 0;
   edit([{ remove: "Total", nth: 2 }, { after: "Findings", paragraphs: ["New"], style: "callout" }]);
   assert.ok(w.calls.includes("para(Total).Delete()"), w.calls.join("\n"));

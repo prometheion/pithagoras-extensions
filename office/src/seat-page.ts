@@ -515,7 +515,7 @@ const WORD_EDIT = `function () {
     for (var s = 0; s < ops.length; s++) {
       if (!ops[s].style) continue;
       var found = styleNamed(doc, ops[s].style);
-      if (!found) return { error: { code: "bad_op", op: s, message: "op " + (s + 1) + ": the document has no style " + JSON.stringify(ops[s].style) + " (office_read with formatting lists the styles in use)" }, touched: false };
+      if (!found) return { error: { code: "bad_op", op: s, message: "op " + (s + 1) + ": the document has no style " + JSON.stringify(ops[s].style) + " (office_read with formatting lists the styles in use; office_format makes a new one with defineStyle, and a list with set.list)" }, touched: false };
       if (found.GetType() !== "paragraph") return { error: { code: "bad_op", op: s, message: "op " + (s + 1) + ": " + JSON.stringify(found.GetName()) + " is a " + found.GetType() + " style, and new paragraphs take a paragraph style" }, touched: false };
       styles[s] = found;
     }

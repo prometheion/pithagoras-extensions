@@ -1431,7 +1431,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.match(read, /Footnotes: \[1\] in \[\d+\] after "Revenue grew\. There was a discrepancy": Checked in March\./);
     // The person's editor, not reloaded, has the look (its own select-all, as HTML).
     const html = String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); return e.pluginMethod_GetSelectedContent({ type: "html" }); })()`));
-    assert.match(html, /style="[^"]*font-weight:\s*bold[^"]*"[^>]*>Quarterly report</i);
+    // (Its HTML says bold by a tag of its own; the size and colour in the style of the text's element.)
+    const at = html.indexOf("Quarterly report");
+    assert.match([...html.slice(0, at).matchAll(/style="([^"]*)"/g)].at(-1)?.[1] ?? "", /font-size:20pt;color:#c81e1e/i);
     await notReloaded(page, frame);
     const shot = await ran(eye, [{ name: "office_screenshot", arguments: { id: word } }]);
     assert.match(shot.results[0], /Page 1 of \d+ of "Formatted from a chat"/);

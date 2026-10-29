@@ -428,7 +428,9 @@ function formatOp(op: unknown, i: number): FormatOp {
     if (!isObject(v) || Object.keys(v).length === 0) throw bad(`set is an object of what to set (${what}: ${keys.join(", ")})`);
     if (Object.keys(v).length > MAX_SET_KEYS) throw bad(`set holds at most ${MAX_SET_KEYS} keys`);
     const extra = Object.keys(v).filter((k) => !keys.includes(k));
-    if (extra.length) throw bad(`set has ${extra.map((k) => JSON.stringify(k)).join(", ")}, which ${extra.length === 1 ? "is not a key" : "are not keys"} of ${what} (they are ${keys.join(", ")})`);
+    // A model may group the keys as the description lists them ({paragraph: {list: "bullet"}}): set is flat.
+    const grouped = extra.some((k) => isObject(v[k]) && k !== "borders") ? `; set is flat: its keys go in it directly ({"list": "bullet"}, not {"paragraph": {"list": "bullet"}})` : "";
+    if (extra.length) throw bad(`set has ${extra.map((k) => JSON.stringify(k)).join(", ")}, which ${extra.length === 1 ? "is not a key" : "are not keys"} of ${what} (they are ${keys.join(", ")})${grouped}`);
     return v;
   };
   switch (shape) {

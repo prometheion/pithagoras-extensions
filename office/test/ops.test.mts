@@ -351,6 +351,7 @@ test("office_format refuses what does not hold before anything is sent, naming t
     });
   // Unknown keys: the refusal lists the ones the op takes.
   no([{ format: "a", set: { bolt: true } }], /set has "bolt", which is not a key of text and paragraphs \(they are font, fontSize, bold,/);
+  no([{ format: "a", set: { paragraph: { list: "bullet" } } }], /set has "paragraph", which is not a key of text and paragraphs \(they are [^)]*\); set is flat: its keys go in it directly/);
   no([{ format: "a", set: { bold: true }, colour: "x" }], /"colour" is not part of \{format, through, nth, set\}/);
   no([{ defineStyle: "S", type: "character", set: { align: "center" } }], /not a key of a character style/);
   no([{ defineStyle: "S", set: { link: "https://x.org" } }], /not a key of a paragraph style/);

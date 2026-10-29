@@ -4,8 +4,8 @@
 [Nextcloud MCP server](https://github.com/cbcoutinho/nextcloud-mcp-server) in containers of its own through Docker for
 extensions — one per instance, or a container you already run that it takes over without touching it — registers each
 server in pi's MCP config under its own name so every agent can reach your clouds, and adds a Nextcloud panel to every
-chat with seven working tabs: **Shopping List**, **Cookbook**, **Notes**, **Files & Sharing**, **Deck**, **Calendar**
-and **Contacts**.
+chat with ten working tabs: **Shopping List**, **Cookbook**, **Notes**, **Files & Sharing**, **Deck**, **Calendar**,
+**Contacts**, **Mail**, **News** and **Collectives**.
 
 This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the service it talks to.
 
@@ -29,8 +29,10 @@ user name and that app password — and press **Save and apply**. The container 
 registered in pi's config under the instance's own name, and the page's status shows each part: the container (and how
 long it has been coming up), the entry in pi's config, and whether the server answers at its `/mcp` address.
 
-The password is written to pi's own settings file once and then never shown again; the field on the page stays empty
-while one is saved, and saving with it left empty keeps what was there.
+The settings stand in the extension's own data folder (where Pithagoras keeps the settings of any of its extensions),
+not beside pi's own files: the password is written there once and then never shown again; the field on the page stays
+empty while one is saved, and saving with it left empty keeps what was there. Where an earlier version kept the settings
+in pi's own config file, they come over once at the first start and leave that file then.
 
 More than one Nextcloud on this machine? Add as many instances as you have — each gets its own container, its own
 port at the loopback of the portal's network, and its own entry in pi's config under its name; an agent that reaches a
@@ -40,11 +42,19 @@ over the instances above its tabs: whichever it holds is what every tab there sh
 Already running this image yourself — with your own name, ports or settings? Adopt that container instead of making a
 new one: on the instance's card choose the found container in place of *own*. The extension then only registers the
 server in pi's config; it never starts, stops, amends or removes an adopted one, and what you set yourself stays as
-you set it.
+you set it. And where pi's config already carries entries that point at such running containers — MCP servers you ran
+before this extension existed — the first start takes them over on its own: each of those entries becomes an instance
+that adopts the container behind it, with its keep-out list coming over as its capability choices and, where the
+container carries them, the
+host, user name and app password from its environment. The settings page shows what came over; your other tuning of
+those entries (the debug flag and the like) stays, and nothing else moves.
 
-The settings page also names what the agents may reach: by default each server's mail, news and collectives tools are
-kept out of pi's config (its shopping list, cookbook and notes are what this panel works with), and that list is a
-plain field — tool-name globs, comma-separated — so you can keep more out or give some back.
+The settings page also shows every capability this extension knows about — the tool families of its tabs, one choice
+each: files and sharing beside each other, mail, news, collectives among them. Each choice turns that family's tools
+off in pi's config where it is turned off, and keeps its tab out of the panel as well; where the instance's endpoint
+does not provide a family at all (its server answers without those tools), the choice stands greyed out and is kept
+out wherever it would reach. What the endpoint provides is found from its own tool list every time the status looks,
+so nothing an earlier version never offered is invented, and a server that starts to offer more shows it on its own.
 
 **Remove** takes an instance away: its entry in pi's config always goes, and its own container with it — an adopted one
 untouched. The settings stay where they were shown on the page, so putting the instance back starts it without typing
@@ -53,7 +63,8 @@ anything new. Uninstalling the extension does the same removal for every instanc
 ## What you get
 
 - **A Nextcloud panel in every chat**, beside the files panel: one place with what your cloud holds, for you and the
-  agent that answers there. Its seven tabs, each thin over the MCP server's own tools:
+  agent that answers there. Its ten tabs, each thin over the MCP server's own tools — and only where the instance's
+  endpoint provides the tab's tools:
   - **Shopping List** — the lists, their items checked as they are bought (the check is in Nextcloud, so a phone on
     the app sees it at once), new items added at the bottom of the list, items and checked runs removed.
   - **Cookbook** — the recipes with ingredients and steps, searched by name or keyword, and a recipe imported from its
@@ -67,9 +78,16 @@ anything new. Uninstalling the extension does the same removal for every instanc
     gone; beside it the open tasks with their due days, ticked off as they are done.
   - **Contacts** — your address books' contacts searched as you type, a card opened and amended in place, new ones
     added and taken away again.
+  - **Mail** — the accounts' mailboxes and their messages by subject, sender and preview; a message opened for its
+    full body and attachments, marked read or unread where the server gives it back.
+  - **News** — the feeds with their unread standing and their items; an article opened for its body beside the link
+    to its original.
+  - **Collectives** — the collectives' pages searched as you type, a page opened for reading where one is not kept
+    read-only.
 - **The agents reach your clouds too**: every server is registered in pi's config, persistent, trusted, with nothing
   direct besides what its registration names — so a chat can ask "check the milk off the list" or "what did I note down
-  about the fence", and the answer comes from Nextcloud. What it may not reach is exactly the keep-out list above.
+  about the fence", and the answer comes from Nextcloud. What it may not reach is exactly what its capability
+  choices turn off.
 
 ## How it runs
 

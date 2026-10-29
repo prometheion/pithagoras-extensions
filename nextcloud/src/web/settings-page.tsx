@@ -2,16 +2,19 @@ import { useCallback, useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, sayError, NextcloudStatus, InstanceView, DiscoveredContainer } from "./api";
 import { isValidInstanceName } from "../instance-name";
+import { CAPABILITIES } from "../capabilities";
 
-/** The page in Settings: the instances (name, host, login, app password, keep-out list, and where each one's /mcp
- * endpoint lives -- a container this extension made, or one it adopted by name), a save per instance that brings its
- * container and its entry in pi's config to what the fields say, and how all stands per instance. The passwords are
- * only ever set, never shown back; an adopted container is never made again, pulled or removed by this extension. */
+/** The page in Settings: the instances (name, host, login, app password, the capability families each one offers to
+ * the chats and the pages -- on or off per family, and grey where its server does not provide it at all -- and where
+ * each one's /mcp endpoint lives: a container this extension made, or one it adopted by name), a save per instance
+ * that brings its container and its entry in pi's config to what the fields say, and how all stands per instance. The
+ * passwords are only ever set, never shown back; an adopted container is never made again, pulled or removed by this
+ * extension. */
 
 /** A field of one card: what the server says of the instance beside what the person has not saved yet. */
 type Draft = InstanceView & { password: string; exists: boolean };
 
-const blankDraft = (): Draft => ({ name: "", url: "", username: "", mcpExcludeTools: "", passwordSet: false, configured: false, container: "own", password: "", exists: false });
+const blankDraft = (): Draft => ({ name: "", url: "", username: "", capabilities: {}, passwordSet: false, configured: false, container: "own", password: "", exists: false });
 
 export default function NextcloudSettings() {
   portal.locale.use();
@@ -77,11 +80,11 @@ export default function NextcloudSettings() {
     setProblem(null);
     setSaved(false);
     try {
-      const fields: Record<string, string> = {
+      const fields: Record<string, unknown> = {
         name: card.name.trim(),
         url: card.url.trim(),
         username: card.username.trim(),
-        mcpExcludeTools: card.mcpExcludeTools.trim(),
+        capabilities: card.capabilities ?? {}, // the choices as they stand in the card; the server keeps only what stands
         container: card.container,
       };
       if (card.password !== "") fields.password = card.password; // it is only set, never answered back
@@ -151,6 +154,15 @@ export default function NextcloudSettings() {
         {t("This extension runs the Nextcloud MCP server for each of its instances -- in a container it made and keeps, or one already running that it adopted by name -- and registers every instance in pi's config for the chats. Each instance needs a host and an app password.")}
       </p>
 
+      {status?.migrated && status.migrated.length > 0 && (
+        <section className="space-y-1 rounded border p-3 text-sm">
+          <h3 className="font-medium">{t("Taken over from pi's config")}</h3>
+          {status.migrated.map((note) => (
+            <p key={note} className="text-xs text-fg-muted">{note}</p>
+          ))}
+        </section>
+      )}
+
       {problem && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
       {saved && !problem && <p className="text-xs text-fg-muted">{t("Saved.")}</p>}
 
@@ -188,12 +200,19 @@ export default function NextcloudSettings() {
 
 /** One card of one instance: its fields, what its container and its entry in pi's config say of it, and a save that
  * brings both to where the fields ask for them. */
-function InstanceCard({ card, busy, drafts, save, remove, onChange, status, discovered, discoverNote }: { card: Draft; busy: boolean; drafts: Draft[]; save(e: React.FormEvent): void; remove(): void; onChange(patch: Partial<Draft>): void; status?: { mode: string; containerName: string; state: string; mcp: { registered: boolean; on: boolean; url?: string }; health: { ok: boolean; server?: { name: string; version: string }; error?: string } }; discovered: DiscoveredContainer[] | null; discoverNote?: string }) {
+function InstanceCard({ card, busy, drafts, save, remove, onChange, status, discovered, discoverNote }: { card: Draft; busy: boolean; drafts: Draft[]; save(e: React.FormEvent): void; remove(): void; onChange(patch: Partial<Draft>): void; status?: { mode: string; containerName: string; state: string; mcp: { registered: boolean; on: boolean; url?: string }; health: { ok: boolean; server?: { name: string; version: string }; error?: string }; capabilities?: { available: Record<string, boolean>; on: Record<string, boolean> } }; discovered: DiscoveredContainer[] | null; discoverNote?: string }) {
   portal.locale.use();
   const name = card.name.trim();
   const nameOk = isValidInstanceName(name); // the same rule the server keeps: one place for it, not two
   const nameTakenByAnother = name !== "" && drafts.some((d) => d !== card && d.name.trim() === name);
   const adopted = card.container.startsWith("adopted:");
+  /** One family on or off in the card's choices: an on stands nowhere in them, only the offs do. */
+  const setCapability = (id: string, on: boolean) => {
+    const next = { ...(card.capabilities ?? {}) };
+    if (on) delete next[id];
+    else next[id] = false;
+    onChange({ capabilities: Object.keys(next).length > 0 ? next : {} });
+  };
   return (
     <form onSubmit={save} className="space-y-3">
       <div className="flex items-center gap-2">
@@ -228,11 +247,21 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status, disc
         <input className={portal.ui.classes.input} type="password" value={card.password} autoComplete="new-password" placeholder={card.passwordSet ? t("(set -- leave empty to keep it)") : t("(not set yet)")} disabled={busy} onChange={(e) => onChange({ password: e.target.value })} />
         <span className="mt-1 block text-xs text-fg-subtle">{t("Made in Nextcloud under Settings, Security, Devices & sessions. It is only ever set, never shown back.")}</span>
       </label>
-      <label className="block text-sm">
-        <span className="mb-1 block font-medium">{t("Tools the chats must not get from this server")}</span>
-        <input className={portal.ui.classes.input} value={card.mcpExcludeTools} placeholder={t("empty: take the default keep-out list")} disabled={busy} onChange={(e) => onChange({ mcpExcludeTools: e.target.value })} />
-        <span className="mt-1 block text-xs text-fg-subtle">{name !== "" && nameOk ? t("Tool-name globs, comma-separated; this server's tools carry the prefix {name}_.", { name }) : t("Tool-name globs, comma-separated.")}</span>
-      </label>
+      <div className="block text-sm">
+        <span className="mb-1 block font-medium">{t("What this server offers to the chats and the pages")}</span>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+          {CAPABILITIES.map((cap) => {
+            const provided = status?.capabilities?.available[cap.id]; // grey where the endpoint says it does not have it
+            return (
+              <label key={cap.id} className={`flex items-center gap-2 ${provided === false ? "opacity-40" : ""}`}>
+                <input type="checkbox" checked={(card.capabilities?.[cap.id] ?? true)} disabled={busy || provided === false} onChange={(e) => setCapability(cap.id, e.target.checked)} />
+                <span>{t(cap.label)}</span>
+              </label>
+            );
+          })}
+        </div>
+        <span className="mt-1 block text-xs text-fg-subtle">{t("A family off keeps its tools out of the chats and takes what shows it with. Where the server does not provide a family at all, it stands grey -- offered nowhere.")}</span>
+      </div>
 
       <div className="block text-sm">
         <span className="mb-1 block font-medium">{t("Where its /mcp endpoint runs")}</span>

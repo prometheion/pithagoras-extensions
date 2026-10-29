@@ -12,9 +12,11 @@
  */
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { setPortal, portal, docker } from "./host";
-import { loadInstances, saveInstances, configured, excludeFor, isValidInstanceName, isAdopted, adoptedName, excludeDefault, NextcloudInstance } from "./config";
+import { loadInstances, saveInstances, configured, isValidInstanceName, isAdopted, adoptedName, NextcloudInstance } from "./config";
+import { CAPABILITIES, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
 import { ensureOwn, releaseOwn, containerState, discoverSafe, instanceAddress, planOwn, IMAGE, OwnPlan, Discovered } from "./container";
+import { migrateExistingMcpEntries } from "./migrate";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
  * ask at once they stand in a row: each run waits for the one before it, so every run sees finished runs only, never
@@ -22,6 +24,7 @@ import { ensureOwn, releaseOwn, containerState, discoverSafe, instanceAddress, p
 let applying: { description: string } | undefined;
 let applyRow: Promise<unknown> = Promise.resolve(); // the end of that row: every new run is hooked to it
 let lastError: string | undefined;
+let migrated: string[] | undefined; // what a first start took over from pi's config, one note each -- for the settings page
 
 function apply(description: string, work: () => Promise<void>): Promise<void> {
   const self = { description };
@@ -44,9 +47,18 @@ function apply(description: string, work: () => Promise<void>): Promise<void> {
   return turn;
 }
 
-/** What an instance says of itself where the settings page wants to read it: everything but the password. */
+/** What an instance says of itself where the settings page wants to read it: everything but the password -- with
+ * its capability choices beside, as a missing map is "everything on". */
 function view(inst: NextcloudInstance): Record<string, unknown> {
-  return { name: inst.name, url: inst.url, username: inst.username, mcpExcludeTools: inst.mcpExcludeTools, passwordSet: inst.password !== "", configured: configured(inst), container: inst.container };
+  return {
+    name: inst.name,
+    url: inst.url,
+    username: inst.username,
+    ...(inst.capabilities !== undefined ? { capabilities: { ...inst.capabilities } } : {}),
+    passwordSet: inst.password !== "",
+    configured: configured(inst),
+    container: inst.container,
+  };
 }
 
 /** Bring every instance's container and its entry in pi's config to where the keys ask for them; a no-op where all
@@ -95,16 +107,25 @@ function ensureApplied(): Promise<void> {
             await portal().mcp.set(inst.name, undefined);
             continue;
           }
-          await portal().mcp.set(inst.name, { url: address, lifecycle: "persistent", excludeTools: excludeFor(inst) }, { trusted: true });
+          await portal().mcp.set(inst.name, { ...carryOver(portal().mcp.get(inst.name)?.entry), url: address, lifecycle: "persistent", excludeTools: excludeGlobs(inst) }, { trusted: true });
           continue;
         }
         const plan = plans.get(inst.name);
         if (!plan) continue; // cannot stand: no own plan for it (too many own instances), and the status says so
         await ensureOwn(d, plan);
-        await portal().mcp.set(inst.name, { url: `http://127.0.0.1:${plan.port}/mcp`, lifecycle: "persistent", excludeTools: excludeFor(inst) }, { trusted: true });
+        await portal().mcp.set(inst.name, { ...carryOver(portal().mcp.get(inst.name)?.entry), url: `http://127.0.0.1:${plan.port}/mcp`, lifecycle: "persistent", excludeTools: excludeGlobs(inst) }, { trusted: true });
       }
     },
   );
+}
+
+/** What an entry in pi's config keeps of itself where this extension rewrites it: the person's own tuning of that
+ * server (the debug flag, the direct-tools flag, whatever stood there) -- but not how the server is reached, which
+ * the instance says now. */
+function carryOver(entry: Record<string, unknown> | undefined): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(entry ?? {})) if (!["url", "command", "socket"].includes(key)) kept[key] = value;
+  return kept;
 }
 
 /** What one instance says of itself in the status: its container, its entry in pi's config, and whether its server
@@ -137,7 +158,29 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
       health = { ok: false, error: (error as Error).message };
     }
   }
-  return { name: inst.name, mode: isAdopted(inst.container) ? "adopted" : "own", containerName: name, state, address, mcp, health, configured: configured(inst) };
+  // What the endpoint provides of each family, asked live where it answers -- so a page offers nowhere what its
+  // server does not have; where it cannot be asked, availability stands unknown and nothing is offered away on it.
+  let capabilities: { available: Record<string, boolean>; on: Record<string, boolean> } | undefined;
+  if (health.ok && address) {
+    try {
+      capabilities = { available: availableFromTools(await toolNames(address)), on: inst.capabilities ? { ...inst.capabilities } : {} };
+    } catch {
+      // the endpoint did not list its tools right now: availability stays unknown for this pass
+    }
+  }
+  return { name: inst.name, mode: isAdopted(inst.container) ? "adopted" : "own", containerName: name, state, address, mcp, health, configured: configured(inst), ...(capabilities !== undefined ? { capabilities } : {}) };
+}
+
+/** The names of one endpoint's tools, asked live and answered from memory for a while: the capability check stands
+ * on it, and a status poll is not to make the endpoint list its tools again every turn. */
+const toolNamesCache = new Map<string, { at: number; names: string[] }>();
+const TOOL_NAMES_TTL_MS = 60_000;
+async function toolNames(address: string): Promise<string[]> {
+  const hit = toolNamesCache.get(address);
+  if (hit && Date.now() - hit.at < TOOL_NAMES_TTL_MS) return hit.names;
+  const names = (await mcpClient(address).listTools()).map((tool) => tool.name);
+  toolNamesCache.set(address, { at: Date.now(), names });
+  return names;
 }
 
 /** Where things stand of every instance at once, and a run of a save. */
@@ -147,11 +190,11 @@ async function status(): Promise<Record<string, unknown>> {
   try {
     plans = planOwn(insts);
   } catch (error) {
-    return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message };
+    return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message, migrated };
   }
   const discovery = await discoverSafe();
   const rows = await Promise.all(insts.map((inst) => instanceStatus(docker(), plans, discovery.containers, inst)));
-  return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError };
+  return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError, migrated };
 }
 
 const nextcloud: ServerHalf = async (portalArg) => {
@@ -182,12 +225,20 @@ const nextcloud: ServerHalf = async (portalArg) => {
     const insts = loadInstances();
     let inst = insts.find((i) => i.name === name);
     if (!inst) {
-      inst = { name, url: "", username: "", password: "", mcpExcludeTools: excludeDefault(name), container: "own" };
+      inst = { name, url: "", username: "", password: "", container: "own" };
       insts.push(inst);
     }
-    for (const key of ["url", "username", "password", "mcpExcludeTools"] as const) {
+    for (const key of ["url", "username", "password"] as const) {
       // A new instance takes its fields here on the first save; an existing one is amended in place.
       if (typeof given[key] === "string") inst[key] = (given[key] as string).trim(); // the password is only set, never answered back
+    }
+    if (given.capabilities !== undefined) {
+      const record = given.capabilities;
+      if (typeof record !== "object" || record === null || Array.isArray(record)) return res.status(400).json({ error: "the capabilities stand as a map of their ids to on or off" });
+      const next: Record<string, boolean> = {};
+      for (const [id, value] of Object.entries(record as Record<string, unknown>)) if (CAPABILITIES.some((cap) => cap.id === id) && typeof value === "boolean") next[id] = value;
+      // A family on stands nowhere in the saved map: only the offs are kept, so a missing map reads as everything on.
+      inst.capabilities = Object.keys(next).length > 0 ? next : undefined;
     }
     const container = typeof given.container === "string" ? given.container.trim() : "";
     if (container) {
@@ -301,9 +352,19 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
   });
 
-  // On every start: one pass toward where the instances ask for it (the entries were removed on stop, so this is how
-  // everything comes back after a restart of the portal); its failures are theirs alone to read in the status.
-  void ensureApplied().catch(() => {});
+  // On every start: first take over what an install before knew nothing of (the existing entries in pi's config that
+  // stand on containers running the image, as they come over once), and then one pass toward where the instances ask
+  // for them (the entries were removed on stop, so this is how everything comes back after a restart of the portal);
+  // their failures are theirs alone to read in the status.
+  void (async () => {
+    try {
+      const notes = await migrateExistingMcpEntries(docker());
+      if (notes.length > 0) migrated = notes;
+    } catch {
+      // the takeover is best effort: where it could not run, what stood stands as it stood
+    }
+    await ensureApplied().catch(() => {});
+  })();
 
   return () => {
     // Where a stop or a removal takes the package: the containers it made go with it, and its entries out of pi's

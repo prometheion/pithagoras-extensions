@@ -16,6 +16,7 @@ export interface NextcloudStatus {
   configured: boolean; // at least one instance set completely
   task?: string; // what a save is doing on the person's behalf right now
   error?: string; // what the last of those said when it failed
+  migrated?: string[]; // what a first start took over from pi's config, one note each (English; shown as it stands)
 }
 
 /** What one instance says of itself in the status. */
@@ -28,6 +29,8 @@ export interface InstanceStatus {
   mcp: { registered: boolean; on: boolean; url?: string };
   health: { ok: boolean; server?: { name: string; version: string }; error?: string };
   configured: boolean;
+  /** What the endpoint's tool list says of each capability family -- where it could be asked. */
+  capabilities?: { available: Record<string, boolean>; on: Record<string, boolean> };
 }
 
 /** What an instance holds, as GET /instances says it (the password not among them). */
@@ -35,7 +38,8 @@ export interface InstanceView {
   name: string;
   url: string;
   username: string;
-  mcpExcludeTools: string;
+  /** The capability families turned off for this instance, by family id; nothing standing is everything on. */
+  capabilities?: Record<string, boolean>;
   passwordSet?: boolean;
   configured: boolean;
   container: string; // "own" or "adopted:<docker container name>"
@@ -74,7 +78,7 @@ export const useNextcloudInstance = (): string | undefined => useContext(Instanc
 export const api = {
   status: () => call<NextcloudStatus>("/status"),
   instances: () => call<{ instances: InstanceView[] }>("/instances"),
-  saveInstance: (fields: Record<string, string>) =>
+  saveInstance: (fields: Record<string, unknown>) =>
     call<{ instances: InstanceView[]; task?: string }>("/instances", {
       method: "POST",
       headers: { "content-type": "application/json" },

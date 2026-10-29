@@ -40,7 +40,7 @@ Via **`pithagoras-docker`** (`requires: { "pithagoras-docker": "^1.3.0" }`, exac
 - Lifecycle: create on first settings save; recreate (re-apply env) when `url`/`username` changes; restart/re-pull only via an explicit "update" action in the settings page; stop + remove container when the extension is disabled/uninstalled.
 - Health: poll the forwarder's `/mcp` (or image healthcheck) and surface running/stopped/error in both the settings page and the panel header.
 
-## 4. UI: one panel, seven tabs
+## 4. UI: one panel, ten tabs
 
 Registered as **one** `portal.slots.set("chat.panel", …)` with id `nextcloud` (like office's single panel) and an internal tab bar — matches "one sidebar tab for everything the MCP offers" without flooding every chat with eight nav entries. Deep-linking later: `portal.panels.open("nextcloud")` + `useShown()`.
 
@@ -53,6 +53,11 @@ Registered as **one** `portal.slots.set("chat.panel", …)` with id `nextcloud` 
 | **Contacts** | Contacts (8) | Address book picker → contact list; detail view with editable CardDAV fields. |
 | **Cookbook** | Cookbook (13) | Recipe grid/list → detail (ingredients, steps); "import from URL" action (schema.org). |
 | **Shopping List** | Shopping List (12) | List picker → checkable items; add/remove/clear-checked; (nice-to-have: "add recipe ingredients" using the one-call tool). |
+| **Mail** | Mail (13) | Accounts → mailboxes → messages by subject/sender/preview; a message opened for its body and attachments, marked read or unread. |
+| **News** | News (8) | Feeds with their unread standing → items; an article opened for its body beside the link to its original. |
+| **Collectives** | Collectives (16) | Collectives' pages searched as you type, a page opened for reading where one is not kept read-only. |
+
+The tab bar is not static: each tab stands under one or more **capabilities** (`src/capabilities.ts`), and a tab is offered where its endpoint provides the capability's tools and no choice turns it off. What an endpoint provides is found from its own `tools/list` while the status looks — so nothing an earlier version never offered is invented, and a server that starts to offer more shows it on its own.
 
 ### 4.3 How panels call the MCP server
 
@@ -127,10 +132,12 @@ await portal.mcp.set({
 ```
 
 - `directTools` stays **off**: 120+ tools eager would burn ~40k tokens per chat context — lazy discovery via pi-mcp-adapter is the point. (Matches current mcp.json.)
-- **Advanced setting** `mcp.excludeTools` (string list, default reflects what Simeon uses now: Mail/News/Collectives/Talk tables): applied in the same `mcp.set` call. Keeps context slim without hiding anything from the panels — panels always talk to the full server directly.
+- **Capability choices** (`src/capabilities.ts`, one per tool family, edited on the settings page as plain toggles) replace the earlier keep-out list: a turned-off capability keeps its tools out of pi's config through the same `mcp.set` call, and keeps its tab out of the panel as well. All choices stand on by default; a legacy entry's old exclude list comes over as its choices at the first migration.
 - Uninstall/disable → `portal.mcp.set(null)` cleans the entry; container removed per §3.
 
 ## 7. Settings (user-visible)
+
+As built, the settings are not these raw keys but **instances** (a list of name/url/username/password/capabilities/container) kept in the extension's own data folder (`dataDir()/settings.json`, see `src/config.ts`) and edited on a dedicated settings page. The flat keys below were the original design; what is left of them is that an earlier version's entries are migrated once at the first start and then leave pi's config file. Existing entries in pi's mcp.json that point at running containers of the image are adopted on their own at the first start, with a note shown on the settings page (`src/migrate.ts`).
 
 Auto-restored settings page (static defaults in code, per the package-source heuristic — keep defaults as literals so restore sees them):
 
@@ -139,9 +146,9 @@ Auto-restored settings page (static defaults in code, per the package-source heu
 | `url` | Nextcloud URL | e.g. `https://tbug.elyros.de`; changed → container recreated |
 | `username` | username | |
 | `password` | app password | hint: Settings ▸ Security ▸ Devices & sessions; core change B for masking |
-| `mcp.excludeTools` | (advanced) comma list | default: `mail, news, collectives, talk` tool groups as in current mcp.json |
+| capabilities | one toggle per tool family | off → the family's tools are kept out of pi's config and its tab stands out of the panel; greyed where the endpoint does not provide it at all |
 
-Status block on the same page: container state, MCP server health, "pi is connected via mcp.json ✓/✗", actions **Update image / Restart**.
+Status block on the same page: container state, MCP server health, "pi is connected via mcp.json ✓/✗", each capability as offered by the endpoint, actions **Update image / Restart**.
 
 ## 8. Security posture (Aegis-default: local/self-hosted)
 

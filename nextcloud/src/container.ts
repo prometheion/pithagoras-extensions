@@ -194,9 +194,22 @@ function endpointFromPorts(ports: unknown): string | undefined {
  * API lists only what is its own and a candidate to adopt is never one of those. A failed read of the machine says so
  * in the error, nothing more -- discovery then stands where it stood before, empty.
  */
+/** The docker CLI by callback -- the promisified form of execFile is no promise on this machine's node build (it hands
+ * back the child process itself), and a discovery that misreads its output would find nothing it was there to find. */
+function runDocker(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("docker", args, { timeout: 15000, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(typeof stdout === "string" ? stdout : String(stdout ?? ""));
+    });
+  });
+}
+
 export async function discover(): Promise<Discovered[]> {
-  const { stdout } = await execFile("docker", ["ps", "-a", "--format", "{{json .}}"], { timeout: 15000, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" });
-  const raw = typeof stdout === "string" ? stdout : String(stdout ?? ""); // the type says string, this keeps it honest at runtime too
+  const raw = await runDocker(["ps", "-a", "--format", "{{json .}}"]); // the callback's word, kept honest at runtime too
   const out: Discovered[] = [];
   for (const line of raw.split(/\r?\n/)) {
     const text = line.trim();

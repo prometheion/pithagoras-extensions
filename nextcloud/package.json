@@ -4,6 +4,7 @@
   "description": "Nextcloud for Pithagoras: runs the Nextcloud MCP server in its own container and brings its Shopping List, Cookbook and Notes into a chat panel.",
   "license": "Apache-2.0",
   "type": "module",
+  "pi": {},
   "pithagoras": {
     "client": "./web/client.js",
     "style": "./web/client.css",

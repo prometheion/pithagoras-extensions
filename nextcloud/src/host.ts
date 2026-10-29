@@ -16,6 +16,9 @@ export function portal(): ServerPortal {
   return current;
 }
 
+/** This extension's own data folder (its settings stand there, as Settings keeps the settings of any extension). */
+export const dataDir = (): string => portal().dataDir();
+
 /**
  * Docker, which this package declares in its requires (Docker for extensions) — present whenever this half runs; a
  * portal without it cannot start an extension that asked for it, so its absence is a broken install, not a state.

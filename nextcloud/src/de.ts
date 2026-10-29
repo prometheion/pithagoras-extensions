@@ -8,8 +8,11 @@ export const de = {
   "Deck": "Deck",
   "Calendar": "Kalender",
   "Contacts": "Kontakte",
-  "The shopping lists, cookbook, notes, files, deck, calendar and contacts of this portal's Nextclouds":
-    "Die Einkaufslisten, das Kochbuch, die Notizen, Dateien, Deck, Kalender und Kontakte der Nextclouds dieses Portals",
+  "Mail": "E-Mail",
+  "News": "Nachrichten",
+  "Collectives": "Gemeinschaften",
+  "The shopping lists, cookbook, notes, files, deck, calendar, contacts, mail, news and collectives of this portal's Nextclouds":
+    "Die Einkaufslisten, das Kochbuch, die Notizen, Dateien, Deck, Kalender, Kontakte, E-Mails, Nachrichten und Gemeinschaften der Nextclouds dieses Portals",
   "No Nextcloud is set yet: add an instance on the Nextcloud page in Settings.":
     "Es ist noch kein Nextcloud eingestellt: Lege eine Instanz auf der Nextcloud-Seite in den Einstellungen an.",
   "This Nextcloud ({name}) is not set up completely yet: fill it in on the Nextcloud page in Settings.":
@@ -56,6 +59,7 @@ export const de = {
   "This extension runs the Nextcloud MCP server for each of its instances -- in a container it made and keeps, or one already running that it adopted by name -- and registers every instance in pi's config for the chats. Each instance needs a host and an app password.":
     "Diese Erweiterung betreibt den Nextcloud-MCP-Server für jede ihrer Instanzen – in einem Container, den sie angelegt und weiterpflegt, oder in einem, der schon lief und den sie nach Namen übernommen hat –, und trägt jede Instanz für die Chats in der Konfiguration von pi ein. Jede Instanz braucht einen Host und ein App-Passwort.",
   "No instance yet: add your first Nextcloud below.": "Noch keine Instanz: Lege unten dein erstes Nextcloud an.",
+  "Taken over from pi's config": "Übernommen aus der Konfiguration von pi",
   "Add an instance": "Instanz hinzufügen",
   "Name": "Bezeichnung",
   "e.g. nextcloud_uni": "z. B. nextcloud_uni",
@@ -82,11 +86,9 @@ export const de = {
   "(not set yet)": "(noch nicht gesetzt)",
   "Made in Nextcloud under Settings, Security, Devices & sessions. It is only ever set, never shown back.":
     "Wird in Nextcloud unter Einstellungen, Sicherheit, Geräte & Sitzungen angelegt. Es wird nur je gesetzt, nie wieder angezeigt.",
-  "Tools the chats must not get from this server": "Werkzeuge, die die Chats von diesem Server nicht bekommen dürfen",
-  "empty: take the default keep-out list": "leer: die Standard-Sperrliste übernehmen",
-  "Tool-name globs, comma-separated.": "Namens-Globs der Werkzeuge, kommagetrennt.",
-  "Tool-name globs, comma-separated; this server's tools carry the prefix {name}_.":
-    "Namens-Globs der Werkzeuge, kommagetrennt; die Werkzeuge dieses Servers tragen das Präfix {name}_.",
+  "What this server offers to the chats and the pages": "Was dieser Server den Chats und den Seiten bietet",
+  "Where the server cannot give what a choice asks for, the choice stands greyed out: nothing it does not offer is offered.":
+    "Wo der Server nicht geben kann, was eine Wahl verlangt, steht die Wahl ausgegraut: Was er nicht anbietet, wird nicht angeboten.",
   "Saved.": "Gespeichert.",
   "Save and apply": "Speichern und anwenden",
   "Start again": "Neu starten",
@@ -218,4 +220,47 @@ export const de = {
   "A new contact in this book": "Ein neuer Kontakt in diesem Buch",
   "This card carries more than one e-mail or phone; this panel only changes the first of each.":
     "Dieser Kontakt hat mehrere E-Mails oder Nummern; dieses Panel ändert jeweils nur die erste davon.",
+
+  // E-Mail
+  "Accounts": "Konten",
+  "Mailboxes": "Postfächer",
+  "Messages": "Nachrichten",
+  "new": "neu",
+  "unread": "ungelesen",
+  "Mark read": "Als gelesen markieren",
+  "Mark unread": "Als ungelesen markieren",
+  "Attachments": "Anhänge",
+  "(unnamed)": "(ohne Namen)",
+  "Has attachments": "Hat Anhänge",
+  "This message has no body.": "Diese Nachricht hat keinen Inhalt.",
+  "No mail account is set up on this Nextcloud.": "Auf diesem Nextcloud ist kein E-Mail-Konto eingerichtet.",
+  "This mailbox is empty.": "Dieses Postfach ist leer.",
+  "The mail accounts could not be read: {error}": "Die E-Mail-Konten konnten nicht gelesen werden: {error}",
+  "The mailboxes could not be read: {error}": "Die Postfächer konnten nicht gelesen werden: {error}",
+  "The messages could not be read: {error}": "Die Nachrichten konnten nicht gelesen werden: {error}",
+  "The message did not answer in a way this panel reads.": "Die Nachricht hat nicht geantwortet, wie dieses Panel es liest.",
+
+  // Nachrichten (Feeds)
+  "Feeds": "Feeds",
+  "Items": "Beiträge",
+  "Open the original": "Original öffnen",
+  "(no title)": "(ohne Titel)",
+  "The feed could not be updated": "Der Feed konnte nicht aktualisiert werden",
+  "This article has no body.": "Dieser Beitrag hat keinen Inhalt.",
+  "No news feeds are set up on this Nextcloud.": "Auf diesem Nextcloud sind keine News-Feeds eingerichtet.",
+  "This feed has no items.": "In diesem Feed stehen keine Beiträge.",
+  "The feeds could not be read: {error}": "Die Feeds konnten nicht gelesen werden: {error}",
+  "The items could not be read: {error}": "Die Beiträge konnten nicht gelesen werden: {error}",
+  "The article did not answer in a way this panel reads.": "Der Beitrag hat nicht geantwortet, wie dieses Panel es liest.",
+
+  // Gemeinschaften
+  "Pages": "Seiten",
+  "Search the pages": "Seiten durchsuchen",
+  "This page is empty.": "Diese Seite ist leer.",
+  "Nothing matched the search.": "Nichts hat die Suche getroffen.",
+  "This collective has no pages yet.": "In dieser Gemeinschaft stehen noch keine Seiten.",
+  "No collectives are set up on this Nextcloud.": "Auf diesem Nextcloud sind keine Gemeinschaften eingerichtet.",
+  "The collectives could not be read: {error}": "Die Gemeinschaften konnten nicht gelesen werden: {error}",
+  "The pages could not be read: {error}": "Die Seiten konnten nicht gelesen werden: {error}",
+  "The page did not answer in a way this panel reads.": "Die Seite hat nicht geantwortet, wie dieses Panel es liest.",
 } as const;

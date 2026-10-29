@@ -2,23 +2,24 @@ import "./client.css";
 import { Suspense, useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import type { PanelProps, Portal } from "@pithagoras/extension-api";
-import { LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuFiles, LuKanban, LuListChecks } from "react-icons/lu";
+import {LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuFiles, LuLayers, LuKanban, LuListChecks, LuMail, LuNewspaper} from "react-icons/lu";
 import { msg, portal, setPortal, t } from "./portal";
 import { de } from "./de";
+import { TABS, tabOffered } from "./capabilities";
 import { api, InstanceContext, NextcloudStatus } from "./web/api";
 
 /**
  * @pithagoras/nextcloud: its browser half. One panel beside every chat -- the Nextcloud of the keys on this portal,
- * by tabs: the shopping lists, the cookbook and the notes, and beside them the files-and-sharing, deck, calendar and
- * contacts tabs -- all seven working, on whichever of the instances the switcher in the header holds (the first
- * where there is more than one). All of it through its own server half (the /api/x routes), which runs every
- * instance's MCP server -- in a container this extension made, or one it adopted -- and knows where things stand;
- * nothing of the Nextcloud talks to the browser itself. Plus its page in Settings: the instances, their containers
- * (made or adopted), their entries in pi's config, and how all stands.
+ * by tabs, one per capability family the instance's server provides: the shopping lists, the cookbook and the notes,
+ * the files-and-sharing, deck, calendar and contacts tabs, and beside them mail, news and collectives -- all of it
+ * working, on whichever of the instances the switcher in the header holds (the first where there is more than one).
+ * Which tabs stand at all is found from the instance's endpoint: a family its server does not provide stands no tab,
+ * and a family its choices turned off stands none either -- offered nowhere, kept out of the chats' tool lists with.
+ * All of it through its own server half (the /api/x routes), which runs every instance's MCP server -- in a
+ * container this extension made, or one it adopted -- and knows where things stand; nothing of the Nextcloud talks
+ * to the browser itself. Plus its page in Settings: the instances, their containers (made or adopted), their
+ * entries in pi's config, and how all stands.
  */
-
-/** The tabs, by what they show. */
-type TabId = "shopping-list" | "cookbook" | "notes" | "files" | "deck" | "calendar" | "contacts";
 
 let ShoppingList: ComponentType;
 let Cookbook: ComponentType;
@@ -27,13 +28,30 @@ let Files: ComponentType;
 let Deck: ComponentType;
 let Calendar: ComponentType;
 let Contacts: ComponentType;
+let Mail: ComponentType;
+let News: ComponentType;
+let Collectives: ComponentType;
 let SettingsPage: ComponentType;
+
+/** The marks of the tabs, by their id. */
+const TAB_ICONS: Record<string, ComponentType> = {
+  shopping: LuListChecks,
+  cookbook: LuBookOpenText,
+  notes: LuCloud,
+  files: LuFiles,
+  deck: LuKanban,
+  calendar: LuCalendarX,
+  contacts: LuContactRound,
+  mail: LuMail,
+  news: LuNewspaper,
+  collectives: LuLayers,
+};
 
 /** The Nextcloud panel beside a chat: the switcher over its instances, and the tabs of whichever it holds. While it
  * has nothing to say (no Nextcloud set) it says that, with the way to where the keys are kept. */
 function NextcloudPanel({ panel }: PanelProps) {
   portal.locale.use();
-  const [tab, setTab] = useState<TabId>("shopping-list");
+  const [tab, setTab] = useState<string>("shopping");
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
   const [selected, setSelected] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -51,6 +69,12 @@ function NextcloudPanel({ panel }: PanelProps) {
     if (names.length && (!selected || !names.includes(selected))) setSelected(names[0]);
   }, [status, selected]);
   const held = instances.find((inst) => inst.name === selected) ?? (instances.length ? instances[0] : undefined);
+  // The tabs that stand for the instance held: what its endpoint provides of each family beside what its choices
+  // turned on -- asked live by the status, so a tab goes away where its server does not have it.
+  const offered = TABS.filter((def) => tabOffered(def, held?.capabilities?.available, held?.capabilities?.on));
+  useEffect(() => {
+    if (offered.length && !offered.some((def) => def.id === tab)) setTab(offered[0].id);
+  }, [held]);
   if (status && !status.configured) {
     return (
       <div className="p-3">
@@ -73,13 +97,10 @@ function NextcloudPanel({ panel }: PanelProps) {
         </div>
       )}
       <div className="nc-tabs" role="tablist">
-        <TabButton active={tab === "shopping-list"} onClick={() => setTab("shopping-list")} icon={<LuListChecks />} label={t("Shopping List")} />
-        <TabButton active={tab === "cookbook"} onClick={() => setTab("cookbook")} icon={<LuBookOpenText />} label={t("Cookbook")} />
-        <TabButton active={tab === "notes"} onClick={() => setTab("notes")} icon={<LuCloud />} label={t("Notes")} />
-        <TabButton active={tab === "files"} onClick={() => setTab("files")} icon={<LuFiles />} label={t("Files & Sharing")} />
-        <TabButton active={tab === "deck"} onClick={() => setTab("deck")} icon={<LuKanban />} label={t("Deck")} />
-        <TabButton active={tab === "calendar"} onClick={() => setTab("calendar")} icon={<LuCalendarX />} label={t("Calendar")} />
-        <TabButton active={tab === "contacts"} onClick={() => setTab("contacts")} icon={<LuContactRound />} label={t("Contacts")} />
+        {offered.map((def) => {
+          const Icon = TAB_ICONS[def.id];
+          return <TabButton key={def.id} active={tab === def.id} onClick={() => setTab(def.id)} icon={<Icon />} label={t(def.label)} />;
+        })}
       </div>
       {held && !held.configured ? (
         <p className="text-sm text-fg-subtle p-1">
@@ -90,41 +111,23 @@ function NextcloudPanel({ panel }: PanelProps) {
         // the tabs read the instance their calls go to from here.
         <div key={held?.name ?? selected ?? "none"}>
           <InstanceContext.Provider value={held?.name}>
-          {tab === "shopping-list" ? (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <ShoppingList />
-            </Suspense>
-          ) : tab === "cookbook" ? (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <Cookbook />
-            </Suspense>
-          ) : tab === "notes" ? (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <Notes />
-            </Suspense>
-          ) : tab === "files" ? (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <Files />
-            </Suspense>
-          ) : tab === "deck" ? (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <Deck />
-            </Suspense>
-          ) : tab === "calendar" ? (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <Calendar />
-            </Suspense>
-          ) : (
-            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-              <Contacts />
-            </Suspense>
-          )}
+            {(() => {
+              const Shown = components[tab];
+              return Shown ? (
+                <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}><Shown /></Suspense>
+              ) : (
+                <p className="text-sm text-fg-subtle p-1">{t("Loading…")}</p>
+              );
+            })()}
           </InstanceContext.Provider>
         </div>
       )}
     </div>
   );
 }
+
+/** The tabs' components, filled where the package registers its half. */
+const components: Record<string, ComponentType> = {};
 
 /** One of the working tabs: its name and its mark, chosen as pressed. */
 function TabButton({ active, onClick, icon, label }: { active: boolean; onClick(): void; icon: React.ReactNode; label: string }) {
@@ -167,7 +170,20 @@ export default function nextcloud(given: Portal): void {
   Deck = portal.ui.lazy(() => import("./web/deck"), "default");
   Calendar = portal.ui.lazy(() => import("./web/calendar"), "default");
   Contacts = portal.ui.lazy(() => import("./web/contacts"), "default");
+  Mail = portal.ui.lazy(() => import("./web/mail"), "default");
+  News = portal.ui.lazy(() => import("./web/news"), "default");
+  Collectives = portal.ui.lazy(() => import("./web/collectives"), "default");
   SettingsPage = portal.ui.lazy(() => import("./web/settings-page"), "default");
+  components.shopping = ShoppingList;
+  components.cookbook = Cookbook;
+  components.notes = Notes;
+  components.files = Files;
+  components.deck = Deck;
+  components.calendar = Calendar;
+  components.contacts = Contacts;
+  components.mail = Mail;
+  components.news = News;
+  components.collectives = Collectives;
 
   // Beside every chat -- shown for all: the Nextcloud of this portal's keys, by tabs.
   portal.slots.register("chat.panel", {
@@ -178,7 +194,7 @@ export default function nextcloud(given: Portal): void {
     component: NextcloudPanel,
     useButton: () => {
       portal.locale.use();
-      return { title: t("The shopping lists, cookbook, notes, files, deck, calendar and contacts of this portal's Nextclouds") };
+      return { title: t("The shopping lists, cookbook, notes, files, deck, calendar, contacts, mail, news and collectives of this portal's Nextclouds") };
     },
   });
 
@@ -187,7 +203,7 @@ export default function nextcloud(given: Portal): void {
     id: "nextcloud",
     title: msg("Nextcloud"),
     icon: LuCloud,
-    search: [{ title: msg("Nextcloud"), words: "nextcloud mcp instances instance adopt adopted container containers port image app password host" }],
+    search: [{ title: msg("Nextcloud"), words: "nextcloud mcp instances instance adopt adopted container containers port image app password host capabilities mail news collectives" }],
     component: () => (
       <Suspense fallback={<SettingsFallback />}>
         <SettingsPage />

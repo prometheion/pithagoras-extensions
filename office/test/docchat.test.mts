@@ -980,3 +980,9 @@ test("a failed run in the editor's chat says so there", async () => {
   await settle();
   assert.deepEqual(posts.filter((p) => p.job.kind === "chat.send").map((p) => p.job.args.text), ["Aegis could not answer: the model is down. Write again to try again."]);
 });
+
+test("the prompts a comment's and the editor's chats start with name office_format beside office_edit: a person asks for a look there too", () => {
+  for (const prompt of [docchat.threadPrompt("d1", "g1", "make the heading bold"), docchat.threadPrompt("d1", "g1", null), docchat.sessionPrompt("d1", ["Ana: centre the title"])]) {
+    assert.match(prompt, /office_edit changes what (the document|it) says, office_format how it looks/);
+  }
+});

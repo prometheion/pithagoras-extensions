@@ -227,7 +227,7 @@ test("registers office_* only in agent and project home chats", () => {
   (setup as any).__run();
   assert.deepEqual(
     s.pi.registered.map((t) => t.name).sort(),
-    ["office_comments", "office_create", "office_edit", "office_list", "office_read", "office_screenshot"],
+    ["office_comments", "office_create", "office_edit", "office_format", "office_list", "office_read", "office_screenshot"],
   );
 
   // wrong kind (a plain chat folder): the factory RETURNS, nothing registered
@@ -1019,7 +1019,7 @@ test("a chat of a comment thread or of the editor's chat gets the tools as any c
   Object.assign(s.pi, { on: (name: string) => seen.push(name), getActiveTools: () => ["read", "ask_question"], setActiveTools: () => assert.fail("no tool is switched off") });
   (setup as any).__run();
   assert.deepEqual(seen, [], "no hook on its runs or its tool calls");
-  assert.deepEqual(s.pi.registered.map((t) => t.name).sort(), ["office_comments", "office_create", "office_edit", "office_list", "office_read", "office_screenshot"]);
+  assert.deepEqual(s.pi.registered.map((t) => t.name).sort(), ["office_comments", "office_create", "office_edit", "office_format", "office_list", "office_read", "office_screenshot"]);
   docchat.__resetDocchatForTests();
 });
 
@@ -1153,4 +1153,101 @@ test("office_screenshot: a document the agent may only read is shown through its
   registerTools({ mayWrite: () => { throw new Error("EACCES"); } });
   await tool(s, "office_screenshot").execute("c", { id: doc.docId });
   assert.equal(s.seat.shots[0].mode, "view");
+});
+
+test("office_format: the ops go to the agent's editor as one word.format job, the session is saved, and the answer says what the call made and that the pages moved", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ ops: 2, styles: [{ style: "Callout", made: true }, { style: "Normal", changed: true, paragraphs: 12 }], reflowed: true });
+  const ok = (await tool(s, "office_format").execute("f1", { id: doc.docId, ops: [{ defineStyle: "Callout", set: { italic: true } }, { page: "*", set: { margins: "2cm" } }] })) as ToolResult;
+  const to = getDoc(doc.docId, s.root)!.mtimeMs;
+  assert.equal(ok.content[0].text, `Formatted "Report" (2 ops), saved as revision ${to}. Made the style "Callout". Changed the style "Normal" (12 paragraphs use it). The document reflowed; office_screenshot shows the pages.`);
+  assert.deepEqual(ok.details, { action: "format", id: doc.docId, ops: 2, from: doc.mtimeMs, to, live: 0 });
+  assert.deepEqual(s.seat.runs.map((r) => [r.mode, r.kind, r.args]), [["edit", "word.format", { ops: [{ defineStyle: "Callout", type: "paragraph", text: { italic: true } }, { page: "*", set: { margins: { top: 1134, right: 1134, bottom: 1134, left: 1134 } } }] }]]);
+  assert.match(s.seen.records.at(-1)!.reason, new RegExp(`^office_format: 2 op\\(s\\) \\(style, page\\) on ${doc.docId} by /f/atlas; saved as revision ${to}$`));
+});
+
+test("office_format: bad ops, a content op, a spreadsheet, Office stopped and a read-only file are refused before anything is sent; a call not taken back whole is partial and in the audit log", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  const fmt = (id: string, ops: unknown) => tool(s, "office_format").execute("f", { id, ops });
+  assert.match(await refused(fmt(doc.docId, [{ format: "a", set: { bolt: true } }])), /^error:bad_op op 1: set has "bolt"/);
+  assert.match(await refused(fmt(doc.docId, [{ quote: "a", replacement: "b" }])), /^error:bad_op op 1: `quote` is an office_edit op/);
+  assert.match(await refused(fmt(sheet.docId, [{ format: "a", set: { bold: true } }])), /^error:unsupported_format office_format changes how Word documents look/);
+  assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ format: "a", set: { bold: true } }] })), /^error:bad_op op 1: `format` is an office_format op/);
+  s.office.state = "stopped";
+  assert.match(await refused(fmt(doc.docId, [{ pageBreak: true }])), /^error:office_stopped /);
+  s.office.state = "running";
+  assert.equal(s.seat.runs.length, 0, "nothing reached the editor");
+  s.seat.answer = () => Promise.reject(new SeatError("editor_not_saved", "made, not sent", 0, true));
+  await refused(fmt(doc.docId, [{ pageBreak: true }]));
+  assert.match(s.seen.records.at(-1)!.reason, /^office_format: 1 op\(s\) \(page break\) on .*; made in the editor, not saved yet \(editor_not_saved\)$/);
+  s.seat.answer = () => Promise.reject(new SeatError("quote_ambiguous", 'op 1: the quote "Total" is in the document 2 times as the editor searches it: quote more of it, or give nth (from 1, in reading order)', 0));
+  assert.match(await refused(fmt(doc.docId, [{ format: "Total", set: { bold: true } }])), /^error:quote_ambiguous op 1: .*give nth .* Nothing was changed: read the document again with office_read and quote it as it stands\.$/);
+});
+
+test("office_read with formatting: the styles in use, the pages, headers, footers and footnotes first; each paragraph's own formatting in its brackets and its runs' under it; table styles; list items without their labels", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = (run) => {
+    assert.deepEqual(run.args, { formatting: true });
+    return {
+      blocks: [
+        { p: "Quarterly report for Meridian Labs", look: { para: { align: "center", spaceBefore: 240 }, runs: [{ t: "Quarterly report", look: { font: "Arial", size: 28, bold: true, italic: true, underline: true, color: "#C81E1E", highlight: "yellow" } }, { t: "Meridian Labs", look: { link: "https://example.com/meridian", style: "Hyperlink" } }] } },
+        { p: "first point", style: "List Paragraph", list: "bullet", level: 1 },
+        { p: "sub point", list: "number", level: 2, format: "lowerLetter", look: { para: { indentLeft: 720, firstLine: -360, line: { multiple: 1.5 } } } },
+        { p: "There was a discrepancy here.", look: { notes: ["There was a discrepancy"], runs: [{ t: "x".repeat(100), look: { superscript: true } }], pictures: [[1800000, 1224000]] } },
+        { table: [["Item", "Amount"], ["Ledger", "42"]], look: { style: "Grid Table 4 - Accent 1", headerRows: 1, merged: [{ row: 0, cell: 1, across: 2 }] } },
+      ],
+      format: {
+        defaults: { font: "Times New Roman", size: 20 },
+        styles: [{ name: "Callout", type: "paragraph", basedOn: "Normal", text: { italic: true, color: "#005AA0" }, para: { indentLeft: 720 } }, { name: "Hyperlink", type: "run", text: { underline: true } }],
+        sections: [
+          { width: 11906, height: 16838, margins: [1134, 1134, 1134, 1134], ends: 3, header: { text: "Meridian Labs — confidential", more: false }, footer: { text: "Page {page} of {pages}", more: false } },
+          { width: 15840, height: 12240, margins: [1440, 1440, 1440, 1440], ends: 0, header: { text: "Logo", more: true } },
+        ],
+        footnotes: [" The audit of March."],
+      },
+    };
+  };
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId, formatting: true })) as ToolResult).content[0].text.split("\n\n").slice(1).join("\n\n");
+  assert.equal(
+    t,
+    [
+      "Formatting: each paragraph's and run's own (direct) formatting is shown with it; a style's look is here once, as the style is itself (what it inherits is not added).",
+      "Document defaults: Times New Roman 10.",
+      "Styles in use: Callout (paragraph, based on Normal: italic, #005AA0; indent left 1.27cm), Hyperlink (character: underline).",
+      'Section 1: A4 portrait, margins 2/2/2/2 cm (top/right/bottom/left). Header: "Meridian Labs — confidential". Footer: "Page {page} of {pages}".',
+      'Section 2 (from [4]): Letter landscape, margins 2.54/2.54/2.54/2.54 cm (top/right/bottom/left). Header: "Logo" (and more than text: pictures or tables).',
+      'Footnotes: [1] in [4] after "There was a discrepancy": The audit of March.',
+      "",
+      "[1] (center, space before 12pt) Quarterly report for Meridian Labs",
+      '    "Quarterly report": Arial 14, bold, italic, underline, #C81E1E, highlight yellow; "Meridian Labs": style "Hyperlink", link https://example.com/meridian',
+      "[2] (List Paragraph, bullet) first point",
+      "[3] (numbered lowerLetter, level 2, line spacing 1.5, indent left 1.27cm, hanging 0.64cm) sub point",
+      "[4] There was a discrepancy here.",
+      `    "${"x".repeat(77)}…": superscript; a picture 5 × 3.4 cm`,
+      '[5] table (style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns)',
+      "| Item | Amount |",
+      "| Ledger | 42 |",
+    ].join("\n"),
+  );
+  // Without it, the read asks for none; a list item still says its list.
+  s.seat.answer = (run) => (assert.deepEqual(run.args, {}), { blocks: [{ p: "first point", list: "bullet", level: 1 }] });
+  assert.match(((await tool(s, "office_read").execute("r2", { id: doc.docId })) as ToolResult).content[0].text, /\n\[1\] \(bullet\) first point$/);
+  // A spreadsheet's and a saved file's formatting are not read, and the read says so.
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.answer = undefined;
+  assert.match(((await tool(s, "office_read").execute("r3", { id: sheet.docId, formatting: true })) as ToolResult).content[0].text, /a spreadsheet's formatting is not read yet: office_screenshot shows it\)$/);
+  s.office.state = "stopped";
+  assert.match(((await tool(s, "office_read").execute("r4", { id: doc.docId, formatting: true })) as ToolResult).content[0].text, /formatting is read from the editor only, and this is the saved file\)$/);
+  assert.match(await refused(tool(s, "office_read").execute("r5", { id: doc.docId, formatting: "yes" })), /^error:bad_op formatting is true or false/);
+});
+
+test("office_read with formatting: past the most a read gives of it, the read says where it stopped", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Long", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ blocks: [{ p: "a" }, { p: "b" }], format: { styles: [], sections: [], footnotes: [] }, formatCut: 2 });
+  assert.match(((await tool(s, "office_read").execute("r", { id: doc.docId, formatting: true })) as ToolResult).content[0].text, /\(formatting is shown up to \[2\]: a read gives 50,000 characters of it at most; office_screenshot shows the pages after it\)$/);
 });

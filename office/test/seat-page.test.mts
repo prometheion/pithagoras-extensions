@@ -149,12 +149,19 @@ test("seat page: the editors' events are numbered in the order they were raised;
 });
 
 /** A command run as the plugin runs it, with `Api` and `Asc.scope.args` as given. */
-function command(kind: string, Api: unknown, args: unknown = {}): { result?: any; error?: any } {
+function command(kind: string, Api: unknown, args: unknown = {}): { result?: any; error?: any; touched?: boolean } {
   // As JSON, as the editor hands it back to the plugin (and out of the context's own objects).
   return JSON.parse(JSON.stringify(vm.runInNewContext(`(${COMMANDS[kind].source})()`, { Api, Asc: { scope: { args } } })));
 }
 
-const paragraph = (text: string) => ({ GetClassType: () => "paragraph", GetText: () => `${text}\r\n`, GetParaPr: () => ({ GetStyle: () => null }) });
+let paragraphs = 0;
+/** A paragraph as the builder gives it, of `text` in `style` (a list item's label in front of it where it has one, as
+ * GetText gives it unless asked without). */
+const paragraph = (text: string, style?: string, label = "") => {
+  const id = `p${++paragraphs}`;
+  const st = style ? { GetName: () => style, GetType: () => "paragraph" } : null;
+  return { GetClassType: () => "paragraph", GetText: (o?: { Numbering?: boolean }) => `${o?.Numbering === false ? "" : label}${text}\r\n`, GetParaPr: () => ({ GetStyle: () => st }), GetStyle: () => st, GetInternalId: () => id, GetNumbering: () => null };
+};
 const contentOf = (elements: unknown[]) => ({ GetElementsCount: () => elements.length, GetElement: (i: number) => elements[i] });
 
 test("word.read: a long document is read up to the most text a read gives, and says it goes on", () => {
@@ -679,7 +686,7 @@ function wordWithComments(text: string, comments: { id: number; from: number; to
     };
     return r;
   };
-  const para: any = { GetClassType: () => "paragraph", GetText: () => `${state.text}\r\n`, GetParaPr: () => ({ GetStyle: () => null }), GetRange: () => range(0, state.text.length), GetNext: () => null, GetPrevious: () => null, Delete() {} };
+  const para: any = { ...paragraph(""), GetText: () => `${state.text}\r\n`, GetRange: () => range(0, state.text.length), GetNext: () => null, GetPrevious: () => null, Delete() {} };
   const doc = {
     ...contentOf([para]),
     GetStyle: () => null,
@@ -1012,4 +1019,292 @@ test("the plugin locates a Word page once the page count held still; a spreadshe
   seen.length = 0;
   await plugin(editor as unknown as ReturnType<typeof workbook>, { kind: "view.locate", args: { kind: "cell" } });
   assert.deepEqual(seen, ["locate"]);
+});
+
+/**
+ * A Word document for the formatting commands, scripted: its body's paragraphs (a style, a list of a kind, a link, a
+ * table around it), what the editor's search finds of a quote (in the body, and where `elsewhere` says, in a header or
+ * a table of contents' entry), its styles and sections; every call a command makes of something it does not answer
+ * itself is written down (`calls`, as "what.Method(args)"), so a test reads what the command did.
+ */
+function scriptedWord(spec: {
+  paras: { text: string; style?: string; list?: { kind: "bullet" | "number"; level?: number; num?: string }; link?: string; table?: string }[];
+  elsewhere?: Record<string, ("header" | "toc")[]>;
+  styles?: Record<string, "paragraph" | "run" | "table">;
+  header?: "text" | "picture";
+  throwOn?: string;
+}) {
+  const calls: string[] = [];
+  const show = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? `[${v.map(show).join(", ")}]` : typeof v === "object" && v && (v as { __label?: string }).__label ? String((v as { __label: string }).__label) : JSON.stringify(v));
+  /** An object answering `own`, writing every other call down under `label`. */
+  const rec = (label: string, own: Record<string, unknown> = {}): any =>
+    new Proxy(own, {
+      get(target, key) {
+        if (key === "__label") return label;
+        if (key in target) return target[key as string];
+        if (typeof key !== "string" || key === "then" || key === "toJSON") return undefined;
+        return (...args: unknown[]) => {
+          const call = `${label}.${key}(${args.map(show).join(", ")})`;
+          calls.push(call);
+          if (spec.throwOn && call.startsWith(spec.throwOn)) throw new Error(`scripted failure at ${call}`);
+          return true;
+        };
+      },
+    });
+  const styles: Record<string, any> = {};
+  const style = (name: string, type: string) => (styles[name] = rec(`style(${name})`, { GetName: () => name, GetType: () => type, GetTextPr: () => rec(`style(${name}).text`), GetParaPr: () => rec(`style(${name}).para`), ToJSON: () => JSON.stringify({ styleId: name }) }));
+  for (const [name, type] of Object.entries({ Normal: "paragraph", "Heading 1": "paragraph", "toc 1": "paragraph", Hyperlink: "run", "Table Grid": "table", ...spec.styles })) style(name, type);
+  const numberings: Record<string, any> = {};
+  const numbering = (id: string, kind: string) =>
+    (numberings[id] ??= rec(`numbering(${id})`, {
+      GetLevel: (k: number) => rec(`numbering(${id}).level(${k})`, { GetLevelIndex: () => k, GetNumbering: () => numberings[id] }),
+      ToJSON: () => JSON.stringify({ abstractNum: { [id]: { lvl: Array.from({ length: 9 }, () => ({ numFmt: { val: kind === "bullet" ? "bullet" : "decimal" } })) } } }),
+    }));
+  let made = 0;
+  const tables: Record<string, any> = {};
+  const body: any[] = [];
+  const paras = spec.paras.map((p, i) => {
+    const label = `para(${p.text})`;
+    const list = p.list ? numbering(p.list.num ?? p.list.kind, p.list.kind) : null;
+    const link = p.link ? rec(`link(${p.link})`, { GetClassType: () => "hyperlink", GetRange: () => ({ __label: `link range` }), GetElementsCount: () => 1, GetElement: () => rec(`run(${p.link})`, { GetClassType: () => "run", GetTextPr: () => ({ GetStyle: () => styles.Hyperlink }) }) }) : null;
+    const elements = link ? [rec(`run(before ${p.text})`, { GetClassType: () => "run", GetRange: () => ({}), GetTextPr: () => ({ GetStyle: () => null }) }), link] : [];
+    const para = rec(label, {
+      GetClassType: () => "paragraph",
+      GetText: (o?: { Numbering?: boolean }) => `${p.list && o?.Numbering !== false ? "·\t" : ""}${p.text}\r\n`,
+      GetStyle: () => (p.style ? styles[p.style] : null),
+      GetParaPr: () => ({ GetStyle: () => (p.style ? styles[p.style] : null) }),
+      GetInternalId: () => `id${i}`,
+      GetNumbering: () => (list ? list.GetLevel(p.list!.level ?? 0) : null),
+      GetPrevious: () => (i > 0 && !spec.paras[i - 1].table ? paras[i - 1] : null),
+      GetNext: () => null,
+      GetParentTable: () => (p.table ? tables[p.table] : null),
+      GetSection: () => section,
+      GetParent: () => doc,
+      GetPosInParent: () => i,
+      GetElementsCount: () => elements.length,
+      GetElement: (k: number) => elements[k],
+      GetAllDrawingObjects: () => [],
+    });
+    return para;
+  });
+  // The body: paragraphs, those of a table inside it as its cells (one row).
+  spec.paras.forEach((p, i) => {
+    if (!p.table) return void body.push(paras[i]);
+    if (tables[p.table]) return;
+    const cells = spec.paras.map((q, k) => (q.table === p.table ? k : -1)).filter((k) => k >= 0).map((k) => rec(`cell(${spec.paras[k].text})`, { GetContent: () => contentOf([paras[k]]) }));
+    const row = rec(`row(${p.table})`, { GetCellsCount: () => cells.length, GetCell: (c: number) => cells[c] });
+    tables[p.table] = rec(`table(${p.table})`, { GetClassType: () => "table", GetRowsCount: () => 1, GetRow: () => row, GetColumnsCount: () => cells.length });
+    body.push(tables[p.table]);
+  });
+  const own = (where: string) => rec(`${where} content`, { GetElementsCount: () => 1, GetElement: () => rec(`${where} paragraph`, { GetClassType: () => "paragraph", ToJSON: () => JSON.stringify({ content: [{ type: "run", content: spec.header === "picture" ? [{ docPr: {} }] : ["Old header"] }] }) }) });
+  const section = rec("section", { GetHeader: (_k: string, make: boolean) => (spec.header || make ? own("header") : null), GetFooter: (_k: string, make: boolean) => (make ? own("footer") : null), GetPageWidth: () => 11906, GetPageHeight: () => 16838 });
+  const hit = (q: string, at: number, extra: Record<string, unknown> = {}) => rec(`range(${q}${at ? `@${at}` : ""})`, { GetText: () => q, GetAllParagraphs: () => [extra.para ?? paras[at]], GetStartPos: () => at * 1000, GetEndPos: () => at * 1000 + q.length, IntersectWith: () => ({ GetText: () => q }), ExpandTo: (r: any) => rec(`range(${q}..${r.GetText()})`, { GetAllParagraphs: () => [paras[at], ...r.GetAllParagraphs()], GetText: () => q }), ...extra });
+  const doc = rec("doc", {
+    ...contentOf(body),
+    GetStyle: (name: string) => styles[name] ?? null,
+    GetAllStyles: () => Object.values(styles),
+    CreateStyle: (name: string, type: string) => (calls.push(`doc.CreateStyle(${JSON.stringify(name)}, ${JSON.stringify(type)})`), style(name, type)),
+    CreateNumbering: (kind: string) => (calls.push(`doc.CreateNumbering(${JSON.stringify(kind)})`), numbering(`new${++made}`, kind)),
+    Search: (q: string) => {
+      const found = spec.paras.flatMap((p, i) => (p.text.includes(q) ? [hit(q, i)] : []));
+      for (const where of spec.elsewhere?.[q] ?? []) {
+        const stray = where === "toc" ? rec("toc entry", { GetInternalId: () => "toc", GetStyle: () => styles["toc 1"] }) : rec("header paragraph", { GetInternalId: () => "header" });
+        found.unshift(hit(q, 0, { para: stray }));
+      }
+      return found;
+    },
+    GetSections: () => [section],
+    GetRange: (a: number, b: number) => rec(`doc.range(${a}, ${b})`),
+    AddFootnote: () => (calls.push("doc.AddFootnote()"), rec("footnote", { GetElement: () => rec("footnote paragraph") })),
+    GetAllComments: () => [],
+    CreateSection: (p: { __label: string }) => (calls.push(`doc.CreateSection(${p.__label})`), rec("new section")),
+  });
+  const Api = rec("Api", { GetDocument: () => doc, CreateTextPr: () => rec("textPr"), CreateParagraph: () => rec("new paragraph", { GetRange: () => rec("new paragraph's range") }) });
+  return { Api, calls, run: (ops: unknown[]) => command("word.format", Api, { ops }) };
+}
+
+test("word.format: text and paragraph keys go to the quote's range and its paragraphs; a character style through a text property, never ApiRange.SetStyle; a paragraph style on the paragraphs", () => {
+  const w = scriptedWord({ paras: [{ text: "Quarterly report for Meridian" }, { text: "Revenue grew" }], styles: { Callout: "paragraph", Mark: "run" } });
+  const out = w.run([
+    { format: "Quarterly", text: { font: "Arial", size: 28, bold: true, italic: false, underline: true, strike: true, vertAlign: "superscript", color: { r: 200, g: 30, b: 30 }, highlight: "yellow", style: "Mark" }, para: { align: "justify", spaceBefore: 240, spaceAfter: 120, lineSpacing: { line: 360, rule: "auto" }, indentLeft: 720, indentRight: 0, firstLine: -283, pageBreakBefore: false, keepWithNext: true } },
+    { format: "Revenue", text: { style: "Callout", color: "auto" } },
+  ]);
+  assert.deepEqual(out, { result: { ops: 2 } });
+  assert.deepEqual(w.calls.filter((c) => !c.startsWith("Api.Save")), [
+    "para(Quarterly report for Meridian).SetJc(\"both\")",
+    "para(Quarterly report for Meridian).SetSpacingBefore(240)",
+    "para(Quarterly report for Meridian).SetSpacingAfter(120)",
+    "para(Quarterly report for Meridian).SetSpacingLine(360, \"auto\")",
+    "para(Quarterly report for Meridian).SetIndLeft(720)",
+    "para(Quarterly report for Meridian).SetIndRight(0)",
+    "para(Quarterly report for Meridian).SetIndFirstLine(-283)",
+    "para(Quarterly report for Meridian).SetPageBreakBefore(false)",
+    "para(Quarterly report for Meridian).SetKeepNext(true)",
+    "range(Quarterly).SetFontFamily(\"Arial\")",
+    "range(Quarterly).SetFontSize(28)",
+    "range(Quarterly).SetBold(true)",
+    "range(Quarterly).SetItalic(false)",
+    "range(Quarterly).SetUnderline(true)",
+    "range(Quarterly).SetStrikeout(true)",
+    "range(Quarterly).SetVertAlign(\"superscript\")",
+    "range(Quarterly).SetColor(200, 30, 30)",
+    "range(Quarterly).SetHighlight(\"yellow\")",
+    "textPr.SetStyle(style(Mark))",
+    "range(Quarterly).SetTextPr(textPr)",
+    "para(Revenue grew).SetStyle(style(Callout))",
+    "range(Revenue@1).SetColor(null)",
+  ]);
+  assert.ok(!w.calls.some((c) => /^range\(.*\)\.SetStyle\(/.test(c)), "ApiRange.SetStyle would set the paragraph's style");
+});
+
+test("word.format: a quote counts only in the body's text, not in a header or a table of contents' entry; one found twice needs nth, which picks in reading order", () => {
+  const w = scriptedWord({ paras: [{ text: "Findings" }, { text: "Meridian Labs one" }, { text: "Meridian Labs two" }], elsewhere: { Findings: ["toc", "header"], "Meridian Labs": ["header"] } });
+  assert.deepEqual(w.run([{ format: "Findings", text: { bold: true } }]), { result: { ops: 1 } });
+  assert.ok(w.calls.includes("range(Findings).SetBold(true)"), w.calls.join("\n"));
+  const two = w.run([{ format: "Meridian Labs", text: { bold: true } }]);
+  assert.equal(two.error.code, "quote_ambiguous");
+  assert.match(two.error.message, /is in the document 2 times as the editor searches it: quote more of it, or give nth/);
+  assert.equal(two.touched, false);
+  w.calls.length = 0;
+  assert.deepEqual(w.run([{ format: "Meridian Labs", nth: 2, text: { italic: true } }]), { result: { ops: 1 } });
+  assert.deepEqual(w.calls.filter((c) => c.includes("SetItalic")), ["range(Meridian Labs@2).SetItalic(true)"]);
+  assert.match(w.run([{ format: "Meridian Labs", nth: 3, text: { italic: true } }]).error.message, /is in the document 2 times, not 3/);
+  assert.equal(w.run([{ format: "nowhere", text: { italic: true } }]).error.code, "quote_not_found");
+});
+
+test("word.format: everything is checked before anything is changed, and a failure after that answers touched (the plugin's Undo takes the command back)", () => {
+  const w = scriptedWord({ paras: [{ text: "Alpha" }, { text: "Beta" }] });
+  const early = w.run([{ format: "Alpha", text: { bold: true } }, { format: "Beta", text: { style: "Nope" } }]);
+  assert.deepEqual([early.error.code, early.error.op, early.touched], ["bad_op", 1, false]);
+  assert.match(early.error.message, /op 2: the document has no style "Nope"/);
+  assert.equal(w.calls.length, 0, "nothing was made");
+  const late = scriptedWord({ paras: [{ text: "Alpha" }, { text: "Beta" }], throwOn: "range(Beta@1).SetBold" });
+  const out = late.run([{ format: "Alpha", text: { italic: true } }, { format: "Beta", text: { bold: true } }]);
+  assert.deepEqual([out.error.code, out.touched], ["failed", true]);
+  assert.ok(!late.calls.includes("Api.Save()"));
+});
+
+test("word.format: defineStyle makes a new style; an existing name is refused without change, with how many paragraphs use it, and changed with it", () => {
+  const w = scriptedWord({ paras: [{ text: "One", style: "Callout" }, { text: "Two", style: "Callout" }, { text: "Three" }], styles: { Callout: "paragraph" } });
+  const no = w.run([{ defineStyle: "callout", type: "paragraph", text: { italic: true } }]);
+  assert.equal(no.error.code, "style_exists");
+  assert.match(no.error.message, /a style "Callout" already \(2 paragraphs use it\): give change: true/);
+  assert.equal(w.calls.length, 0);
+  const changed = w.run([{ defineStyle: "Callout", type: "paragraph", change: true, text: { italic: true }, para: { indentLeft: 720 } }]);
+  assert.deepEqual(changed.result, { ops: 1, styles: [{ style: "Callout", changed: true, paragraphs: 2 }], reflowed: true });
+  assert.ok(w.calls.includes("style(Callout).text.SetItalic(true)") && w.calls.includes("style(Callout).para.SetIndLeft(720)"), w.calls.join("\n"));
+  assert.ok(!w.calls.some((c) => c.startsWith("doc.CreateStyle")));
+  w.calls.length = 0;
+  const made = w.run([{ defineStyle: "Note", type: "character", basedOn: "Hyperlink", text: { bold: true } }, { format: "Three", text: { style: "Note" } }]);
+  assert.deepEqual(made.result, { ops: 2, styles: [{ style: "Note", made: true }] });
+  assert.deepEqual(w.calls.slice(0, 3), ['doc.CreateStyle("Note", "run")', "style(Note).SetBasedOn(style(Hyperlink))", "style(Note).text.SetBold(true)"]);
+  assert.ok(w.calls.includes("textPr.SetStyle(style(Note))"), "a later op of the call uses the style it made");
+  // A style's type is kept: a paragraph style is no character style.
+  assert.match(w.run([{ defineStyle: "Callout", type: "character", change: true, text: { bold: true } }]).error.message, /is a paragraph style already/);
+});
+
+test("word.format: a link is taken off by moving its runs out of it, which lose the Hyperlink style; a new one goes on the range", () => {
+  const w = scriptedWord({ paras: [{ text: "Visit Example now", link: "https://example.com/" }] });
+  assert.deepEqual(w.run([{ format: "Example", text: { link: "" } }]), { result: { ops: 1 } });
+  assert.deepEqual(w.calls.filter((c) => !c.startsWith("Api.Save")), ["para(Visit Example now).RemoveElement(1)", "para(Visit Example now).AddElement(run(https://example.com/), 1)", "run(https://example.com/).SetStyle(null)"]);
+  w.calls.length = 0;
+  w.run([{ format: "Example", text: { link: "https://example.org/b" } }]);
+  assert.equal(w.calls.at(-2), 'range(Example).AddHyperlink("https://example.org/b", "")');
+});
+
+test("word.format: clear takes the text's own formatting off with null setters, and a run's character style at the run", () => {
+  const w = scriptedWord({ paras: [{ text: "Alpha" }] });
+  w.run([{ format: "Alpha", text: { clear: true, bold: true } }]);
+  const said = w.calls.filter((c) => c.startsWith("range(Alpha)"));
+  assert.deepEqual(said.slice(0, 3), ["range(Alpha).SetBold(null)", "range(Alpha).SetItalic(null)", "range(Alpha).SetUnderline(null)"]);
+  assert.ok(said.includes('range(Alpha).SetHighlight("none")'));
+  assert.equal(said.at(-1), "range(Alpha).SetBold(true)", "what the op sets comes after the clearing");
+});
+
+test("word.format: a list goes on the list of the same kind right before it, else a new one starts; listStart always starts one there; none takes it off", () => {
+  const w = scriptedWord({ paras: [{ text: "one", list: { kind: "bullet", num: "b1" } }, { text: "two" }, { text: "three" }] });
+  w.run([{ format: "two", through: "three", para: { list: "bullet" } }]);
+  assert.deepEqual(w.calls.filter((c) => c.includes("SetNumbering")), ["para(two).SetNumbering(numbering(b1).level(0))", "para(three).SetNumbering(numbering(b1).level(0))"]);
+  w.calls.length = 0;
+  w.run([{ format: "two", para: { list: "number", level: 1 } }]);
+  assert.deepEqual(w.calls.filter((c) => /Numbering/.test(c)), ['doc.CreateNumbering("numbered")', "para(two).SetNumbering(numbering(new1).level(1))"]);
+  w.calls.length = 0;
+  w.run([{ format: "two", para: { list: "bullet", listStart: 4 } }]);
+  assert.deepEqual(w.calls.filter((c) => /Numbering|SetStart/.test(c)), ['doc.CreateNumbering("bullet")', "numbering(new2).level(0).SetStart(4)", "para(two).SetNumbering(numbering(new2).level(0))"]);
+  w.calls.length = 0;
+  w.run([{ format: "one", para: { list: "none" } }]);
+  assert.deepEqual(w.calls.filter((c) => /Numbering/.test(c)), ["para(one).SetNumbering(null)"]);
+  // A level without a list is refused for a paragraph in none.
+  assert.match(w.run([{ format: "three", para: { level: 2 } }]).error.message, /is in no list: give list/);
+});
+
+test("word.format: a table's style, widths in the builder's EMU, header rows, borders and a cell range's merge; cells past the table refused before anything", () => {
+  const w = scriptedWord({ paras: [{ text: "Item", table: "t" }, { text: "Amount", table: "t" }], styles: { "Grid Table 4 - Accent 1": "table", Callout: "paragraph" } });
+  const out = w.run([
+    { formatTable: "Item", table: { tableStyle: "Grid Table 4 - Accent 1", width: { percent: 100 }, columnWidths: [3969, 1700], headerRows: 1 }, cell: { borders: { top: { type: "single", size: 4, color: { r: 0, g: 0, b: 0 } }, insideV: { type: "none" } }, fill: { r: 255, g: 255, b: 0 } } },
+    { formatTable: "Item", cells: { col: 0, row: 0, cols: 2, rows: 1 }, cell: { merge: true, valign: "center", align: "right" } },
+  ]);
+  assert.deepEqual(out, { result: { ops: 2 } });
+  for (const c of [
+    "table(t).SetStyle(style(Grid Table 4 - Accent 1))",
+    'table(t).SetWidth("percent", 100)',
+    "table(t).SetColumnWidth(0, 2520315)",
+    "table(t).SetColumnWidth(1, 1079500)",
+    "row(t).SetTableHeader(true)",
+    'table(t).SetTableBorderTop("single", 4, 0, 0, 0, 0)',
+    'table(t).SetTableBorderInsideV("none", 0, 0, 0, 0, 0)',
+    'cell(Item).SetShd("clear", 255, 255, 0)',
+    'cell(Amount).SetVerticalAlign("center")',
+    'para(Amount).SetJc("right")',
+    "table(t).MergeCells([cell(Item), cell(Amount)])",
+  ]) assert.ok(w.calls.includes(c), `${c}\n${w.calls.join("\n")}`);
+  w.calls.length = 0;
+  const past = w.run([{ formatTable: "Item", cells: { col: 0, row: 0, cols: 3, rows: 1 }, cell: { fill: "none" } }]);
+  assert.match(past.error.message, /row 1 of the table has 2 cells/);
+  assert.match(w.run([{ formatTable: "Item", table: { columnWidths: [1, 2, 3] } }]).error.message, /the table has 2 columns, and columnWidths gives 3/);
+  assert.match(w.run([{ formatTable: "Item", table: { tableStyle: "Callout" } }]).error.message, /is a paragraph style, not a table style/);
+  assert.equal(w.calls.length, 0);
+});
+
+test("word.format: a header that holds more than text is replaced only with replace; its text takes the first paragraph's place, the page number and count as fields", () => {
+  const pic = scriptedWord({ paras: [{ text: "Body" }], header: "picture" });
+  const no = pic.run([{ page: "*", set: { header: [{ text: "New" }] } }]);
+  assert.match(no.error.message, /the header holds more than text \(a picture, a table or a field\): give replace: true/);
+  assert.equal(pic.calls.length, 0);
+  assert.deepEqual(pic.run([{ page: "*", set: { header: [{ text: "Page " }, { field: "page" }, { text: " of " }, { field: "pages" }], replace: true } }]).result, { ops: 1, reflowed: true });
+  assert.deepEqual(pic.calls.filter((c) => c.startsWith("header")), ["header paragraph.RemoveAllElements()", 'header paragraph.AddText("Page ")', "header paragraph.AddPageNumber()", 'header paragraph.AddText(" of ")', "header paragraph.AddPagesCount()"]);
+  const plain = scriptedWord({ paras: [{ text: "Body" }], header: "text" });
+  plain.run([{ page: "Body", set: { header: [], size: { width: 11906, height: 16838 }, orientation: "landscape", margins: { top: 1, right: 2, bottom: 3, left: 4 }, differentFirstPage: true } }]);
+  assert.deepEqual(plain.calls.filter((c) => c.startsWith("section")), ["section.SetPageSize(16838, 11906, false)", "section.SetPageMargins(4, 1, 2, 3)", "section.SetTitlePage(true)", 'section.RemoveHeader("default")']);
+});
+
+test("word.format: a page break and a table of contents go after their paragraph (a TOC at the start where none is given, as a TOC field); a footnote at the quote's end", () => {
+  const w = scriptedWord({ paras: [{ text: "Title" }, { text: "There was a discrepancy." }] });
+  const out = w.run([{ after: "Title", pageBreak: true }, { toc: true, levels: 2 }, { footnote: "discrepancy", text: "The audit." }, { sectionBreak: "Title", type: "continuous" }]);
+  assert.deepEqual(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(out.result, { ops: 4, reflowed: true });
+  for (const c of ["new paragraph.AddPageBreak()", "doc.AddElement(1, new paragraph)", "doc.AddElement(0, new paragraph)", 'new paragraph\'s range.AddField("TOC \\\\o \\"1-2\\" \\\\h \\\\z \\\\u")', "doc.UpdateAllTOC(false)", "doc.range(1011, 1011).Select()", "doc.AddFootnote()", 'footnote paragraph.AddText("The audit.")', "doc.CreateSection(para(Title))", 'new section.SetType("continuous")']) assert.ok(w.calls.includes(c), `${c}\n${w.calls.join("\n")}`);
+  const inTable = scriptedWord({ paras: [{ text: "Cell", table: "t" }] });
+  assert.match(inTable.run([{ after: "Cell", pageBreak: true }]).error.message, /a page break goes after a paragraph outside tables/);
+});
+
+test("word.edit: a quote is found in the body only, a list item's label is no part of its text, and nth picks among repeats; an insert takes any paragraph style of the document", () => {
+  const w = scriptedWord({ paras: [{ text: "Findings" }, { text: "Total" }, { text: "Total" }, { text: "point", list: { kind: "bullet" } }], elsewhere: { Findings: ["toc", "header"] }, styles: { Callout: "paragraph", Mark: "run" } });
+  const edit = (ops: unknown[]) => command("word.edit", w.Api, { ops });
+  assert.equal(edit([{ quote: "Total", replacement: "Sum" }]).error.code, "quote_ambiguous");
+  assert.equal(edit([{ quote: "·\tpoint", replacement: "x" }]).error.code, "quote_not_found", "the label is not text");
+  assert.equal(edit([{ paragraphs: ["x"], style: "Mark" }]).error.message, 'op 1: "Mark" is a run style, and new paragraphs take a paragraph style');
+  assert.match(edit([{ paragraphs: ["x"], style: "Heading 7" }]).error.message, /no style "Heading 7"/);
+  w.calls.length = 0;
+  edit([{ remove: "Total", nth: 2 }, { after: "Findings", paragraphs: ["New"], style: "callout" }]);
+  assert.ok(w.calls.includes("para(Total).Delete()"), w.calls.join("\n"));
+  assert.ok(w.calls.includes("new paragraph.SetStyle(style(Callout))"), w.calls.join("\n"));
+});
+
+test("the plugin takes back a word.format that failed after it changed something with the editor's Undo, and one that failed in its check without it", async () => {
+  const methods: string[] = [];
+  const late = await bridge({ kind: "word.format", args: { ops: [] } }, () => ({ error: { code: "failed", op: 1, message: "op 2: the editor did not merge the cells" }, touched: true }), (name) => (methods.push(name), true));
+  assert.deepEqual([late.error.code, late.undone, methods], ["failed", true, ["Undo"]]);
+  const early = await bridge({ kind: "word.format", args: { ops: [] } }, () => ({ error: { code: "bad_op", op: 0, message: "op 1: no style" }, touched: false }), (name) => (methods.push(name), true));
+  assert.deepEqual([early.error.code, early.undone, methods], ["bad_op", undefined, ["Undo"]]);
 });

@@ -24,6 +24,8 @@ export const de: Record<string, string | Plural> = {
   "Downloading": "Wird heruntergeladen",
   "Edited a document": "Ein Dokument bearbeitet",
   "Editing an office document": "Ein Office-Dokument bearbeiten",
+  "Formatted a document": "Ein Dokument formatiert",
+  "Formatting an office document": "Ein Office-Dokument formatieren",
   "Export a fresh copy": "Eine frische Kopie exportieren",
   "Failed": "Fehlgeschlagen",
   "Image tag (pinned)": "Image-Tag (festgelegt)",

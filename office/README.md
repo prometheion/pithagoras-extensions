@@ -22,7 +22,7 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
 - Recommended: 1 GB of RAM.
   About 700 MiB were measured while one document is edited, and 770 MiB to 1.05 GB with three documents open in
-  the agents' editors (the most there are at once: 540-975 MiB of it the agents' browser), 800-810 MiB with people's
+  the agents' editors (the most there are at once: 540-975 MiB of it the agents' browser), 800-940 MiB with people's
   editors of two of them open as well. The settings page shows the memory all of Office uses while it runs: the
   Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
   10 minutes after its last editor closed, and is capped at 3 GB. The figure is what `docker stats` shows: the

@@ -1258,6 +1258,43 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
   assert.match(await refused(tool(s, "office_read").execute("r5", { id: doc.docId, formatting: "yes" })), /^error:bad_op formatting is true or false/);
 });
 
+test("office_read with formatting: a table's borders, and each cell's own fill, vertical alignment, borders and paragraphs' and runs' formatting on a line of its own under the rows", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({
+    blocks: [
+      {
+        table: [["Region", "Revenue"], ["North", "120 / approx."]],
+        look: {
+          style: "Grid Table 4 - Accent 1",
+          borders: { bottom: "single 1.5pt #C00000" },
+          cells: [
+            { row: 0, cell: 1, fill: "none", para: { align: "right" } },
+            { row: 1, cell: 1, k: 0, of: 2, fill: "#FFFF00", valign: "center", borders: { left: "none", top: "single 1.5pt #C00000" }, para: { align: "right" }, runs: [{ t: "120", look: { bold: true } }] },
+            { row: 1, cell: 1, k: 1, of: 2, para: { align: "center" } },
+          ],
+        },
+      },
+    ],
+    format: { styles: [], sections: [{ width: 11906, height: 16838, margins: [1134, 1134, 1134, 1134], ends: 0 }], footnotes: [] },
+  });
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId, formatting: true })) as ToolResult).content[0].text;
+  assert.match(
+    t,
+    new RegExp(
+      `\\n${[
+        '[1] table (style "Grid Table 4 - Accent 1", borders bottom single 1.5pt #C00000)',
+        "| Region | Revenue |",
+        "| North | 120 / approx. |",
+        "    B1: fill none; (right)",
+        '    B2: fill #FFFF00, valign center, borders left none, top single 1.5pt #C00000; paragraph 1 (right) "120": bold; paragraph 2 (center)',
+      ]
+        .join("\n")
+        .replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`,
+    ),
+  );
+});
+
 test("office_read with formatting: what a paragraph or run sets off or to zero is said, each footnote at its own mark (in a table's cell too, none shifted), and a section showing an earlier one's header says so", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);

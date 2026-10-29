@@ -1519,6 +1519,45 @@ test("word.read with formatting: what is set off or to zero is direct formatting
   assert.deepEqual(out.result.format.sections.map((x: { header?: unknown; headerAs?: number }) => [Boolean(x.header), x.headerAs]), [[true, undefined], [false, 1], [false, 1]]);
 });
 
+test("word.read with formatting: a table's own borders, and each cell's own fill, vertical alignment and borders and its paragraphs' and runs' own formatting, as the table's JSON has them; cells that set nothing are left out", () => {
+  const run = (rPr: Record<string, unknown>, text: string) => ({ type: "run", rPr, content: [text] });
+  const cellPara = (id: string, json: Record<string, unknown>) => ({ GetClassType: () => "paragraph", GetText: () => "", GetParaPr: () => ({ GetStyle: () => null }), GetStyle: () => null, GetInternalId: () => id, GetNumbering: () => null, GetAllDrawingObjects: () => [], ToJSON: () => JSON.stringify(json), GetElementsCount: () => 0, GetElement: () => null });
+  const red = { auto: false, r: 192, g: 0, b: 0 };
+  // Rows of cells: each its tcPr (as DS 10.0's JSON has it: the left border as "start") and its paragraphs.
+  const cells = [
+    [{ tcPr: { tcBorders: {} }, paras: [cellPara("a1", { content: [run({}, "Region")] })] }, { tcPr: { shd: { val: "nil", fill: { auto: false, r: 255, g: 255, b: 255 } }, tcBorders: {} }, paras: [cellPara("b1", { content: [run({}, "Revenue")] })] }],
+    [
+      { tcPr: { tcBorders: {} }, paras: [cellPara("a2", { content: [run({}, "North")] })] },
+      { tcPr: { shd: { val: "clear", fill: { auto: false, r: 255, g: 255, b: 0 } }, vAlign: "center", tcBorders: { start: { value: "none", sz: 0, color: { auto: true } }, top: { value: "single", sz: 12, color: red } } }, paras: [cellPara("b2", { pPr: { jc: "end" }, content: [run({ b: true }, "120")] }), cellPara("b2b", { pPr: { jc: "center" }, content: [run({}, "approx.")] })] },
+    ],
+  ];
+  const table = {
+    GetClassType: () => "table",
+    GetInternalId: () => "t1",
+    GetRowsCount: () => cells.length,
+    GetRow: (r: number) => ({ GetCellsCount: () => cells[r].length, GetCell: (c: number) => ({ GetContent: () => contentOf(cells[r][c].paras) }) }),
+    ToJSON: () => JSON.stringify({ tblPr: { tblBorders: { bottom: { value: "single", sz: 12, color: red } } }, content: cells.map((row) => ({ content: row.map((c) => ({ tcPr: c.tcPr, content: { content: [] } })) })) }),
+  };
+  const section = { GetPageWidth: () => 11906, GetPageHeight: () => 16838, GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134, GetHeader: () => null, GetFooter: () => null, ToJSON: () => "{}" };
+  const doc = { ...contentOf([table]), GetAllStyles: () => [], GetAllImages: () => [], GetStyle: () => null, GetDefaultTextPr: () => ({ ToJSON: () => "{}" }), GetSections: () => [section], GetFootnotesFirstParagraphs: () => [] };
+  const out = command("word.read", { GetDocument: () => doc }, { formatting: true });
+  assert.deepEqual(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(out.result.blocks[0].look, {
+    borders: { bottom: "single 1.5pt #C00000" },
+    cells: [
+      { row: 0, cell: 1, fill: "none" },
+      { row: 1, cell: 1, k: 0, of: 2, para: { align: "right" }, runs: [{ t: "120", look: { bold: true } }], fill: "#FFFF00", valign: "center", borders: { left: "none", top: "single 1.5pt #C00000" } },
+      { row: 1, cell: 1, k: 1, of: 2, para: { align: "center" } },
+    ],
+  });
+  // The editor gives a command's answer back only where it is nested 10 deep at most (DS 10.0's Asc.C3c): deeper, the
+  // plugin got undefined and the read failed.
+  const fits = (v: unknown, depth = 0): boolean => depth <= 10 && (typeof v !== "object" || v === null || Object.values(v).every((x) => fits(x, depth + 1)));
+  assert.ok(fits(out), "the answer is nested 10 deep at most");
+  // Without formatting, none of it.
+  assert.equal(command("word.read", { GetDocument: () => doc }, {}).result.blocks[0].look, undefined);
+});
+
 test("word.read with formatting: a numbered item carries its label as the editor numbers it, so a list going on and one starting again are told apart; a bullet and a read without formatting carry none", () => {
   const numbering = (fmt: string) => {
     const n: any = { ToJSON: () => JSON.stringify({ abstractNum: { a: { lvl: [{ numFmt: { val: fmt } }] } } }) };

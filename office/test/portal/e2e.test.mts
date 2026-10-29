@@ -1179,7 +1179,9 @@ async function run(PITHAGORAS: string): Promise<void> {
       /\] \(numbered lowerLetter "c\.", level 2\) sub point/,
       /\] \(page break before\) Strike me\.\n {4}"Strike me\.": strike/,
       /\] Plain closing words\.\n {4}"Plain closing": bold\n/,
-      /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,
+      /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns, borders bottom single 1\.5pt #C00000\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,
+      // The cell's own formatting under the rows: what the read had left to a screenshot before.
+      /\| Ledger \| 42 \| ok \|(?:\n {4}[A-C]\d: [^\n]*)*\n {4}B2: fill #FFFF00, valign center; \(right\) "42": bold\n/,
     ]) assert.match(read, want);
     // The person's editor has it, without a reload.
     const html = await personHtml(person.frame);

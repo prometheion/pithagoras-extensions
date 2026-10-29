@@ -378,7 +378,13 @@ type ParaLook = { align?: string; spaceBefore?: number; spaceAfter?: number; lin
 /** A footnote's mark: the text before it (its last 40 characters), the note's text, and in a table its cell. */
 type NoteMark = { at: string; note: string; row?: number; cell?: number };
 type BlockLook = { para?: ParaLook; runs?: { t: string; look: RunLook }[]; notes?: NoteMark[]; pictures?: [number, number][] };
-type TableLook = { style?: string; headerRows?: number; merged?: { row: number; cell: number; across?: number; above?: true }[]; notes?: NoteMark[]; pictures?: true };
+/** Borders by side, each as office_format takes it ("single 1.5pt #C00000", "none"). */
+type Borders = Partial<Record<"top" | "bottom" | "left" | "right" | "insideH" | "insideV", string>>;
+/** A table cell's look, an entry a cell paragraph with its own formatting (its row and place in the row from 0; `k` the
+ * paragraph's place in the cell where it has `of` paragraphs), the cell's own fill, vertical alignment and borders on
+ * its first entry (or an entry of their own). */
+type CellLook = { row: number; cell: number; k?: number; of?: number; fill?: string; valign?: string; borders?: Borders; para?: ParaLook; runs?: { t: string; look: RunLook }[] };
+type TableLook = { style?: string; headerRows?: number; merged?: { row: number; cell: number; across?: number; above?: true }[]; borders?: Borders; cells?: CellLook[]; notes?: NoteMark[]; pictures?: true };
 type WordBlock = ({ p: string; style?: string; list?: "bullet" | "number"; level?: number; format?: string; label?: string; look?: BlockLook } | { table: string[][]; row?: number; of?: number; look?: TableLook });
 type WordFormat = {
   defaults?: RunLook;
@@ -432,6 +438,23 @@ const colName = (n: number) => {
   return out;
 };
 
+const bordersWords = (b: Borders) => `borders ${Object.entries(b).map(([side, v]) => `${side} ${v}`).join(", ")}`;
+/** A cell's own formatting, on a line of its own under its table: "B2: fill #FFFF00, valign center; (right) "42": bold"
+ * (its entries, one a paragraph, together). */
+function cellLookLines(cells: CellLook[]): string[] {
+  const lines: { at: string; words: string[] }[] = [];
+  for (const c of cells) {
+    const at = `${colName(c.cell)}${c.row + 1}`;
+    const own = [c.fill ? `fill ${c.fill}` : "", c.valign ? `valign ${c.valign}` : "", c.borders ? bordersWords(c.borders) : ""].filter(Boolean).join(", ");
+    const para = [c.of && c.k !== undefined ? `paragraph ${c.k + 1}` : "", c.para ? `(${paraWords(c.para)})` : "", (c.runs ?? []).map((r) => `${quoted(r.t)}: ${runWords(r.look)}`).join("; ")].filter(Boolean).join(" ");
+    const last = lines[lines.length - 1];
+    const words = [own, para].filter(Boolean);
+    if (last && last.at === at) last.words.push(...words);
+    else lines.push({ at, words });
+  }
+  return lines.map((l) => `${l.at}: ${l.words.join("; ")}`);
+}
+
 /** `first`: the number of the first block (a page's blocks are numbered as office_read numbers the document's). A
  * table of which only some rows are given (a page's) says which. */
 function wordText(read: WordBlocks, first = 1): string {
@@ -441,8 +464,10 @@ function wordText(read: WordBlocks, first = 1): string {
     .map((b, i) => {
       if ("table" in b) {
         const l = b.look;
-        const words = l ? [l.style ? `style ${JSON.stringify(l.style)}` : "", l.headerRows ? `header row${l.headerRows === 1 ? "" : "s"} ${l.headerRows}` : "", ...(l.merged ?? []).map((m) => `${colName(m.cell)}${m.row + 1} ${m.above ? "merged with the cell above" : `spans ${m.across} columns`}`), l.pictures ? "holds pictures (not read)" : ""].filter(Boolean) : [];
-        return `[${i + first}] table${rows(b)}${words.length ? ` (${words.join(", ")})` : ""}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}`;
+        const words = l ? [l.style ? `style ${JSON.stringify(l.style)}` : "", l.headerRows ? `header row${l.headerRows === 1 ? "" : "s"} ${l.headerRows}` : "", ...(l.merged ?? []).map((m) => `${colName(m.cell)}${m.row + 1} ${m.above ? "merged with the cell above" : `spans ${m.across} columns`}`), l.borders ? bordersWords(l.borders) : "", l.pictures ? "holds pictures (not read)" : ""].filter(Boolean) : [];
+        // A page's rows of a table (b.row) are numbered from the table's first row, as its cells' looks are.
+        const cells = cellLookLines((l?.cells ?? []).filter((c) => !b.row || (c.row >= b.row - 1 && c.row < b.row - 1 + b.table.length))).map((line) => `\n    ${line}`);
+        return `[${i + first}] table${rows(b)}${words.length ? ` (${words.join(", ")})` : ""}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}${cells.join("")}`;
       }
       const look = b.look;
       const bracket = [b.style, listWords(b), look?.para ? paraWords(look.para) : ""].filter(Boolean).join(", ");
@@ -640,7 +665,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_read",
     label: LABELS.office_read,
     guard: GUARDS.office_read,
-    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style and list in brackets (\"[2] (Heading 1) Findings\", \"[5] (bullet) Point\"), a table as \"[4] table\" and its rows \"| a | b |\"; `formatting: true` adds how it looks (styles in use, page setup, headers and footers, footnotes, each paragraph's and run's own formatting, table styles). A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
+    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style and list in brackets (\"[2] (Heading 1) Findings\", \"[5] (bullet) Point\"), a table as \"[4] table\" and its rows \"| a | b |\"; `formatting: true` adds how it looks (styles in use, page setup, headers and footers, footnotes, each paragraph's and run's own formatting, tables' and cells' own). A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
     promptSnippet: "Read an office document as it stands in the editor",
     parameters: {
       type: "object",

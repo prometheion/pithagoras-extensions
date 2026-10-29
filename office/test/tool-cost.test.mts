@@ -19,12 +19,12 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * real-model runs of #13's PR 2 (an op's quote is its first key's value, set is flat, both with examples), 706 since its
  * first review (a cell's text keys leave out link), 711 since a table of contents updates itself (owner point 15: "it
  * updates itself"); office_read 246 -> 301 with
- * `formatting` and lists; office_edit 958 -> 974 with `nth` and any paragraph style; office_create 190 -> 200: a Word
+ * `formatting` and lists, 303 since it reads tables' and cells' own formatting; office_edit 958 -> 974 with `nth` and any paragraph style; office_create 190 -> 200: a Word
  * document starts with the paragraph "New document", which a model kept when it was told the document starts empty). */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 200,
-  office_read: 301,
+  office_read: 303,
   office_edit: 974,
   office_format: 711,
   office_comments: 181,
@@ -51,5 +51,5 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 2734);
+  assert.equal(agreed, 2736);
 });

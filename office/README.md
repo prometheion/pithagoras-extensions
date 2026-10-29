@@ -129,8 +129,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   each section's page, margins, header and footer (or the earlier section's it shows), the footnotes and where each
   one's mark is (a table's in its cell), and each paragraph's and run's own formatting (not what its style gives it;
   what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a numbered item's number as the editor gives it (`(numbered "3.")`, so a list that
-  goes on and one that starts again are told apart), a table's style, header rows and merged cells; 50,000 characters of
-  it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
+  goes on and one that starts again are told apart), a table's style, header rows, merged cells and borders, and
+  each cell's own fill, vertical alignment and borders with its paragraphs' and runs' own formatting (`B2: fill
+  #FFFF00, valign center; (right) "42": bold`, under the table's rows); 50,000 characters of it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
   `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these
   in one call (Excel's rules for names: at most 31 characters, none of `[]:*?/\`, no two alike in any case; one sheet
@@ -387,8 +388,8 @@ agents' editor.
   busy is refused (`error:busy`).
 - `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
   columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A link lies
-  inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out cell fills and borders and what a
-  table that holds a picture looks like (`office_screenshot` shows them).
+  inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out what a table that holds a
+  picture looks like and the cells of a table inside a cell (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
   editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most.

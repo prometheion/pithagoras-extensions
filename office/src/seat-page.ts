@@ -423,6 +423,27 @@ function lookOf(p, names) {
   if (pPr && pPr.sectPr) out.sectionEnd = true;
   return out;
 }
+// Borders as office_format takes them ("single 1.5pt #C00000", "none"), by side; the JSON's start and end are the left
+// and right (sizes in eighths of a point).
+function bordersOf(bs) {
+  var out = {}, SIDE = { top: "top", bottom: "bottom", left: "left", start: "left", right: "right", end: "right", insideH: "insideH", insideV: "insideV" };
+  for (var k in bs || {}) {
+    var b = bs[k];
+    if (!SIDE[k] || !b || !b.value) continue;
+    out[SIDE[k]] = b.value === "none" || b.value === "nil" ? "none" : b.value + " " + +(b.sz / 8).toFixed(2) + "pt " + (hex(b.color) || "auto");
+  }
+  return out;
+}
+// A table cell's own look from its tcPr: its fill ("none" where it sets none), vertical alignment and borders.
+function cellLook(pr) {
+  var out = {};
+  if (!pr) return out;
+  if (pr.shd) out.fill = pr.shd.val === "nil" ? "none" : hex(pr.shd.fill) || "none";
+  if (pr.vAlign) out.valign = pr.vAlign;
+  var b = bordersOf(pr.tcBorders);
+  if (Object.keys(b).length) out.borders = b;
+  return out;
+}
 // A style's own look, and what it is based on.
 function styleLook(st, names) {
   var j = JSON.parse(st.ToJSON()), out = { name: st.GetName(), type: st.GetType() };
@@ -456,7 +477,8 @@ function hfText(content) {
  * one other than the default, and its list (`list`: "bullet" or "number" and its level from 1, `format` the
  * numbering's own kind, "decimal", "lowerLetter", ...); a table's rows of cell texts; up to MAX_READ_TEXT characters
  * (`truncated` where the document goes on). With `formatting` (Asc.scope.args) each block also says how it looks
- * (`look`, WORD_LOOK_SRC; a table: its style, header rows and merged cells), and `format` how the document does: the
+ * (`look`, WORD_LOOK_SRC; a table: its style, header rows, merged cells and borders, and each cell's own fill,
+ * vertical alignment and borders and its paragraphs' and runs' own formatting), and `format` how the document does: the
  * styles in use, each section's page and header and footer (`sections`, with the block it ends at), the footnotes'
  * texts; up to MAX_READ_FORMAT characters of it (`formatCut`: the block it stopped at).
  */
@@ -509,7 +531,7 @@ const WORD_READ = `function () {
             if (size > ${MAX_READ_TEXT}) { truncated = true; break; }
           }
           var tb = { table: rows };
-          // A table's style, header rows and merged cells from its JSON, which carries its cells' content: not taken
+          // A table's style, header rows, merged cells and cells' looks from its JSON, which carries its cells' content: not taken
           // of a table that holds pictures (their data would be in it).
           if (formatting && pictured[el.GetInternalId()]) looked(tb, { pictures: true });
           else if (formatting) {
@@ -525,6 +547,34 @@ const WORD_READ = `function () {
             });
             if (header) tlook.headerRows = header;
             if (merged.length) tlook.merged = merged;
+            var tborders = bordersOf(tj.tblPr && tj.tblPr.tblBorders);
+            if (Object.keys(tborders).length) tlook.borders = tborders;
+            // Each cell's own look and its paragraphs' and runs' (a nested table's are not read), only where it sets
+            // something; a cell by its row and its place in the row (from 0), as merged gives them. Flat, one entry a
+            // cell paragraph (\`k\`, of \`of\`), the cell's own look on its first: the editor gives a command's answer
+            // back only where it is nested 10 deep at most (Asc.C3c in DS 10.0; deeper, the plugin gets undefined).
+            var cellLooks = [];
+            (tj.content || []).forEach(function (rj, ri) {
+              (rj.content || []).forEach(function (cj, k) {
+                var own = cellLook(cj.tcPr), mine = [], n = 0, cc = null;
+                try { cc = el.GetRow(ri).GetCell(k).GetContent(); } catch (x) { cc = null; }
+                for (var e = 0; cc && e < cc.GetElementsCount(); e++) {
+                  var cp = cc.GetElement(e);
+                  if (cp.GetClassType() !== "paragraph") continue;
+                  var pl = lookOf(cp, names);
+                  (pl.runs || []).forEach(function (r) { if (r.look.style) used[r.look.style] = true; });
+                  if (pl.para || pl.runs) mine.push({ row: ri, cell: k, k: n, para: pl.para, runs: pl.runs });
+                  n++;
+                }
+                if (!mine.length && Object.keys(own).length) mine.push({ row: ri, cell: k });
+                mine.forEach(function (c1, j) {
+                  if (j === 0) for (var key in own) c1[key] = own[key];
+                  if (n > 1) c1.of = n; else delete c1.k;
+                  cellLooks.push(c1);
+                });
+              });
+            });
+            if (cellLooks.length) tlook.cells = cellLooks;
             var tnotes = tableNotes(tj, []);
             if (tnotes.length) tlook.notes = tnotes;
             if (Object.keys(tlook).length) looked(tb, tlook);

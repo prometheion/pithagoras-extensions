@@ -75,6 +75,44 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/**
+ * A proxy to an OpenAI-compatible model API at `base` (".../v1"): what the portal sends to `<url>/<path>` goes to
+ * `<base>/<path>`, with the key where one is given, and every request's JSON is kept (`requests`), so a test reads the
+ * tool calls a model made and the results it got. The answers pass through as they come (streamed).
+ */
+async function realModelProxy(base: string, key?: string): Promise<{ url: string; requests: unknown[]; close: () => void }> {
+  const requests: unknown[] = [];
+  const target = base.replace(/\/+$/, "");
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks);
+      try {
+        requests.push(JSON.parse(body.toString("utf8")));
+      } catch {
+        // not JSON (a GET): nothing to keep
+      }
+      const headers: Record<string, string> = { "content-type": String(req.headers["content-type"] ?? "application/json") };
+      if (key) headers.authorization = `Bearer ${key}`;
+      void fetch(`${target}${String(req.url).replace(/^\/v1/, "")}`, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : body }).then(
+        async (answer) => {
+          res.writeHead(answer.status, { "content-type": answer.headers.get("content-type") ?? "application/json" });
+          if (answer.body) for await (const chunk of answer.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
+          res.end();
+        },
+        (e: Error) => {
+          res.writeHead(502, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: `the model's API did not answer: ${e.message}` } }));
+        },
+      );
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, requests, close: () => server.close() };
+}
+
 const until = async (what: () => Promise<boolean> | boolean, ms: number, every = 250) => {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -117,7 +155,11 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
 
   // The chat's model is the script: `scripted` reads text only, `scripted-eye` (case n's) says it takes pictures too,
   // so pi gives it a tool's image parts.
-  writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", input: ["text"], contextWindow: 32768, maxTokens: 4096 }, { id: "scripted-eye", name: "scripted-eye", input: ["text", "image"], contextWindow: 32768, maxTokens: 4096 }] } } }));
+  // Case p's real model, where one is given (OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL): reached through a proxy of
+  // the test's own, which keeps every request the portal sends it (the tool calls and their results are in them).
+  const real = process.env.OFFICE_REAL_MODEL_URL && process.env.OFFICE_REAL_MODEL ? await realModelProxy(process.env.OFFICE_REAL_MODEL_URL, process.env.OFFICE_REAL_MODEL_KEY) : null;
+  const realProvider = real ? { real: { baseUrl: real.url, api: "openai-completions", apiKey: "proxied", models: [{ id: process.env.OFFICE_REAL_MODEL, name: process.env.OFFICE_REAL_MODEL, input: process.env.OFFICE_REAL_MODEL_IMAGES === "1" ? ["text", "image"] : ["text"], contextWindow: Number(process.env.OFFICE_REAL_MODEL_CONTEXT ?? 65536), maxTokens: 8192 }] } } : {};
+  writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", input: ["text"], contextWindow: 32768, maxTokens: 4096 }, { id: "scripted-eye", name: "scripted-eye", input: ["text", "image"], contextWindow: 32768, maxTokens: 4096 }] }, ...realProvider } }));
   writeFileSync(path.join(piAgent, "settings.json"), JSON.stringify({ defaultProvider: "scripted", defaultModel: "scripted" }));
   // The portal runs `pi` for installs, as a real install has it on PATH: the one of its own packages.
   writeFileSync(path.join(bin, "pi"), `#!/bin/sh\nexec node "${PITHAGORAS}/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "$@"\n`, { mode: 0o755 });
@@ -213,6 +255,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await browser?.close().catch(() => {});
     if (!keep) await json(`${at}/container/remove`, { method: "POST", body: JSON.stringify({ data: true }) }).catch(() => {});
     for (const child of children) child.kill();
+    real?.close();
     if (mode === "container") execFileSync("docker", ["rm", "-f", portalName], { stdio: "ignore" });
     if (keep) return;
     // The portal's log outlives the run where OFFICE_E2E_LOG names a file for it.
@@ -1353,6 +1396,101 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     console.log(`n. from a page in the agents' browser: ${JSON.stringify(fromPage)}`);
     for (const [what, how] of Object.entries(fromPage)) assert.match(how, what.endsWith(" ws") ? /^(refused|no answer)$/ : /^failed/, what);
     await personCloses(page);
+  });
+
+  test("o: office_format from a chat: a scripted model formats a report (a style, a list, a table, the page, a footnote) and reads its formatting; the person's Office page shows it live; a picture of the page from a model that takes pictures", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    const word = await newDoc("Formatted from a chat", "word");
+    const { page, frame } = await personOpens(word, "word");
+    const [wrote, formatted, read] = await say(eye, [
+      { name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Quarterly report" }, { after: "Quarterly report", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", paragraphs: ["Revenue grew. There was a discrepancy.", "North", "South"] }, { after: "South", table: [["Region", "Revenue"], ["North", "120"]] }] } },
+      {
+        name: "office_format",
+        arguments: {
+          id: word,
+          ops: [
+            { format: "Quarterly report", set: { fontSize: 20, bold: true, color: "#C81E1E", align: "center" } },
+            { defineStyle: "Callout", set: { italic: true, indentLeft: "1cm" } },
+            { format: "Revenue grew", set: { style: "Callout" } },
+            { format: "North", through: "South", set: { list: "bullet" } },
+            { formatTable: "Region", set: { tableStyle: "Grid Table 4 - Accent 1", headerRows: 1, width: "100%" } },
+            { page: "*", set: { margins: "2cm", footer: "Page {page} of {pages}" } },
+            { footnote: "discrepancy", text: "Checked in March." },
+          ],
+        },
+      },
+      { name: "office_read", arguments: { id: word, formatting: true } },
+    ]);
+    console.log(`o. ${wrote}\no. ${formatted}\no. ${read}`);
+    assert.match(formatted, /^Formatted "Formatted from a chat" \(7 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Made the style "Callout"\. The document reflowed/);
+    assert.match(read, /"Quarterly report": 20, bold, #C81E1E/);
+    assert.match(read, /\(Callout\) Revenue grew\./);
+    assert.match(read, /\(bullet\) North/);
+    assert.match(read, /table \(style "Grid Table 4 - Accent 1", header row 1\)/);
+    assert.match(read, /Footer: "Page \{page\} of \{pages\}"/);
+    assert.match(read, /Footnotes: \[1\] in \[\d+\] after "Revenue grew\. There was a discrepancy": Checked in March\./);
+    // The person's editor, not reloaded, has the look (its own select-all, as HTML).
+    const html = String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); return e.pluginMethod_GetSelectedContent({ type: "html" }); })()`));
+    assert.match(html, /style="[^"]*font-weight:\s*bold[^"]*"[^>]*>Quarterly report</i);
+    await notReloaded(page, frame);
+    const shot = await ran(eye, [{ name: "office_screenshot", arguments: { id: word } }]);
+    assert.match(shot.results[0], /Page 1 of \d+ of "Formatted from a chat"/);
+    pictureOf(shot, 0, "formatted-page");
+    // The tool's card in the chat (the Office extension's) says what the call did.
+    await personCloses(page);
+  });
+
+  /**
+   * p: a real model (one OpenAI-compatible model, named by the environment) runs a fixed task through the office tools,
+   * and the run's tool calls are counted: how many, how many refused and with which codes, and which keys of the ops it
+   * got wrong, so the tool texts can be changed until a run has no refusal the text could have prevented. Skipped
+   * unless OFFICE_REAL_MODEL_URL (its API's base, ending in /v1) and OFFICE_REAL_MODEL (its id) are set;
+   * OFFICE_REAL_MODEL_KEY is its API key where it needs one, OFFICE_REAL_MODEL_IMAGES=1 says it takes pictures,
+   * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls.
+   */
+  test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)" }, async () => {
+    const made = await json(`${origin}/api/sessions`, { method: "POST", body: "{}" });
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    const chatId = made.body.id as string;
+    const set = await json(`${origin}/api/sessions/${chatId}/config`, { method: "POST", body: JSON.stringify({ provider: "real", modelId: process.env.OFFICE_REAL_MODEL }) });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    const task = [
+      'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
+      '1. A title line "Quarterly report 2026", centred, 20 pt, bold, dark red.',
+      '2. A heading "Summary" (Heading 1) with a paragraph of two sentences under it; make the words "record quarter" in it bold and yellow-highlighted.',
+      '3. A heading "Highlights" with three bulleted points under it, and one second-level point under the second.',
+      '4. A heading "Figures" with a table of three columns (Region, Revenue, Change) and four rows, its header row repeating, in the table style "Grid Table 4 - Accent 1", the Revenue column right-aligned.',
+      '5. A style "Note" (italic, grey #666666, indented 1 cm) for a closing paragraph "Figures are unaudited.", with a footnote on "unaudited" saying "Audit due in March.".',
+      '6. A4 landscape pages with 2 cm margins, a header "Meridian Labs — internal" and a footer "Page X of Y" with the real page numbers.',
+      "7. A table of contents at the start.",
+      "Then read the document with its formatting and fix anything that is not as asked. Answer with one line when done.",
+    ].join("\n");
+    real!.requests.length = 0;
+    const t0 = Date.now();
+    const sent = await json(`${origin}/api/sessions/${chatId}/prompt`, { method: "POST", body: JSON.stringify({ message: task }) });
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    await until(async () => (await json(`${origin}/api/sessions/${chatId}`)).body?.status === "running", 60_000, 500);
+    assert.ok(await until(async () => (await json(`${origin}/api/sessions/${chatId}`)).body?.status !== "running", 1_700_000, 2000), "the run ended in time");
+    // The calls and their results, as the last request the model got holds them.
+    const last = real!.requests.at(-1) as { messages?: { role: string; content?: unknown; tool_calls?: { id: string; function: { name: string; arguments: string } }[]; tool_call_id?: string }[] } | undefined;
+    const messages = last?.messages ?? [];
+    const results = new Map(messages.filter((m) => m.role === "tool").map((m) => [m.tool_call_id, typeof m.content === "string" ? m.content : JSON.stringify(m.content)]));
+    const calls = messages.flatMap((m) => m.tool_calls ?? []).map((c) => ({ name: c.function.name, args: c.function.arguments, result: results.get(c.id) ?? "" }));
+    const refusals = calls.filter((c) => /^(<<<[^\n]*\n)?error:/.test(c.result.replace(/^\s+/, "")) || /error:[a-z_]+ /.test(c.result.slice(0, 200)));
+    const codes: Record<string, number> = {};
+    for (const r of refusals) {
+      const code = /error:([a-z_]+)/.exec(r.result)?.[1] ?? "?";
+      codes[code] = (codes[code] ?? 0) + 1;
+    }
+    const report = { model: process.env.OFFICE_REAL_MODEL, seconds: Math.round((Date.now() - t0) / 1000), requests: real!.requests.length, calls: calls.length, byTool: calls.reduce((m: Record<string, number>, c) => ((m[c.name] = (m[c.name] ?? 0) + 1), m), {}), refused: refusals.length, codes, refusals: refusals.map((r) => ({ name: r.name, args: r.args.slice(0, 600), result: r.result.slice(0, 600) })) };
+    console.log(`p. ${JSON.stringify(report, null, 1)}`);
+    if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(process.env.OFFICE_REAL_MODEL_REPORT, JSON.stringify({ ...report, all: calls }, null, 1));
+    // What the run made: the document, formatted, in the default agent's home.
+    const doc = (await state()).docs.find((d) => d.title === "Quarterly report");
+    assert.ok(doc, "the model made the document");
+    assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
+    const xml = await partOf(doc!.docId, "word/document.xml");
+    console.log(`p. the saved document: TOC ${/TOC \\o/.test(xml)}, table style ${/<w:tblStyle /.test(xml)}, header rows ${/<w:tblHeader/.test(xml)}, landscape ${/w:orient="landscape"/.test(xml)}, footnote ${/<w:footnoteReference/.test(xml)}, highlight ${/<w:highlight w:val="yellow"/.test(xml)}, lists ${/<w:numPr>/.test(xml)}`);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

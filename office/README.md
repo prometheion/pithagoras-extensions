@@ -76,7 +76,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
   as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`,
-  `office_read`, `office_edit`, `office_comments` and `office_screenshot`. An agent sees the documents in its own
+  `office_read`, `office_edit`, `office_format`, `office_comments` and `office_screenshot`. An agent sees the documents in its own
   folder (its home, or its project's) and the ones it was granted by a mention; another agent's, and the files in
   another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
@@ -95,8 +95,33 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   fails (a person changed the same sheets meanwhile), the agent hears so (`error:partial`) and reads the document
   again. After an edit the Document Server is asked to save the session, and the agent hears the new revision; that
   save holds what you typed until then too.
-  Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph
-  (a document keeps one: its only paragraph removed leaves it empty).
+  Word: replace quoted text, add paragraphs (in any paragraph style the document has) or a table after a paragraph,
+  remove a paragraph (a document keeps one: its only paragraph removed leaves it empty). A quote is looked for in the
+  body's text only: not in headers, footers, footnotes or a table of contents' entries (which repeat the headings),
+  and a text found more than once is refused unless the call says which place it means (`nth`, from 1, in reading
+  order). A list item's number or bullet is no part of its text: `office_read` gives the list in the brackets
+  (`[5] (bullet) Point`).
+  **How a Word document looks** is `office_format`'s, a tool of its own (so a chat that never formats can leave it
+  lazy in Settings → Tools, and pay nothing for it): characters (font, size, bold, italic, underline, strike,
+  superscript, subscript, colour, highlight, links on and off, character styles, and taking a text's own formatting
+  off), paragraphs (alignment, spacing, line spacing, indents, bulleted and numbered lists with their levels and a
+  new start, page break before, keep with next), styles (new paragraph and character styles; an existing one changes
+  only when the call says `change: true`, and the answer counts the paragraphs that use it), tables (a table style,
+  width, column widths, header rows, borders, cell fills, alignment, row heights, merged cells), the page (size,
+  orientation, margins, headers and footers with the page number and count, a first page of its own), sections,
+  page breaks, footnotes and a table of contents. Each op names its place by a quote, as `office_edit`'s do. A call
+  is made whole or not at all: everything it names is checked first (quotes, styles, tables and cells, what a header
+  holds), and a call that fails after it changed something is taken back by the editor's own Undo, as one step. A
+  header or footer that holds more than text (a picture, a table, a field other than the page number and count) is
+  replaced only with `replace: true`; setting the header of a later section that showed the one before it gives it
+  one of its own, and the earlier one stays. Lengths are points, or a text with its unit (`"2.5cm"`, `"10mm"`,
+  `"1in"`), colours `"#RRGGBB"`. Borders are single lines (the editor draws no other kind through its API). When a
+  call moves the pages (page setup, a style changed, a section, a page break, a table of contents), its answer says
+  so, and `office_screenshot` shows them. `office_read` with `formatting: true` also says how a Word document looks:
+  the document's defaults and the styles in use (each as it is itself; what it inherits from another is not added),
+  each section's page, margins, header and footer, the footnotes and where they are, and each paragraph's and run's
+  own formatting (not what its style gives it), a table's style, header rows and merged cells; 50,000 characters of
+  it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
   `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these
   in one call (Excel's rules for names: at most 31 characters, none of `[]:*?/\`, no two alike in any case; one sheet
@@ -345,12 +370,17 @@ agents' editor.
 - What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. An editor that
   stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
   not written.
-- The agent edits text, paragraphs, tables, cells and sheets; it cannot change formatting beyond a paragraph's style,
-  write comments of its own or make tracked changes (it answers in the threads it was asked in). A sheet the agent copies takes the values, formulas, number formats and
+- The agent edits text, paragraphs, tables, cells and sheets, and formats Word documents; it cannot format a
+  spreadsheet yet, write comments of its own or make tracked changes (it answers in the threads it was asked in). A sheet the agent copies takes the values, formulas, number formats and
   column widths of the old one, not its other formatting (fonts, colours, borders), charts, pictures, row heights or
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
+- `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
+  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A table of
+  contents lists the headings as the editor finds them when it is made, and is not brought up to date by later
+  calls; a link lies inside one paragraph. `office_read`'s formatting leaves out cell fills and borders and what a
+  table that holds a picture looks like (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
   editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most.
@@ -398,6 +428,20 @@ own (Node's alpine image, with this machine's Docker socket), on a network of it
 ```sh
 OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras [OFFICE_PORTAL_MODE=container] npm run test:real -w office
 ```
+
+Its case p gives a real model a fixed task (a report with a title, headings, lists, a table, a style, a footnote, the
+page set up, a header, a footer and a table of contents, written and formatted with the office tools) and counts the
+calls it made, the ones refused and their codes, so the tool texts can be changed until a run has no refusal they
+could have prevented. It runs only where a model is given, any model with an OpenAI-compatible API, with the portal on
+the machine:
+
+```sh
+OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras OFFICE_REAL_MODEL_URL=<its API, ending in /v1> OFFICE_REAL_MODEL=<its id> \
+  [OFFICE_REAL_MODEL_KEY=<key>] [OFFICE_REAL_MODEL_IMAGES=1] [OFFICE_REAL_MODEL_REPORT=calls.json] \
+  node --import tsx --test --test-timeout=1800000 --test-name-pattern='^(the portal|p: )' test/portal/real-portal.test.mts
+```
+
+(from `office/`; the pattern runs the portal's set-up and case p alone).
 
 `scripts/make-fixtures.mjs` makes `fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node
 scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ but not what

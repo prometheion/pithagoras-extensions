@@ -273,34 +273,43 @@ function runText(items, field) {
 function lookOf(p, names) {
   var drawings = 0;
   try { drawings = p.GetAllDrawingObjects().length; } catch (e) { drawings = 0; }
-  var elements = [], pPr = null;
+  // Each element's JSON beside the element itself: a run's character style is named by the run (its JSON's style id
+  // is not always the one GetAllStyles gives a style the document made).
+  var elements = [], apis = [], pPr = null;
   if (!drawings) {
     var j = JSON.parse(p.ToJSON());
     pPr = j.pPr;
     elements = j.content || [];
+    for (var a = 0; a < elements.length; a++) apis.push(a < p.GetElementsCount() ? p.GetElement(a) : null);
   } else {
     pPr = JSON.parse(p.GetParaPr().ToJSON());
     for (var e = 0; e < p.GetElementsCount(); e++) {
       var el = p.GetElement(e), t = el.GetClassType();
-      if (t === "hyperlink" || (t === "run" && el.GetText())) elements.push(JSON.parse(el.ToJSON()));
+      if (t === "hyperlink" || (t === "run" && el.GetText())) { elements.push(JSON.parse(el.ToJSON())); apis.push(el); }
     }
   }
+  var styleName = function (api, type) {
+    try { var st = api && api.GetClassType() === type && api.GetTextPr ? api.GetTextPr().GetStyle() : null; return st ? st.GetName() : undefined; } catch (x) { return undefined; }
+  };
   var runs = [], text = "", field = { kind: "", skip: false, notes: [] }, notes = [];
-  var add = function (r, link) {
+  var add = function (r, link, api) {
     var before = text.length;
     field.notes = [];
     var s = runText(r.content, field);
     field.notes.forEach(function (k) { notes.push(text + s.slice(0, k)); });
     if (!s) return;
     text += s;
-    var look = runLook(r.rPr, names);
+    var look = runLook(r.rPr, names), own = styleName(api, "run");
+    if (own) look.style = own;
+    else if (api) delete look.style;
     if (link) look.link = link;
     var last = runs[runs.length - 1];
     if (last && same(last.look, look)) last.t += s; else runs.push({ t: s, look: look, at: before });
   };
-  elements.forEach(function (el) {
-    if (el.type === "run") add(el);
-    else if (el.type === "hyperlink") (el.content || []).forEach(function (r) { if (r.type === "run") add(r, el.value); });
+  elements.forEach(function (el, k) {
+    var api = apis[k] && apis[k].GetClassType() === el.type ? apis[k] : null;
+    if (el.type === "run") add(el, undefined, api);
+    else if (el.type === "hyperlink") (el.content || []).forEach(function (r, m) { if (r.type === "run") add(r, el.value, api && m < api.GetElementsCount() ? api.GetElement(m) : null); });
   });
   var out = {};
   var pp = paraLook(pPr);
@@ -871,7 +880,7 @@ const WORD_FORMAT = `function () {
           if (o.text) textOn(content.GetRange(), o.text, cps, i2);
         });
         if (c2.rowHeight !== undefined) { var seen = {}; cs.forEach(function (x) { if (!seen[x.r]) { seen[x.r] = true; x.row.SetHeight("atLeast", c2.rowHeight); } }); }
-        if (c2.merge && !tb.MergeCells(cs.map(function (x) { return x.cell; }))) fail("failed", i2, "the editor did not merge the cells");
+        if (c2.merge && !tb.MergeCells(cs.map(function (x) { return x.cell; }))) fail("failed", i2, "the editor did not merge the cells (they are no rectangle of the table's grid: one of them spans columns or rows)");
       } else if (o.page !== undefined) {
         var ss = sectionsOf(o, i2), ps = o.set;
         touched = true;

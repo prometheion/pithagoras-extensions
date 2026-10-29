@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { colour, editJob, formatJob, length, MAX_ARGS_BYTES, MAX_MERGE_CELLS, MAX_OPS, MAX_SET_KEYS, MAX_SHEET_OPS, OpError, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
+import { colour, editJob, formatJob, length, MAX_ARGS_BYTES, MAX_FORMAT_CELLS, MAX_MERGE_CELLS, MAX_OPS, MAX_SET_KEYS, MAX_SHEET_OPS, OpError, parseArea, parseLines, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
 import { SHEET_MODEL_SRC, WORD_MODEL_SRC } from "../src/seat-page";
 
 /** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
@@ -271,7 +271,8 @@ test("Word ops take nth, from 1, where they have a quote (or an insert's after);
   assert.throws(() => editJob("docx", [{ quote: "a", replacement: "b", nth: 0 }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{ quote: "a", replacement: "b", nth: "2" }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{ format: "a", set: { bold: true } }]), (e: unknown) => e instanceof OpError && e.code === "bad_op" && /`format` is an office_format op/.test(e.message));
-  assert.throws(() => editJob("xlsx", [{ format: "a", set: { bold: true } }]), refused("unsupported_format", 0));
+  assert.throws(() => editJob("xlsx", [{ format: "A1", set: { bold: true } }]), (e: unknown) => e instanceof OpError && e.code === "bad_op" && /`format` is an office_format op \(how the sheet looks\)/.test(e.message));
+  assert.throws(() => editJob("xlsx", [{ page: "a", set: { margins: 1 } }]), refused("unsupported_format", 0));
 });
 
 test("lengths are points as numbers, or texts with their unit, in twips; colours are #RRGGBB in either case", () => {
@@ -385,7 +386,7 @@ test("office_format refuses what does not hold before anything is sent, naming t
   no([{ quote: "a", replacement: "b" }], /`quote` is an office_edit op/);
   no([{ format: "a", set: { bold: true } }, { paragraphs: ["x"] }], /`paragraphs` is an office_edit op/, "bad_op", 1);
   no([{ range: "A1", values: [[1]] }], /spreadsheet edit/, "unsupported_format");
-  assert.throws(() => formatJob("xlsx", [{ format: "a", set: { bold: true } }]), refused("unsupported_format"));
+  assert.throws(() => formatJob("xlsx", [{ footnote: "a", text: "b" }]), refused("unsupported_format"));
   // Values.
   no([{ format: "a", set: { bold: "yes" } }], /set.bold is true or false/);
   no([{ format: "a", set: { fontSize: 0 } }], /set.fontSize is the size in points/);
@@ -427,4 +428,129 @@ test("office_format refuses what does not hold before anything is sent, naming t
   // The caps of every call.
   assert.throws(() => formatJob("docx", Array.from({ length: MAX_OPS + 1 }, () => ({ pageBreak: true }))), refused("bad_op"));
   assert.throws(() => formatJob("docx", []), refused("bad_op"));
+});
+
+/* ---------------- spreadsheets (#13 PR 3) ---------------- */
+
+test("office_format (spreadsheet): each op and set key, in the agent's words, reaches the command in the builder's terms", () => {
+  const job = formatJob("xlsx", [
+    { sheet: "Data", format: "b2:d9", set: { numberFormat: '#,##0.00 "€"', font: "Arial", fontSize: 10.5, bold: true, italic: false, underline: true, strike: false, superscript: true, color: "#c81e1e", fill: "none", align: "center", valign: "top", wrap: true, rotation: -45, borders: { bottom: "double #FF0000", insideH: "dashed 2pt", top: "single 1.5pt", left: "3pt" }, merge: false, clear: true } },
+    { format: "C:D", set: { fill: "#1F4E79" } },
+    { format: "5:6", set: { rotation: "vertical", borders: "outside" } },
+    { format: "A1", set: { subscript: true } },
+    { columns: "c:e", width: 18.456 },
+    { sheet: "Data", columns: "F", hide: true },
+    { rows: "7", height: 30, show: true },
+    { rows: "8:9", autofit: true },
+    { columns: "G", set: { width: 12 } },
+    { freeze: "B3" },
+    { sheet: "Data", freeze: "A2" },
+    { freeze: "none" },
+    { freeze: "A1" },
+  ]);
+  assert.equal(job.kind, "cell.format");
+  const black = { r: 0, g: 0, b: 0 };
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", format: "B2:D9", area: { col: 1, row: 1, cols: 3, rows: 8 }, looks: { numberFormat: '#,##0.00 "€"', font: "Arial", size: 10.5, bold: true, italic: false, underline: true, strike: false, vertAlign: "superscript", color: { r: 200, g: 30, b: 30 }, fill: "none", align: "center", valign: "top", wrap: true, rotation: -45, borders: { bottom: { style: "Double", color: { r: 255, g: 0, b: 0 } }, insideH: { style: "MediumDashed", color: black }, top: { style: "Medium", color: black }, left: { style: "Thick", color: black } }, merge: false, clear: true } },
+    { format: "C:D", area: { col: 2, row: 0, cols: 2, rows: 1048576, whole: "columns" }, looks: { fill: { r: 31, g: 78, b: 121 } } },
+    { format: "5:6", area: { col: 0, row: 4, cols: 16384, rows: 2, whole: "rows" }, looks: { rotation: 255, borders: { top: { style: "Thin", color: black }, bottom: { style: "Thin", color: black }, left: { style: "Thin", color: black }, right: { style: "Thin", color: black } } } },
+    { format: "A1", area: { col: 0, row: 0, cols: 1, rows: 1 }, looks: { vertAlign: "subscript" } },
+    { columns: "C:E", from: 2, count: 3, width: 18.46 },
+    { sheet: "Data", columns: "F:F", from: 5, count: 1, hidden: true },
+    { rows: "7:7", from: 6, count: 1, height: 30, hidden: false },
+    { rows: "8:9", from: 7, count: 2, autofit: true },
+    { columns: "G:G", from: 6, count: 1, width: 12 },
+    { freeze: "B3", cols: 1, rows: 2 },
+    { sheet: "Data", freeze: "A2", cols: 0, rows: 1 },
+    { freeze: "none", cols: 0, rows: 0 },
+    { freeze: "none", cols: 0, rows: 0 },
+  ]);
+});
+
+test("office_format (spreadsheet): what does not hold is refused before anything is sent, naming the op and what it takes", () => {
+  const no = (ops: unknown[], message: RegExp, code = "bad_op", op = 0) =>
+    assert.throws(() => formatJob("xlsx", ops), (e: unknown) => {
+      assert.ok(e instanceof OpError, String(e));
+      assert.equal(e.code, code, e.message);
+      assert.equal(e.op, op, e.message);
+      assert.match(e.message, message);
+      return true;
+    }, JSON.stringify(ops));
+  no([{ format: "A1" }], /set is an object of what to set \(for cells: numberFormat, font/);
+  no([{ format: "A1", bold: true }], /"bold" is not part of \{sheet\?, format, set\}: what to set goes in set/);
+  no([{ format: "A0", set: { bold: true } }], /format is the cells, as "A1:D9", or whole columns "C:D" or rows "5:6"/);
+  no([{ format: "C", set: { bold: true } }], /format is the cells/);
+  no([{ format: "A1", columns: "C", set: { bold: true } }], /each is an op of its own/);
+  no([{ format: "A1", sheet: "", set: { bold: true } }], /sheet is a sheet's name/);
+  no([{ format: "A1", set: { highlight: "yellow" } }], /"highlight", which is not a key of cells .*\(highlight, link and style are Word's\)/);
+  no([{ format: "A1", set: { font: { bold: true } } }], /set.font is a font's name/);
+  no([{ format: "A1", set: { text: { bold: true } } }], /set is flat/);
+  no([{ format: "A1", set: { numberFormat: "" } }], /set.numberFormat is a number format as Excel writes it/);
+  no([{ format: "A1", set: { fontSize: 500 } }], /from 1 to 409/);
+  no([{ format: "A1", set: { color: "auto" } }], /set.color is "#RRGGBB"$/);
+  no([{ format: "A1", set: { fill: "red" } }], /set.fill is "#RRGGBB" or "none"/);
+  no([{ format: "A1", set: { align: "general" } }], /set.align is left, center, right, justify \(the editor's API sets no "general" back: clear: true/);
+  no([{ format: "A1", set: { valign: "middle" } }], /set.valign is "top", "center" or "bottom"/);
+  no([{ format: "A1", set: { rotation: 100 } }], /set.rotation is the text's angle in degrees, a whole number from -90 to 90/);
+  no([{ format: "A1", set: { rotation: 12.5 } }], /set.rotation/);
+  no([{ format: "A1", set: { borders: "none" } }], /there is no "none" \(clear: true takes all of the cells' formatting off\)/);
+  no([{ format: "A1", set: { borders: { bottom: "none" } } }], /set.borders.bottom is a line, .*there is no "none"/);
+  no([{ format: "A1", set: { borders: { bottom: "wavy" } } }], /set.borders.bottom is a line, as "single 1pt #000000" \(single, double, dashed or dotted/);
+  no([{ format: "A1", set: { borders: { diagonal: "single" } } }], /its sides are top, bottom, left, right, insideH, insideV/);
+  no([{ format: "A1", set: { merge: true } }], /a merge takes two cells or more/);
+  no([{ format: "C:D", set: { merge: true } }], /merge takes cells \("A1:D1"\), not whole columns or rows/);
+  no([{ format: "A1", set: { superscript: true, subscript: true } }], /superscript or subscript, not both/);
+  no([{ format: "A1", set: { clear: false } }], /set.clear is true/);
+  no([{ columns: "C" }], /give what to do with the columns: width, hide, show or autofit/);
+  no([{ columns: "C1", width: 3 }], /columns is columns by their letters, "C" or "C:E"/);
+  no([{ columns: "C", height: 3 }], /"height" is not part of \{sheet\?, columns, width\?, hide\?, show\?, autofit\?\} \(columns take a width in characters\)/);
+  no([{ rows: "x", height: 3 }], /rows is rows by their numbers, "5" or "5:7"/);
+  no([{ rows: "5", width: 3 }], /rows take a height in points/);
+  no([{ rows: "5", height: 500 }], /height is the rows' height in points/);
+  no([{ columns: "C", width: 0 }], /width is the columns' width in characters/);
+  no([{ columns: "C", hide: true, show: true }], /hide or show, not both/);
+  no([{ columns: "C", width: 3, autofit: true }], /width or autofit, not both/);
+  no([{ columns: "C", hide: false }], /hide is true/);
+  no([{ freeze: "B2:C3" }], /freeze is the first cell that scrolls/);
+  no([{ freeze: true }], /freeze is the first cell that scrolls/);
+  no([{ freeze: "B2", set: {} }], /"set" is not part of \{sheet\?, freeze\}/);
+  // Content ops are office_edit's, Word ops a Word document's.
+  no([{ range: "A1", values: [[1]] }], /`range` is an office_edit op \(what the sheet holds\)/);
+  no([{ format: "A1", set: { bold: true } }, { insertRows: "5" }], /`insertRows` is an office_edit op/, "bad_op", 1);
+  no([{ addSheet: "X" }], /`addSheet` is an office_edit op/);
+  no([{ footnote: "a", text: "b" }], /is a Word op \(`footnote`\), and this is a spreadsheet/, "unsupported_format");
+  no([{ formatTable: "a", set: { fill: "none" } }], /is a Word op/, "unsupported_format");
+  // The caps: cells by their addresses, and columns and rows.
+  assert.doesNotThrow(() => formatJob("xlsx", [{ format: "A1:CV200", set: { bold: true } }, { format: "A:XFD", set: { bold: true } }]));
+  assert.throws(() => formatJob("xlsx", [{ format: "A1:CV200", set: { bold: true } }, { format: "A201", set: { bold: true } }]), (e: unknown) => e instanceof OpError && new RegExp(`formats ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most \\(got 20,001\\)`).test(e.message));
+  assert.throws(() => formatJob("xlsx", [{ rows: "1:20001", height: 20 }]), (e: unknown) => e instanceof OpError && /take 20,000 columns and rows at most/.test(e.message));
+});
+
+test("office_edit (spreadsheet): rows and columns inserted and deleted, by number or letter, either end first; deletes come after every op that can be taken back", () => {
+  const ops = editJob("xlsx", [{ sheet: "Data", insertRows: "6:5" }, { insertColumns: "c" }, { range: "A1", values: [[1]] }, { addSheet: "New" }, { deleteRows: "$9" }, { sheet: "Data", deleteColumns: "B:D" }]).args.ops;
+  assert.deepEqual(ops, [
+    { sheet: "Data", insertRows: "5:6", from: 4, count: 2 },
+    { insertColumns: "C:C", from: 2, count: 1 },
+    { range: "A1", values: [[1]] },
+    { addSheet: "New" },
+    { deleteRows: "9:9", from: 8, count: 1 },
+    { sheet: "Data", deleteColumns: "B:D", from: 1, count: 3 },
+  ]);
+  const no = (list: unknown[], message: RegExp, op: number) => assert.throws(() => editJob("xlsx", list), (e: unknown) => e instanceof OpError && e.code === "bad_op" && e.op === op && message.test(e.message), JSON.stringify(list));
+  no([{ deleteRows: "5" }, { range: "A1", values: [[1]] }], /^op 1 cannot be taken back once made \(deleted rows\), so it goes after every op that can: put it last in the call \(op 2 comes after it\)/, 0);
+  no([{ range: "A1", values: [[1]] }, { deleteColumns: "B" }, { insertRows: "2" }], /^op 2 cannot be taken back/, 1);
+  no([{ insertRows: "A" }], /insertRows is rows by their numbers, "5" or "5:7"/, 0);
+  no([{ insertColumns: "5" }], /insertColumns is columns by their letters/, 0);
+  no([{ insertRows: "0" }], /insertRows is rows/, 0);
+  no([{ insertRows: "5", values: [[1]] }], /must be exactly one of/, 0);
+  no([{ insertRows: "5", deleteRows: "6" }], /must be exactly one of/, 0);
+  no([{ insertRows: "5", count: 2 }], /"count" is not part of \{sheet\?, insertRows\}/, 0);
+  // Not sheet ops: no wait for the Document Server, so no count against MAX_SHEET_OPS.
+  assert.doesNotThrow(() => editJob("xlsx", Array.from({ length: MAX_SHEET_OPS + 5 }, (_, k) => ({ insertRows: String(k + 1) }))));
+  assert.deepEqual(parseLines("XFD", "columns"), { from: 16383, count: 1, text: "XFD:XFD" });
+  assert.equal(parseLines("XFE", "columns"), null);
+  assert.equal(parseLines("1048577", "rows"), null);
+  assert.deepEqual(parseArea("$b$2"), { area: { col: 1, row: 1, cols: 1, rows: 1 }, text: "B2" });
+  assert.deepEqual(parseArea("d:c")?.text, "C:D");
+  assert.equal(parseArea("5"), null);
 });

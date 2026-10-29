@@ -1231,19 +1231,80 @@ async function run(PITHAGORAS: string): Promise<void> {
     await tools.office_edit.execute("q4", { id: doc, ops: [{ quote: "Total", nth: 2, replacement: "Sum" }] });
     const read = (await tools.office_read.execute("q5", { id: doc, formatting: true })).content[0].text;
     assert.match(read, /\(Heading 1\) Findings\n {4}"Findings": italic\n\[\d+\] Total\n\[\d+\] Sum\n/);
-    // A call whose last op the editor cannot make (B1 spans two columns, so A1:B2 is no rectangle of cells): the
-    // editor's Undo takes the whole call back.
+    // A call whose last op cannot be made once the ops before it are (its quote is parted by the footnote op 3 puts
+    // in it, which the check, made on the document as it stands, cannot see): the editor's Undo takes the whole call
+    // back, the footnote with it.
     const person = await personOpens(doc);
     const before = { read: (await tools.office_read.execute("q6", { id: doc, formatting: true })).content[0].text, html: await personHtml(person.frame), xml: await partOf(doc, "word/document.xml") };
     const t0 = Date.now();
-    const failed = await tools.office_format.execute("q7", { id: doc, ops: [{ format: "Alpha", set: { bold: true, highlight: "yellow" } }, { format: "Report", set: { fontSize: 30 } }, { formatTable: "c11", cells: "A1:B2", set: { merge: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    const failed = await tools.office_format.execute("q7", { id: doc, ops: [{ format: "Alpha", set: { bold: true, highlight: "yellow" } }, { format: "Report", set: { fontSize: 30 } }, { footnote: "Alpha", text: "A note the Undo takes back." }, { format: "Alpha text", set: { italic: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
     console.log(`22. a call failing at its last op: ${failed} (${Date.now() - t0} ms)`);
-    assert.match(failed, /^error:failed op 3: /);
+    assert.match(failed, /^error:quote_not_found op 4: /);
     await delay(3000);
     assert.equal((await tools.office_read.execute("q8", { id: doc, formatting: true })).content[0].text, before.read, "the agent's editor is as it was");
     assert.equal(await personHtml(person.frame), before.html, "so is the person's");
     await tools.office_edit.execute("q9", { id: doc, ops: [{ quote: "Sum", replacement: "Sum." }] });
-    assert.doesNotMatch(await partOf(doc, "word/document.xml"), /<w:highlight w:val="yellow"/, "the next save has nothing of the failed call");
+    const saved = await partOf(doc, "word/document.xml");
+    assert.doesNotMatch(saved, /<w:highlight w:val="yellow"/, "the next save has nothing of the failed call");
+    assert.doesNotMatch(saved, /<w:footnoteReference/, "nor its footnote");
+    await person.page.context().close();
+  });
+
+  test("23. after the first review: a call that fails having changed nothing leaves the agent's earlier edits (here, its merge refused against the grid); a section break's type starts the section after it; a section's inherited header is read and taken off; formatting set off or to zero is read; each footnote at its own mark, a cell's too; part of a link is refused; a size alone keeps landscape", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Reviewed", "word");
+    await tools.office_edit.execute("r0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Alpha words" },
+        { after: "Alpha words", paragraphs: ["S one text"] },
+        { after: "S one text", paragraphs: ["Heading words"], style: "Heading 1" },
+        { after: "Heading words", paragraphs: ["Indented item"] },
+        { after: "Indented item", table: [["c11", "c12", "c13"], ["c21", "cellnote", "c23"]] },
+        { paragraphs: ["Tail para", "S two text"] },
+      ],
+    });
+    await tools.office_format.execute("r1", { id: doc, ops: [{ formatTable: "c11", cells: "B1:C1", set: { merge: true } }] });
+    assert.match((await tools.office_edit.execute("r2", { id: doc, ops: [{ quote: "Alpha words", replacement: "Beta words" }] })).content[0].text, /saved as revision/);
+    const person = await personOpens(doc);
+    // B1 spans two columns, so A1:B2 is no rectangle of the grid. Refused, and the edit before it stays: in the agent's
+    // editor, the person's and the save (before the review, the plugin's Undo took that edit back).
+    const failed = await tools.office_format.execute("r3", { id: doc, ops: [{ formatTable: "c11", cells: "A1:B2", set: { merge: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    console.log(`23. a merge that is no rectangle: ${failed}`);
+    assert.match(failed, /^error:bad_op op 1: the cells to merge are no rectangle of the table's grid/);
+    await delay(3000);
+    assert.match((await tools.office_read.execute("r4", { id: doc })).content[0].text, /\n\[1\] Beta words\n/);
+    assert.match(await personHtml(person.frame), /Beta words/);
+    await tools.office_edit.execute("r5", { id: doc, ops: [{ quote: "Tail para", replacement: "Tail para." }] });
+    assert.match(await partOf(doc, "word/document.xml"), /Beta words/);
+    assert.doesNotMatch(await partOf(doc, "word/document.xml"), /Alpha words/);
+
+    // Set off and to zero, over a style's; footnotes in a cell and after it; part of a link.
+    await tools.office_format.execute("r6", { id: doc, ops: [{ defineStyle: "Indented", set: { indentLeft: "1.27cm" } }, { format: "Indented item", set: { style: "Indented" } }, { format: "Beta words", set: { link: "https://example.com/beta" } }] });
+    await tools.office_format.execute("r7", { id: doc, ops: [{ format: "Indented item", set: { indentLeft: 0 } }, { format: "Heading", set: { bold: false } }, { footnote: "cellnote", text: "Note in the cell." }, { footnote: "Tail para", text: "Note at the tail." }] });
+    const part = await tools.office_format.execute("r8", { id: doc, ops: [{ format: "Beta", set: { link: "" } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    assert.match(part, /^error:bad_op op 1: the quote is part of the link "Beta words", and a link changes or goes off whole/);
+    const looks = (await tools.office_read.execute("r9", { id: doc, formatting: true })).content[0].text;
+    console.log(`23. office_read with formatting:\n${looks}`);
+    assert.match(looks, /\] \(Indented, indent left 0cm\) Indented item\n/);
+    assert.match(looks, /\] \(Heading 1\) Heading words\n {4}"Heading": not bold\n/);
+    assert.match(looks, /\nFootnotes: \[1\] in \[\d+\] cell B2 after "cellnote": Note in the cell\.; \[2\] in \[\d+\] after "Tail para": Note at the tail\.\n/);
+
+    // A section break's type is how the section after it starts; that section shows the header before it until it
+    // has one of its own, and "" gives it an empty one.
+    await tools.office_format.execute("r10", { id: doc, ops: [{ sectionBreak: "S one text", type: "continuous" }, { page: "Beta words", set: { header: "Head one", orientation: "landscape" } }] });
+    const xml = await partOf(doc, "word/document.xml");
+    const sects = [...xml.matchAll(/<w:sectPr[\s\S]*?<\/w:sectPr>/g)].map((m) => m[0]);
+    assert.equal(sects.length, 2, "two sections");
+    assert.match(sects[1], /<w:type w:val="continuous"\s*\/>/, "the section after the break starts continuous");
+    assert.doesNotMatch(sects[0], /w:val="continuous"/, "the one before it starts as it did");
+    const inherited = (await tools.office_read.execute("r11", { id: doc, formatting: true })).content[0].text;
+    assert.match(inherited, /\nSection 1: [^\n]*landscape[^\n]* Header: "Head one"\.\n/);
+    assert.match(inherited, /\nSection 2 \(from \[\d+\]\): [^\n]* Header: section 1's \(none of its own\)\.\n/);
+    await tools.office_format.execute("r12", { id: doc, ops: [{ page: "S two text", set: { header: "" } }, { page: "Beta words", set: { pageSize: "Letter" } }] });
+    const after = (await tools.office_read.execute("r13", { id: doc, formatting: true })).content[0].text;
+    console.log(`23. after the header was taken off section 2:\n${after.split("\n\n")[1]}`);
+    assert.match(after, /\nSection 1: Letter landscape[^\n]* Header: "Head one"\.\n/, "a size alone kept landscape");
+    assert.match(after, /\nSection 2 \(from \[\d+\]\): [^\n]* Header: ""\.\n/, "an empty header of its own");
     await person.page.context().close();
   });
 

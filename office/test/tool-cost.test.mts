@@ -22,11 +22,12 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * document starts with the paragraph "New document", which a model kept when it was told the document starts empty).
  * #13's PR 3, spreadsheets (plan: office_format ~910, office_edit ~1,050, office_read ~330): office_format 706 -> 929
  * with its sheet ops and keys, 936 after the second real-model run (a sheet border's sides are the range's edges);
- * office_edit 974 -> 1,068 with rows and columns; office_read 301 -> 329 with a sheet's formatting. */
+ * office_edit 974 -> 1,068 with rows and columns; office_read 301 -> 329 with a sheet's formatting, 336 since its first
+ * review (the text names office_screenshot for a sheet's alignment and borders, as the owner's answer 7 has it). */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 200,
-  office_read: 329,
+  office_read: 336,
   office_edit: 1068,
   office_format: 936,
   office_comments: 181,
@@ -53,5 +54,5 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 3081);
+  assert.equal(agreed, 3088);
 });

@@ -139,7 +139,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   it is hidden, and reads one sheet or all of them. A change to the sheets shows in your editor once the Document
   Server has let it through, a moment after the call makes it. A sheet the edit deletes is hidden and renamed
   `~deleted …` at once, and goes when the edit's other ops are made. Deleted rows and columns cannot be taken back, so
-  a call deletes them last, after every op that can be (a call that does otherwise is refused). Rows and columns are
+  a call deletes them last, after every op that can be (a call that does otherwise is refused); where the call fails
+  after a delete was made, what it changed below or right of the deleted lines stays too (its cells moved), and the
+  answer names those ops. A call inserts and deletes 20,000 rows and columns at most. Rows and columns are
   inserted and deleted while you are in the workbook too: the agent's answer then names the people in it, as their
   cells move. If you are in the middle of typing into a cell when the agent's insert moves it, OnlyOffice 10.0 puts
   what you type into the document, but your own editor may show that cell empty until you reload it (the Document
@@ -150,10 +152,13 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   alignment, wrap, text rotation, borders (single, double, dashed or dotted lines), merging and splitting, and taking
   all of a cell's formatting off (`clear`, merges too; the values stay). Columns take a width (in characters, as the
   sheet shows it), rows a height (in points), and both can be hidden, shown and fitted to their contents; frozen
-  panes keep the rows above and the columns left of a cell in view. A call is made whole or not at all: each op reads
-  what it changes first, and where a later op of the call fails, what it changed is put back. Two things cannot be put
-  back, because OnlyOffice's API cannot read them: the alignment and the borders. Where a later op fails, they stay as
-  the call set them, and the answer (`error:partial`) names them. OnlyOffice's API takes no border off and sets no
+  panes keep the rows above and the columns left of a cell in view. A call is made whole or not at all: it is checked
+  against the workbook first (superscript on a number, a freeze of a hidden sheet, more than 20,000 cells, whole
+  columns and rows counting the used cells in them, are refused before anything changes), each op reads what it
+  changes first, and where a later op of the call fails, what it changed is put back. Some things cannot be put
+  back, because OnlyOffice's API cannot read them: the alignment and the borders, the formatting of a text whose
+  characters differ (part of it bold, say) and the width of a hidden column. Where a later op fails, they stay as the
+  call set them, and the answer (`error:partial`) names them. OnlyOffice's API takes no border off and sets no
   "general" alignment back: only `clear` takes them off, with everything else. A merge keeps the top-left cell's
   value (as in Excel); taking a merge back puts the others' values back. A column width or row height put back is the
   column's or row's own from then on (the API sets none back to the sheet's default), which looks the same. `office_read` with `formatting: true` says how
@@ -401,8 +406,8 @@ agents' editor.
 - What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. An editor that
   stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
   not written.
-- The agent edits text, paragraphs, tables, cells and sheets, and formats Word documents; it cannot format a
-  spreadsheet yet, write comments of its own or make tracked changes (it answers in the threads it was asked in). A sheet the agent copies takes the values, formulas, number formats and
+- The agent edits text, paragraphs, tables, cells and sheets, and formats Word documents and spreadsheets; it cannot
+  write comments of its own or make tracked changes (it answers in the threads it was asked in). A sheet the agent copies takes the values, formulas, number formats and
   column widths of the old one, not its other formatting (fonts, colours, borders), charts, pictures, row heights or
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
@@ -411,7 +416,10 @@ agents' editor.
   columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A table of
   contents lists the headings as the editor finds them when it is made, and is not brought up to date by later
   calls; a link lies inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out cell fills and borders and what a
-  table that holds a picture looks like (`office_screenshot` shows them).
+  table that holds a picture looks like (`office_screenshot` shows them). For spreadsheets `office_format` leaves out, for now:
+  conditional formats, data validation, charts, filters, tables, sorting, named ranges, pictures, cell styles, a
+  sheet's tab colour, grouped rows and columns, protection and print setup; `office_read` does not read a sheet's
+  alignment and borders (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
   editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most.

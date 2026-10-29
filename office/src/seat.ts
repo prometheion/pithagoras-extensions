@@ -88,7 +88,7 @@ export const LIMITS = {
   toolWindowMs: 5 * 60_000,
 };
 
-type Outcome = { result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: boolean };
+type Outcome = { result?: unknown; error?: { code?: string; message?: string; op?: number; shifted?: unknown[] }; ran?: boolean };
 type Job = {
   id: string;
   kind: string;
@@ -138,7 +138,9 @@ type Editor = {
 /** A coded refusal the tools pass on as `error:<code> <message>`. `ran`: the editor's plugin had taken the job, so
  * the command may have run, and an edit may be in the document (office_edit records it all the same). */
 export class SeatError extends Error {
-  constructor(public readonly code: string, message: string, public readonly op?: number, public readonly ran = false) {
+  /** `shifted`: of a spreadsheet edit that failed partly made, the rows and columns it left moved (seat-page.ts,
+   * cellEdit), which the answer names to the people in the workbook. */
+  constructor(public readonly code: string, message: string, public readonly op?: number, public readonly ran = false, public readonly shifted?: unknown[]) {
     super(message);
   }
 }
@@ -248,7 +250,7 @@ export async function run(home: string, docId: string, mode: SeatMode, job: Seat
     // Closed between the find and now (another call made room for its document): never handed, so nothing ran.
     if (!editors.has(editor.id)) throw new SeatError("editor_closed", "the agent's editor of this document was closed for another document as the call began; try again");
     const outcome = await handOver(editor, job, options);
-    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op, outcome.ran ?? false);
+    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op, outcome.ran ?? false, Array.isArray(outcome.error.shifted) ? outcome.error.shifted : undefined);
     if (!edit) return outcome.result;
     let changed: boolean;
     try {
@@ -859,7 +861,7 @@ function pluginRoute(req: IncomingMessage, res: ServerResponse, editor: Editor, 
         }
         return json(res, 413, { error: "the result is too large", code: "too_large" });
       }
-      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: unknown } = {};
+      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number; shifted?: unknown[] }; ran?: unknown } = {};
       try {
         done = JSON.parse(body.toString("utf8"));
       } catch {

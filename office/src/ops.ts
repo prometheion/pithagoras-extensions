@@ -90,6 +90,10 @@ export function editJob(ext: "docx" | "xlsx", ops: unknown): EditJob {
   const sheetOps = cells.filter(isSheetOp).length;
   if (sheetOps > MAX_SHEET_OPS) throw new OpError("bad_op", `one call takes at most ${MAX_SHEET_OPS} sheet ops (got ${sheetOps}); split the edit into several calls`);
   lastWithoutInverse(cells, (op) => "deleteRows" in op || "deleteColumns" in op);
+  // An insert taken back reads what was written into its rows or columns, and a delete moves as many: as many lines a
+  // call as a format reads cells.
+  const lines = cells.reduce((n, op) => n + ("count" in op ? op.count : 0), 0);
+  if (lines > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call inserts and deletes ${MAX_FORMAT_CELLS.toLocaleString("en")} rows and columns at most (got ${lines.toLocaleString("en")}); split it into several calls`);
   return { kind: "cell.edit", args: { ops: cells } };
 }
 
@@ -883,8 +887,10 @@ export function parseArea(v: string): { area: SheetArea; text: string } | null {
 
 function sheetFormatJob(ops: unknown[]): SheetFormatJob {
   const out = ops.map(sheetFormatOp);
-  const cells = out.reduce((n, op) => n + ("format" in op && !op.area.whole ? op.area.cols * op.area.rows : 0), 0);
-  if (cells > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call formats ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most (got ${cells.toLocaleString("en")}): each one's formats are read first, so that the call can be taken back; split it into several calls, or format whole columns ("C:D") or rows ("5:6")`);
+  // Whole columns and rows count one each here (the command counts the used cells among them besides): "1:1048576"
+  // never gets as far as the agents' browser.
+  const cells = out.reduce((n, op) => n + ("format" in op ? (op.area.whole === "columns" ? op.area.cols : op.area.whole === "rows" ? op.area.rows : op.area.cols * op.area.rows) : 0), 0);
+  if (cells > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call formats ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most (got ${cells.toLocaleString("en")}, a whole column or row counting one): each one's formats are read first, so that the call can be taken back; split it into several calls, or format whole columns ("C:D") or rows ("5:6")`);
   const lines = out.reduce((n, op) => n + ("count" in op ? op.count : 0), 0);
   if (lines > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call's columns and rows ops take ${MAX_FORMAT_CELLS.toLocaleString("en")} columns and rows at most (got ${lines.toLocaleString("en")}); split it into several calls`);
   return { kind: "cell.format", args: { ops: out } };

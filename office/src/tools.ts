@@ -695,7 +695,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_read",
     label: LABELS.office_read,
     guard: GUARDS.office_read,
-    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style and list in brackets (\"[2] (Heading 1) Findings\", \"[5] (bullet) Point\"), a table as \"[4] table\" and its rows \"| a | b |\"; `formatting: true` adds how it looks (styles in use, page setup, headers and footers, footnotes, each paragraph's and run's own formatting, table styles; per sheet its cells' formats, merged cells, column widths, row heights, frozen panes, not alignment or borders). A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
+    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style and list in brackets (\"[2] (Heading 1) Findings\", \"[5] (bullet) Point\"), a table as \"[4] table\" and its rows \"| a | b |\"; `formatting: true` adds how it looks (styles in use, page setup, headers and footers, footnotes, each paragraph's and run's own formatting, table styles; per sheet its cells' formats, merged cells, column widths, row heights, frozen panes; not alignment or borders: office_screenshot shows them). A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
     promptSnippet: "Read an office document as it stands in the editor",
     parameters: {
       type: "object",
@@ -855,6 +855,10 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         if (e instanceof seat.SeatError && (e.code === "timeout" || e.code === "editor_closed") && job.kind === "cell.edit" && job.args.ops.some((op) => "deleteSheet" in op)) {
           e = new seat.SeatError(e.code, `${e.message}; a sheet the call deletes may be left as a hidden sheet named "~deleted …", which you can delete`, e.op, e.ran);
         }
+        // Rows or columns that stay moved after a failure (a delete made before it): the people in the workbook are
+        // named as after a call that worked.
+        const stayMoved = e instanceof seat.SeatError && e.shifted ? movesSaid({ shifted: e.shifted }, usersOf(doc.docId).map((u) => u.name || "someone")) : "";
+        if (stayMoved && e instanceof seat.SeatError) e = new seat.SeatError(e.code, `${e.message.replace(/\.$/, "")}.${stayMoved.replace(/\.$/, "")}`, e.op, e.ran, e.shifted);
         // The editor took the edit and then gave no clear answer: it may be in the document, and reach the file with
         // a later save. Recorded all the same, so that every change an agent may have made is in the audit log.
         if (e instanceof seat.SeatError && e.ran) record({ subject: doc.title, reason: `${what}; ${e.code === "editor_not_saved" ? "made in the editor, not saved yet" : e.code === "partial" ? "failed, and not taken back whole" : "outcome unknown"} (${e.code})`, chatId });

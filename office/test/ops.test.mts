@@ -521,8 +521,12 @@ test("office_format (spreadsheet): what does not hold is refused before anything
   no([{ footnote: "a", text: "b" }], /is a Word op \(`footnote`\), and this is a spreadsheet/, "unsupported_format");
   no([{ formatTable: "a", set: { fill: "none" } }], /is a Word op/, "unsupported_format");
   // The caps: cells by their addresses, and columns and rows.
-  assert.doesNotThrow(() => formatJob("xlsx", [{ format: "A1:CV200", set: { bold: true } }, { format: "A:XFD", set: { bold: true } }]));
-  assert.throws(() => formatJob("xlsx", [{ format: "A1:CV200", set: { bold: true } }, { format: "A201", set: { bold: true } }]), (e: unknown) => e instanceof OpError && new RegExp(`formats ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most \\(got 20,001\\)`).test(e.message));
+  assert.doesNotThrow(() => formatJob("xlsx", [{ format: "A1:CV36", set: { bold: true } }, { format: "A:XFD", set: { bold: true } }]));
+  // A whole column or row counts one here (the command counts the used cells among them): every row of a sheet is far
+  // more than a call formats, and refused before the agents' browser builds any of it.
+  assert.throws(() => formatJob("xlsx", [{ format: "1:1048576", set: { font: "Arial" } }]), (e: unknown) => e instanceof OpError && /formats 20,000 cells at most \(got 1,048,576, a whole column or row counting one\)/.test(e.message));
+  assert.throws(() => formatJob("xlsx", [{ format: "A1:CV200", set: { bold: true } }, { format: "A:A", set: { bold: true } }]), (e: unknown) => e instanceof OpError && /\(got 20,001,/.test(e.message));
+  assert.throws(() => formatJob("xlsx", [{ format: "A1:CV200", set: { bold: true } }, { format: "A201", set: { bold: true } }]), (e: unknown) => e instanceof OpError && new RegExp(`formats ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most \\(got 20,001,`).test(e.message));
   assert.throws(() => formatJob("xlsx", [{ rows: "1:20001", height: 20 }]), (e: unknown) => e instanceof OpError && /take 20,000 columns and rows at most/.test(e.message));
 });
 
@@ -547,6 +551,9 @@ test("office_edit (spreadsheet): rows and columns inserted and deleted, by numbe
   no([{ insertRows: "5", count: 2 }], /"count" is not part of \{sheet\?, insertRows\}/, 0);
   // Not sheet ops: no wait for the Document Server, so no count against MAX_SHEET_OPS.
   assert.doesNotThrow(() => editJob("xlsx", Array.from({ length: MAX_SHEET_OPS + 5 }, (_, k) => ({ insertRows: String(k + 1) }))));
+  // As many rows and columns a call as a format reads cells: an insert taken back reads what was written into it.
+  assert.doesNotThrow(() => editJob("xlsx", [{ insertRows: "2:10001" }, { insertColumns: "A:J" }, { deleteRows: "1:9990" }]));
+  no([{ insertRows: "2:1000001" }, { range: "A1", values: [[1]] }], /^one call inserts and deletes 20,000 rows and columns at most \(got 1,000,000\)/, undefined as unknown as number);
   assert.deepEqual(parseLines("XFD", "columns"), { from: 16383, count: 1, text: "XFD:XFD" });
   assert.equal(parseLines("XFE", "columns"), null);
   assert.equal(parseLines("1048577", "rows"), null);

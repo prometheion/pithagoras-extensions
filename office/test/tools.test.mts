@@ -1315,6 +1315,9 @@ test("office_edit (spreadsheet): rows and columns made and taken away go in the 
   // A delete before an op that can be taken back is refused before anything is sent.
   assert.match(await refused(t.execute("e3", { id: sheet.docId, ops: [{ deleteColumns: "B" }, { range: "A1", values: [[1]] }] })), /^error:bad_op op 1 cannot be taken back once made \(deleted columns\)/);
   assert.equal(s.seat.runs.length, 2);
+  // A call that failed after its delete was made leaves the rows moved: the people in the workbook are named there too.
+  s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: the editor did not delete the sheet "Old" within 10 s. The ops before it are taken back, but the change the editor was asked for may still be made. Not taken back: the rows 9:9 of "Sheet1" that op 3 deleted.', 1, true, [{ sheet: "Sheet1", kind: "rows", at: 8, count: 1, made: false }]));
+  assert.match(await refused(t.execute("e4", { id: sheet.docId, ops: [{ range: "A1", values: [[1]] }, { deleteSheet: "Old" }, { deleteRows: "9" }] })), /^error:partial op 2: .* that op 3 deleted\. Ann and Bob are in this workbook, and its cells moved: row 9 of "Sheet1" deleted \(the rows below it moved up\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\. Part of this call may be in the document/);
 });
 
 test("office_read with formatting (spreadsheet): each sheet's cells, then how they look: the usual font, the formats by range, merged cells, own column widths and row heights, hidden ones, frozen panes; alignment and borders said to be unread", async () => {

@@ -16,6 +16,7 @@ import { parseDocx } from "../../src/ooxml.ts";
 import { templateDocx, within } from "../../src/store.ts";
 import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
 import { jpegSize, SHOT_MAX_BYTES, SHOT_SIDE } from "../../src/cdp.ts";
+import { PI_TOOLS, portalEnv, realModelMay, realModelProxy } from "./real-model.mts";
 
 /**
  * Office in a real portal, end to end: the portal's own server (`core/server/dist/index.js` of PITHAGORAS_DIR, built),
@@ -75,44 +76,6 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-/**
- * A proxy to an OpenAI-compatible model API at `base` (".../v1"): what the portal sends to `<url>/<path>` goes to
- * `<base>/<path>`, with the key where one is given, and every request's JSON is kept (`requests`), so a test reads the
- * tool calls a model made and the results it got. The answers pass through as they come (streamed).
- */
-async function realModelProxy(base: string, key?: string): Promise<{ url: string; requests: unknown[]; close: () => void }> {
-  const requests: unknown[] = [];
-  const target = base.replace(/\/+$/, "");
-  const server = http.createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
-    req.on("end", () => {
-      const body = Buffer.concat(chunks);
-      try {
-        requests.push(JSON.parse(body.toString("utf8")));
-      } catch {
-        // not JSON (a GET): nothing to keep
-      }
-      const headers: Record<string, string> = { "content-type": String(req.headers["content-type"] ?? "application/json") };
-      if (key) headers.authorization = `Bearer ${key}`;
-      void fetch(`${target}${String(req.url).replace(/^\/v1/, "")}`, { method: req.method, headers, body: req.method === "GET" || req.method === "HEAD" ? undefined : body }).then(
-        async (answer) => {
-          res.writeHead(answer.status, { "content-type": answer.headers.get("content-type") ?? "application/json" });
-          if (answer.body) for await (const chunk of answer.body as unknown as AsyncIterable<Uint8Array>) res.write(chunk);
-          res.end();
-        },
-        (e: Error) => {
-          res.writeHead(502, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: { message: `the model's API did not answer: ${e.message}` } }));
-        },
-      );
-    });
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, requests, close: () => server.close() };
-}
-
 const until = async (what: () => Promise<boolean> | boolean, ms: number, every = 250) => {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -157,7 +120,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   // so pi gives it a tool's image parts.
   // Case p's real model, where one is given (OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL): reached through a proxy of
   // the test's own, which keeps every request the portal sends it (the tool calls and their results are in them).
-  const real = process.env.OFFICE_REAL_MODEL_URL && process.env.OFFICE_REAL_MODEL ? await realModelProxy(process.env.OFFICE_REAL_MODEL_URL, process.env.OFFICE_REAL_MODEL_KEY) : null;
+  // Its key stays in this process (the proxy adds it); the portal is started without any OFFICE_REAL_MODEL_* (portalEnv).
+  const real = process.env.OFFICE_REAL_MODEL_URL && process.env.OFFICE_REAL_MODEL ? await realModelProxy(process.env.OFFICE_REAL_MODEL_URL, process.env.OFFICE_REAL_MODEL_KEY, realModelMay) : null;
   const realProvider = real ? { real: { baseUrl: real.url, api: "openai-completions", apiKey: "proxied", models: [{ id: process.env.OFFICE_REAL_MODEL, name: process.env.OFFICE_REAL_MODEL, input: process.env.OFFICE_REAL_MODEL_IMAGES === "1" ? ["text", "image"] : ["text"], contextWindow: Number(process.env.OFFICE_REAL_MODEL_CONTEXT ?? 65536), maxTokens: 8192 }] } } : {};
   writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", input: ["text"], contextWindow: 32768, maxTokens: 4096 }, { id: "scripted-eye", name: "scripted-eye", input: ["text", "image"], contextWindow: 32768, maxTokens: 4096 }] }, ...realProvider } }));
   writeFileSync(path.join(piAgent, "settings.json"), JSON.stringify({ defaultProvider: "scripted", defaultModel: "scripted" }));
@@ -183,7 +147,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   const entry = path.join(PITHAGORAS, "core/server/dist/index.js");
   if (mode === "host") {
     children.push(spawn(process.execPath, [model, String(modelPort), log], { stdio: ["ignore", portalOut, portalOut] }));
-    children.push(spawn(process.execPath, [entry], { cwd: PITHAGORAS, env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", portalOut, portalOut] }));
+    children.push(spawn(process.execPath, [entry], { cwd: PITHAGORAS, env: { ...portalEnv(process.env), ...env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", portalOut, portalOut] }));
   } else {
     // A container of its own: its own network namespace, the portal's port published on 127.0.0.1, the folders it
     // reads and writes mounted where they are on the machine, Docker's socket as both Compose files give it.
@@ -1449,6 +1413,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
    * unless OFFICE_REAL_MODEL_URL (its API's base, ending in /v1) and OFFICE_REAL_MODEL (its id) are set;
    * OFFICE_REAL_MODEL_KEY is its API key where it needs one, OFFICE_REAL_MODEL_IMAGES=1 says it takes pictures,
    * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls.
+   * The model gets the office tools alone, and its key never reaches the portal (real-model.mts).
    */
   test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)" }, async () => {
     const made = await json(`${origin}/api/sessions`, { method: "POST", body: "{}" });
@@ -1456,6 +1421,16 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const chatId = made.body.id as string;
     const set = await json(`${origin}/api/sessions/${chatId}/config`, { method: "POST", body: JSON.stringify({ provider: "real", modelId: process.env.OFFICE_REAL_MODEL }) });
     assert.equal(set.status, 200, JSON.stringify(set.body));
+    // The chat has the office tools alone: no shell and no file tools for a hosted model on this machine, where the
+    // portal runs with the sandbox off. Switched off for it: pi's own and every other tool a chat of the default agent
+    // has, as the portal saw them registered (in a scripted chat first, where none has run yet). The proxy refuses any
+    // request that offers another all the same.
+    await say(await chat(), []);
+    const listed = (await json(`${origin}/api/sessions/${chatId}/tools`)).body as { tools: { name: string }[] };
+    assert.ok(listed.tools.some((t) => t.name === "office_format"), JSON.stringify(listed));
+    const off = [...new Set([...PI_TOOLS, ...listed.tools.map((t) => t.name)])].filter((name) => !realModelMay(name));
+    const switched = await json(`${origin}/api/sessions/${chatId}/tools`, { method: "PUT", body: JSON.stringify({ off }) });
+    assert.equal(switched.status, 200, JSON.stringify(switched.body));
     const task = [
       'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
       '1. A title line "Quarterly report 2026", centred, 20 pt, bold, dark red.',
@@ -1487,6 +1462,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const report = { model: process.env.OFFICE_REAL_MODEL, seconds: Math.round((Date.now() - t0) / 1000), requests: real!.requests.length, calls: calls.length, byTool: calls.reduce((m: Record<string, number>, c) => ((m[c.name] = (m[c.name] ?? 0) + 1), m), {}), refused: refusals.length, codes, refusals: refusals.map((r) => ({ name: r.name, args: r.args.slice(0, 600), result: r.result.slice(0, 600) })) };
     console.log(`p. ${JSON.stringify(report, null, 1)}`);
     if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(process.env.OFFICE_REAL_MODEL_REPORT, JSON.stringify({ ...report, all: calls }, null, 1));
+    assert.deepEqual(real!.refused, [], "no request offered the model a tool other than the office tools");
+    assert.ok(real!.requests.length > 0 && real!.requests.every((r) => ((r as { tools?: { function?: { name?: string } }[] }).tools ?? []).every((t) => realModelMay(String(t.function?.name)))));
     // What the run made: the document, formatted, in the default agent's home.
     const doc = (await state()).docs.find((d) => d.title === "Quarterly report");
     assert.ok(doc, "the model made the document");

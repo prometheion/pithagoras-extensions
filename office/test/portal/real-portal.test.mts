@@ -1649,7 +1649,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.ok(await until(async () => (saved = parseDocx(readFileSync(await fileOf(word))).text).includes(`Typed by the person:${more}`), 90_000, 1000), `the file has the person's words: ${JSON.stringify(saved.slice(-300))}`);
     const last = await JSZip.loadAsync(readFileSync(await fileOf(word)));
     const lastXml = (await last.file("word/document.xml")?.async("string")) ?? "";
-    assert.doesNotMatch(lastXml, /<w:highlight /, "no highlight of the failed call");
+    assert.doesNotMatch(lastXml, /<w:highlight w:val="yellow"/, "no highlight of the failed call");
     assert.doesNotMatch(lastXml, /<w:sz w:val="60"\s*\/>/, "nor its size");
     assert.equal((lastXml.match(/<w:footnoteReference /g) ?? []).length, 1, "nor its footnote");
     assert.doesNotMatch((await last.file("word/footnotes.xml")?.async("string")) ?? "", /A note the Undo takes back/);

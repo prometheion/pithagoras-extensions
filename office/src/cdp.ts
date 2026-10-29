@@ -157,6 +157,9 @@ export const FRAME_FN = `async function (t) {
         if (now !== pages) { pages = now; since = Date.now(); }
       }
     }
+    // Refused before the pictures are waited for: they do not change the page count (a picture's size is in the file),
+    // and the wait would hold the browser's shots and the editor's jobs for nothing.
+    if (t.page > pages) return stop("no_page", "the document has " + pages + " page" + (pages === 1 ? "" : "s") + " as the editor lays it out now");
     var pics = pictures();
     if (pics && pics.loading) {
       var end = Math.min(Date.now() + t.picturesMs, t.until - t.picturesSpareMs);
@@ -169,13 +172,15 @@ export const FRAME_FN = `async function (t) {
       await drawn();
       alive();
     }
-    if (t.page > pages) return stop("no_page", "the document has " + pages + " page" + (pages === 1 ? "" : "s") + " as the editor lays it out now");
     try { api.asc_setDrawCollaborationMarks(false); } catch (e) {}
     api.zoomFitToPage();
     api.goToPage(t.page - 1);
     await drawn();
     await sleep(100);
     alive();
+    // Counted again as the page is taken: a picture whose fetch just failed is complete before its error event (where
+    // the loader sets it to null) has run, so a count from before the page's draw can report it as drawn.
+    if (pics) pics = pictures();
     var cv = document.getElementById("id_viewer");
     if (!cv) return stop("not_drawn", "the editor has no page canvas");
     var W = cv.width, H = cv.height, d = cv.getContext("2d").getImageData(0, 0, W, H).data;

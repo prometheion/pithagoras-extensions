@@ -430,6 +430,31 @@ test("frame function, Word: a picture still loading at the wait's end, or one th
   assert.equal(out.data, "QUJD");
 });
 
+test("frame function, Word: a picture whose fetch failed just before the page is taken counts as failed, though its error event came after the wait looked", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const editor = { getCountPages: () => 1, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };
+  // As Chromium has a broken <img>: `complete` once its fetch failed, and the loader's onerror (Image = null) a task
+  // later, here 10 ms after the frame function first looked.
+  const loader = imageLoader(editor, { "http://ds/media/broken.png": { complete: true } });
+  const w = frameWindow({ editor, ...loader }, { id_viewer: viewer });
+  setTimeout(() => ((loader.AscCommon.W8i.jO["http://ds/media/broken.png"] as { Image: unknown }).Image = null), 10);
+  const out = await frameFn(w.window, { kind: "word", page: 1, pages: 1 });
+  assert.deepEqual(out.pictures, { loading: 0, failed: 1 });
+  assert.equal(out.data, "QUJD", "the page is taken");
+});
+
+test("frame function, Word: a page past the count is refused at once, not after the wait for a picture still loading", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const did: string[] = [];
+  const editor = { getCountPages: () => 8, zoomFitToPage: () => did.push("fit"), goToPage: () => did.push("page"), asc_setDrawCollaborationMarks() {} };
+  const w = frameWindow({ editor, ...imageLoader(editor, { "http://ds/media/hanging.png": { complete: false } }) }, { id_viewer: viewer });
+  const began = Date.now();
+  const out = await frameFn(w.window, { kind: "word", page: 9, pages: 8, picturesMs: 2000 });
+  assert.deepEqual(out, { error: { code: "no_page", message: "the document has 8 pages as the editor lays it out now" } });
+  assert.ok(Date.now() - began < 500, `refused in ${Date.now() - began} ms`);
+  assert.deepEqual(did, [], "the view not moved");
+});
+
 test("frame function, Word: without the editor's image loader (another shape, none, or one that throws when looked at) nothing is waited for and the answer says it is not known", async () => {
   const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
   const editor = { getCountPages: () => 1, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };

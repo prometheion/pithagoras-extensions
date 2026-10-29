@@ -18,7 +18,7 @@ This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the 
   user you log in with: in Nextcloud under **Settings ▸ Security ▸ Devices & sessions**, "Add an app password". The
   app name it asks for can be anything; `pithagoras` is a good one. A personal password works, but an app password is
   the kind that can be revoked on its own when something goes wrong.
-- About 150 MB of disk for the image (`ghcr.io/cbcoutinho/nextcloud-mcp-server:v0.202.2`, pulled once, shared by all
+- About 150 MB of disk for the image (`ghcr.io/cbcoutinho/nextcloud-mcp-server:0.203.0`, pulled once, shared by all
   instances).
 
 ## Installing

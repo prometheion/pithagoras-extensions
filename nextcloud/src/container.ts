@@ -15,9 +15,10 @@ import type { Docker } from "../../shared/docker-api";
 import { NextcloudInstance, DEFAULT_INSTANCE_NAME } from "./config";
 import { ownName } from "./host";
 
-/** The image by its release tag: what latest pointed to when this version was made (v0.202.2, 2026-10-28), and
- * what it is tested with. Pinned so an update of the server's own code is the person's choice, not a pull. */
-export const IMAGE = "ghcr.io/cbcoutinho/nextcloud-mcp-server:v0.202.2";
+/** The image by its release tag: what latest pointed to when this version was made (0.203.0, 2026-10-29), and
+ * what it is tested with. Pinned so an update of the server's own code is the person's choice, not a pull. The tags
+ * on GHCR carry no v prefix, whatever the project's releases call themselves. */
+export const IMAGE = "ghcr.io/cbcoutinho/nextcloud-mcp-server:0.203.0";
 
 /** The name an own container stands under by its default, and how each instance's is made from it: the base for the
  * instance an earlier version carried, the base with its slug of the instance's name beside (overridable as every

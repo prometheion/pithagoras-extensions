@@ -77,7 +77,7 @@ await new Promise<void>((resolve) => mock.listen(mcpPort, "127.0.0.1", () => res
 const { fakeDocker } = await import(from("extensions/docker/test/fake-docker.ts"));
 const docker = await fakeDocker();
 process.env.DOCKER_SOCKET = docker.socket;
-docker.images.add("ghcr.io/cbcoutinho/nextcloud-mcp-server:v0.202.2");
+docker.images.add("ghcr.io/cbcoutinho/nextcloud-mcp-server:0.203.0");
 
 const host = await import(from("core/server/dist/extension-host.js"));
 const db = await import(from("core/server/dist/db.js"));
@@ -132,7 +132,7 @@ test("no instance yet: it says none is set, and the way it keeps that said", asy
   // what it does on its start may not have stood done as it first answers (it looked through mcp.json for something
   // to adopt): wait for nothing left doing before reading what it kept.
   const s = await until((s) => s.task === undefined && s.migrated === undefined, "the startup task to stand done");
-  assert.deepEqual(s, { image: "ghcr.io/cbcoutinho/nextcloud-mcp-server:v0.202.2", instances: [], configured: false });
+  assert.deepEqual(s, { image: "ghcr.io/cbcoutinho/nextcloud-mcp-server:0.203.0", instances: [], configured: false });
 });
 
 test("a saved instance stands in a container of its own, on the portal's network, and its entry in mcp.json with it", async () => {

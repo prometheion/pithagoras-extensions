@@ -306,10 +306,20 @@ const nextcloud: ServerHalf = async (portalArg) => {
   });
 
   // On every start: one pass toward where the instances ask for their entries in pi's config (the entries were
-  // removed on stop, so this is how everything comes back after a restart of the portal); its failures are its own
-  // to read in the status.
+  // removed on stop, so this is how everything comes back after a restart of the portal). While the extension is
+  // still loading, the portal refuses its actions outright, so that first pass retries them until the load has
+  // finished instead of failing once and waiting for someone to press Start; any other failure stays in the status.
   void (async () => {
-    await ensureApplied().catch(() => {});
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await ensureApplied();
+        return;
+      } catch (error) {
+        const message = (error as Error).message ?? "";
+        if (!/not\s+(yet\s+)?initialized/i.test(message) || attempt >= 100) return;
+        await new Promise((wait) => setTimeout(wait, 500));
+      }
+    }
   })();
 
   return () => {

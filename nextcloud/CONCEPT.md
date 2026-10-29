@@ -158,7 +158,7 @@ Status block on the same page: container state, MCP server health, "pi is connec
 
 ## 10. Open questions
 
-- Multi-instance from day one or Phase 3? (Current manual setup has two accounts; v1 spec says main account only.)
-- Adopt existing containers on install, or always own a fresh one?
+- ~~Multi-instance from day one or Phase 3?~~ **Decided: multi-instance, done** — every instance gets its own container, its loopback port at and above 8000, and its own entry in pi's config under its name; the panel switches over them.
+- ~~Adopt existing containers on install, or always own a fresh one?~~ **Decided: both** — an instance owns a made container by default and can take over any found container running the image instead (adopted ones are never touched).
 - Core change B: confirm current masking behavior of the generated settings page before scoping.
-- Calendar tab UX: month grid (heavier) vs day list + week strip (cheaper) — decide in Phase 2.
+- ~~Calendar tab UX: month grid vs day list~~ **Decided: day list** — what Phase 2 built.

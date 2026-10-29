@@ -37,14 +37,20 @@ type JsonRpcMessage = {
 
 const PROTOCOL_VERSION = "2025-03-26";
 
+// How long a request is given, before it is gone up on: short for the check that there is a server at all,
+// long for what the tools do (a WebDAV read can pull in several megabytes as base64).
+const PING_TIMEOUT_MS = 15_000;
+const TOOL_TIMEOUT_MS = 120_000;
+
 /** A streamable-HTTP MCP client of `url`, sessionful. */
 export function mcpClient(url: string) {
   let sessionId: string | undefined;
   let initialized = false;
   let nextId = 1;
 
-  /** One JSON-RPC message to the server, answered as JSON or event stream, its one result read back. */
-  async function post(message: JsonRpcMessage): Promise<unknown> {
+  /** One JSON-RPC message to the server, answered as JSON or event stream, its one result read back -- given no
+   * longer than `timeoutMs`, over the whole answer including its body. */
+  async function post(message: JsonRpcMessage, timeoutMs = 30_000): Promise<unknown> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       // The server takes nothing else: without both of them it answers 406.
@@ -53,9 +59,10 @@ export function mcpClient(url: string) {
     if (sessionId) headers["mcp-session-id"] = sessionId;
     let answer: Response;
     try {
-      answer = await fetch(url, { method: "POST", headers, body: JSON.stringify(message) });
+      answer = await fetch(url, { method: "POST", headers, body: JSON.stringify(message), signal: AbortSignal.timeout(timeoutMs) });
     } catch (error) {
-      throw new Error(`The MCP server at ${url} could not be reached: ${(error as Error).message}`);
+      const timedOut = (error as Error).name === "TimeoutError";
+      throw new Error(`The MCP server at ${url} could not be reached: ${timedOut ? `it took longer than ${Math.round(timeoutMs / 1000)} s` : (error as Error).message}`);
     }
     const givenSession = answer.headers.get("mcp-session-id");
     if (givenSession) sessionId = givenSession;
@@ -99,11 +106,11 @@ export function mcpClient(url: string) {
   }
 
   /** One request of the client proper: an initialize round trip first where needed, one retry over a gone session. */
-  async function rpc(method: string, params?: unknown): Promise<unknown> {
+  async function rpc(method: string, params?: unknown, timeoutMs = 30_000): Promise<unknown> {
     if (!initialized) await initialize();
     for (let attempt = 0; ; attempt++) {
       try {
-        return await post({ jsonrpc: "2.0", id: nextId++, method, params });
+        return await post({ jsonrpc: "2.0", id: nextId++, method, params }, timeoutMs);
       } catch (error) {
         if (attempt === 0 && (error as NodeJS.ErrnoException).code === "E_SESSION_GONE") {
           initialized = false;
@@ -120,7 +127,7 @@ export function mcpClient(url: string) {
     /** Whether the server answers at all: an initialize round trip, with what it says of itself. */
     async ping(): Promise<{ name: string; version: string }> {
       initialized = false;
-      const result = (await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "@pithagoras/nextcloud", version: "0.1.0" } } })) as Record<string, unknown>;
+      const result = (await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "@pithagoras/nextcloud", version: "0.1.0" } } }, PING_TIMEOUT_MS)) as Record<string, unknown>;
       initialized = true;
       const info = (result?.serverInfo ?? {}) as Record<string, unknown>;
       return { name: String(info.name ?? ""), version: String(info.version ?? "") };
@@ -132,7 +139,7 @@ export function mcpClient(url: string) {
     },
     /** Call a tool of the server: its content parts back, raw -- this module parses none of them. */
     async callTool(name: string, args: Record<string, unknown>): Promise<McpResult> {
-      const result = (await rpc("tools/call", { name, arguments: args })) as McpResult;
+      const result = (await rpc("tools/call", { name, arguments: args }, TOOL_TIMEOUT_MS)) as McpResult;
       return result ?? { content: [] };
     },
   };

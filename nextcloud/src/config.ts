@@ -140,6 +140,8 @@ function writeAtomic(dest: string, bytes: Buffer): void {
   const dir = path.dirname(dest);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${path.basename(dest)}.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, bytes);
+  fs.writeFileSync(tmp, bytes, { mode: 0o600 });
+  // The file holds app passwords: where the temporary name stood before (a crashed run), it is narrowed anyway.
+  fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, dest);
 }

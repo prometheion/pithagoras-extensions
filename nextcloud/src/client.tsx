@@ -88,34 +88,39 @@ function NextcloudPanel({ panel }: PanelProps) {
         <p className="text-sm text-fg-subtle p-1">
           {t("This Nextcloud ({name}) is not set up completely yet: fill it in on the Nextcloud page in Settings.", { name: held.name })}
         </p>
-      ) : tab === "shopping-list" ? (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <ShoppingList />
-        </Suspense>
-      ) : tab === "cookbook" ? (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <Cookbook />
-        </Suspense>
-      ) : tab === "notes" ? (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <Notes />
-        </Suspense>
-      ) : tab === "files" ? (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <Files />
-        </Suspense>
-      ) : tab === "deck" ? (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <Deck />
-        </Suspense>
-      ) : tab === "calendar" ? (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <Calendar />
-        </Suspense>
       ) : (
-        <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
-          <Contacts />
-        </Suspense>
+        // The open tab remounts where the instance changes: what it shows belongs to that one and no other.
+        <div key={held?.name ?? selected ?? "none"}>
+          {tab === "shopping-list" ? (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <ShoppingList />
+            </Suspense>
+          ) : tab === "cookbook" ? (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <Cookbook />
+            </Suspense>
+          ) : tab === "notes" ? (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <Notes />
+            </Suspense>
+          ) : tab === "files" ? (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <Files />
+            </Suspense>
+          ) : tab === "deck" ? (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <Deck />
+            </Suspense>
+          ) : tab === "calendar" ? (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <Calendar />
+            </Suspense>
+          ) : (
+            <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}>
+              <Contacts />
+            </Suspense>
+          )}
+        </div>
       )}
     </div>
   );

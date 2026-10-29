@@ -184,7 +184,9 @@ const nextcloud: ServerHalf = async (portalArg) => {
     if (!inst) {
       inst = { name, url: "", username: "", password: "", mcpExcludeTools: excludeDefault(name), container: "own" };
       insts.push(inst);
-    } else for (const key of ["url", "username", "password", "mcpExcludeTools"] as const) {
+    }
+    for (const key of ["url", "username", "password", "mcpExcludeTools"] as const) {
+      // A new instance takes its fields here on the first save; an existing one is amended in place.
       if (typeof given[key] === "string") inst[key] = (given[key] as string).trim(); // the password is only set, never answered back
     }
     const container = typeof given.container === "string" ? given.container.trim() : "";

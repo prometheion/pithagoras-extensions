@@ -219,22 +219,28 @@ function styleNames(doc) {
   (doc.GetAllStyles() || []).forEach(function (s) { try { out[JSON.parse(s.ToJSON()).styleId] = s.GetName(); } catch (e) {} });
   return out;
 }
-// A run's direct formatting, compact: only what it sets.
+// A run's direct formatting, compact: only what it sets. What it sets off or to nothing is direct formatting too, and
+// shown so (false, "auto", "none"): it hides what a style gives the text.
 function runLook(r, names) {
   var out = {};
   if (!r) return out;
   if (r.rFonts && r.rFonts.ascii) out.font = r.rFonts.ascii;
   if (typeof r.sz === "number") out.size = r.sz;
-  if (r.b === true) out.bold = true;
-  if (r.i === true) out.italic = true;
+  if (typeof r.b === "boolean") out.bold = r.b;
+  if (typeof r.i === "boolean") out.italic = r.i;
   if (r.u === true || (r.u && typeof r.u === "object" && r.u.value !== "none")) out.underline = true;
+  else if (r.u === false || (r.u && typeof r.u === "object")) out.underline = false;
   if (r.strike === true || r.dstrike === true) out.strike = true;
+  else if (r.strike === false) out.strike = false;
   if (r.vertAlign === "superscript" || r.vertAlign === "subscript") out[r.vertAlign] = true;
-  if (r.color && !r.color.auto) out.color = hex(r.color);
-  if (r.highlight && typeof r.highlight === "object") out.highlight = HIGHLIGHT_RGB[[r.highlight.r, r.highlight.g, r.highlight.b].join(",")] || hex(r.highlight);
+  if (r.color && r.color.auto) out.color = "auto";
+  else if (r.color) out.color = hex(r.color);
+  if (r.highlight === "none") out.highlight = "none";
+  else if (r.highlight && typeof r.highlight === "object") out.highlight = HIGHLIGHT_RGB[[r.highlight.r, r.highlight.g, r.highlight.b].join(",")] || hex(r.highlight);
   if (r.rStyle && names[r.rStyle]) out.style = names[r.rStyle];
   return out;
 }
+// A paragraph's, the same way: a zero indent or a false flag it sets is shown.
 function paraLook(p) {
   var out = {};
   if (!p) return out;
@@ -243,15 +249,15 @@ function paraLook(p) {
   if (p.spacing) {
     if (typeof p.spacing.before === "number") out.spaceBefore = p.spacing.before;
     if (typeof p.spacing.after === "number") out.spaceAfter = p.spacing.after;
-    if (typeof p.spacing.line === "number") out.line = p.spacing.lineRule === "auto" || !p.spacing.lineRule ? { multiple: p.spacing.line / 240 } : { exact: p.spacing.line };
+    if (typeof p.spacing.line === "number") out.line = p.spacing.lineRule === "auto" || !p.spacing.lineRule ? { multiple: p.spacing.line / 240 } : p.spacing.lineRule === "atLeast" ? { atLeast: p.spacing.line } : { exact: p.spacing.line };
   }
   if (p.ind) {
-    if (typeof p.ind.left === "number" && p.ind.left) out.indentLeft = p.ind.left;
-    if (typeof p.ind.right === "number" && p.ind.right) out.indentRight = p.ind.right;
-    if (typeof p.ind.firstLine === "number" && p.ind.firstLine) out.firstLine = p.ind.firstLine;
+    if (typeof p.ind.left === "number") out.indentLeft = p.ind.left;
+    if (typeof p.ind.right === "number") out.indentRight = p.ind.right;
+    if (typeof p.ind.firstLine === "number") out.firstLine = p.ind.firstLine;
   }
-  if (p.keepNext === true) out.keepWithNext = true;
-  if (p.pageBreakBefore === true) out.pageBreakBefore = true;
+  if (typeof p.keepNext === "boolean") out.keepWithNext = p.keepNext;
+  if (typeof p.pageBreakBefore === "boolean") out.pageBreakBefore = p.pageBreakBefore;
   return out;
 }
 function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
@@ -268,9 +274,43 @@ function runText(items, field) {
     else if (it.type === "instrText") field.kind = /^\\s*NUMPAGES\\b/i.test(String(it.instr)) ? "{pages}" : /^\\s*PAGE\\b/i.test(String(it.instr)) ? "{page}" : "";
     else if (it.type === "fldChar" && it.fldCharType === "separate") field.skip = Boolean(field.kind);
     else if (it.type === "fldChar" && it.fldCharType === "end") { if (field.kind) s += field.kind; field.kind = ""; field.skip = false; }
-    else if (it.type === "footnoteRef") field.notes.push(s.length);
+    else if (it.type === "footnoteRef") field.notes.push({ k: s.length, id: it.footnote });
   }
   return s;
+}
+// The text of the footnote a run's mark \`id\` stands for: the run's JSON carries its footnotes' content.
+function noteText(r, id) {
+  var f = (r.footnotes || []).filter(function (x) { return String(x.id) === String(id); })[0];
+  return f ? (f.content || []).map(function (pj) { return paraText(pj).text.trim(); }).filter(Boolean).join(" / ") : "";
+}
+// A paragraph's text from its JSON, and its footnotes' marks: the text before each (its last 40 characters) and the
+// note's own text, so each note is said where its own mark is.
+function paraText(pj) {
+  var text = "", notes = [], field = { kind: "", skip: false, notes: [] };
+  var run = function (r) {
+    field.notes = [];
+    var s = runText(r.content, field);
+    field.notes.forEach(function (n) { notes.push({ at: (text + s.slice(0, n.k)).slice(-40), note: noteText(r, n.id) }); });
+    text += s;
+  };
+  (pj.content || []).forEach(function (el) {
+    if (el.type === "run") run(el);
+    else if (el.type === "hyperlink") (el.content || []).forEach(function (r) { if (r.type === "run") run(r); });
+  });
+  return { text: text, notes: notes };
+}
+// The footnotes' marks in a table's JSON (nested tables among its cells), each with its cell (row and cell from 0).
+function tableNotes(tj, out, where) {
+  (tj.content || []).forEach(function (rj, ri) {
+    (rj.content || []).forEach(function (cell, k) {
+      var at = where || { row: ri, cell: k };
+      ((cell.content && cell.content.content) || []).forEach(function (el) {
+        if (el.type === "paragraph") paraText(el).notes.forEach(function (n) { n.row = at.row; n.cell = at.cell; out.push(n); });
+        else if (el.type === "table") tableNotes(el, out, at);
+      });
+    });
+  });
+  return out;
 }
 // A paragraph's look: its own formatting (pp), and its text in runs of the same direct formatting (only those that
 // set something), its footnotes' places (as the text before them) and its pictures' sizes (EMU).
@@ -300,7 +340,7 @@ function lookOf(p, names) {
     var before = text.length;
     field.notes = [];
     var s = runText(r.content, field);
-    field.notes.forEach(function (k) { notes.push(text + s.slice(0, k)); });
+    field.notes.forEach(function (n) { notes.push({ at: (text + s.slice(0, n.k)).slice(-40), note: noteText(r, n.id) }); });
     if (!s) return;
     text += s;
     var look = runLook(r.rPr, names), own = styleName(api, "run");
@@ -320,7 +360,7 @@ function lookOf(p, names) {
   if (Object.keys(pp).length) out.para = pp;
   var shown = runs.filter(function (r) { return Object.keys(r.look).length; }).map(function (r) { return { t: r.t, look: r.look }; });
   if (shown.length) out.runs = shown;
-  if (notes.length) out.notes = notes.map(function (s) { return s.slice(-40); });
+  if (notes.length) out.notes = notes;
   if (drawings) out.pictures = p.GetAllDrawingObjects().map(function (d) { return [d.GetWidth(), d.GetHeight()]; });
   if (pPr && pPr.sectPr) out.sectionEnd = true;
   return out;
@@ -424,6 +464,8 @@ const WORD_READ = `function () {
             });
             if (header) tlook.headerRows = header;
             if (merged.length) tlook.merged = merged;
+            var tnotes = tableNotes(tj, []);
+            if (tnotes.length) tlook.notes = tnotes;
             if (Object.keys(tlook).length) looked(tb, tlook);
           }
           blocks.push(tb);
@@ -439,11 +481,14 @@ const WORD_READ = `function () {
       var defaults = runLook(JSON.parse(doc.GetDefaultTextPr().ToJSON()), names);
       var dj = JSON.parse(doc.GetDefaultTextPr().ToJSON());
       if (!defaults.font && dj.fontFamily && dj.fontFamily.name) defaults.font = dj.fontFamily.name;
+      // A section without a header (footer) of its own shows the one of the nearest section before it that has one
+      // (\`headerAs\`, from 1).
+      var ownHeader = 0, ownFooter = 0;
       var secs = doc.GetSections().map(function (sec, k) {
         var s = { width: sec.GetPageWidth(), height: sec.GetPageHeight(), margins: [sec.GetPageMarginTop(), sec.GetPageMarginRight(), sec.GetPageMarginBottom(), sec.GetPageMarginLeft()], ends: sections[k] || 0 };
         var hd = hfText(sec.GetHeader("default", false)), ft = hfText(sec.GetFooter("default", false));
-        if (hd) s.header = hd;
-        if (ft) s.footer = ft;
+        if (hd) { s.header = hd; ownHeader = k + 1; } else if (ownHeader) s.headerAs = ownHeader;
+        if (ft) { s.footer = ft; ownFooter = k + 1; } else if (ownFooter) s.footerAs = ownFooter;
         try { var first = JSON.parse(sec.ToJSON()).titlePg; if (first) { s.firstPage = true; var h1 = hfText(sec.GetHeader("title", false)), f1 = hfText(sec.GetFooter("title", false)); if (h1) s.firstHeader = h1; if (f1) s.firstFooter = f1; } } catch (e) {}
         return s;
       });
@@ -478,9 +523,23 @@ function described(c) {
 function hexId(c) { var id = Number(c.GetId()); return isFinite(id) && id >= 0 ? ("00000000" + id.toString(16)).slice(-8) : String(c.GetId()); }
 `;
 
+/**
+ * Inside word.edit and word.format, where a command fails after its edit began (\`touched\`): one change of its own that
+ * the editor's history certainly holds, a paragraph added at the end and taken away again. The plugin's Undo then takes
+ * back this command's history point. Without it, a command that failed before anything it ran made a change (a merge,
+ * a link or a footnote the editor answered null for) left no point of its own, and the Undo took back the agent's
+ * previous call instead (measured in DS 10.0: an earlier, saved office_edit was gone, in a person's editor too).
+ */
+const OWN_POINT_SRC = `
+function ownPoint(doc) {
+  try { var p = Api.CreateParagraph(); doc.Push(p); p.Delete(); } catch (e) {}
+}
+`;
+
 /** word.edit: every op checked on the text first (WORD_MODEL_SRC), then made, each found again in the document as it
  * stands then; anything that does not hold throws, and what was changed by then is taken back by the plugin. */
 const WORD_EDIT = `function () {
+  ${OWN_POINT_SRC}
   ${WORD_COLLECT_SRC}
   ${WORD_QUOTE_SRC}
   ${WORD_MODEL_SRC}
@@ -570,6 +629,7 @@ const WORD_EDIT = `function () {
     return { result: moved.length ? { ops: ops.length, moved: moved } : { ops: ops.length } };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };
+    if (touched) ownPoint(doc);
     return { error: code, touched: touched };
   }
 }`;
@@ -593,8 +653,14 @@ const WORD_EDIT = `function () {
  *   name only in its own case; a table's borders and a cell's are drawn "single" or "none" (the other kinds as none).
  * - `doc.AddTableOfContents` does nothing; a TOC field (`AddField`) and `UpdateAllTOC` make one, whose entries are
  *   paragraphs of the styles "toc 1" to "toc 9".
+ * - `doc.CreateSection(p)` ends p's section at p with a copy of it, which it answers; the section p was in goes on after
+ *   the break, so the break's type (how a section starts) is set on that one. A section after a break has no header or
+ *   footer of its own and shows the one before it; `GetHeader("default", true)` gives it an empty one of its own.
+ * - A merge of cells that are no rectangle of the table's grid answers null and changes nothing: the check reads the
+ *   grid (gridSpan, vMerge) from the table's JSON first.
  */
 const WORD_FORMAT = `function () {
+  ${OWN_POINT_SRC}
   ${WORD_COLLECT_SRC}
   ${WORD_QUOTE_SRC}
   var touched = false;
@@ -648,6 +714,26 @@ const WORD_FORMAT = `function () {
       }
       return out;
     };
+    // A table's cells on its grid, from its JSON: each row's cells, the grid columns each covers and whether it goes on
+    // the cell above it (a vertical merge).
+    var gridOf = function (table) {
+      return (JSON.parse(table.ToJSON()).content || []).map(function (rj) {
+        var col = rj.trPr && typeof rj.trPr.gridBefore === "number" ? rj.trPr.gridBefore : 0;
+        return (rj.content || []).map(function (cell) {
+          var pr = cell.tcPr || {}, span = pr.gridSpan > 1 ? pr.gridSpan : 1, g = { from: col, to: col + span, above: pr.vMerge === "continue" || Boolean(pr.vMerge && pr.vMerge.val === "continue") };
+          col += span;
+          return g;
+        });
+      });
+    };
+    // The name of the style a style of the document is based on, in lower case (its JSON names it by id); "" for none.
+    var ids = null;
+    var parentOf = function (name) {
+      var st = styleNamed(doc, name);
+      if (!st) return "";
+      if (!ids) { ids = {}; (doc.GetAllStyles() || []).forEach(function (s) { try { ids[JSON.parse(s.ToJSON()).styleId] = String(s.GetName()).toLowerCase(); } catch (e) {} }); }
+      try { var b = JSON.parse(st.ToJSON()).basedOn; return b !== undefined && ids[b] ? ids[b] : ""; } catch (e) { return ""; }
+    };
     var tableOf = function (op, i) {
       var t = pick(doc, op.formatTable, op.nth, i, "quote").para.GetParentTable();
       if (!t) fail("bad_op", i, JSON.stringify(op.formatTable) + " is not in a table");
@@ -656,7 +742,7 @@ const WORD_FORMAT = `function () {
 
     // The check: every op on the document as it stands, nothing changed (the paragraphs an earlier op of the call puts
     // in a list count as in one).
-    var listing = {};
+    var listing = {}, bases = {};
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i];
       if (op.format !== undefined) {
@@ -667,6 +753,19 @@ const WORD_FORMAT = `function () {
           span = hit.range.ExpandTo(on[0].range).GetAllParagraphs();
         }
         if (op.text && op.text.link && op.through !== undefined && on[0].at !== hit.at) fail("bad_op", i, "a link lies inside one paragraph: format its text alone");
+        // A link is changed or taken off whole (its runs leave it together): a quote of part of one would change the
+        // rest of it too.
+        if (op.text && op.text.link !== undefined) {
+          var whole = op.through !== undefined ? hit.range.ExpandTo(on[0].range) : hit.range;
+          span.forEach(function (p) {
+            for (var e = 0; e < p.GetElementsCount(); e++) {
+              var el = p.GetElement(e);
+              if (el.GetClassType() !== "hyperlink") continue;
+              var x = whole.IntersectWith(el.GetRange()), all = el.GetRange().GetText();
+              if (x && x.GetText() && x.GetText() !== all) fail("bad_op", i, "the quote is part of the link " + JSON.stringify(all) + ", and a link changes or goes off whole: quote all of its text");
+            }
+          });
+        }
         if (op.text && op.text.style) styleOf(op.text.style, "text", i, true);
         var lst = op.para || {};
         if (lst.list) span.forEach(function (p) { listing[p.GetInternalId()] = lst.list !== "none"; });
@@ -682,18 +781,35 @@ const WORD_FORMAT = `function () {
           fail("style_exists", i, "the document has a style " + JSON.stringify(typeof have === "string" ? op.defineStyle : have.GetName()) + " already" + (type === "paragraph" ? " (" + users + " paragraph" + (users === 1 ? "" : "s") + " use it)" : "") + ": give change: true to change it, or another name");
         }
         if (have && (typeof have === "string" ? have : have.GetType()) !== type) fail("bad_op", i, JSON.stringify(op.defineStyle) + " is a " + (typeof have === "string" ? have : have.GetType()) + " style already, not a " + op.type + " style");
-        if (op.basedOn !== undefined) styleOf(op.basedOn, type, i, true);
+        if (op.basedOn !== undefined) {
+          styleOf(op.basedOn, type, i, true);
+          // The chain from basedOn, by name (what this call bases a style on first, then the document's own): one that
+          // comes back to the style itself would be a loop, which the editor does not refuse.
+          var me = op.defineStyle.toLowerCase(), seen = {};
+          for (var up = op.basedOn.toLowerCase(); up && !seen[up]; up = bases[up] !== undefined ? bases[up] : parentOf(up)) {
+            if (up === me) fail("bad_op", i, JSON.stringify(op.defineStyle) + " cannot be based on " + JSON.stringify(op.basedOn) + (op.basedOn.toLowerCase() === me ? ", itself" : ", which is based on it") + ": give basedOn another style");
+            seen[up] = true;
+          }
+          bases[me] = op.basedOn.toLowerCase();
+        }
         made[op.defineStyle.toLowerCase()] = have || type;
       } else if (op.formatTable !== undefined) {
         var table = tableOf(op, i), cells = cellsOf(table, op, i);
         if (op.table && op.table.tableStyle) styleOf(op.table.tableStyle, "table", i, true);
         if (op.table && op.table.columnWidths && op.table.columnWidths.length > table.GetColumnsCount()) fail("bad_op", i, "the table has " + table.GetColumnsCount() + " columns, and columnWidths gives " + op.table.columnWidths.length);
         if (op.cell && op.cell.merge) {
-          var width = -1;
           for (var r = 0; r < op.cells.rows; r++) {
             var row = table.GetRow(op.cells.row + r), n = row.GetCellsCount();
             if (op.cells.col + op.cells.cols > n) fail("bad_op", i, "the cells to merge are no rectangle: row " + (op.cells.row + r + 1) + " has " + n + " cells");
           }
+          var grid = gridOf(table), c0 = op.cells.col, c1 = op.cells.col + op.cells.cols - 1, r0 = op.cells.row, r1 = op.cells.row + op.cells.rows - 1;
+          var left = grid[r0][c0].from, right = grid[r0][c1].to;
+          var none = function (why) { fail("bad_op", i, "the cells to merge are no rectangle of the table's grid: " + why + " (office_read with formatting shows the merged cells)"); };
+          for (var gr = r0; gr <= r1; gr++) {
+            if (grid[gr][c0].from !== left || grid[gr][c1].to !== right) none("row " + (gr + 1) + "'s cells cover other columns than row " + (r0 + 1) + "'s");
+            for (var gc = c0; gc <= c1; gc++) if (gr === r0 && grid[gr][gc].above) none("a cell of row " + (gr + 1) + " is merged with the cell above it");
+          }
+          (grid[r1 + 1] || []).forEach(function (g) { if (g.above && g.from < right && g.to > left) none("a cell of row " + (r1 + 1) + " is merged with the cell below it"); });
         }
       } else if (op.page !== undefined) {
         var secs = sectionsOf(op, i);
@@ -807,9 +923,18 @@ const WORD_FORMAT = `function () {
       paras.forEach(function (p) { p.SetNumbering(numbering.GetLevel(level)); });
     };
     var border = function (b) { return b.type === "none" ? ["none", 0, 0, 0, 0, 0] : ["single", b.size, 0, b.color.r, b.color.g, b.color.b]; };
-    var setHeader = function (sec, part, pieces) {
-      if (!pieces.length) return part === "header" ? sec.RemoveHeader("default") : sec.RemoveFooter("default");
-      var content = part === "header" ? sec.GetHeader("default", true) : sec.GetFooter("default", true);
+    // \`k\`: the section's place among all of them, -1 where it is not known (a section by its quote).
+    var setHeader = function (sec, part, pieces, k) {
+      var own = function (s, make) { return part === "header" ? s.GetHeader("default", make) : s.GetFooter("default", make); };
+      if (!pieces.length) {
+        if (own(sec, false)) return part === "header" ? sec.RemoveHeader("default") : sec.RemoveFooter("default");
+        // A section without one of its own shows the one of a section before it: an empty one of its own instead
+        // (where k is not known, wherever another section has one).
+        var all = doc.GetSections(), shown = false;
+        for (var j = 0; j < (k >= 0 ? k : all.length); j++) if (own(all[j], false)) shown = true;
+        if (!shown) return;
+      }
+      var content = own(sec, true);
       var first = content.GetElementsCount() && content.GetElement(0).GetClassType() === "paragraph" ? content.GetElement(0) : null;
       // The first paragraph keeps its own look (its style, its alignment); the rest goes.
       for (var e = content.GetElementsCount() - 1; e >= (first ? 1 : 0); e--) content.RemoveElement(e);
@@ -895,23 +1020,27 @@ const WORD_FORMAT = `function () {
         var ss = sectionsOf(o, i2), ps = o.set;
         touched = true;
         reflowed = true;
-        ss.forEach(function (sec) {
+        ss.forEach(function (sec, k) {
           if (ps.size || ps.orientation) {
             var w = ps.size ? ps.size.width : sec.GetPageWidth(), hh = ps.size ? ps.size.height : sec.GetPageHeight();
-            var land = ps.orientation ? ps.orientation === "landscape" : w > hh;
+            // A size alone keeps the section's orientation.
+            var land = ps.orientation ? ps.orientation === "landscape" : sec.GetPageWidth() > sec.GetPageHeight();
             if ((land && w < hh) || (!land && w > hh)) { var sw = w; w = hh; hh = sw; }
             sec.SetPageSize(w, hh, !land);
           }
           if (ps.margins) sec.SetPageMargins(ps.margins.left, ps.margins.top, ps.margins.right, ps.margins.bottom);
           if (ps.differentFirstPage !== undefined) sec.SetTitlePage(ps.differentFirstPage);
-          if (ps.header) setHeader(sec, "header", ps.header);
-          if (ps.footer) setHeader(sec, "footer", ps.footer);
+          if (ps.header) setHeader(sec, "header", ps.header, o.page === "*" ? k : -1);
+          if (ps.footer) setHeader(sec, "footer", ps.footer, o.page === "*" ? k : -1);
         });
       } else if (o.sectionBreak !== undefined) {
-        var sp = pick(doc, o.sectionBreak, o.nth, i2, "quote").last;
+        // CreateSection ends the paragraph's section there with a copy of it (what it answers), and the section the
+        // paragraph was in goes on after the break: its type is how the new section starts.
+        var sp = pick(doc, o.sectionBreak, o.nth, i2, "quote").last, goesOn = sp.GetSection();
         touched = true;
         reflowed = true;
-        doc.CreateSection(sp).SetType(o.type);
+        doc.CreateSection(sp);
+        goesOn.SetType(o.type);
       } else if (o.footnote !== undefined) {
         var fh = pick(doc, o.footnote, o.nth, i2, "quote"), end = fh.range.GetEndPos();
         touched = true;
@@ -942,6 +1071,7 @@ const WORD_FORMAT = `function () {
     return { result: result };
   } catch (err) {
     var code = err && err.code ? err : { code: "failed", message: String(err && err.message || err) };
+    if (touched) ownPoint(doc);
     return { error: code, touched: touched };
   }
 }`;

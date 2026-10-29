@@ -362,6 +362,12 @@ test("office_format refuses what does not hold before anything is sent, naming t
   no([{ defineStyle: "S", type: "character", set: { align: "center" } }], /not a key of a character style/);
   no([{ defineStyle: "S", set: { link: "https://x.org" } }], /not a key of a paragraph style/);
   no([{ formatTable: "a", cells: "A1", set: { tableStyle: "x" } }], /not a key of cells/);
+  // A link lies inside one paragraph, and a cell may hold several: no cell or table key.
+  no([{ formatTable: "a", cells: "A1", set: { link: "https://example.com/" } }], /set has "link", which is not a key of cells/);
+  no([{ formatTable: "a", set: { link: "" } }], /set has "link", which is not a key of a table/);
+  // basedOn is a style's name, refused as one.
+  no([{ defineStyle: "N", basedOn: "", set: { bold: true } }], /^op 1: basedOn is the name of a paragraph style the document has \(or one this call makes\), as office_read with formatting names it$/);
+  no([{ defineStyle: "N", type: "character", basedOn: 3, set: { bold: true } }], /basedOn is the name of a character style/);
   no([{ page: "a", set: { bold: true } }], /not a key of page setup/);
   // Shapes.
   no([{ through: "b", set: { bold: true } }], /must be exactly one of/);

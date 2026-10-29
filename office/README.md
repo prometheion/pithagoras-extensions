@@ -114,13 +114,17 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   holds), and a call that fails after it changed something is taken back by the editor's own Undo, as one step. A
   header or footer that holds more than text (a picture, a table, a field other than the page number and count) is
   replaced only with `replace: true`; setting the header of a later section that showed the one before it gives it
-  one of its own, and the earlier one stays. Lengths are points, or a text with its unit (`"2.5cm"`, `"10mm"`,
+  one of its own, and the earlier one stays (`""` there gives it an empty one, so its pages show none). A link is
+  changed or taken off whole: a quote of part of a link is refused. A style is never based on itself, also not
+  through others. A section break's type (`continuous`, `evenPage`, `oddPage`) is how the section after it starts,
+  and a page size alone keeps the section's orientation. Lengths are points, or a text with its unit (`"2.5cm"`, `"10mm"`,
   `"1in"`), colours `"#RRGGBB"`. Borders are single lines (the editor draws no other kind through its API). When a
   call moves the pages (page setup, a style changed, a section, a page break, a table of contents), its answer says
   so, and `office_screenshot` shows them. `office_read` with `formatting: true` also says how a Word document looks:
   the document's defaults and the styles in use (each as it is itself; what it inherits from another is not added),
-  each section's page, margins, header and footer, the footnotes and where they are, and each paragraph's and run's
-  own formatting (not what its style gives it), a table's style, header rows and merged cells; 50,000 characters of
+  each section's page, margins, header and footer (or the earlier section's it shows), the footnotes and where each
+  one's mark is (a table's in its cell), and each paragraph's and run's own formatting (not what its style gives it;
+  what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a table's style, header rows and merged cells; 50,000 characters of
   it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
   `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these
@@ -151,7 +155,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   the same page). The agent's own active cell shows only as its highlighted column letter and row number. The text
   the picture shows comes with it, as office_read gives it, so the guard reads it: a Word page's body text (of a table
   over many pages, the rows on the page), or the cells of the range that are shown; 20,000 characters at most. Only in
-  the picture, so the guard does not read them: a page's header and footer, text boxes, shapes and charts, text inside
+  the picture, so the guard does not read them: a page's header, footer and footnotes, text boxes, shapes and charts, text inside
   the document's own pictures, and a long text that runs into the range from a cell outside it. A model that cannot
   take pictures is refused (`error:no_images`) before anything is done. A picture costs the model about 1,000 to
   1,600 input tokens on every later turn of the chat. Taking one moves the agent's own view (its page, zoom, sheet and
@@ -379,7 +383,7 @@ agents' editor.
 - `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
   columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A table of
   contents lists the headings as the editor finds them when it is made, and is not brought up to date by later
-  calls; a link lies inside one paragraph. `office_read`'s formatting leaves out cell fills and borders and what a
+  calls; a link lies inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out cell fills and borders and what a
   table that holds a picture looks like (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
@@ -433,7 +437,9 @@ Its case p gives a real model a fixed task (a report with a title, headings, lis
 page set up, a header, a footer and a table of contents, written and formatted with the office tools) and counts the
 calls it made, the ones refused and their codes, so the tool texts can be changed until a run has no refusal they
 could have prevented. It runs only where a model is given, any model with an OpenAI-compatible API, with the portal on
-the machine:
+the machine. Its chat has the office tools alone (every other tool switched off for it, so the model has no shell
+and no file tools on the machine), the proxy refuses a request that offers the model any other tool, and the
+model's key stays in the test's own process (the portal is started without any `OFFICE_REAL_MODEL_*`):
 
 ```sh
 OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras OFFICE_REAL_MODEL_URL=<its API, ending in /v1> OFFICE_REAL_MODEL=<its id> \

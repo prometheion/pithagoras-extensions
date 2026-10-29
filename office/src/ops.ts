@@ -451,7 +451,8 @@ function formatOp(op: unknown, i: number): FormatOp {
       const type = op.type === undefined ? "paragraph" : op.type;
       if (type !== "paragraph" && type !== "character") throw bad(`type is "paragraph" (the default) or "character"`);
       if (op.change !== undefined && op.change !== true) throw bad("change is true, to change a style the document has (it changes every paragraph that uses it)");
-      const basedOn = op.basedOn === undefined ? {} : { basedOn: quote("basedOn") };
+      if (op.basedOn !== undefined && (typeof op.basedOn !== "string" || !op.basedOn.trim() || op.basedOn.length > 100 || !oneLine(op.basedOn))) throw bad(`basedOn is the name of a ${type} style the document has (or one this call makes), as office_read with formatting names it`);
+      const basedOn = op.basedOn === undefined ? {} : { basedOn: op.basedOn.trim() };
       const keys = type === "paragraph" ? [...STYLE_TEXT_KEYS, ...STYLE_PARA_KEYS] : STYLE_TEXT_KEYS;
       const given = set(keys, `a ${type} style`);
       return { defineStyle: name.trim(), type, ...basedOn, ...(op.change ? { change: true as const } : {}), ...textSet(given, bad, STYLE_TEXT_KEYS), ...(type === "paragraph" ? paraSet(given, bad, STYLE_PARA_KEYS) : {}) };
@@ -463,11 +464,13 @@ function formatOp(op: unknown, i: number): FormatOp {
         cells = typeof op.cells === "string" ? (parseRange(op.cells) ?? undefined) : undefined;
         if (!cells) throw bad(`cells is a table's cells as A1:C2 (column letters, row numbers from 1, as office_read shows the table; got ${JSON.stringify(op.cells)})`);
       }
-      const given = set(cells ? [...CELL_KEYS, ...TEXT_KEYS.filter((k) => k !== "style")] : [...TABLE_KEYS, ...CELL_KEYS, ...TEXT_KEYS.filter((k) => k !== "style")], cells ? "cells" : "a table");
+      // A cell's text keys leave out a style and a link: a link lies inside one paragraph (and a cell may hold several).
+      const cellText = TEXT_KEYS.filter((k) => k !== "style" && k !== "link");
+      const given = set(cells ? [...CELL_KEYS, ...cellText] : [...TABLE_KEYS, ...CELL_KEYS, ...cellText], cells ? "cells" : "a table");
       if (given.merge !== undefined && !cells) throw bad("merge takes cells: the rectangle to merge, as A1:B1");
       if (given.merge !== undefined && cells && cells.cols * cells.rows > MAX_MERGE_CELLS) throw bad(`a merge takes ${MAX_MERGE_CELLS} cells at most`);
       if (given.merge !== undefined && cells && cells.cols * cells.rows < 2) throw bad("a merge takes two cells or more");
-      const text = textSet(given, bad, TEXT_KEYS.filter((k) => k !== "style"));
+      const text = textSet(given, bad, cellText);
       return { formatTable: quote("formatTable"), ...nth(), ...(cells ? { cells } : {}), ...tableSet(given, bad), ...cellSet(given, bad), ...text };
     }
     case "page": {

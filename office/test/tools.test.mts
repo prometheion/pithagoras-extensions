@@ -1197,7 +1197,7 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
         { p: "Quarterly report for Meridian Labs", look: { para: { align: "center", spaceBefore: 240 }, runs: [{ t: "Quarterly report", look: { font: "Arial", size: 28, bold: true, italic: true, underline: true, color: "#C81E1E", highlight: "yellow" } }, { t: "Meridian Labs", look: { link: "https://example.com/meridian", style: "Hyperlink" } }] } },
         { p: "first point", style: "List Paragraph", list: "bullet", level: 1 },
         { p: "sub point", list: "number", level: 2, format: "lowerLetter", look: { para: { indentLeft: 720, firstLine: -360, line: { multiple: 1.5 } } } },
-        { p: "There was a discrepancy here.", look: { notes: ["There was a discrepancy"], runs: [{ t: "x".repeat(100), look: { superscript: true } }], pictures: [[1800000, 1224000]] } },
+        { p: "There was a discrepancy here.", look: { notes: [{ at: "There was a discrepancy", note: " The audit of March." }], runs: [{ t: "x".repeat(100), look: { superscript: true } }], pictures: [[1800000, 1224000]] } },
         { table: [["Item", "Amount"], ["Ledger", "42"]], look: { style: "Grid Table 4 - Accent 1", headerRows: 1, merged: [{ row: 0, cell: 1, across: 2 }] } },
       ],
       format: {
@@ -1243,6 +1243,35 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
   s.office.state = "stopped";
   assert.match(((await tool(s, "office_read").execute("r4", { id: doc.docId, formatting: true })) as ToolResult).content[0].text, /formatting is read from the editor only, and this is the saved file\)$/);
   assert.match(await refused(tool(s, "office_read").execute("r5", { id: doc.docId, formatting: "yes" })), /^error:bad_op formatting is true or false/);
+});
+
+test("office_read with formatting: what a paragraph or run sets off or to zero is said, each footnote at its own mark (in a table's cell too, none shifted), and a section showing an earlier one's header says so", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({
+    blocks: [
+      { p: "Indented list item", style: "List Paragraph", look: { para: { indentLeft: 0, firstLine: 0, keepWithNext: false, pageBreakBefore: false, line: { atLeast: 300 } } } },
+      { p: "Heading words", style: "Heading 1", look: { runs: [{ t: "words", look: { bold: false, italic: false, underline: false, strike: false, color: "auto", highlight: "none" } }] } },
+      { table: [["cellnote", "b"]], look: { notes: [{ at: "cellnote", note: "Note in the cell.", row: 0, cell: 0 }] } },
+      { p: "a picture here", look: { pictures: [[360000, 360000]] } },
+      { p: "Tail para", look: { notes: [{ at: "Tail para", note: "Note at the tail." }] } },
+    ],
+    format: {
+      defaults: { font: "Arial", size: 20, bold: false },
+      styles: [{ name: "List Paragraph", type: "paragraph", para: { indentLeft: 720 } }],
+      sections: [
+        { width: 11906, height: 16838, margins: [1134, 1134, 1134, 1134], ends: 2, header: { text: "Head one", more: false } },
+        { width: 11906, height: 16838, margins: [1134, 1134, 1134, 1134], ends: 0, headerAs: 1 },
+      ],
+      footnotes: ["Note in the cell.", "Beside the picture.", "Note at the tail."],
+    },
+  });
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId, formatting: true })) as ToolResult).content[0].text;
+  assert.match(t, /\nDocument defaults: Arial 10\.\n/, "the defaults' font and size only");
+  assert.match(t, /Section 2 \(from \[3\]\): A4 portrait, [^\n]*\. Header: section 1's \(none of its own\)\.\n/);
+  assert.match(t, /\nFootnotes: \[1\] in \[3\] cell A1 after "cellnote": Note in the cell\.; \[2\] in \[5\] after "Tail para": Note at the tail\.; \(its place not read\) Beside the picture\.\n/);
+  assert.match(t, /\n\[1\] \(List Paragraph, line spacing at least 15pt, indent left 0cm, first line 0cm, not keep with next, no page break before\) Indented list item\n/);
+  assert.match(t, /\n    "words": not bold, not italic, no underline, no strike, colour auto, highlight none\n/);
 });
 
 test("office_read with formatting: past the most a read gives of it, the read says where it stopped", async () => {

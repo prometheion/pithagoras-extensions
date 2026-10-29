@@ -66,7 +66,7 @@ export const LABELS: Record<string, string> = {
  * folder (its home, or its project's), where it writes anyway, and office_edit and office_format change a document of the agent's own scope through its
  * editor, which runs nothing, carries nothing out and lands nowhere a later run reads as instructions. office_screenshot's picture is the
  * document too: its text part carries a Word page's body text and a sheet range's cells (20,000 characters at most),
- * which the guard reads. Only in the picture, and not read by the guard: a page's header and footer, text boxes,
+ * which the guard reads. Only in the picture, and not read by the guard: a page's header, footer and footnotes, text boxes,
  * shapes and charts, text inside the document's own pictures, and a long text that runs into the range from a cell
  * outside it.
  */
@@ -301,7 +301,7 @@ type ToolContext = { model?: { id?: string; name?: string; input?: unknown } };
 /** office_format's description: what the model reads of it (ops.ts formatJob has the full grammar, and its refusals
  * name what a key takes, so value lists that a refusal gives stay out of here). */
 const FORMAT_DESCRIPTION =
-  'Change how a Word document of your library looks, through your own editor in it (office_edit changes what it says); people in it see it at once. One call is made whole or not at all. Each op\'s first key holds the quote of the body\'s text that is its place, exactly as office_read shows it ({format: "Q3 results", set}, {footnote: "unaudited", text}; `nth` picks a repeat, from 1), and `set` what to set. Ops: {format, through?, set}: the quote\'s text, or from it to the end of `through`, and its paragraphs; {defineStyle, type?, basedOn?, change?, set}: a new paragraph style ("character" for text; an existing one changes only with change: true); {formatTable, cells?, set}: the table holding the quote, or its cells ("A1:C2" as office_read shows it); {page, set}: page setup of the quote\'s section ("*" all); {sectionBreak, type?}: a new section after the quote\'s paragraph; {after?, pageBreak: true}; {footnote, text}: at the quote\'s end; {after?, toc: true, levels?}: a table of contents (at the start by default). set is flat ({bold: true, list: "bullet"}), its keys: for text font, fontSize, bold, italic, underline, strike, superscript, subscript, color, highlight, link ("" removes), style (character or paragraph style), clear (direct formatting off); for paragraphs align (left, center, right, justify), spaceBefore, spaceAfter, lineSpacing (1.5, or "14pt" exact), indentLeft, indentRight, firstLine (negative hangs), list ("bullet", "number", "none"; continues the list before), level (1-9), listStart, pageBreakBefore, keepWithNext; for tables tableStyle, width ("100%" or a length), columnWidths, headerRows, and the cell keys for all cells; for cells borders ("all", "outside", "inside", "none" or {top, bottom, left, right, insideH, insideV}, each "single 1pt #000000" or "none"), fill, align, valign, rowHeight, merge (true), and the text keys; for the page pageSize (A4, Letter, ... or [w, h]), orientation, margins (one or [top, right, bottom, left]), header, footer ({page}, {pages}; "" removes), differentFirstPage, replace (a header holding more than text). Lengths in points, or "2.5cm", "10mm", "1in"; colours "#RRGGBB". office_read with formatting: true shows the result, office_screenshot a picture of it.';
+  'Change how a Word document of your library looks, through your own editor in it (office_edit changes what it says); people in it see it at once. One call is made whole or not at all. Each op\'s first key holds the quote of the body\'s text that is its place, exactly as office_read shows it ({format: "Q3 results", set}, {footnote: "unaudited", text}; `nth` picks a repeat, from 1), and `set` what to set. Ops: {format, through?, set}: the quote\'s text, or from it to the end of `through`, and its paragraphs; {defineStyle, type?, basedOn?, change?, set}: a new paragraph style ("character" for text; an existing one changes only with change: true); {formatTable, cells?, set}: the table holding the quote, or its cells ("A1:C2" as office_read shows it); {page, set}: page setup of the quote\'s section ("*" all); {sectionBreak, type?}: a new section after the quote\'s paragraph; {after?, pageBreak: true}; {footnote, text}: at the quote\'s end; {after?, toc: true, levels?}: a table of contents (at the start by default). set is flat ({bold: true, list: "bullet"}), its keys: for text font, fontSize, bold, italic, underline, strike, superscript, subscript, color, highlight, link ("" removes), style (character or paragraph style), clear (direct formatting off); for paragraphs align (left, center, right, justify), spaceBefore, spaceAfter, lineSpacing (1.5, or "14pt" exact), indentLeft, indentRight, firstLine (negative hangs), list ("bullet", "number", "none"; continues the list before), level (1-9), listStart, pageBreakBefore, keepWithNext; for tables tableStyle, width ("100%" or a length), columnWidths, headerRows, and the cell keys for all cells; for cells borders ("all", "outside", "inside", "none" or {top, bottom, left, right, insideH, insideV}, each "single 1pt #000000" or "none"), fill, align, valign, rowHeight, merge (true), and the text keys but link; for the page pageSize (A4, Letter, ... or [w, h]), orientation, margins (one or [top, right, bottom, left]), header, footer ({page}, {pages}; "" removes), differentFirstPage, replace (a header holding more than text). Lengths in points, or "2.5cm", "10mm", "1in"; colours "#RRGGBB". office_read with formatting: true shows the result, office_screenshot a picture of it.';
 
 /** What office_format's answer adds about the call: the styles it made or changed, and whether the pages moved. */
 function formatSaid(made: unknown): string {
@@ -373,15 +373,17 @@ const people = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
 
 /** A run's or paragraph's direct formatting as the read commands give it (seat-page.ts WORD_LOOK_SRC): lengths in
  * twips, sizes in half-points. */
-type RunLook = { font?: string; size?: number; bold?: true; italic?: true; underline?: true; strike?: true; superscript?: true; subscript?: true; color?: string; highlight?: string; style?: string; link?: string };
-type ParaLook = { align?: string; spaceBefore?: number; spaceAfter?: number; line?: { multiple: number } | { exact: number }; indentLeft?: number; indentRight?: number; firstLine?: number; keepWithNext?: true; pageBreakBefore?: true };
-type BlockLook = { para?: ParaLook; runs?: { t: string; look: RunLook }[]; notes?: string[]; pictures?: [number, number][] };
-type TableLook = { style?: string; headerRows?: number; merged?: { row: number; cell: number; across?: number; above?: true }[]; pictures?: true };
+type RunLook = { font?: string; size?: number; bold?: boolean; italic?: boolean; underline?: boolean; strike?: boolean; superscript?: true; subscript?: true; color?: string; highlight?: string; style?: string; link?: string };
+type ParaLook = { align?: string; spaceBefore?: number; spaceAfter?: number; line?: { multiple: number } | { exact: number } | { atLeast: number }; indentLeft?: number; indentRight?: number; firstLine?: number; keepWithNext?: boolean; pageBreakBefore?: boolean };
+/** A footnote's mark: the text before it (its last 40 characters), the note's text, and in a table its cell. */
+type NoteMark = { at: string; note: string; row?: number; cell?: number };
+type BlockLook = { para?: ParaLook; runs?: { t: string; look: RunLook }[]; notes?: NoteMark[]; pictures?: [number, number][] };
+type TableLook = { style?: string; headerRows?: number; merged?: { row: number; cell: number; across?: number; above?: true }[]; notes?: NoteMark[]; pictures?: true };
 type WordBlock = ({ p: string; style?: string; list?: "bullet" | "number"; level?: number; format?: string; look?: BlockLook } | { table: string[][]; row?: number; of?: number; look?: TableLook });
 type WordFormat = {
   defaults?: RunLook;
   styles: { name: string; type: string; basedOn?: string; text?: RunLook; para?: ParaLook }[];
-  sections: { width: number; height: number; margins: number[]; ends: number; header?: { text: string; more: boolean }; footer?: { text: string; more: boolean }; firstPage?: true; firstHeader?: { text: string; more: boolean }; firstFooter?: { text: string; more: boolean } }[];
+  sections: { width: number; height: number; margins: number[]; ends: number; header?: { text: string; more: boolean }; footer?: { text: string; more: boolean }; headerAs?: number; footerAs?: number; firstPage?: true; firstHeader?: { text: string; more: boolean }; firstFooter?: { text: string; more: boolean } }[];
   footnotes: string[];
 };
 /** Word blocks as the agent reads them: `[n] text`, a style and a list in brackets, a table as its rows; with the
@@ -399,8 +401,10 @@ function runWords(l: RunLook): string {
   const out: string[] = [];
   if (l.style) out.push(`style ${JSON.stringify(l.style)}`);
   if (l.font || l.size) out.push([l.font, l.size ? `${l.size / 2}` : ""].filter(Boolean).join(" "));
+  // Off is said too: a run's own "not bold" hides its style's bold.
   for (const k of ["bold", "italic", "underline", "strike", "superscript", "subscript"] as const) if (l[k]) out.push(k);
-  if (l.color) out.push(l.color);
+  else if (l[k] === false) out.push(k === "bold" || k === "italic" ? `not ${k}` : `no ${k}`);
+  if (l.color) out.push(l.color === "auto" ? "colour auto" : l.color);
   if (l.highlight) out.push(`highlight ${l.highlight}`);
   if (l.link) out.push(`link ${l.link}`);
   return out.join(", ");
@@ -410,12 +414,13 @@ function paraWords(l: ParaLook): string {
   if (l.align) out.push(l.align);
   if (l.spaceBefore !== undefined) out.push(`space before ${pt(l.spaceBefore)}`);
   if (l.spaceAfter !== undefined) out.push(`space after ${pt(l.spaceAfter)}`);
-  if (l.line) out.push("multiple" in l.line ? `line spacing ${+l.line.multiple.toFixed(2)}` : `line spacing ${pt(l.line.exact)} exact`);
-  if (l.indentLeft) out.push(`indent left ${cm(l.indentLeft)}`);
-  if (l.indentRight) out.push(`indent right ${cm(l.indentRight)}`);
-  if (l.firstLine) out.push(l.firstLine < 0 ? `hanging ${cm(-l.firstLine)}` : `first line ${cm(l.firstLine)}`);
-  if (l.keepWithNext) out.push("keep with next");
-  if (l.pageBreakBefore) out.push("page break before");
+  if (l.line) out.push("multiple" in l.line ? `line spacing ${+l.line.multiple.toFixed(2)}` : "atLeast" in l.line ? `line spacing at least ${pt(l.line.atLeast)}` : `line spacing ${pt(l.line.exact)} exact`);
+  // A zero indent and a flag set off are the paragraph's own too (over its style's).
+  if (l.indentLeft !== undefined) out.push(`indent left ${cm(l.indentLeft)}`);
+  if (l.indentRight !== undefined) out.push(`indent right ${cm(l.indentRight)}`);
+  if (l.firstLine !== undefined) out.push(l.firstLine < 0 ? `hanging ${cm(-l.firstLine)}` : `first line ${cm(l.firstLine)}`);
+  if (l.keepWithNext !== undefined) out.push(l.keepWithNext ? "keep with next" : "not keep with next");
+  if (l.pageBreakBefore !== undefined) out.push(l.pageBreakBefore ? "page break before" : "no page break before");
   return out.join(", ");
 }
 /** A run's text as the formatting line quotes it: cut where it is long (what it says is in the block's text). */
@@ -454,7 +459,7 @@ function formatHead(read: WordBlocks): string {
   const f = read.format;
   if (!f) return "";
   const lines: string[] = ["Formatting: each paragraph's and run's own (direct) formatting is shown with it; a style's look is here once, as the style is itself (what it inherits is not added)."];
-  if (f.defaults && (f.defaults.font || f.defaults.size)) lines.push(`Document defaults: ${runWords(f.defaults)}.`);
+  if (f.defaults && (f.defaults.font || f.defaults.size)) lines.push(`Document defaults: ${runWords({ font: f.defaults.font, size: f.defaults.size })}.`);
   if (f.styles.length) {
     const style = (s: WordFormat["styles"][number]) => {
       const own = [s.text ? runWords(s.text) : "", s.para ? paraWords(s.para) : ""].filter(Boolean).join("; ");
@@ -462,17 +467,27 @@ function formatHead(read: WordBlocks): string {
     };
     lines.push(`Styles in use: ${f.styles.map(style).join(", ")}.`);
   }
-  const hf = (what: string, x?: { text: string; more: boolean }) => (x ? ` ${what}: ${JSON.stringify(x.text)}${x.more ? " (and more than text: pictures or tables)" : ""}.` : "");
+  const hf = (what: string, x?: { text: string; more: boolean }, as?: number) => (x ? ` ${what}: ${JSON.stringify(x.text)}${x.more ? " (and more than text: pictures or tables)" : ""}.` : as ? ` ${what}: section ${as}'s (none of its own).` : "");
   f.sections.forEach((s, k) => {
     const paper = PAPER.find(([, w, h]) => (Math.abs(w - s.width) <= 20 && Math.abs(h - s.height) <= 20) || (Math.abs(h - s.width) <= 20 && Math.abs(w - s.height) <= 20));
     const size = paper ? paper[0] : `${cm(s.width)} × ${cm(s.height)}`;
     const from = k === 0 ? "" : ` (from [${(f.sections[k - 1].ends || 0) + 1}])`;
     const head = f.sections.length === 1 ? "Page" : `Section ${k + 1}${from}`;
-    lines.push(`${head}: ${size} ${s.width > s.height ? "landscape" : "portrait"}, margins ${s.margins.map((m) => +((m / 1440) * 2.54).toFixed(2)).join("/")} cm (top/right/bottom/left).${hf("Header", s.header)}${hf("Footer", s.footer)}${s.firstPage ? ` A first page of its own.${hf("First page's header", s.firstHeader)}${hf("First page's footer", s.firstFooter)}` : ""}`);
+    lines.push(`${head}: ${size} ${s.width > s.height ? "landscape" : "portrait"}, margins ${s.margins.map((m) => +((m / 1440) * 2.54).toFixed(2)).join("/")} cm (top/right/bottom/left).${hf("Header", s.header, s.headerAs)}${hf("Footer", s.footer, s.footerAs)}${s.firstPage ? ` A first page of its own.${hf("First page's header", s.firstHeader)}${hf("First page's footer", s.firstFooter)}` : ""}`);
   });
-  // The footnotes in reading order, each after the text it follows.
-  const places = read.blocks.flatMap((b, i) => ("p" in b ? (b.look?.notes ?? []).map((at) => ({ block: i + 1, at })) : []));
-  if (f.footnotes.length) lines.push(`Footnotes: ${f.footnotes.map((t, k) => `[${k + 1}]${places[k] ? ` in [${places[k].block}] after ${JSON.stringify(places[k].at.length >= 40 ? `…${places[k].at}` : places[k].at)}` : ""}: ${t.trim()}`).join("; ")}`.replace(/([^.!?])$/, "$1."));
+  // The footnotes in reading order, each after the text its own mark follows (a table's in its cell). A note whose mark
+  // is where the read takes no text (beside a picture) is said without a place, never at another one's.
+  const marks = read.blocks.flatMap((b, i) => (b.look?.notes ?? []).map((m) => ({ block: i + 1, ...m })));
+  const rest = f.footnotes.map((t) => t.trim());
+  for (const m of marks) {
+    const at = rest.indexOf(m.note.trim());
+    if (at >= 0) rest.splice(at, 1);
+  }
+  const said = [
+    ...marks.map((m, k) => `[${k + 1}] in [${m.block}]${m.cell !== undefined ? ` cell ${colName(m.cell)}${(m.row ?? 0) + 1}` : ""} after ${JSON.stringify(m.at.length >= 40 ? `…${m.at}` : m.at)}: ${m.note.trim()}`),
+    ...rest.map((t) => `(its place not read) ${t}`),
+  ];
+  if (said.length) lines.push(`Footnotes: ${said.join("; ")}`.replace(/([^.!?])$/, "$1."));
   return `${lines.join("\n")}\n\n`;
 }
 

@@ -93,7 +93,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   written over. An edit is made whole or not at all: every quote, sheet name and position is checked against the
   document as it stands first, and an edit that fails after it changed something is taken back. Where even that
   fails (a person changed the same sheets meanwhile), the agent hears so (`error:partial`) and reads the document
-  again. After an edit the Document Server is asked to save the session, and the agent hears the new revision; that
+  again. In a spreadsheet, what you changed yourself after the agent's step (a cell you typed into or formatted, a
+  row you wrote into) is never taken back with the agent's call: it stays as you made it, and the agent's answer
+  (`error:partial`) names it. After an edit the Document Server is asked to save the session, and the agent hears the new revision; that
   save holds what you typed until then too.
   Word: replace quoted text, add paragraphs (in any paragraph style the document has) or a table after a paragraph,
   remove a paragraph (a document keeps one: its only paragraph removed leaves it empty). A quote is looked for in the
@@ -126,15 +128,39 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   one's mark is (a table's in its cell), and each paragraph's and run's own formatting (not what its style gives it;
   what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a numbered item's number as the editor gives it (`(numbered "3.")`, so a list that
   goes on and one that starts again are told apart), a table's style, header rows and merged cells; 50,000 characters of
-  it at most. A spreadsheet's formatting is not read yet, nor that of the saved file when Office is stopped.
+  it at most. Not read: the saved file's formatting, when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
-  `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these
+  `='My data'!A1` reach other sheets), insert and delete rows and columns (`{insertRows: "5:6"}` makes new rows 5
+  and 6; formulas follow the cells they name, and those that named deleted cells turn `#REF!`), and make, rename,
+  move, copy, hide, show and delete sheets, up to 20 of these
   in one call (Excel's rules for names: at most 31 characters, none of `[]:*?/\`, no two alike in any case; one sheet
   always stays visible). A hidden sheet is moved by showing it, moving it and hiding it again. Deleting a sheet turns
   the formulas that name it into `#REF!`, as in Excel. `office_read` lists every sheet with its position and whether
   it is hidden, and reads one sheet or all of them. A change to the sheets shows in your editor once the Document
   Server has let it through, a moment after the call makes it. A sheet the edit deletes is hidden and renamed
-  `~deleted …` at once, and goes when the edit's other ops are made. The agent cannot write comments or tracked
+  `~deleted …` at once, and goes when the edit's other ops are made. Deleted rows and columns cannot be taken back, so
+  a call deletes them last, after every op that can be (a call that does otherwise is refused). Rows and columns are
+  inserted and deleted while you are in the workbook too: the agent's answer then names the people in it, as their
+  cells move. If you are in the middle of typing into a cell when the agent's insert moves it, OnlyOffice 10.0 puts
+  what you type into the document, but your own editor may show that cell empty until you reload it (the Document
+  Server's co-editing; it is the same when the agent writes the cell you are typing in).
+  **How a spreadsheet looks** is `office_format`'s too: cells (`"A1:D9"`, or whole columns `"C:D"` and rows `"5:6"`)
+  take a number format (`"#,##0.00"`, `"0%"`, `"dd.mm.yyyy"`), font, size, bold, italic, underline, strike,
+  superscript and subscript (in cells that hold text: OnlyOffice sets them on a text's characters), colour, fill,
+  alignment, wrap, text rotation, borders (single, double, dashed or dotted lines), merging and splitting, and taking
+  all of a cell's formatting off (`clear`, merges too; the values stay). Columns take a width (in characters, as the
+  sheet shows it), rows a height (in points), and both can be hidden, shown and fitted to their contents; frozen
+  panes keep the rows above and the columns left of a cell in view. A call is made whole or not at all: each op reads
+  what it changes first, and where a later op of the call fails, what it changed is put back. Two things cannot be put
+  back, because OnlyOffice's API cannot read them: the alignment and the borders. Where a later op fails, they stay as
+  the call set them, and the answer (`error:partial`) names them. OnlyOffice's API takes no border off and sets no
+  "general" alignment back: only `clear` takes them off, with everything else. A merge keeps the top-left cell's
+  value (as in Excel); taking a merge back puts the others' values back. A column width or row height put back is the
+  column's or row's own from then on (the API sets none back to the sheet's default), which looks the same. `office_read` with `formatting: true` says how
+  each sheet looks: the font most cells have, the cells that look otherwise (grouped into ranges), merged cells, the
+  columns' widths and rows' heights that differ from the sheet's, hidden ones and frozen panes, 50,000 characters of it
+  at most. It cannot say the alignment or the borders (OnlyOffice has no getter for them): `office_screenshot` shows
+  them. The agent cannot write comments or tracked
   changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
   is in a document its session stays open after the people left it, so it is saved as the last person leaves: what

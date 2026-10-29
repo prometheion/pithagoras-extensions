@@ -1683,7 +1683,11 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
    * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls.
    * The model gets the office tools alone, and its key never reaches the portal (real-model.mts).
    */
-  test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)" }, async () => {
+  const realSkip = real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)";
+  /** A chat of the default agent set to the real model, with the office tools alone, given `task`; its calls by tool and
+   * its refusals with their codes printed (and written to OFFICE_REAL_MODEL_REPORT, a ".json" there named by `label`
+   * where a run has several cases), once the run ended. */
+  async function realRun(label: string, task: string): Promise<{ name: string; args: string; result: string }[]> {
     const made = await json(`${origin}/api/sessions`, { method: "POST", body: "{}" });
     assert.equal(made.status, 200, JSON.stringify(made.body));
     const chatId = made.body.id as string;
@@ -1699,17 +1703,6 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const off = [...new Set([...PI_TOOLS, ...listed.tools.map((t) => t.name)])].filter((name) => !realModelMay(name));
     const switched = await json(`${origin}/api/sessions/${chatId}/tools`, { method: "PUT", body: JSON.stringify({ off }) });
     assert.equal(switched.status, 200, JSON.stringify(switched.body));
-    const task = [
-      'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
-      '1. A title line "Quarterly report 2026", centred, 20 pt, bold, dark red.',
-      '2. A heading "Summary" (Heading 1) with a paragraph of two sentences under it; make the words "record quarter" in it bold and yellow-highlighted.',
-      '3. A heading "Highlights" with three bulleted points under it, and one second-level point under the second.',
-      '4. A heading "Figures" with a table of three columns (Region, Revenue, Change) and four rows, its header row repeating, in the table style "Grid Table 4 - Accent 1", the Revenue column right-aligned.',
-      '5. A style "Note" (italic, grey #666666, indented 1 cm) for a closing paragraph "Figures are unaudited.", with a footnote on "unaudited" saying "Audit due in March.".',
-      '6. A4 landscape pages with 2 cm margins, a header "Meridian Labs — internal" and a footer "Page X of Y" with the real page numbers.',
-      "7. A table of contents at the start.",
-      "Then read the document with its formatting and fix anything that is not as asked. Answer with one line when done.",
-    ].join("\n");
     real!.requests.length = 0;
     const t0 = Date.now();
     const sent = await json(`${origin}/api/sessions/${chatId}/prompt`, { method: "POST", body: JSON.stringify({ message: task }) });
@@ -1728,16 +1721,60 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
       codes[code] = (codes[code] ?? 0) + 1;
     }
     const report = { model: process.env.OFFICE_REAL_MODEL, seconds: Math.round((Date.now() - t0) / 1000), requests: real!.requests.length, calls: calls.length, byTool: calls.reduce((m: Record<string, number>, c) => ((m[c.name] = (m[c.name] ?? 0) + 1), m), {}), refused: refusals.length, codes, refusals: refusals.map((r) => ({ name: r.name, args: r.args.slice(0, 600), result: r.result.slice(0, 600) })) };
-    console.log(`p. ${JSON.stringify(report, null, 1)}`);
-    if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(process.env.OFFICE_REAL_MODEL_REPORT, JSON.stringify({ ...report, all: calls }, null, 1));
+    console.log(`${label}. ${JSON.stringify(report, null, 1)}`);
+    const file = process.env.OFFICE_REAL_MODEL_REPORT;
+    if (file) writeFileSync(label === "p" ? file : file.replace(/(\.json)?$/, `-${label}.json`), JSON.stringify({ ...report, all: calls }, null, 1));
     assert.deepEqual(real!.refused, [], "no request offered the model a tool other than the office tools");
     assert.ok(real!.requests.length > 0 && real!.requests.every((r) => ((r as { tools?: { function?: { name?: string } }[] }).tools ?? []).every((t) => realModelMay(String(t.function?.name)))));
+    return calls;
+  }
+
+  test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
+    const task = [
+      'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
+      '1. A title line "Quarterly report 2026", centred, 20 pt, bold, dark red.',
+      '2. A heading "Summary" (Heading 1) with a paragraph of two sentences under it; make the words "record quarter" in it bold and yellow-highlighted.',
+      '3. A heading "Highlights" with three bulleted points under it, and one second-level point under the second.',
+      '4. A heading "Figures" with a table of three columns (Region, Revenue, Change) and four rows, its header row repeating, in the table style "Grid Table 4 - Accent 1", the Revenue column right-aligned.',
+      '5. A style "Note" (italic, grey #666666, indented 1 cm) for a closing paragraph "Figures are unaudited.", with a footnote on "unaudited" saying "Audit due in March.".',
+      '6. A4 landscape pages with 2 cm margins, a header "Meridian Labs — internal" and a footer "Page X of Y" with the real page numbers.',
+      "7. A table of contents at the start.",
+      "Then read the document with its formatting and fix anything that is not as asked. Answer with one line when done.",
+    ].join("\n");
+    const calls = await realRun("p", task);
     // What the run made: the document, formatted, in the default agent's home.
     const doc = (await state()).docs.find((d) => d.title === "Quarterly report");
     assert.ok(doc, "the model made the document");
     assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
     const xml = await partOf(doc!.docId, "word/document.xml");
     console.log(`p. the saved document: TOC ${/TOC \\o/.test(xml)}, table style ${/<w:tblStyle /.test(xml)}, header rows ${/<w:tblHeader/.test(xml)}, landscape ${/w:orient="landscape"/.test(xml)}, footnote ${/<w:footnoteReference/.test(xml)}, highlight ${/<w:highlight w:val="yellow"/.test(xml)}, lists ${/<w:numPr>/.test(xml)}`);
+  });
+
+  /**
+   * p2: the same real model makes an invoice spreadsheet (#13 PR 3): values and formulas, number formats, a header row
+   * with fill, borders and alignment, a merged title, column widths, a row height, frozen rows, and a row inserted into
+   * the items. Counted as p is.
+   */
+  test("p2: a real model makes and formats an invoice spreadsheet through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
+    const task = [
+      'Make a spreadsheet titled "Invoice" with office_create, and fill and format it with the office tools, without asking me anything:',
+      '1. In A1 the title "Invoice March 2026", bold and 16 pt, its cells A1:D1 merged.',
+      "2. In row 3 the headers Item, Quantity, Unit price, Total: bold, white text on dark blue (#1F4E79), centred, with a border around each cell.",
+      "3. Four items in rows 4 to 7, each Total a formula (quantity times unit price), and in row 8 \"Sum\" with a formula adding up the totals.",
+      '4. Unit prices and totals with two decimals and a thousands separator; the Sum row bold, with a double line above it.',
+      "5. Column A 25 characters wide, columns B to D fitted to their contents, row 3 30 points high.",
+      "6. Rows 1 to 3 frozen, so that they stay in view when scrolling.",
+      "7. Then insert a new row 5 with a fifth item, so that the Sum still adds up all five items.",
+      "Then read the sheet with its formatting and fix anything that is not as asked. Answer with one line when done.",
+    ].join("\n");
+    const calls = await realRun("p2", task);
+    const doc = (await state()).docs.find((d) => d.title === "Invoice" && d.ext === "xlsx");
+    assert.ok(doc, "the model made the spreadsheet");
+    assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc!.docId)));
+    const sheet = (await zip.file("xl/worksheets/sheet1.xml")?.async("string")) ?? "";
+    const styles = (await zip.file("xl/styles.xml")?.async("string")) ?? "";
+    console.log(`p2. the saved sheet: merged ${/<mergeCell ref="A1:D1"/.test(sheet)}, frozen ${/<pane [^>]*ySplit="3"[^>]*state="frozen"/.test(sheet)}, fill ${/1F4E79/i.test(styles)}, number format ${/#,##0\.00/.test(styles)}, double border ${/style="double"/.test(styles)}, column A ${/<col [^>]*min="1" max="1"[^>]*width="25/.test(sheet) || /<col [^>]*width="25[^"]*"[^>]*min="1" max="1"/.test(sheet)}, row 3 ${/<row r="3"[^>]* ht="30"/.test(sheet)}, sum ${/<f>SUM\(D4:D8\)<\/f>/.test(sheet)}`);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

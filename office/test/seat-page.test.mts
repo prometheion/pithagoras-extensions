@@ -473,10 +473,16 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         }
         list.sort((x, y) => x - y);
       },
+      // The editor lays the sizes out after the command (DS 10.0): they show from the next one on.
       AutoFit: (rows: boolean, cols: boolean) => {
         state.calls.push(`AutoFit ${address} ${rows} ${cols}`);
-        if (cols) for (let c = b.c1; c <= b.c2; c++) sh.widths[c] = 12.5;
-        if (rows) for (let r = b.r1; r <= b.r2; r++) sh.heights[r] = 20;
+        later.push({
+          due: state.commands + 1,
+          fn: () => {
+            if (cols) for (let c = b.c1; c <= b.c2; c++) sh.widths[c] = 12.5;
+            if (rows) for (let r = b.r1; r <= b.r2; r++) sh.heights[r] = 20;
+          },
+        });
       },
       GetCharacters: () => ({ GetFont: font, GetCount: () => String(sh.cells[first] ?? "").length }),
       GetFillColor: () => (lookAt(sh, first).fill === "none" ? "No Fill" : colourOf(lookAt(sh, first).fill)),
@@ -508,9 +514,14 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         });
         sh.merges = sh.merges.filter((m) => !meets(bounds(m), b));
       },
+      // The merged cells take the top-left one's value (the others' go) and its formats (DS 10.0).
       Merge: (across: boolean) => {
         state.calls.push(`Merge ${address} ${across}`);
-        for (const a of grid.flat().slice(1)) delete sh.cells[a];
+        for (const a of grid.flat().slice(1)) {
+          delete sh.cells[a];
+          if (sh.looks[first]) sh.looks[a] = { ...sh.looks[first] };
+          else delete sh.looks[a];
+        }
         sh.merges = sh.merges.filter((m) => !meets(bounds(m), b));
         sh.merges.push(address);
       },
@@ -580,7 +591,8 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       const sel = state.selected;
       if (type !== "cell" || !sel || sel.sheet !== state.active) return;
       const p = parse(sel.address.split(":")[0]);
-      sel.sheet.frozen = { cols: p.c, rows: p.r };
+      // It shows in the panes from the next command on (DS 10.0).
+      later.push({ due: state.commands + 1, fn: () => void (sel.sheet.frozen = { cols: p.c, rows: p.r }) });
     },
     Save: () => void state.saves++,
   };
@@ -876,10 +888,24 @@ test("a sheet's format taken back when a later op fails: number formats, fonts, 
   assert.equal(out.error?.code, "partial", JSON.stringify(out));
   assert.equal(out.ran, true);
   assert.equal(out.error.op, 4);
-  assert.equal(out.error.message, 'op 5: superscript takes text, and "Sheet1"!A5 holds a number (the editor sets it on a text\'s characters): leave that cell out. The ops before it are taken back, but not all of them whole. The editor cannot read back the alignment and borders of "Sheet1"!A1:C1 (op 1), the alignment and borders of "Sheet1"!D1:F1 (op 4), which stay as this call set them.');
+  assert.equal(out.error.message, 'op 5: superscript takes text, and "Sheet1"!A5 holds a number (the editor sets it on a text\'s characters): leave that cell out. The ops before it are taken back, but not all of them whole. The editor cannot read back the alignment and borders of "Sheet1"!A1:C1 (op 1), "Sheet1"!A1:B1 (op 2) and "Sheet1"!D1:F1 (op 4), which stay as this call set them.');
   assert.equal(readable(sheet1), before, "what the builder reads is as it was, B1's value and E1:F1's merge among it");
   assert.equal(sheet1.aligns.A1, "center", "alignment has no getter: it stays");
   assert.ok(sheet1.borders.A1.length, "nor do borders");
+});
+
+test("a merge taken back gives the merged cells their own formats back, which the merge had made the top-left one's", async () => {
+  const book = workbook(["Sheet1"]);
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { A1: "a", B1: "b", A5: 5 });
+  sheet1.looks.A1 = { bold: true, fill: "#FF0000" };
+  sheet1.looks.B1 = { italic: true };
+  sheet1.formats.B1 = "0.00";
+  const before = readable(sheet1);
+  const out = await plugin(book, formatting([{ format: "A1:B1", set: { merge: true } }, { format: "A5", set: { subscript: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the alignment and borders of "Sheet1"!A1:B1 \(op 1\)/, "a merge gives the others the top-left one's alignment and borders too");
+  assert.equal(readable(sheet1), before);
 });
 
 test("an inverse keeps what a person changed after the step, and names it: a cell typed into after the agent's write, a cell filled after its format, a row written into after its insert", async () => {
@@ -908,6 +934,7 @@ test("columns and rows: widths in characters, heights in points, hidden, shown a
   data.hiddenCols.push(4);
   data.widths[1] = 11;
   data.widths[4] = 9;
+  data.widths[5] = 10;
   data.cells.A9 = 3;
   const before = readable(data);
   const ops = [
@@ -919,7 +946,7 @@ test("columns and rows: widths in characters, heights in points, hidden, shown a
   ];
   const out = await plugin(book, formatting(ops));
   assert.deepEqual(out.result, { ops: 5, cells: 0 }, JSON.stringify(out));
-  assert.deepEqual([data.widths, data.heights, data.hiddenRows, data.hiddenCols, data.frozen], [{ 1: 20, 2: 20, 3: 12.5, 4: 9 }, { 1: 30, 2: 30 }, [1, 2], [], { cols: 1, rows: 2 }]);
+  assert.deepEqual([data.widths, data.heights, data.hiddenRows, data.hiddenCols, data.frozen], [{ 1: 20, 2: 20, 3: 12.5, 4: 9, 5: 10 }, { 1: 30, 2: 30 }, [1, 2], [], { cols: 1, rows: 2 }]);
   assert.ok(book.state.calls.includes("AutoFit D:D false true"));
   assert.equal(book.state.active.name, "Sheet1", "the agent's active sheet is its own again");
   assert.ok(!book.state.calls.includes("FreezeAt"));
@@ -929,7 +956,8 @@ test("columns and rows: widths in characters, heights in points, hidden, shown a
   assert.equal(refused.error?.code, "not_found", JSON.stringify(refused));
   assert.equal(readable(data), after);
   // Taken back when a later op fails, the freeze too (an unfreeze through its sheet made active).
-  const undone = await plugin(book, formatting([{ sheet: "Data", columns: "B:E", width: 5, hide: true }, { sheet: "Data", rows: "2:3", show: true }, { sheet: "Data", freeze: "none" }, { sheet: "Data", format: "A9", set: { subscript: true } }]));
+  // (An autofit's width, and a freeze at a cell, show only after their command: neither is a person's change.)
+  const undone = await plugin(book, formatting([{ sheet: "Data", columns: "B:E", width: 5, hide: true }, { sheet: "Data", columns: "F", autofit: true }, { sheet: "Data", rows: "2:3", show: true }, { sheet: "Data", freeze: "C4" }, { sheet: "Data", format: "A9", set: { subscript: true } }]));
   assert.equal(undone.undone, true, JSON.stringify(undone));
   assert.equal(readable(data), after, "widths, hidden columns and rows and the frozen panes as they were");
   assert.equal(book.state.active.name, "Sheet1");

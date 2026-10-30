@@ -265,7 +265,7 @@ export default function Deck() {
           </button>
           <span className="flex-1" />
           {card.done ? (
-            <span className="shrink-0 text-xs font-semibold" style={{ color: "var(--accent)" }}>{t("done")}</span>
+            <span className="shrink-0 text-xs font-semibold" style={{ color: "rgb(var(--accent))" }}>{t("done")}</span>
           ) : (
             <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={markDone}>
               {t("Mark done")}
@@ -354,7 +354,7 @@ export default function Deck() {
             <div className="space-y-2">
               {stacks.map((stack) => (
                 <section key={stack.id}>
-                  <header className="flex items-center gap-1 border-b pb-1 text-sm font-semibold" style={{ borderColor: "var(--line)" }}>
+                  <header className="flex items-center gap-1 border-b pb-1 text-sm font-semibold" style={{ borderColor: "rgb(var(--line))" }}>
                     <span>{stack.title}</span>
                     <span className="text-xs font-normal text-fg-subtle">{stack.cards.length}</span>
                     <span className="flex-1" />

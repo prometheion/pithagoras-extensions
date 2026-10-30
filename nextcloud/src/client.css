@@ -1,83 +1,113 @@
-/* @pithagoras/nextcloud -- its own chrome: a bar of tabs, one list per tab, and the picked thing below. The colours are
-   the portal's theme variables, so a chosen theme paints it too (the same tokens its Tailwind utilities use). */
+/* @pithagoras/nextcloud -- its own chrome: a bar of tabs, one list per tab, and the picked thing below. The colours
+   are the portal's theme variables -- the same RGB triplets its Tailwind utilities wrap in rgb(...), so a chosen
+   theme paints it too (a bare triplet as a colour value is invalid, which left this panel flat before). */
 
-/* ---- the tab bar -------------------------------------------------------- */
+/* ---- the tab bar: pills that wrap to a second row where the panel narrows ------------------------------ */
 
 .nc-tabs {
   display: flex;
-  gap: 0.15rem;
-  padding: 0.35rem 0.5rem 0;
-  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.15rem 0.15rem 0.3rem;
 }
+
+/* ---- a tab (the big bar and the sub-tab rows share the look) ------------------------------------------- */
 
 .nc-tab {
   appearance: none;
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--fg-muted);
-  font-size: 0.8rem;
-  padding: 0.3rem 0.6rem;
-  border-radius: 6px 6px 0 0;
+  font-size: 0.78rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
   cursor: pointer;
+  max-width: 100%;
+}
+
+.nc-tab > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nc-tab svg {
+  flex: none;
 }
 
 .nc-tab:hover:not(:disabled) {
   color: var(--fg);
-  background: var(--raised);
+  background: rgb(var(--raised) / 0.7);
 }
 
-.nc-tab-on {
-  color: var(--accent);
+/* The pressed pill is tinted with the theme's accent, not just recoloured. */
+.nc-tab-on,
+.nc-tab-on:hover:not(:disabled) {
+  color: rgb(var(--accent));
+  background: rgb(var(--accent) / 0.14);
+  border-color: rgb(var(--accent) / 0.45);
   font-weight: 600;
 }
 
-/* ---- a list, and the thing picked from it -------------------------------- */
+/* ---- a list, and the thing picked from it ---------------------------------------------------------------- */
 
 .nc-list {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.2rem;
   margin-top: 0.5rem;
 }
 
 .nc-row {
   appearance: none;
-  border: 1px solid var(--line);
-  background: var(--raised);
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
   color: var(--fg);
   text-align: left;
   font-size: 0.82rem;
-  padding: 0.4rem 0.6rem;
-  border-radius: 7px;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
   cursor: pointer;
   width: 100%;
 }
 
 .nc-row:hover {
-  border-color: var(--fg-subtle);
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
 }
 
-.nc-row-on {
-  border-color: var(--accent);
-  background: transparent;
+/* The picked one stands out by an accent edge and a faint tint, not only a darker line. */
+.nc-row-on,
+.nc-row-on:hover {
+  border-color: rgb(var(--accent) / 0.55);
+  background: rgb(var(--accent) / 0.08);
 }
 
-/* ---- the shopping list --------------------------------------------------- */
+/* ---- the shopping list ----------------------------------------------------------------------------------- */
 
 .nc-item {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.28rem 0.4rem;
+  padding: 0.3rem 0.45rem;
   border-radius: 7px;
+  min-width: 0;
 }
 
 .nc-item:hover {
-  background: var(--raised);
+  background: rgb(var(--raised) / 0.6);
 }
 
 .nc-item-name {
   flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.85rem;
 }
 
@@ -99,28 +129,29 @@
 }
 
 .nc-item button:hover {
-  color: var(--danger);
-  background: var(--raised);
+  color: rgb(var(--danger));
+  background: rgb(var(--raised) / 0.8);
 }
 
-/* ---- the note view ------------------------------------------------------- */
+/* ---- the note view ---------------------------------------------------------------------------------------- */
 
 .nc-note-text {
   white-space: pre-wrap;
+  word-break: break-word;
   font-size: 0.85rem;
   line-height: 1.45;
 }
 
-/* ---- a switcher of views inside one tab (the sub-tabs) -------------------- */
+/* ---- a switcher of views inside one tab (the sub-tabs) ----------------------------------------------------- */
 
 .nc-subtabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.15rem;
-  padding: 0.25rem 0 0;
+  gap: 0.25rem;
+  padding: 0.1rem 0.1rem 0;
 }
 
-/* ---- the files view ------------------------------------------------------ */
+/* ---- the files view ----------------------------------------------------------------------------------------- */
 
 .nc-crumbs {
   display: flex;
@@ -128,6 +159,7 @@
   align-items: center;
   gap: 0.1rem;
   font-size: 0.82rem;
+  min-width: 0;
 }
 
 .nc-crumbs button {
@@ -139,11 +171,15 @@
   font-size: 0.82rem;
   padding: 0.15rem 0.35rem;
   border-radius: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nc-crumbs button:hover {
   color: var(--fg);
-  background: var(--raised);
+  background: rgb(var(--raised) / 0.7);
 }
 
 /* A row of the file list, a full-width pick.
@@ -152,24 +188,38 @@
 .nc-event,
 .nc-contact {
   appearance: none;
-  border: 1px solid var(--line);
-  background: var(--raised);
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
   color: var(--fg);
   text-align: left;
   font-size: 0.82rem;
-  padding: 0.4rem 0.6rem;
-  border-radius: 7px;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
   cursor: pointer;
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.nc-file svg,
+.nc-event svg,
+.nc-contact svg {
+  flex: none;
+  color: var(--fg-subtle);
+}
+
+/* A folder is the only entry that leads somewhere deeper: it wears the accent. */
+.nc-file svg.nc-file-dir {
+  color: rgb(var(--accent));
 }
 
 .nc-file:hover,
 .nc-event:hover,
 .nc-contact:hover {
-  border-color: var(--fg-subtle);
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
 }
 
 .nc-file-name {
@@ -191,9 +241,9 @@
   width: 100%;
   max-height: 65vh;
   object-fit: contain;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--raised);
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--raised) / 0.5);
 }
 
 .nc-file-text {
@@ -204,20 +254,21 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   margin: 0;
   padding: 0.5rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--raised);
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--surface));
   max-height: 55vh;
   overflow: auto;
 }
 
-/* ---- the shares view ------------------------------------------------------ */
+/* ---- the shares view ----------------------------------------------------------------------------------------- */
 
 .nc-share {
-  border: 1px solid var(--line);
-  background: var(--raised);
-  border-radius: 7px;
-  padding: 0.4rem 0.6rem;
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
+  border-radius: 8px;
+  padding: 0.45rem 0.65rem;
+  min-width: 0;
 }
 
 /* A small round word: the kind of share, a card's label, a due thing coming. */
@@ -226,7 +277,8 @@
   font-size: 0.68rem;
   line-height: 1.35;
   padding: 0.02rem 0.45rem;
-  border: 1px solid var(--line);
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--raised) / 0.6);
   border-radius: 999px;
   color: var(--fg-muted);
   max-width: 100%;
@@ -246,29 +298,31 @@
   height: 0.55rem;
   border-radius: 50%;
   display: inline-block;
-  border: 1px solid var(--line);
+  border: 1px solid rgb(var(--line));
 }
 
-/* ---- the deck view --------------------------------------------------------- */
+/* ---- the deck view ------------------------------------------------------------------------------------------- */
 
 .nc-card {
   appearance: none;
-  border: 1px solid var(--line);
-  background: var(--raised);
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
   color: var(--fg);
   text-align: left;
   font-size: 0.82rem;
-  padding: 0.35rem 0.55rem;
-  border-radius: 7px;
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
   cursor: pointer;
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
+  min-width: 0;
 }
 
 .nc-card:hover {
-  border-color: var(--fg-subtle);
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
 }
 
 /* A done card: the way a checked item goes.
@@ -282,7 +336,7 @@
   text-decoration: line-through;
 }
 
-/* ---- a small form inside a tab --------------------------------------------- */
+/* ---- a small form inside a tab ---------------------------------------------------------------------------------- */
 
 .nc-form {
   display: flex;
@@ -290,8 +344,19 @@
   gap: 0.4rem;
   margin-top: 0.65rem;
   padding: 0.5rem 0.6rem;
-  border: 1px dashed var(--line);
-  border-radius: 7px;
+  border: 1px dashed rgb(var(--line));
+  border-radius: 8px;
+}
+
+.nc-form input,
+.nc-form select {
+  min-width: 0;
+  width: 100%;
+}
+
+/* One line of the share form may give its length away: the type pick and the name sit on a row that wraps. */
+.nc-form .flex {
+  min-width: 0;
 }
 
 .nc-form-title {
@@ -310,10 +375,13 @@
   margin: 0;
 }
 
-/* ---- the contacts view ------------------------------------------------------- */
+/* ---- the contacts view -------------------------------------------------------------------------------------------- */
 
 .nc-contact-sub {
   color: var(--fg-subtle);
   font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
-

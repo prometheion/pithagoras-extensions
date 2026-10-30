@@ -236,7 +236,7 @@ export default function Contacts() {
         </div>
 
         {contact.emails.length > 1 || contact.phones.length > 1 ? (
-          <p className="rounded-md border px-2 py-1 text-xs text-fg-muted" style={{ borderColor: "var(--line)", background: "var(--raised)" }}>
+          <p className="rounded-md border px-2 py-1 text-xs text-fg-muted" style={{ borderColor: "rgb(var(--line))", background: "rgb(var(--raised))" }}>
             {t("This card carries more than one e-mail or phone; this panel only changes the first of each.")}
           </p>
         ) : null}
@@ -291,7 +291,7 @@ export default function Contacts() {
                 <li key={c.uid}>
                   <button type="button" className="nc-contact" onClick={() => openContact(c)}>
                     <span className="min-w-0 flex-1 truncate text-left">{c.fn}</span>
-                    {c.hasPhoto && <span className="shrink-0 nc-dot" style={{ background: "var(--fg-subtle)" }} title={t("Has a photo")} />}
+                    {c.hasPhoto && <span className="shrink-0 nc-dot" style={{ background: "rgb(var(--fg-subtle))" }} title={t("Has a photo")} />}
                     {c.email !== undefined && <span className="nc-contact-sub shrink-0 truncate">{c.email}</span>}
                   </button>
                 </li>

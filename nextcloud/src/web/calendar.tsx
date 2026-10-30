@@ -331,7 +331,7 @@ export default function Calendar() {
           )}
         </div>
         {event.recurring && (
-          <p className="rounded-md border px-2 py-1 text-xs text-fg-muted" style={{ borderColor: "var(--line)", background: "var(--raised)" }}>
+          <p className="rounded-md border px-2 py-1 text-xs text-fg-muted" style={{ borderColor: "rgb(var(--line))", background: "rgb(var(--raised))" }}>
             {t("This is a recurring event. Changing it stays in Nextcloud itself.")}
           </p>
         )}

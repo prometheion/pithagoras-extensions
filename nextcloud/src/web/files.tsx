@@ -369,7 +369,7 @@ export default function FilesAndSharing() {
                   {rows.map((row) => (
                     <li key={row.path}>
                       <button type="button" className="nc-file" disabled={previewBusy} onClick={() => void open(row)} title={row.directory ? row.name : t("Open or download this file")}>
-                        {row.directory ? <LuFolder className="shrink-0" /> : <LuFileText className="shrink-0" />}
+                        {row.directory ? <LuFolder className="nc-file-dir shrink-0" /> : <LuFileText className="shrink-0" />}
                         <span className="nc-file-name">{row.name}</span>
                         {!row.directory && row.size !== undefined && <span className="nc-file-size">{formatBytes(row.size)}</span>}
                       </button>

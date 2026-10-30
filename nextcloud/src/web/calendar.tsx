@@ -387,12 +387,12 @@ export default function Calendar() {
       />
 
       {calendars !== null && calendars.length > 0 && (
-        <select
-          className={portal.ui.classes.inputSmall}
+        <portal.ui.Select
+          size="sm"
+          className="w-full"
           value={view === "todos" ? (todoCal ?? "") : (calendarName ?? "")}
           aria-label={t("The calendar")}
-          onChange={(e) => {
-            const name = e.target.value;
+          onChange={(name) => {
             if (view === "todos") {
               setTodoCal(name);
               loadTodos(name || null);
@@ -402,14 +402,11 @@ export default function Calendar() {
               loadEvents(day, name || null);
             }
           }}
-        >
-          {calendars.map((c) => (
-            <option key={c.name} value={c.name}>
-              {c.displayName}
-              {c.readOnly ? ` (${t("read-only")})` : ""}
-            </option>
-          ))}
-        </select>
+          options={calendars.map((c) => ({
+            value: c.name,
+            label: c.displayName + (c.readOnly ? ` (${t("read-only")})` : ""),
+          }))}
+        />
       )}
 
       {view === "events" && (

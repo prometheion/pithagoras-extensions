@@ -304,12 +304,17 @@ export default function Deck() {
 
             {otherStacks.length > 0 && (
               <div className="flex items-center gap-1">
-                <select className={portal.ui.classes.inputSmall} value={moveTo ?? ""} aria-label={t("Move this card to")} onChange={(e) => setMoveTo(e.target.value === "" ? null : Number(e.target.value))}>
-                  <option value="">{t("Move this card to…")}</option>
-                  {otherStacks.map((s) => (
-                    <option key={s.id} value={s.id}>{s.title}</option>
-                  ))}
-                </select>
+                <portal.ui.Select
+                  size="sm"
+                  className="min-w-0 flex-1"
+                  value={moveTo === null ? "" : String(moveTo)}
+                  aria-label={t("Move this card to")}
+                  onChange={(v) => setMoveTo(v === "" ? null : Number(v))}
+                  options={([
+                    { value: "", label: t("Move this card to…") },
+                    ...otherStacks.map((s) => ({ value: String(s.id), label: s.title })),
+                  ] as { value: string; label: string }[])}
+                />
                 <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || moveTo === null} onClick={() => moveTo !== null && moveCard(moveTo)}>
                   {t("Move")}
                 </button>

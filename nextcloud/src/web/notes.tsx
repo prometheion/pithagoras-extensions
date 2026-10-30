@@ -144,17 +144,17 @@ export default function Notes() {
         <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void remove()} aria-label={t("Delete this note")}>
           {t("Delete this note")}
         </button>
+        <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || note === null || (editedTitle === note.title && editedContent === note.content)} onClick={() => void save()}>
+          {t("Save")}
+        </button>
       </div>
       {note === null ? (
         <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
       ) : (
-        <>
-          <input className={portal.ui.classes.input} value={editedTitle} aria-label={t("Note title")} onChange={(e) => setEditedTitle(e.target.value)} />
-          <textarea className="nc-note-text" rows={10} value={editedContent} aria-label={t("Note content")} onChange={(e) => setEditedContent(e.target.value)} />
-          <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || (editedTitle === note.title && editedContent === note.content)} onClick={() => void save()}>
-            {t("Save")}
-          </button>
-        </>
+        <div className="nc-note-edit">
+          <input className="nc-note-title" value={editedTitle} aria-label={t("Note title")} onChange={(e) => setEditedTitle(e.target.value)} />
+          <textarea className="nc-note-text" rows={8} value={editedContent} aria-label={t("Note content")} onChange={(e) => setEditedContent(e.target.value)} />
+        </div>
       )}
       {problem && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
     </div>

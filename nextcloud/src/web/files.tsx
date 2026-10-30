@@ -338,22 +338,26 @@ export default function Files() {
         </>
       ) : (
         <>
-          <div className="nc-crumbs" aria-label={t("Where you are")}>
-            <button type="button" onClick={() => { setPath(""); }}>{t("Files")}</button>
-            {crumbs.map((segment, i) => (
-              <span key={i} className="inline-flex min-w-0 items-center gap-0.5">
-                <LuChevronRight size={11} className="text-fg-subtle" />
-                <button type="button" onClick={() => setPath(crumbs.slice(0, i + 1).join("/"))}>
-                  {segment}
-                </button>
-              </span>
-            ))}
-            <span className="ml-auto shrink-0">
+          {/* The path and the Shared-with-me entry stand on their own lines: a long path must not push
+              the chip to a second row and leave a gap under it. */}
+          <div className="nc-files-head">
+            <div className="nc-crumbs" aria-label={t("Where you are")}>
+              <button type="button" onClick={() => { setPath(""); }}>{t("Files")}</button>
+              {crumbs.map((segment, i) => (
+                <span key={i} className="inline-flex min-w-0 items-center gap-0.5">
+                  <LuChevronRight size={11} className="text-fg-subtle" />
+                  <button type="button" onClick={() => setPath(crumbs.slice(0, i + 1).join("/"))}>
+                    {segment}
+                  </button>
+                </span>
+              ))}
+            </div>
+            <div>
               <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => setWithMe(true)} title={t("What others hold on you")}>
                 <LuUsers />
                 <span>{t("Shared with me")}</span>
               </button>
-            </span>
+            </div>
           </div>
           {rows === null ? (
             fileProblem !== null ? (
@@ -526,11 +530,16 @@ function SharingBox({
       >
         <p className="nc-form-title">{t("Add a share")}</p>
         <div className="flex gap-1">
-          <select className={portal.ui.classes.inputSmall} value={form.shareType} aria-label={t("Shared with")} onChange={(e) => setForm({ ...form, shareType: Number(e.target.value), shareWith: "" })}>
-            {shareTypes.map(([value, label]) => (
-              <option key={value} value={value}>{t(label)}</option>
-            ))}
-          </select>
+          <div className="w-40 shrink">
+          <portal.ui.Select
+            size="sm"
+            className="w-full"
+            value={String(form.shareType)}
+            aria-label={t("Shared with")}
+            onChange={(v) => setForm({ ...form, shareType: Number(v), shareWith: "" })}
+            options={shareTypes.map(([value, label]) => ({ value: String(value), label: t(label) }))}
+          />
+          </div>
           <input className={portal.ui.classes.input} value={form.shareWith} placeholder={t("The name of it")} aria-label={t("The name of the user, group or address")} onChange={(e) => setForm({ ...form, shareWith: e.target.value })} />
         </div>
         <div className="nc-perm-row" role="group" aria-label={t("What they may do")}>

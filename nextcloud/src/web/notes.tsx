@@ -24,6 +24,11 @@ export default function Notes() {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
+  // the made note's words as they stand: open in the list view where nothing is chosen yet
+  const [creating, setCreating] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newContent, setNewContent] = useState("");
+
   const search = (text: string) => {
     setResults(null);
     void api
@@ -72,6 +77,31 @@ export default function Notes() {
     }
   };
 
+  const create = async () => {
+    if (busy) return;
+    const title = newTitle.trim();
+    if (title === "" && newContent.trim() === "") return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      const result = await api.tool("nc_notes_create_note", { title, content: newContent, category: "" }, instance); // no category: the note goes in the plain one
+      setCreating(false);
+      setNewTitle("");
+      setNewContent("");
+      search(""); // the list as it stands now
+      // the made note's own id, where the answer carries it: opened to what was just made
+      const data = partText(result).data;
+      if (typeof data === "object" && data !== null) {
+        const id = Number((data as Record<string, unknown>).id);
+        if (!Number.isNaN(id) && id !== 0) open(id);
+      }
+    } catch (error) {
+      setProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async () => {
     if (busy || chosenId === null) return;
     if (!window.confirm(t("Remove this note for good?"))) return;
@@ -109,6 +139,23 @@ export default function Notes() {
             </button>
           </form>
         </div>
+        <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => setCreating((c) => !c)}>
+          {creating ? "−" : "+"} {t("A new note")}
+        </button>
+        {creating && (
+          <div className="nc-note-edit">
+            <input className="nc-note-title" value={newTitle} aria-label={t("Note title")} onChange={(e) => setNewTitle(e.target.value)} />
+            <textarea className="nc-note-text" rows={8} value={newContent} aria-label={t("Note content")} onChange={(e) => setNewContent(e.target.value)} />
+            <div className="flex gap-1 border-t px-3 py-2" style={{ borderColor: "rgb(var(--line))" }}>
+              <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || (newTitle.trim() === "" && newContent.trim() === "")} onClick={() => void create()}>
+                {t("Add")}
+              </button>
+              <button type="button" className={portal.ui.classes.ghost} onClick={() => setCreating(false)}>
+                {t("Cancel")}
+              </button>
+            </div>
+          </div>
+        )}
         {results === null ? (
           problem ? (
             <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The notes could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>

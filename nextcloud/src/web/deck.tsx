@@ -57,6 +57,9 @@ const showDate = (iso?: string): string => {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
 };
 
+/** The colours a new board may stand in. */
+const BOARD_COLORS = ["#0f6bb5", "#4ca34c", "#e0a126", "#d94f4f", "#8b5cf6", "#ef5c86", "#23587e", "#5f6b7a"];
+
 const mapCard = (c: Rec): CardMini => ({
   id: Number(c.id ?? 0),
   title: String(c.title ?? ""),
@@ -94,6 +97,14 @@ export default function Deck() {
   const [moveTo, setMoveTo] = useState<number | null>(null);
   const [actionProblem, setActionProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // a new board's words: its name and the colour it stands in
+  const [boardFormOpen, setBoardFormOpen] = useState(false);
+  const [boardTitle, setBoardTitle] = useState("");
+  const [boardColor, setBoardColor] = useState("#0f6bb5");
+  // a new stack's word: its name
+  const [stackFormOpen, setStackFormOpen] = useState(false);
+  const [stackName, setStackName] = useState("");
 
   const loadBoards = () => {
     setBoards(null);
@@ -253,6 +264,48 @@ export default function Deck() {
     );
   };
 
+  /** A new board made and picked: the boards are read again and the one by its name is chosen. Its own running,
+   * because with no boards at all there is none to act under. */
+  const createBoard = async () => {
+    if (busy || boardTitle.trim() === "") return;
+    const title = boardTitle.trim();
+    setBusy(true);
+    setActionProblem(null);
+    try {
+      await api.tool("deck_create_board", { title, color: boardColor }, instance);
+      const result = await api.tool("deck_get_boards", {}, instance);
+      const rows = (arrayOf(partText(result).data, "boards") ?? []).map((b) => ({ id: Number(b.id), title: String(b.title ?? ""), color: strOf(b.color) }));
+      setBoards(rows);
+      const created = rows.find((b) => b.title === title);
+      if (created !== undefined) {
+        setBoardId(created.id);
+        setCard(null);
+        setNewStackId(null);
+        loadStacks(created.id);
+      } else if (boardId !== null) {
+        loadStacks(boardId);
+      }
+      setBoardFormOpen(false);
+      setBoardTitle("");
+    } catch (error) {
+      setActionProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createStack = () => {
+    if (boardId === null || busy || stackName.trim() === "") return;
+    void act(
+      () => api.tool("deck_create_stack", { board_id: boardId, title: stackName.trim(), order: 999 }, instance),
+      () => {
+        setStackFormOpen(false);
+        setStackName("");
+        loadStacks(boardId);
+      }
+    );
+  };
+
   // ---- what is drawn -------------------------------------------------------
 
   if (card !== null) {
@@ -347,7 +400,36 @@ export default function Deck() {
                 <span>{board.title}</span>
               </button>
             ))}
+            <button type="button" aria-pressed={boardFormOpen} className={`nc-tab${boardFormOpen ? " nc-tab-on" : ""}`} onClick={() => setBoardFormOpen((o) => !o)}>
+              + {t("New board")}
+            </button>
           </div>
+
+          {boardFormOpen && (
+            <form
+              className="space-y-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void createBoard();
+              }}
+            >
+              <input className={portal.ui.classes.input} value={boardTitle} placeholder={t("The board's name")} aria-label={t("The board's name")} onChange={(e) => setBoardTitle(e.target.value)} />
+              <div className="flex items-center gap-1">
+                {BOARD_COLORS.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    aria-label={color}
+                    className="h-5 w-5 shrink-0 rounded-full border"
+                    style={{ background: color, borderColor: boardColor === color ? "rgb(var(--fg))" : "transparent", borderWidth: boardColor === color ? 2 : 1 }}
+                    onClick={() => setBoardColor(color)}
+                  />
+                ))}
+                <span className="flex-1" />
+                <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || boardTitle.trim() === ""}>{t("Add")}</button>
+              </div>
+            </form>
+          )}
 
           {boardId !== null && (stacks === null ? (
             stackProblem !== null ? (
@@ -413,6 +495,26 @@ export default function Deck() {
                   )}
                 </section>
               ))}
+
+              <div className="space-y-1">
+                {stackFormOpen ? (
+                  <form
+                    className="flex items-center gap-1"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      createStack();
+                    }}
+                  >
+                    <input className={portal.ui.classes.input} value={stackName} placeholder={t("The stack's name")} aria-label={t("The stack's name")} onChange={(e) => setStackName(e.target.value)} />
+                    <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || stackName.trim() === ""}>{t("Add")}</button>
+                    <button type="button" className={portal.ui.classes.ghost} onClick={() => setStackFormOpen(false)}>{t("Cancel")}</button>
+                  </form>
+                ) : (
+                  <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => setStackFormOpen(true)}>
+                    <LuPlus /> {t("A new stack")}
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </>

@@ -47,15 +47,15 @@ Registered as **one** `portal.slots.set("chat.panel", …)` with id `nextcloud` 
 | Tab | MCP tool group | UI sketch |
 |---|---|---|
 | **Files** | Files/WebDAV (14) + Sharing (10+) | Path breadcrumb + file list; click → preview/download for pdf/image, download otherwise; sub-view "Shares" listing who-what with create-share dialog. See §5 for integration with the shipped Files extension. |
-| **Deck** | Deck (15) | Board picker → stack columns with cards; rename/create/reorder; labels/assignees shown as badges. |
-| **Notes** | Notes (7) | Left: note list + keyword search; right: content, edit/save/delete. |
-| **Calendar** | Calendar (20+) | Month grid or day list of events (+todos sub-tab); click event → details/edit form (date, summary, location, description). |
-| **Contacts** | Contacts (8) | Address book picker → contact list; detail view with editable CardDAV fields. |
-| **Cookbook** | Cookbook (13) | Recipe grid/list → detail (ingredients, steps); "import from URL" action (schema.org). |
-| **Shopping List** | Shopping List (12) | List picker → checkable items; add/remove/clear-checked; (nice-to-have: "add recipe ingredients" using the one-call tool). |
-| **Mail** | Mail (13) | Accounts → mailboxes → messages by subject/sender/preview; a message opened for its body and attachments, marked read or unread. |
+| **Deck** | Deck (15) | Board picker (+ new board with its color) → stack columns (+ new stacks) with cards; create/rename/move/delete; labels/assignees shown as badges. |
+| **Notes** | Notes (7) | Left: note list + keyword search (+ new note); right: content, edit/save/delete. |
+| **Calendar** | Calendar (20+) | Month grid like Nextcloud's calendar (≤2 events per day + "more"), the chosen day's agenda beneath it; click event → details/edit form (date, time, all-day, location, note), new events on the day; todos sub-tab with create/delete/tick-off. |
+| **Contacts** | Contacts (8) | Address book picker → contact list; detail view with editable CardDAV fields; new contacts added and deleted. |
+| **Cookbook** | Cookbook (13) | Recipe grid/list + keyword search (+ new recipe from its fields) → detail (ingredients, steps), edited or deleted; "import from URL" action (schema.org). |
+| **Shopping List** | Shopping List (12) | Lists (new ones created, renamed, deleted) → checkable items with name/amount/measure amended in place; add/remove/clear-checked/uncheck-all. |
+| **Mail** | Mail (13) | Accounts → mailboxes → messages by subject/sender/preview (+ compose: send or keep as draft); a message opened for its body and attachments, marked read or unread, starred, moved or deleted. |
 | **News** | News (8) | Feeds with their unread standing → items; an article opened for its body beside the link to its original. |
-| **Collectives** | Collectives (16) | Collectives' pages searched as you type, a page opened for reading where one is not kept read-only. |
+| **Collectives** | Collectives (16) | Collectives (+ new ones) and their pages searched as you type, a page opened for reading and — where one is not kept read-only — written and saved back (+ new pages). |
 
 The tab bar is not static: each tab stands under one or more **capabilities** (`src/capabilities.ts`), and a tab is offered where its endpoint provides the capability's tools and no choice turns it off. What an endpoint provides is found from its own `tools/list` while the status looks — so nothing an earlier version never offered is invented, and a server that starts to offer more shows it on its own.
 
@@ -168,4 +168,4 @@ Status block on the same page: container state, MCP server health, "pi is connec
 - ~~Multi-instance from day one or Phase 3?~~ **Decided: multi-instance, done** — every instance gets its own container, its loopback port at and above 8000, and its own entry in pi's config under its name; the panel switches over them.
 - ~~Adopt existing containers on install, or always own a fresh one?~~ **Decided: no adoption** (2026-07, Simeon's feedback: "das where its mcp endpoint lives kann weg") — every instance owns exactly one container the extension made and keeps; the adopted/discovery mechanism (the `container` field, `GET /discover`, the settings select) is gone.
 - Core change B: confirm current masking behavior of the generated settings page before scoping.
-- ~~Calendar tab UX: month grid vs day list~~ **Decided: day list** — what Phase 2 built.
+- ~~Calendar tab UX: month grid vs day list~~ **Superseded (2026-10, Simeon: "das soll ein richtiger Kalender sein")**: month grid as default view with the chosen day's agenda beneath it — what Nextcloud's own calendar does.

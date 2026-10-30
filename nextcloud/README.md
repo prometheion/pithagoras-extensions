@@ -58,25 +58,32 @@ where they were shown on the page, so putting the instance back starts it withou
 - **A Nextcloud panel in every chat**, beside the files panel: one place with what your cloud holds, for you and the
   agent that answers there. Its ten tabs, each thin over the MCP server's own tools — and only where the instance's
   endpoint provides the tab's tools:
-  - **Shopping List** — the lists, their items checked as they are bought (the check is in Nextcloud, so a phone on
-    the app sees it at once), new items added at the bottom of the list, items and checked runs removed.
-  - **Cookbook** — the recipes with ingredients and steps, searched by name or keyword, and a recipe imported from its
-    URL wherever a site has marked it up (schema.org).
-  - **Notes** — all the notes, searched as you type, opened for reading, edited and saved back in place.
-  - **Files** (sharing built in, as on Nextcloud) — browse your files, preview images and text and pull a file down; beside it the shares: who
-    has what with what permission, new ones added, taken away again, and a short public link made of a path.
-  - **Deck** — your boards' stacks and cards by their order, due date and labels; new cards set off at the top of a
-    stack, a card's text read and written back.
-  - **Calendar** — day by day what stands in which calendar, an event opened for its time, place and note changed or
-    gone; beside it the open tasks with their due days, ticked off as they are done.
+  - **Shopping List** — the lists (new ones made, renamed, taken away), their items checked as they are bought
+    (the check is in Nextcloud, so a phone on the app sees it at once) and each item's name, amount and measure
+    amended; new items added at the bottom of the list, items and checked runs removed, everything opened again at once.
+  - **Cookbook** — the recipes with ingredients and steps, searched by name or keyword, a recipe set off from its own
+    fields (or one imported from its URL wherever a site has marked it up, schema.org) and an old one changed or gone
+    where you want.
+  - **Notes** — all the notes, searched as you type, opened for reading, edited and saved back in place, and a new
+    note set off where none stood yet.
+  - **Files** (sharing built in, as on Nextcloud) — browse your files (a new folder or file made on the spot),
+    preview images and text and pull a file down; a file moved, renamed, copied or taken away, and what was thrown out
+    lies in the trash until it is brought back; beside it the shares: who has what with what permission, new ones added,
+    taken away again, and a short public link made of a path.
+  - **Deck** — your boards (a new one set off with its color) and their stacks (new ones added), cards by their order,
+    due date and labels; new cards set off at the top of a stack, a card's text read and written back.
+  - **Calendar** — the month at a glance in a grid like Nextcloud's own calendar, the chosen day's events laid out
+    beneath it; an event opened for its time, place and note changed or gone, new ones set off on the day; beside it the
+    open tasks (new ones with their due day), ticked off as they are done.
   - **Contacts** — your address books' contacts searched as you type, a card opened and amended in place, new ones
     added and taken away again.
-  - **Mail** — the accounts' mailboxes and their messages by subject, sender and preview; a message opened for its
-    full body and attachments, marked read or unread where the server gives it back.
+  - **Mail** — the accounts' mailboxes and their messages by subject, sender and preview; new mail written at once —
+    sent or kept as a draft; a message opened for its full body and attachments, starred, moved to another mailbox or
+    taken away, marked read or unread where the server gives it back.
   - **News** — the feeds with their unread standing and their items; an article opened for its body beside the link
     to its original.
-  - **Collectives** — the collectives' pages searched as you type, a page opened for reading where one is not kept
-    read-only.
+  - **Collectives** — the collectives (a new one set off) and their pages searched as you type, a page opened for
+    reading and — where one is not kept read-only — written and saved back; new pages made where the collective allows.
 - **The agents reach your clouds too**: every server is registered in pi's config, persistent, trusted, with nothing
   direct besides what its registration names — so a chat can ask "check the milk off the list" or "what did I note down
   about the fence", and the answer comes from Nextcloud. What it may not reach is exactly what its capability

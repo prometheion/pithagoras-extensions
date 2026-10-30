@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 import { SubTabs } from "./widgets";
 
-/** The Calendar tab: a day agenda over the days -- what is on the chosen day of which calendar, and where the next
- * seven reach past it; and one event open to its detail, read or changed (title, times, text, place) and taken away.
- * A recurring event is only listed with a note that changing it stays in Nextcloud itself. And beside the events:
- * a todo sub-view over what is still open, to be ticked off. All of it as a tool call on the server. */
+/** The Calendar tab: a month grid over the chosen calendar -- every day its events in short, one day opened to
+ * its agenda and one event open to its detail, read or changed (title, times, text, place) and taken away, new
+ * events made on any day. A recurring event is only listed with a note that changing it stays in Nextcloud
+ * itself. And beside the events: a todo sub-view over what is still open -- to be ticked off, added and taken
+ * away. All of it as a tool call on the server. */
 
 type Rec = Record<string, unknown>;
 
@@ -41,6 +42,31 @@ interface TodoRow {
 const pad = (n: number): string => String(n).padStart(2, "0");
 /** A day in the tool's words from a Date. */
 const dayWord = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+/** The "YYYY-MM" word of a Date's month. */
+const monthWord = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+/** A month word back to its first day, as a local noon (a day's shadow does not reach across it). */
+const monthStart = (word: string): Date => new Date(`${word}-01T12:00`);
+/** The cells of one month grid: Monday-first, just as many weeks as the month needs. */
+function monthGrid(month: string): string[] {
+  const first = monthStart(month);
+  const lead = (first.getDay() + 6) % 7; // a JS Sunday is day 0 -- back to the Monday on or before it
+  const tailDay = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  return Array.from({ length: Math.ceil((lead + tailDay) / 7) * 7 }, (_, i) => {
+    const d = new Date(first);
+    d.setDate(first.getDate() - lead + i);
+    return dayWord(d);
+  });
+}
+/** The weekday row, Monday-first, in the words this locale says. */
+const WEEKDAYS: string[] = (() => {
+  const monday = new Date(2024, 0, 8); // a known Monday
+  return [0, 1, 2, 3, 4, 5, 6].map((i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    return d.toLocaleDateString(undefined, { weekday: "narrow" });
+  });
+})();
+
 /** An ISO word back to what a datetime-local input speaks -- or its date half alone for an all-day field. */
 const localInput = (iso: string | undefined, dateOnly = false): string => {
   if (!iso) return "";
@@ -60,10 +86,12 @@ export default function Calendar() {
   const [calendarProblem, setCalendarProblem] = useState<string | null>(null);
   const [calendarName, setCalendarName] = useState<string | null>(null);
 
-  // the agenda: the day it shows and the events it read for it
-  const [day, setDay] = useState<string>(() => dayWord(new Date()));
-  const [events, setEvents] = useState<EventSummary[] | null>(null);
+  // the month it shows and the one day opened to its agenda below the grid
+  const [month, setMonth] = useState<string>(() => monthWord(new Date()));
+  const [selectedDay, setSelectedDay] = useState<string>(() => dayWord(new Date()));
+  const [monthEvents, setMonthEvents] = useState<EventSummary[] | null>(null); // everything of the shown month
   const [eventProblem, setEventProblem] = useState<string | null>(null);
+  const [showNew, setShowNew] = useState(false);
 
   // the one event open and its edit words as they stand (wall-clock words, what the input speaks)
   const [event, setEvent] = useState<EventFull | null>(null);
@@ -80,11 +108,13 @@ export default function Calendar() {
   const [todos, setTodos] = useState<TodoRow[] | null>(null);
   const [todoProblem, setTodoProblem] = useState<string | null>(null);
 
-  // the new-event form: its words as they stand
+  // the new-event and new-todo forms: their words as they stand
   const [newTitle, setNewTitle] = useState("");
   const [newAllDay, setNewAllDay] = useState(false);
   const [newStartAt, setNewStartAt] = useState("09:00");
   const [newEndAt, setNewEndAt] = useState("10:00");
+  const [newTodoTitle, setNewTodoTitle] = useState("");
+  const [newTodoDue, setNewTodoDue] = useState("");
 
   const [busy, setBusy] = useState(false);
 
@@ -109,16 +139,19 @@ export default function Calendar() {
     loadCalendars();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadEvents = (dayKey: string, name: string | null) => {
+  /** The whole shown month at once: one call from its first to its last day, as the grid and the agenda share it. */
+  const loadMonth = (name: string | null, key: string) => {
     if (name === null) return;
-    setEvents(null);
+    setMonthEvents(null);
     setEventProblem(null);
+    const first = monthStart(key);
+    const lastDay = new Date(first.getFullYear(), first.getMonth() + 1, 0); // the month's last day as a noon
     void api
-      .tool("nc_calendar_list_events", { calendar_name: name, start_date: dayKey, end_date: dayKey, limit: 50 }, instance)
+      .tool("nc_calendar_list_events", { calendar_name: name, start_date: dayWord(first), end_date: dayWord(lastDay), limit: 300 }, instance)
       .then((result) => {
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).events : undefined;
-        setEvents(
+        setMonthEvents(
           Array.isArray(list)
             ? list.map((e) => {
                 const r = e as Rec;
@@ -140,8 +173,35 @@ export default function Calendar() {
   };
 
   useEffect(() => {
-    loadEvents(day, calendarName);
-  }, [day]); // eslint-disable-line react-hooks/exhaustive-deps
+    loadMonth(calendarName, month);
+  }, [month, calendarName]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** The month's events under the day of their local shadow -- all-day first in each day, then by start. */
+  const byDay = useMemo(() => {
+    const map: Record<string, EventSummary[]> = {};
+    for (const e of monthEvents ?? []) {
+      if (e.start === undefined) continue;
+      const d = new Date(e.start);
+      if (Number.isNaN(d.getTime())) continue;
+      (map[dayWord(d)] ??= []).push(e);
+    }
+    for (const key of Object.keys(map)) {
+      map[key].sort((a, b) => Number(b.allDay) - Number(a.allDay) || String(a.start ?? "").localeCompare(String(b.start ?? "")));
+    }
+    return map;
+  }, [monthEvents]);
+
+  const stepMonth = (by: number) => {
+    const d = monthStart(month);
+    d.setMonth(d.getMonth() + by);
+    setMonth(monthWord(d));
+  };
+
+  /** A day of the grid, opened to its agenda -- a neighbour-month day turns the month with it. */
+  const pickDay = (key: string) => {
+    setSelectedDay(key);
+    if (key.slice(0, 7) !== month) setMonth(key.slice(0, 7));
+  };
 
   const openEvent = (summary: EventSummary) => {
     if (calendarName === null || busy) return;
@@ -217,7 +277,7 @@ export default function Calendar() {
       try {
         await api.tool("nc_calendar_update_event", args, instance);
         setEvent(null);
-        loadEvents(day, calendarName);
+        loadMonth(calendarName, month);
       } catch (error) {
         setEventProblem2(sayError(error));
       } finally {
@@ -234,7 +294,7 @@ export default function Calendar() {
       try {
         await api.tool("nc_calendar_delete_event", { calendar_name: calendarName, event_uid: event.uid }, instance);
         setEvent(null);
-        loadEvents(day, calendarName);
+        loadMonth(calendarName, month);
       } catch (error) {
         setEventProblem2(sayError(error));
       } finally {
@@ -245,7 +305,7 @@ export default function Calendar() {
 
   const createEvent = () => {
     if (calendarName === null || newTitle.trim() === "") return;
-    const start = new Date(`${day}T${newAllDay ? "00:00" : newStartAt}`);
+    const start = new Date(`${selectedDay}T${newAllDay ? "00:00" : newStartAt}`);
     if (Number.isNaN(start.getTime())) return;
     void (async () => {
       setBusy(true);
@@ -253,16 +313,17 @@ export default function Calendar() {
         const args: Rec = {
           calendar_name: calendarName,
           title: newTitle.trim(),
-          start_datetime: newAllDay ? day : `${day}T${newStartAt}:00`, // a day alone is the tool's all-day word
+          start_datetime: newAllDay ? selectedDay : `${selectedDay}T${newStartAt}:00`, // a day alone is the tool's all-day word
           all_day: newAllDay,
         };
         if (!newAllDay) {
-          const end = new Date(`${day}T${newEndAt}:00`);
-          args.end_datetime = !Number.isNaN(end.getTime()) && end > start ? `${day}T${newEndAt}:00` : undefined;
+          const end = new Date(`${selectedDay}T${newEndAt}:00`);
+          args.end_datetime = !Number.isNaN(end.getTime()) && end > start ? `${selectedDay}T${newEndAt}:00` : undefined;
         }
         await api.tool("nc_calendar_create_event", args, instance);
         setNewTitle("");
-        loadEvents(day, calendarName);
+        setShowNew(false);
+        loadMonth(calendarName, month);
       } catch (error) {
         setEventProblem(sayError(error));
       } finally {
@@ -305,6 +366,41 @@ export default function Calendar() {
       setBusy(true);
       try {
         await api.tool("nc_calendar_complete_todo", { calendar_name: todoCal, todo_uid: todo.uid }, instance); // its own now is the timestamp
+        loadTodos(todoCal);
+      } catch (error) {
+        setTodoProblem(sayError(error));
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const deleteTodo = (todo: TodoRow) => {
+    if (todoCal === null || busy) return;
+    if (!window.confirm(t("Take this todo away for good?"))) return;
+    void (async () => {
+      setBusy(true);
+      try {
+        await api.tool("nc_calendar_delete_todo", { calendar_name: todoCal, todo_uid: todo.uid }, instance);
+        loadTodos(todoCal);
+      } catch (error) {
+        setTodoProblem(sayError(error));
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const createTodo = () => {
+    if (todoCal === null || newTodoTitle.trim() === "") return;
+    void (async () => {
+      setBusy(true);
+      try {
+        const args: Rec = { calendar_name: todoCal, summary: newTodoTitle.trim() };
+        if (newTodoDue !== "") args.due = newTodoDue; // a day alone is the tool's all-day word
+        await api.tool("nc_calendar_create_todo", args, instance);
+        setNewTodoTitle("");
+        setNewTodoDue("");
         loadTodos(todoCal);
       } catch (error) {
         setTodoProblem(sayError(error));
@@ -375,6 +471,9 @@ export default function Calendar() {
     );
   }
 
+  const todayKey = dayWord(new Date());
+  const agenda = byDay[selectedDay] ?? [];
+
   return (
     <div className="space-y-2">
       <SubTabs
@@ -397,9 +496,8 @@ export default function Calendar() {
               setTodoCal(name);
               loadTodos(name || null);
             } else {
+              // a new calendar means a new month too: the [month, calendarName] effect makes the call
               setCalendarName(name);
-              // a new calendar means new days too: the [day] effect alone would hold on to the previous one's events
-              loadEvents(day, name || null);
             }
           }}
           options={calendars.map((c) => ({
@@ -412,74 +510,115 @@ export default function Calendar() {
       {view === "events" && (
         <div className="space-y-2">
           <div className="flex items-center gap-1">
-            <button type="button" className={portal.ui.classes.ghost} onClick={() => setDay((d) => dayWord(shift(d, -7)))}>
-              ← {t("seven days")}
-            </button>
-            <button type="button" className={portal.ui.classes.ghost} aria-label={t("Previous day")} onClick={() => setDay((d) => dayWord(shift(d, -1)))}>
+            <button type="button" className={portal.ui.classes.ghost} aria-label={t("Previous month")} onClick={() => stepMonth(-1)}>
               ‹
             </button>
-            <span className="min-w-0 flex-1 truncate text-center text-sm font-semibold">{dayLabel(day)}</span>
-            <button type="button" className={portal.ui.classes.ghost} aria-label={t("Next day")} onClick={() => setDay((d) => dayWord(shift(d, 1)))}>
+            <span className="min-w-0 flex-1 truncate text-center text-sm font-semibold">{monthLabel(month)}</span>
+            <button type="button" className={portal.ui.classes.ghost} aria-label={t("Next month")} onClick={() => stepMonth(1)}>
               ›
             </button>
-            <button type="button" className={portal.ui.classes.ghost} onClick={() => setDay((d) => dayWord(shift(d, 7)))}>
-              {t("seven days")} →
+            <button type="button" className={portal.ui.classes.ghost} onClick={() => { setMonth(monthWord(new Date())); setSelectedDay(dayWord(new Date())); }}>
+              {t("Today")}
             </button>
           </div>
 
-          {events === null ? (
+          {monthEvents === null ? (
             eventProblem !== null ? (
               <portal.ui.ErrorBanner onClose={() => setEventProblem(null)}>{t("The events could not be read: {error}", { error: eventProblem })}</portal.ui.ErrorBanner>
             ) : (
-              <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />
+              <portal.ui.RowsSkeleton rows={6} label={t("Loading…")} />
             )
-          ) : events.length === 0 ? (
-            <portal.ui.Empty>{t("Nothing is on this day.")}</portal.ui.Empty>
           ) : (
-            <ul className="space-y-0.5">
-              {events.map((e) => (
-                <li key={e.uid}>
-                  <button type="button" className="nc-event" onClick={() => openEvent(e)}>
-                    <span className="min-w-0 flex-1 truncate text-left">
-                      {e.summary}
-                      {e.location !== undefined && <span className="text-fg-subtle"> — {e.location}</span>}
-                    </span>
-                    {!e.allDay && e.start !== undefined && (
-                      <span className="shrink-0 text-xs text-fg-muted">{timeOfEvent(e)}</span>
+            <div className="nc-monthgrid">
+              {WEEKDAYS.map((w, i) => (
+                <span key={i} className="nc-monthhead">{w}</span>
+              ))}
+              {monthGrid(month).map((key) => {
+                const dayEvents = byDay[key] ?? [];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => pickDay(key)}
+                    aria-label={t("Open the day {day}", { day: dayLabel(key) })}
+                    className={`nc-monthcell${key.slice(0, 7) !== month ? " nc-monthcell-out" : ""}${key === selectedDay ? " nc-monthcell-on" : ""}${key === todayKey ? " nc-monthcell-today" : ""}`}
+                  >
+                    <span className="nc-monthnum">{Number(key.slice(8))}</span>
+                    {dayEvents.length > 0 && (
+                      <span className="nc-monthevs">
+                        {dayEvents.slice(0, 2).map((e) => (
+                          <span key={e.uid} className={`nc-monthchip${e.allDay ? " nc-monthchip-all" : ""}`}>{e.summary}</span>
+                        ))}
+                        {dayEvents.length > 2 && <span className="nc-monthmore">+{dayEvents.length - 2}</span>}
+                      </span>
                     )}
                   </button>
-                </li>
-              ))}
-            </ul>
+                );
+              })}
+            </div>
           )}
 
-          <form
-            className="nc-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              createEvent();
-            }}
-          >
-            <p className="nc-form-title">{t("A new event on this day")}</p>
-            <input className={portal.ui.classes.input} value={newTitle} placeholder={t("What it is")} aria-label={t("What it is")} onChange={(e) => setNewTitle(e.target.value)} />
-            <div className="flex flex-wrap items-center gap-1">
-              <label className="inline-flex items-center gap-1 text-xs">
-                <input type="checkbox" checked={newAllDay} onChange={(e) => setNewAllDay(e.target.checked)} />
-                {t("All day")}
-              </label>
-              {!newAllDay && (
-                <>
-                  <span className="text-xs text-fg-subtle">{t("From")}</span>
-                  <input type="time" className={portal.ui.classes.inputSmall} value={newStartAt} aria-label={t("From")} onChange={(e) => setNewStartAt(e.target.value)} />
-                  <span className="text-xs text-fg-subtle">{t("to")}</span>
-                  <input type="time" className={portal.ui.classes.inputSmall} value={newEndAt} aria-label={t("To")} onChange={(e) => setNewEndAt(e.target.value)} />
-                </>
+          {monthEvents !== null && (
+            <>
+              <div className="flex items-center gap-1">
+                <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => setShowNew((s) => !s)}>
+                  {showNew ? "−" : "+"} {t("New event")}
+                </button>
+                <span className="flex-1" />
+                <span className="text-xs text-fg-subtle">{dayLabel(selectedDay)}</span>
+              </div>
+
+              {agenda.length === 0 ? (
+                <portal.ui.Empty>{t("Nothing is on this day.")}</portal.ui.Empty>
+              ) : (
+                <ul className="space-y-0.5">
+                  {agenda.map((e) => (
+                    <li key={e.uid}>
+                      <button type="button" className="nc-event" onClick={() => openEvent(e)}>
+                        <span className="min-w-0 flex-1 truncate text-left">
+                          {e.summary}
+                          {e.location !== undefined && <span className="text-fg-subtle"> — {e.location}</span>}
+                        </span>
+                        {!e.allDay && e.start !== undefined && (
+                          <span className="shrink-0 text-xs text-fg-muted">{timeOfEvent(e)}</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               )}
-            </div>
-            <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || newTitle.trim() === ""}>
-              {t("Add")}
-            </button>
-          </form>
+
+              {showNew && (
+                <form
+                  className="nc-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    createEvent();
+                  }}
+                >
+                  <p className="nc-form-title">{t("A new event on this day")}</p>
+                  <input className={portal.ui.classes.input} value={newTitle} placeholder={t("What it is")} aria-label={t("What it is")} onChange={(e) => setNewTitle(e.target.value)} />
+                  <div className="flex flex-wrap items-center gap-1">
+                    <label className="inline-flex items-center gap-1 text-xs">
+                      <input type="checkbox" checked={newAllDay} onChange={(e) => setNewAllDay(e.target.checked)} />
+                      {t("All day")}
+                    </label>
+                    {!newAllDay && (
+                      <>
+                        <span className="text-xs text-fg-subtle">{t("From")}</span>
+                        <input type="time" className={portal.ui.classes.inputSmall} value={newStartAt} aria-label={t("From")} onChange={(e) => setNewStartAt(e.target.value)} />
+                        <span className="text-xs text-fg-subtle">{t("to")}</span>
+                        <input type="time" className={portal.ui.classes.inputSmall} value={newEndAt} aria-label={t("To")} onChange={(e) => setNewEndAt(e.target.value)} />
+                      </>
+                    )}
+                  </div>
+                  <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || newTitle.trim() === ""}>
+                    {t("Add")}
+                  </button>
+                </form>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -507,11 +646,32 @@ export default function Calendar() {
                         {(() => { const d = new Date(td.due); return Number.isNaN(d.getTime()) ? td.due : dayWord(d); })()}
                       </span>
                     )}
+                    <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => deleteTodo(td)} aria-label={t("Take this todo away")}>
+                      ×
+                    </button>
                   </div>
                 </li>
               ))}
             </ul>
           )}
+
+          <form
+            className="nc-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              createTodo();
+            }}
+          >
+            <p className="nc-form-title">{t("A new todo")}</p>
+            <input className={portal.ui.classes.input} value={newTodoTitle} placeholder={t("What is to do")} aria-label={t("What is to do")} onChange={(e) => setNewTodoTitle(e.target.value)} />
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-fg-subtle">{t("Due")}</span>
+              <input type="date" className={portal.ui.classes.inputSmall} value={newTodoDue} aria-label={t("Due")} onChange={(e) => setNewTodoDue(e.target.value)} />
+            </div>
+            <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || newTodoTitle.trim() === ""}>
+              {t("Add")}
+            </button>
+          </form>
         </div>
       )}
 
@@ -520,11 +680,9 @@ export default function Calendar() {
   );
 }
 
-/** The seven-day step from a day key, as a Date in the local noon (a day's shadow does not reach across it). */
-function shift(key: string, by: number): Date {
-  const d = new Date(`${key}T12:00`);
-  d.setDate(d.getDate() + by);
-  return d;
+/** A month key as its row's words: the month long and its year. */
+function monthLabel(key: string): string {
+  return monthStart(key).toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
 /** A day key as a row's words: the weekday short and its date. */

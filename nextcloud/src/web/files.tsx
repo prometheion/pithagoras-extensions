@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LuChevronRight, LuExternalLink, LuFileText, LuFolder, LuShare2, LuUsers } from "react-icons/lu";
+import { LuChevronRight, LuExternalLink, LuFileText, LuFolder, LuEllipsis, LuShare2, LuTrash2, LuUsers } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, sayError, useNextcloudInstance } from "./api";
 
@@ -31,6 +31,14 @@ interface Preview {
   kind: "text" | "image" | "pdf";
   body?: string;
   dataUrl?: string;
+}
+
+/** What the trash list says of one deleted entry. */
+interface TrashRow {
+  id: string;
+  name?: string;
+  originalLocation?: string;
+  deletedAt?: number;
 }
 
 /** What the share tool says of one share, from its OCS words. */
@@ -121,6 +129,17 @@ export default function Files() {
   const [withMeShares, setWithMeShares] = useState<ShareRow[] | null>(null);
   const [shareProblem, setShareProblem] = useState<string | null>(null);
   const [boxFor, setBoxFor] = useState<string | null>(null);
+
+  // the tree's own making and moving: a new folder or file where it stands, the one entry whose action box is
+  // open under its row, and the trash as it stands beside the tree
+  const [newKind, setNewKind] = useState<null | "folder" | "file">(null);
+  const [newName, setNewName] = useState("");
+  const [busyNew, setBusyNew] = useState(false);
+  const [createProblem, setCreateProblem] = useState<string | null>(null);
+  const [actFor, setActFor] = useState<string | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashRows, setTrashRows] = useState<TrashRow[] | null>(null);
+  const [trashProblem, setTrashProblem] = useState<string | null>(null);
 
   // ---- the tree --------------------------------------------------------------
 
@@ -264,6 +283,49 @@ export default function Files() {
     if (withMe) loadWithMe();
   }, [withMe]);
 
+  const loadTrash = () => {
+    setTrashRows(null);
+    void api
+      .tool("nc_webdav_list_trash", {}, instance)
+      .then((result) => {
+        const data = partText(result).data;
+        const list = typeof data === "object" && data !== null ? (data as Rec).items : undefined;
+        setTrashRows(
+          Array.isArray(list)
+            ? list.map((e) => {
+                const r = e as Rec;
+                return { id: String(r.id ?? ""), name: strOf(r.name), originalLocation: strOf(r.original_location ?? r.originalLocation), deletedAt: numOf(r.deleted_at ?? r.deletedAt) };
+              })
+            : [],
+        );
+      })
+      .catch((error) => setTrashProblem(sayError(error)));
+  };
+
+  useEffect(() => {
+    if (trashOpen) loadTrash();
+  }, [trashOpen]);
+
+  /** What a new folder or file goes where it stands, and the list looks again at once. */
+  const createEntry = async () => {
+    const name = newName.trim();
+    if (busyNew || newKind === null || name === "") return;
+    const at = path === "" ? name : `${path}/${name}`;
+    setBusyNew(true);
+    setCreateProblem(null);
+    try {
+      if (newKind === "folder") await api.tool("nc_webdav_create_directory", { path: at }, instance);
+      else await api.tool("nc_webdav_write_file", { path: at, content: "" }, instance); // fail-closed on the server: no file is quietly overwritten
+      setNewKind(null);
+      setNewName("");
+      loadListing(path); // the folder as it stands now
+    } catch (error) {
+      setCreateProblem(sayError(error));
+    } finally {
+      setBusyNew(false);
+    }
+  };
+
   /** What is shared at one entry of the tree -- its box and its mark draw from this. */
   const sharesAt = (at: string): ShareRow[] => (allShares ?? []).filter((s) => s.target === at);
 
@@ -336,6 +398,45 @@ export default function Files() {
             </ul>
           )}
         </>
+      ) : trashOpen ? (
+        <>
+          <div className="nc-crumbs" aria-label={t("Where you are")}>
+            <button type="button" onClick={() => { setTrashOpen(false); }}>{t("Files")}</button>
+            <LuChevronRight size={11} className="text-fg-subtle" />
+            <span className="truncate">{t("Trash")}</span>
+          </div>
+          {trashRows === null ? (
+            trashProblem !== null ? (
+              <portal.ui.ErrorBanner onClose={() => setTrashProblem(null)}>{t("The trash could not be read: {error}", { error: trashProblem })}</portal.ui.ErrorBanner>
+            ) : (
+              <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
+            )
+          ) : trashRows.length === 0 ? (
+            <portal.ui.Empty>{t("The trash is empty.")}</portal.ui.Empty>
+          ) : (
+            <ul className="space-y-1">
+              {trashRows.map((entry) => (
+                <li key={entry.id} className="nc-file" title={entry.originalLocation ?? ""}>
+                  <LuTrash2 className="shrink-0 text-fg-muted" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm">{entry.name ?? t("(unnamed)")}</span>
+                    <span className="block truncate text-xs text-fg-subtle">
+                      {entry.originalLocation !== undefined ? `was ${entry.originalLocation}` : ""}
+                      {entry.deletedAt !== undefined ? ` · ${new Date(entry.deletedAt * 1000).toLocaleDateString()}` : ""}
+                    </span>
+                  </span>
+                  <button type="button" className={portal.ui.classes.primarySmall} onClick={() => {
+                    void api.tool("nc_webdav_restore_from_trash", { entry_id: entry.id }, instance)
+                      .then(() => loadTrash())
+                      .catch((error) => setTrashProblem(sayError(error)));
+                  }}>
+                    {t("Restore")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       ) : (
         <>
           {/* The path and the Shared-with-me entry stand on their own lines: a long path must not push
@@ -353,12 +454,41 @@ export default function Files() {
               ))}
             </div>
             <div>
-              <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => setWithMe(true)} title={t("What others hold on you")}>
+              <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => { setPreview(null); setTrashOpen(false); setWithMe(true); }} title={t("What others hold on you")}>
                 <LuUsers />
                 <span>{t("Shared with me")}</span>
               </button>
+              <button type="button" className={`nc-tab${trashOpen ? " nc-tab-on" : ""}`} onClick={() => { setPreview(null); setWithMe(false); setTrashOpen(true); }} title={t("What was taken away")}>
+                <LuTrash2 />
+                <span>{t("Trash")}</span>
+              </button>
             </div>
           </div>
+
+          {/* A new folder or file where the list stands: one word, and the list looks again at once. */}
+          {newKind === null ? (
+            <div className="flex gap-1">
+              <button type="button" className={portal.ui.classes.ghost} onClick={() => { setNewKind("folder"); setNewName(""); }}>
+                + {t("A new folder")}
+              </button>
+              <button type="button" className={portal.ui.classes.ghost} onClick={() => { setNewKind("file"); setNewName(""); }}>
+                + {t("A new file")}
+              </button>
+            </div>
+          ) : (
+            <form
+              className="flex items-center gap-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void createEntry();
+              }}
+            >
+              <input className={portal.ui.classes.input} value={newName} placeholder={newKind === "folder" ? t("The folder's name") : t("The file's name")} aria-label={newKind === "folder" ? t("The folder's name") : t("The file's name")} onChange={(e) => setNewName(e.target.value)} />
+              <button type="submit" className={portal.ui.classes.primarySmall} disabled={busyNew || newName.trim() === ""}>{t("Add")}</button>
+              <button type="button" className={portal.ui.classes.ghost} onClick={() => setNewKind(null)}>×</button>
+            </form>
+          )}
+          {createProblem !== null && <portal.ui.ErrorBanner onClose={() => setCreateProblem(null)}>{createProblem}</portal.ui.ErrorBanner>}
           {rows === null ? (
             fileProblem !== null ? (
               <portal.ui.ErrorBanner onClose={() => setFileProblem(null)}>{t("The files could not be read: {error}", { error: fileProblem })}</portal.ui.ErrorBanner>
@@ -386,11 +516,32 @@ export default function Files() {
                         className={`nc-row-share${shares.length > 0 ? " is-shared" : ""}`}
                         title={shares.length > 0 ? t("What is shared at this one") : t("Share this one")}
                         aria-label={t("Shares of this one")}
-                        onClick={() => setBoxFor(boxFor === row.path ? null : row.path)}
+                        onClick={() => { setActFor(null); setBoxFor(boxFor === row.path ? null : row.path); }}
                       >
                         <LuShare2 />
                       </button>
+                      <button
+                        type="button"
+                        className={`nc-row-share${actFor === row.path ? " is-shared" : ""}`}
+                        title={t("Move, copy or take it away")}
+                        aria-label={t("The things this one can be done to")}
+                        onClick={() => { setBoxFor(null); setActFor(actFor === row.path ? null : row.path); }}
+                      >
+                        <LuEllipsis />
+                      </button>
                     </div>
+                    {actFor === row.path && (
+                      <ActionsBox
+                        entry={row}
+                        instance={instance}
+                        onChanged={() => {
+                          setActFor(row.path); // a fresh box on the same path, so its inputs start from where it stands now
+                          loadListing(path);
+                          loadShareIndex();
+                        }}
+                        onClose={() => setActFor(null)}
+                      />
+                    )}
                     {boxFor === row.path && (
                       <SharingBox
                         entryPath={row.path}
@@ -580,6 +731,121 @@ function SharingBox({
           </p>
         )}
       </form>
+
+      {problem !== null && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
+    </div>
+  );
+}
+
+/** The box that opens under one entry of the tree for what it can be done to: moved (or renamed, which is a move
+ * by another word), copied, or taken away. It calls the same tools on the server and tells its list to look again.
+ * A move onto what already stands there fails closed; that is how it is meant. */
+function ActionsBox({
+  entry,
+  instance,
+  onChanged,
+  onClose,
+}: {
+  entry: FileRow;
+  instance?: string;
+  onChanged(): void;
+  onClose(): void;
+}) {
+  portal.locale.use();
+  const [moveTarget, setMoveTarget] = useState(entry.path);
+  const [copyTarget, setCopyTarget] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const move = async () => {
+    const to = moveTarget.trim().replace(/^\/+/, "");
+    if (busy || to === "" || to === entry.path) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      await api.tool("nc_webdav_move_resource", { source_path: entry.path, destination_path: to }, instance);
+      onChanged();
+      onClose();
+    } catch (error) {
+      setProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    const to = copyTarget.trim().replace(/^\/+/, "");
+    if (busy || to === "") return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      await api.tool("nc_webdav_copy_resource", { source_path: entry.path, destination_path: to }, instance);
+      setCopyTarget("");
+      onChanged();
+    } catch (error) {
+      setProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteEntry = async () => {
+    if (busy) return;
+    if (!window.confirm(t("Take {name} to the trash?", { name: entry.name }))) return;
+    setBusy(true);
+    setProblem(null);
+    try {
+      await api.tool("nc_webdav_delete_resource", { path: entry.path }, instance);
+      onClose();
+      onChanged();
+    } catch (error) {
+      setProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="nc-sharebox">
+      <div className="flex items-center gap-1">
+        <LuEllipsis className="shrink-0 text-fg-muted" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("What it can be done to")}</span>
+        <button type="button" className={portal.ui.classes.ghost} onClick={onClose} aria-label={t("Close this box")}>
+          ×
+        </button>
+      </div>
+
+      <form
+        className="nc-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void move();
+        }}
+      >
+        <p className="nc-form-title">{t("Move or rename")}</p>
+        <input className={portal.ui.classes.input} value={moveTarget} placeholder={entry.path} aria-label={t("The new path")} onChange={(e) => setMoveTarget(e.target.value)} />
+        <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || moveTarget.trim() === "" || moveTarget.trim().replace(/^\/+/, "") === entry.path}>
+          {t("Move")}
+        </button>
+      </form>
+
+      <form
+        className="nc-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void copy();
+        }}
+      >
+        <p className="nc-form-title">{t("Copy")}</p>
+        <input className={portal.ui.classes.input} value={copyTarget} placeholder={t("Where the copy goes")} aria-label={t("Where the copy goes")} onChange={(e) => setCopyTarget(e.target.value)} />
+        <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || copyTarget.trim() === ""}>
+          {t("Copy")}
+        </button>
+      </form>
+
+      <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void deleteEntry()}>
+        {t("Take it to the trash")}
+      </button>
 
       {problem !== null && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
     </div>

@@ -50,6 +50,7 @@ interface OpenMessage {
   html: boolean;
   attachments: Attachment[];
   seen: boolean;
+  flagged: boolean;
 }
 
 /** A unix-seconds moment in the reader's words, nothing where it stands at zero. */
@@ -73,6 +74,7 @@ const readBody = (message: Record<string, unknown>): OpenMessage => {
       mime: typeof a?.mime === "string" ? a.mime : undefined,
     })),
     seen: Boolean(flags.seen),
+    flagged: Boolean(flags.flagged),
   };
 };
 
@@ -83,6 +85,10 @@ const who = (list: Address[]): string => {
   if (first.label && first.email) return `${first.label} <${first.email}>`;
   return first.label ?? first.email ?? "";
 };
+
+/** The words of an address field, comma or point-comma separated, into what the mail tools take: an array of addresses. */
+const parseRecipients = (word: string): Address[] =>
+  word.split(/[,;]/).map((part) => part.trim()).filter((part) => part !== "").map((part) => ({ email: part }));
 
 export default function Mail() {
   portal.locale.use();
@@ -95,6 +101,17 @@ export default function Mail() {
   const [open, setOpen] = useState<{ id: number; message: OpenMessage } | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+
+  // the made message's words as they stand in the form: sent away or laid down as a draft where an account is picked
+  const [composing, setComposing] = useState(false);
+  const [cTo, setCTo] = useState("");
+  const [cCc, setCCc] = useState("");
+  const [cBcc, setCBcc] = useState("");
+  const [cSubject, setCSubject] = useState("");
+  const [cBody, setCBody] = useState("");
+  // where the opened message is moved to, and a short word said once after what stood behind it
+  const [moveBox, setMoveBox] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const loadAccounts = () => {
     setAccounts(null);
@@ -188,6 +205,82 @@ export default function Mail() {
     }
   };
 
+  const starToggle = async () => {
+    if (busy || open === null) return;
+    setBusy(true);
+    try {
+      await api.tool("nc_mail_set_flags", { message_id: open.id, flagged: !open.message.flagged }, instance);
+      setOpen({ ...open, message: { ...open.message, flagged: !open.message.flagged } });
+    } catch (error) {
+      setProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** The opened message laid away to the picked mailbox; its id is dead with the move, so the mailbox is read again. */
+  const moveOpen = () => {
+    if (busy || open === null || moveBox === null || mailboxId === null || moveBox === mailboxId) return;
+    setBusy(true);
+    setProblem(null);
+    void api
+      .tool("nc_mail_move_message", { message_id: open.id, destination_mailbox_id: moveBox }, instance)
+      .then(() => {
+        setOpen(null);
+        selectMailbox(mailboxId);
+      })
+      .catch((error) => setProblem(sayError(error)))
+      .finally(() => setBusy(false));
+  };
+
+  const deleteOpen = () => {
+    if (busy || open === null || mailboxId === null) return;
+    if (!window.confirm(t("Take this message to the trash?"))) return;
+    setBusy(true);
+    setProblem(null);
+    void api
+      .tool("nc_mail_delete_message", { message_id: open.id }, instance)
+      .then(() => {
+        setOpen(null);
+        selectMailbox(mailboxId);
+      })
+      .catch((error) => setProblem(sayError(error)))
+      .finally(() => setBusy(false));
+  };
+
+  /** The made message sent away or laid down as a draft, from the one account it stands under. */
+  const sendOrDraft = async (mode: "send" | "draft") => {
+    if (busy || accountId === null) return;
+    const to = parseRecipients(cTo);
+    if (to.length === 0) {
+      setProblem(t("Give the message at least one recipient."));
+      return;
+    }
+    // the mail tools take their recipients as a JSON array of {"label", "email"} objects, as a word
+    const args: Record<string, unknown> = { account_id: accountId, to: JSON.stringify(to), subject: cSubject.trim(), body: cBody };
+    const cc = parseRecipients(cCc);
+    if (cc.length > 0) args.cc = JSON.stringify(cc);
+    const bcc = parseRecipients(cBcc);
+    if (bcc.length > 0) args.bcc = JSON.stringify(bcc);
+    setBusy(true);
+    setProblem(null);
+    try {
+      await api.tool(mode === "send" ? "nc_mail_send_message" : "nc_mail_save_draft", args, instance);
+      setComposing(false);
+      setCTo("");
+      setCCc("");
+      setCBcc("");
+      setCSubject("");
+      setCBody("");
+      if (mode === "draft") setNotice(t("The draft is laid down in the account's Drafts."));
+      selectAccount(accountId); // the mailboxes' counts as they stand now
+    } catch (error) {
+      setProblem(sayError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // ---- the open message ------------------------------------------------------
   if (open !== null) {
     const m = open.message;
@@ -198,10 +291,34 @@ export default function Mail() {
             ← {t("Messages")}
           </button>
           <span className="flex-1" />
+          <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void starToggle()} title={m.flagged ? t("Take the star off") : t("Star this message")}>
+            {m.flagged ? "★" : "☆"}
+          </button>
           <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void toggleRead()}>
             {m.seen ? t("Mark unread") : t("Mark read")}
           </button>
+          <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void deleteOpen()}>
+            {t("Delete")}
+          </button>
         </div>
+        {mailboxes !== null && mailboxes.length > 1 && (
+          <div className="flex items-center gap-1">
+            <portal.ui.Select
+              size="sm"
+              className="min-w-0 flex-1"
+              value={moveBox === null ? "" : String(moveBox)}
+              aria-label={t("Move this message to")}
+              onChange={(v) => setMoveBox(v === "" ? null : Number(v))}
+              options={([
+                { value: "", label: t("Move this message to…") },
+                ...mailboxes.filter((box) => box.databaseId !== mailboxId).map((box) => ({ value: String(box.databaseId), label: box.displayName ?? box.name })),
+              ] as { value: string; label: string }[])}
+            />
+            <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || moveBox === null} onClick={() => void moveOpen()}>
+              {t("Move")}
+            </button>
+          </div>
+        )}
         <div className="nc-share">
           <p className="nc-note-text" style={{ fontWeight: 600, marginBottom: "0.2rem" }}>
             {m.subject || "(no subject)"}
@@ -279,9 +396,44 @@ export default function Mail() {
   if (accountId !== null) {
     return (
       <div className="space-y-2">
-        <button type="button" className={portal.ui.classes.ghost} onClick={() => setAccountId(null)}>
-          ← {t("Accounts")}
-        </button>
+        <div className="flex items-center gap-1">
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => setAccountId(null)}>
+            ← {t("Accounts")}
+          </button>
+          <span className="flex-1" />
+          <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => { setComposing((c) => !c); setNotice(null); }}>
+            {composing ? "−" : "+"} {t("A new message")}
+          </button>
+        </div>
+        {notice !== null && <p className="text-xs text-fg-muted">{notice}</p>}
+        {composing && (
+          <form
+            className="nc-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void sendOrDraft("send");
+            }}
+          >
+            <input className={portal.ui.classes.input} value={cTo} placeholder={t("To, comma-separated")} aria-label={t("To, comma-separated")} onChange={(e) => setCTo(e.target.value)} />
+            <div className="flex gap-1">
+              <input className={portal.ui.classes.input} value={cCc} placeholder={t("Cc (optional)")} aria-label={t("Cc (optional)")} onChange={(e) => setCCc(e.target.value)} />
+              <input className={portal.ui.classes.input} value={cBcc} placeholder={t("Bcc (optional)")} aria-label={t("Bcc (optional)")} onChange={(e) => setCBcc(e.target.value)} />
+            </div>
+            <input className={portal.ui.classes.input} value={cSubject} placeholder={t("Subject")} aria-label={t("Subject")} onChange={(e) => setCSubject(e.target.value)} />
+            <textarea className="nc-note-text" rows={6} value={cBody} placeholder={t("The message's text")} aria-label={t("The message's text")} onChange={(e) => setCBody(e.target.value)} />
+            <div className="flex gap-1">
+              <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || parseRecipients(cTo).length === 0}>
+                {t("Send")}
+              </button>
+              <button type="button" className={portal.ui.classes.ghost} disabled={busy || parseRecipients(cTo).length === 0} onClick={() => void sendOrDraft("draft")}>
+                {t("Save as draft")}
+              </button>
+              <button type="button" className={portal.ui.classes.ghost} onClick={() => setComposing(false)}>
+                {t("Cancel")}
+              </button>
+            </div>
+          </form>
+        )}
         {mailboxes === null ? (
           problem ? (
             <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The mailboxes could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>

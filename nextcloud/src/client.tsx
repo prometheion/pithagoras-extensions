@@ -51,7 +51,8 @@ const TAB_ICONS: Record<string, ComponentType> = {
  * has nothing to say (no Nextcloud set) it says that, with the way to where the keys are kept. */
 function NextcloudPanel({ panel }: PanelProps) {
   portal.locale.use();
-  const [tab, setTab] = useState<string>("shopping");
+  // Files stands first and is the view the panel opens on (Simeon, 2026-10-30).
+  const [tab, setTab] = useState<string>("files");
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
   const [selected, setSelected] = useState<string | undefined>(undefined);
   useEffect(() => {

@@ -79,17 +79,19 @@ export interface PanelTab {
 
 /** The tabs, in their order: what the families of today stand under -- with the ones an earlier version of this
  * extension never showed (mail, news and collectives among them) beside them. */
+/** The standing order of the tabs (Simeon, 2026-10-30): Files stands first and is the default view,
+    then Calendar, Contacts, Notes, Deck, Collectives, Cookbook, Shopping List, Mail, News. */
 export const TABS: PanelTab[] = [
-  { id: "shopping", label: "Shopping List", capabilityIds: ["shopping"] },
-  { id: "cookbook", label: "Cookbook", capabilityIds: ["cookbook"] },
-  { id: "notes", label: "Notes", capabilityIds: ["notes"] },
   { id: "files", label: "Files", capabilityIds: ["files", "sharing"] },
-  { id: "deck", label: "Deck", capabilityIds: ["deck"] },
   { id: "calendar", label: "Calendar", capabilityIds: ["calendar"] },
   { id: "contacts", label: "Contacts", capabilityIds: ["contacts"] },
+  { id: "notes", label: "Notes", capabilityIds: ["notes"] },
+  { id: "deck", label: "Deck", capabilityIds: ["deck"] },
+  { id: "collectives", label: "Collectives", capabilityIds: ["collectives"] },
+  { id: "cookbook", label: "Cookbook", capabilityIds: ["cookbook"] },
+  { id: "shopping", label: "Shopping List", capabilityIds: ["shopping"] },
   { id: "mail", label: "Mail", capabilityIds: ["mail"] },
   { id: "news", label: "News", capabilityIds: ["news"] },
-  { id: "collectives", label: "Collectives", capabilityIds: ["collectives"] },
 ];
 
 /** Whether one tab is offered for an instance's standing: where what the endpoint provides is known, at least one

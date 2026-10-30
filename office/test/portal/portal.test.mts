@@ -154,7 +154,7 @@ test("the editor's traffic reaches the Document Server through the way in, told 
 test("the tools are in a project's chats, read the project's own document through the portal's files, and not in a plain chat", async () => {
   assert.deepEqual(registered(chat(process.env.WORKSPACE_ROOT!)), [], "a chat of no agent's or project's folder has none");
   const inProject = registered(chat(project));
-  assert.deepEqual(inProject.map((t) => t.name).sort(), ["office_comments", "office_create", "office_edit", "office_list", "office_read"]);
+  assert.deepEqual(inProject.map((t) => t.name).sort(), ["office_comments", "office_create", "office_edit", "office_list", "office_read", "office_screenshot"]);
   for (const t of inProject) assert.equal(t.guard.outside, true, t.name);
   const tool = (name: string) => inProject.find((t) => t.name === name);
   const listed = await tool("office_list").execute("c1", {});

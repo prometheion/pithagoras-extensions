@@ -52,6 +52,7 @@ import { saveNow } from "./editing";
 import { holdWayBack } from "./back";
 import { registerTools } from "./tools";
 import * as seat from "./seat";
+import * as cdp from "./cdp";
 import { PLUGIN_GUID } from "./seat-page";
 import { floatingTag } from "./office-ui";
 import { writesFromHere } from "../../shared/proxy";
@@ -390,7 +391,8 @@ export function buildEditorConfig(dd: string, secret: string, docId: string, as:
     // The one editor with a plugin: Office's own, which makes the agent's edits (seat-page.ts). It runs in the agents'
     // browser on its own network, on the Document Server's origin there (the relay's way in), where no person's session
     // is.
-    editorConfig.customization = { macros: false, plugins: true, compactHeader: true };
+    // No spell check: nobody reads its squiggles, and they would be in the agent's screenshots (office_screenshot).
+    editorConfig.customization = { macros: false, plugins: true, compactHeader: true, features: { spellcheck: { mode: false, change: false } } };
     editorConfig.plugins = { pluginsData: [`${as.pluginUrl}config.json`], autostart: [PLUGIN_GUID] };
     return { config, ticketUrl: `${base}/doc/${ticket}`, key };
   }
@@ -987,6 +989,8 @@ function wireSeats(dd: string, secret: string): void {
     },
     listenerOrigin: () => `http://${container.NAMES.relay}:${container.BACK_PORT}`,
     dsOrigin: agentsDs,
+    // A picture through the browser's debugging port, from the relay (cdp.ts).
+    capture: (editorId, target) => cdp.shot(editorId, target, { exec: (cmd, ms) => container.execRelay(cmd, ms), browser: container.NAMES.agent }),
     log: logLine,
   });
   // A Document Server (re)started ends every session the agents' editors were in, and with them the chats of the

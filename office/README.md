@@ -21,8 +21,10 @@ This extension is not made or endorsed by Ascensio System SIA. "ONLYOFFICE" name
 - A Linux host with Docker Engine 28.0 or later that the portal can reach (its socket): the portal on the machine
   itself, or in Docker (both of Pithagoras' Compose files). On macOS or Windows the portal has to run in Docker.
 - Recommended: 1 GB of RAM.
-  About 700 MiB were measured while one document is edited. The settings page shows the memory all of Office uses
-  while it runs: the Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
+  About 700 MiB were measured while one document is edited, and 770 MiB to 1.05 GB with three documents open in
+  the agents' editors (the most there are at once: 540-975 MiB of it the agents' browser), 800-940 MiB with people's
+  editors of two of them open as well. The settings page shows the memory all of Office uses while it runs: the
+  Document Server's and, while it runs, the agents' browser's. That browser starts on demand, stops
   10 minutes after its last editor closed, and is capped at 3 GB. The figure is what `docker stats` shows: the
   containers' memory less the file cache the kernel can drop again.
 - Disk for the images (`onlyoffice/documentserver`, several GB, Node's `node:22.23.4-alpine3.23`, about 50 MB, for the
@@ -74,8 +76,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
   as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`,
-  `office_read`, `office_edit` and `office_comments`. An agent sees the documents in its own folder (its home, or its project's) and
-  the ones it was granted by a mention; another agent's, and the files in another agent's or project's folder, are not
+  `office_read`, `office_edit`, `office_comments` and `office_screenshot`. An agent sees the documents in its own
+  folder (its home, or its project's) and the ones it was granted by a mention; another agent's, and the files in
+  another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
   goes into its folder and belongs to it, not to one of its chats. A file in its folder is read
   through the portal as the agent itself would read it: with the sandbox on, one the agent could not read is refused,
@@ -110,6 +113,30 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   closes for a fourth); the browser stops ten minutes after its last editor closed, and starts again with the next
   call (a few seconds). Where you stopped Office, `office_read` reads the saved file and says so, and `office_edit` is
   refused until it runs again: there is no other way to write.
+  **The agent sees what it made**: `office_screenshot` gives it a picture (JPEG) of a document as its own editor shows
+  it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still and
+  drawn once the document's pictures have loaded (the editor shows a document before its pictures come, and draws
+  nothing where one is missing: the picture waits up to 6 s for them, and where one has still not come, or could not
+  be loaded, takes the page as it is and says so to the agent); or
+  a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
+  refused beyond that with the largest range from its first cell that fits (about 23 columns by 41 rows of default
+  cells at 100 %, 30 by 55 at 75 %); hidden rows and columns are left out. By default a sheet's used range from A1, as
+  much as fits. 1,024 px on the longer side (`large`: as large as the editor draws it, up to 1,568 for a sheet range,
+  about 1,170 for a Word page). The picture is drawn from the canvases the editor draws the page or the cells on (a
+  sheet's with its charts and pictures), not from the one above them where it draws selections, cursors and the names
+  of the people in the document: so it shows that document alone, with no other editor in it, and no person's
+  selection, cursor or name (measured with a person selecting and typing in the same sheet, and with their cursor on
+  the same page). The agent's own active cell shows only as its highlighted column letter and row number. The text
+  the picture shows comes with it, as office_read gives it, so the guard reads it: a Word page's body text (of a table
+  over many pages, the rows on the page), or the cells of the range that are shown; 20,000 characters at most. Only in
+  the picture, so the guard does not read them: a page's header and footer, text boxes, shapes and charts, text inside
+  the document's own pictures, and a long text that runs into the range from a cell outside it. A model that cannot
+  take pictures is refused (`error:no_images`) before anything is done. A picture costs the model about 1,000 to
+  1,600 input tokens on every later turn of the chat. Taking one moves the agent's own view (its page, zoom, sheet and
+  selection), which you may see as its cursor moving; pictures are taken one at a time in the agents' browser, and a
+  sheet a person hid, moved or renamed meanwhile is not shown (`sheet_changed`). The page is laid out as the editor
+  lays it out: with its fonts (Carlito for Calibri, for instance), so a page break may fall elsewhere than in desktop
+  Word.
   A save that would overwrite a newer revision (the file changed on disk while it was open: a script, a git pull) is
   not lost and does not overwrite it: it is kept beside the document as "<title> (conflict <date time>)", and the audit
   log says so; the agent is told, and its editor of that document closes. A save the Document Server could not hand
@@ -198,17 +225,26 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   out of reach), and the extension's listener through the relay's way back; nothing else, never the portal, its pages
   or anyone's session (a portal in a container of its own is on the Document Server's network, not on this one). It
   runs as a user that is not root, with none of the kernel's capabilities,
-  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most, and no
-  debugging port. Chromium's own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses:
-  the container is the boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
+  no new privileges, a read-only root, its profile in memory, 3 GB of memory and 512 processes at most. Chromium's
+  own sandbox is off (`--no-sandbox`), as it needs what the default seccomp profile refuses: the container is the
+  boundary, for a hostile file the editor renders. It opens one page, the seat page, from the
   extension's listener through the relay, under a secret that is new at every start of the server half and is only in
   its command line (`/seat/<secret>/`), and that page opens an editor for each document an agent works in, with a
   config the server half signs. Those configs are the only ones with a plugin: Office's own (people's editors keep
   plugins and macros off, signed). The plugin takes the agent's edits from the listener under a token of its editor's
-  (`/plugin/<token>/`), and runs one of four fixed commands with them as data: the model never sends code. Anything
+  (`/plugin/<token>/`), and runs one of its fixed commands with them as data: the model never sends code. Anything
   else on those paths is answered as an unknown address. The agent's write permission is checked before each edit and
   when its editor opens (one it may not change opens read-only), and a file in a folder the agent could not read is
   never opened.
+  **Its debugging port** (CDP, which controls the whole browser and with it every document an agent has open) is for
+  `office_screenshot` alone. Chromium opens it on its own loopback (127.0.0.1:9223) only, and `socat` passes port
+  9222 on the agents' network to it; nothing publishes it. On that network only the relay is besides the browser, and
+  the port's one user is a fixed Node script that the server half runs in the relay with `docker exec` (which needs
+  the portal's Docker access, so nothing on the host or in a container of anybody else's reaches it). The script's
+  only argument is data: which editor, and the page or range, which the server half checked and which reaches the
+  editor as an argument, never as code. A page in the browser cannot use the port: Chromium refuses a page's request
+  for its list of pages, and a WebSocket that names an origin (none is allowed). The Document Server and the island
+  are not on that network.
   What this browser does not keep apart: the editors of every document the agents have open (three at most, of any
   agent) are in that one page, on one origin, so a document that got a script running in its editor (a bug of
   OnlyOffice's own; macros are off) reaches the other documents open there at that moment. And `office_read` reads
@@ -302,7 +338,7 @@ agents' editor.
   editor that may only comment.
 - A cell comment's answer is posted once the comment is five seconds old: a reply on a cell comment made a moment ago
   was now and then lost. A reply that does not reach the thread is posted again, a few times.
-- The agents' browser opens for an answer as it does for the tools (about 0.3-0.45 GB while it runs), and an editor
+- The agents' browser opens for an answer as it does for the tools (about 0.3-0.55 GB while it runs), and an editor
   opened only to post closes after a minute.
 - A file above 512 MiB is not indexed.
 - One Document Server for the portal, run by this extension. A container of that name that nobody owns (one from
@@ -318,6 +354,11 @@ agents' editor.
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
+- `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
+  100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
+  editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most. A Word picture
+  waits for all of the document's pictures, not only the page's (the editor does not say which are on a page), so a
+  slow picture elsewhere in the document delays it, up to 6 s. A sheet's picture does not wait for pictures.
 
 ## Licences
 
@@ -355,7 +396,8 @@ that the agent's commands rely on); they are opt-in, as they need Docker Engine 
 `real-portal.test.mts` proves the same in a real portal: the portal's own server started from that folder (built with
 `npm run build` there), Docker for extensions and Office installed into it through `POST /api/packages`, a person in
 the real Office page in Chromium, and the agent's office tools called from a chat whose model is a script
-(`scripted-model.mjs`, no model server needed). `OFFICE_PORTAL_MODE=container` runs the portal in a container of its
+(`scripted-model.mjs`, no model server needed; one of its two models says it takes pictures, and keeps the pictures
+pi gives it, so `office_screenshot`'s JPEGs are checked as a model gets them). `OFFICE_PORTAL_MODE=container` runs the portal in a container of its
 own (Node's alpine image, with this machine's Docker socket), on a network of its own:
 
 ```sh

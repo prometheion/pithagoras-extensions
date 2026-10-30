@@ -15,6 +15,7 @@ import JSZip from "jszip";
 import { parseDocx } from "../../src/ooxml.ts";
 import { templateDocx, within } from "../../src/store.ts";
 import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
+import { jpegSize, SHOT_MAX_BYTES, SHOT_SIDE } from "../../src/cdp.ts";
 
 /**
  * Office in a real portal, end to end: the portal's own server (`core/server/dist/index.js` of PITHAGORAS_DIR, built),
@@ -41,13 +42,21 @@ import { AGENT_IMAGE, AGENT_IMAGE_TAG } from "../../src/container.ts";
  * before the portal starts) was moved into the default agent's home; the editor's chat of a document made on the tab is
  * answered by the default agent.
  *
+ * Case n is office_screenshot from a chat: a model that says it takes pictures (scripted-eye) gets a Word page and a
+ * sheet range of its agent's documents, each one JPEG within the caps (the very bytes pi gave the model, which the
+ * scripted model keeps) with the text it shows; a person's editor of the document is as it was after the shot; a model
+ * without image input gets error:no_images, a document of another agent is not found; two agents' shots at once are
+ * both taken, the relay's picture runs one after the other (Docker's events); and the agents' browser's debugging port
+ * answers neither the machine and a person's browser on it nor a page in the agents' browser.
+ *
  * Cases h to l are comments and the editor's chat as the way to talk to agents, in Word and a spreadsheet: mentions
  * from the editor's list and typed by hand, answers in the thread and in the editor's chat, a thread's chat kept
  * through replies, resolve and unresolve and gone after a delete, messages that come during a run given together, no
  * question tool, none of these chats listed, and limits set on the Office page.
  *
  * OFFICE_E2E_SHOTS=<a folder> keeps pictures there: Settings → Office after Start, the chat with a document open in
- * its Office panel, the panel made narrow, the mention lists, answered threads and the editors' chats. OFFICE_E2E_PULL_AGENT=1 removes the agents' editor's image
+ * its Office panel, the panel made narrow, the mention lists, answered threads and the editors' chats, and case n's
+ * office_screenshot pictures with the person's page before and after them. OFFICE_E2E_PULL_AGENT=1 removes the agents' editor's image
  * (`chromedp/headless-shell`, about 540 MB) before Start, so the page's Start is seen downloading it.
  */
 
@@ -106,8 +115,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
   writeFileSync(path.join(officeData, "docs", LEGACY, "Old minutes.docx"), await templateDocx());
   writeFileSync(path.join(officeData, "index.json"), JSON.stringify({ version: 1, docs: [{ docId: LEGACY, title: "Old minutes", ext: "docx", createdAt: 1, updatedAt: 1, sizeBytes: 1, mtimeMs: 1, owner: null, grants: [] }] }));
 
-  // The chat's model is the script, the only one there is.
-  writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", contextWindow: 32768, maxTokens: 4096 }] } } }));
+  // The chat's model is the script: `scripted` reads text only, `scripted-eye` (case n's) says it takes pictures too,
+  // so pi gives it a tool's image parts.
+  writeFileSync(path.join(piAgent, "models.json"), JSON.stringify({ providers: { scripted: { baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "none", models: [{ id: "scripted", name: "scripted", input: ["text"], contextWindow: 32768, maxTokens: 4096 }, { id: "scripted-eye", name: "scripted-eye", input: ["text", "image"], contextWindow: 32768, maxTokens: 4096 }] } } }));
   writeFileSync(path.join(piAgent, "settings.json"), JSON.stringify({ defaultProvider: "scripted", defaultModel: "scripted" }));
   // The portal runs `pi` for installs, as a real install has it on PATH: the one of its own packages.
   writeFileSync(path.join(bin, "pi"), `#!/bin/sh\nexec node "${PITHAGORAS}/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" "$@"\n`, { mode: 0o755 });
@@ -175,17 +185,21 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     return made.body.id as string;
   };
   let scripts = 0;
-  const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]): Promise<string[]> => {
+  /** A picture the model was given after a tool result (scripted-model.mjs keeps it as a file). */
+  type Given = { result: number; file: string; mimeType: string; bytes: number };
+  const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]): Promise<string[]> => (await ran(chatId, calls)).results;
+  /** `say`, with the pictures the model was given. */
+  const ran = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]): Promise<{ results: string[]; images: Given[] }> => {
     const id = `s${++scripts}-${process.pid}`;
     const sent = await json(`${origin}/api/sessions/${chatId}/prompt`, { method: "POST", body: JSON.stringify({ message: `Do as scripted. SCRIPT#${id} <<<${JSON.stringify(calls)}>>>` }) });
     assert.equal(sent.status, 200, JSON.stringify(sent.body));
-    let done: { results: string[] } | undefined;
+    let done: { results: string[]; images: Given[] } | undefined;
     await until(() => {
       done = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.id === id && l.final);
       return !!done;
     }, 180_000);
     assert.ok(done, `the chat ran script ${id} to its end (portal log: ${path.join(root, "portal.log")})`);
-    return done.results;
+    return done;
   };
 
   let browser: Browser;
@@ -1174,6 +1188,171 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.equal(realpathSync(behind.body.workspace), home, "the chat behind it works in the default agent's home");
     await shot(editor, "owned-tab-document-chat");
     await personCloses(editor);
+  });
+
+  /** A chat of `agent` (the default one where none is named) whose model takes pictures (scripted-eye). */
+  const eyeChat = async (agent?: string) => {
+    const made = await json(`${origin}/api/sessions`, { method: "POST", body: JSON.stringify(agent ? { agent } : {}) });
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    const set = await json(`${origin}/api/sessions/${made.body.id}/config`, { method: "POST", body: JSON.stringify({ provider: "scripted", modelId: "scripted-eye" }) });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    return made.body.id as string;
+  };
+  /** The one picture the model got with tool result `n`: a JPEG within the caps (the longer side 1,024 px at most, 1 MiB
+   * at most), kept where OFFICE_E2E_SHOTS names a folder. */
+  const pictureOf = (given: { images: Given[] }, n: number, name: string) => {
+    const mine = given.images.filter((i) => i.result === n);
+    assert.equal(mine.length, 1, `one picture with tool result ${n}: ${JSON.stringify(given.images)}`);
+    const [image] = mine;
+    assert.equal(image.mimeType, "image/jpeg");
+    const bytes = readFileSync(image.file);
+    const size = jpegSize(bytes);
+    assert.ok(size, "a JPEG with its size in its frame header");
+    assert.ok(Math.max(size.width, size.height) <= SHOT_SIDE.normal, `the longer side within ${SHOT_SIDE.normal} px: ${JSON.stringify(size)}`);
+    assert.ok(bytes.length <= SHOT_MAX_BYTES, `within ${SHOT_MAX_BYTES} bytes: ${bytes.length}`);
+    console.log(`n. ${name}: ${size.width} x ${size.height}, ${bytes.length} bytes`);
+    if (process.env.OFFICE_E2E_SHOTS) writeFileSync(path.join(process.env.OFFICE_E2E_SHOTS, `screenshot-${name}-${mode}.jpg`), bytes);
+    return { ...size, bytes };
+  };
+  /** What the person's Word editor shows of its own view, read without touching it: where its caret is on the screen
+   * (which moves with the view's scroll too), the page count, and its status bar's page and zoom. */
+  const personView = (frame: Frame) =>
+    frame.evaluate(`(function () {
+      var c = document.getElementById("id_target_cursor"), text = function (id) { var e = document.getElementById(id); return e ? e.textContent.trim() : null; };
+      return JSON.stringify({ caret: c ? [c.style.left, c.style.top, c.style.height] : null, pages: window.Asc.editor.getCountPages(), page: text("label-pages"), zoom: text("label-zoom") });
+    })()`) as Promise<string>;
+  /** The relay's runs of the picture client (cdp.ts) between `since` and `until`, as Docker recorded them: start and end. */
+  const shotRuns = (since: number, until: number) => {
+    const lines = execFileSync("docker", ["events", "--since", String(since / 1000), "--until", String(until / 1000), "--filter", `container=${PREFIX}-relay`, "--filter", "event=exec_start", "--filter", "event=exec_die", "--format", "{{json .}}"], { encoding: "utf8" }).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const runs = new Map<string, { start?: number; end?: number }>();
+    for (const e of lines) {
+      const id = e.Actor?.Attributes?.execID as string;
+      const run = runs.get(id) ?? {};
+      if (/^exec_start: node --no-warnings -e /.test(e.Action ?? e.status ?? "")) run.start = e.timeNano / 1e6;
+      if (/^exec_die/.test(e.Action ?? e.status ?? "")) run.end = e.timeNano / 1e6;
+      runs.set(id, run);
+    }
+    return [...runs.values()].filter((r): r is { start: number; end: number } => r.start !== undefined && r.end !== undefined).sort((a, b) => a.start - b.start);
+  };
+
+  test("n: office_screenshot from a chat whose model takes pictures: a Word page and a sheet range of its agent's documents, each one JPEG within the caps with the text it shows; a person's editor of the Word document unchanged by it; a model without image input gets error:no_images, a document of another agent not_found; two agents' shots at once both taken, one after the other; the debugging port reached neither from a person's browser nor from a page in the agents' browser", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    const word = await newDoc("Shot report", "word");
+    const sheet = await newDoc("Shot numbers", "cell");
+    const [wrote, filled] = await say(eye, [
+      { name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Quarterly shot report" }, { after: "Quarterly shot report", paragraphs: ["Revenue grew in every region."] }, { after: "Revenue grew in every region.", table: [["Region", "Revenue"], ["North", "120"], ["South", "95"]] }] } },
+      { name: "office_edit", arguments: { id: sheet, ops: [{ range: "A1:C4", values: [["Region", "Q1", "Q2"], ["North", 120, 130], ["South", 95, 101], ["Total", "=SUM(B2:B3)", "=SUM(C2:C3)"]] }] } },
+    ]);
+    assert.match(wrote, /Edited "Shot report"/);
+    assert.match(filled, /Edited "Shot numbers"/);
+
+    // A person has the Word document open and typed a line they have not saved.
+    const { page, frame } = await personOpens(word, "word");
+    assert.ok(await until(async () => (await personText(frame)).includes("Quarterly shot report"), 30_000), "the document is loaded");
+    await frame.locator("#editor_sdk").click({ position: { x: 400, y: 120 } });
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await delay(500);
+    await page.keyboard.type("Typed by the person", { delay: 25 });
+    await delay(2500);
+    const viewBefore = await personView(frame);
+    const pictureBefore = await page.screenshot();
+
+    const t0 = Date.now();
+    const shots = await ran(eye, [
+      { name: "office_screenshot", arguments: { id: word } },
+      { name: "office_screenshot", arguments: { id: sheet, range: "A1:C4" } },
+    ]);
+    console.log(`n. two shots in one run: ${Date.now() - t0} ms\nn. Word: ${JSON.stringify(shots.results[0])}\nn. sheet: ${JSON.stringify(shots.results[1])}`);
+    assert.match(shots.results[0], new RegExp(`Page 1 of 1 of "Shot report" \\(id ${word}\\), as your editor shows it now\\. Its text:\\n\\n\\[1\\] Quarterly shot report\\n\\[2\\] Revenue grew in every region\\.\\n\\[3\\] table`));
+    assert.match(shots.results[0], /North[\s\S]*120[\s\S]*South[\s\S]*95/);
+    assert.match(shots.results[1], /Sheet "Sheet1" A1:C4 at 100 %, as your editor shows it now\. Its cells:\n\nA1: "?Region"?\n/);
+    assert.match(shots.results[1], /\nB4: 215\b/);
+    const page1 = pictureOf(shots, 0, "word-page");
+    const range = pictureOf(shots, 1, "sheet-range");
+    assert.ok(page1.height > page1.width, "a Word page stands upright");
+    assert.ok(range.width > range.height, "four rows of three columns are wider than high");
+
+    // The person's editor: not reloaded, its caret, page count and zoom as they were, their line still there. (Their
+    // page may differ by one thing: the agent's cursor, which the person sees as a co-author's, is where the agent's
+    // editor looked for the page.)
+    await delay(1000);
+    const viewAfter = await personView(frame);
+    const pictureAfter = await page.screenshot();
+    console.log(`n. the person's view before: ${viewBefore}\nn. after: ${viewAfter}\nn. the person's page the same to the byte: ${pictureBefore.equals(pictureAfter)}`);
+    if (process.env.OFFICE_E2E_SHOTS) {
+      writeFileSync(path.join(process.env.OFFICE_E2E_SHOTS, `screenshot-person-before-${mode}.png`), pictureBefore);
+      writeFileSync(path.join(process.env.OFFICE_E2E_SHOTS, `screenshot-person-after-${mode}.png`), pictureAfter);
+    }
+    assert.equal(viewAfter, viewBefore, "the person's view is as it was");
+    await notReloaded(page, frame);
+    assert.match(await personText(frame), /Quarterly shot report[\s\S]*Typed by the person/);
+
+    // A model without image input: refused before anything is done, and no picture.
+    const blind = await chat();
+    const refused = await ran(blind, [{ name: "office_screenshot", arguments: { id: word } }]);
+    console.log(`n. a model without image input: ${JSON.stringify(refused.results[0])}`);
+    assert.match(refused.results[0], /error:no_images scripted cannot see images; office_read gives the document's text/);
+    assert.deepEqual(refused.images, []);
+
+    // Another agent, Iris, with a document of its own: invisible to the default agent's chat.
+    const iris = await json(`${origin}/api/agents`, { method: "POST", body: JSON.stringify({ name: "Iris" }) });
+    assert.equal(iris.status, 200, JSON.stringify(iris.body));
+    const irisChat = await eyeChat(iris.body.id);
+    const [made] = await say(irisChat, [{ name: "office_create", arguments: { title: "Iris plan", type: "word" } }]);
+    const irisDoc = /id ([\w-]+),/.exec(made)![1];
+    const [irisWrote] = await say(irisChat, [{ name: "office_edit", arguments: { id: irisDoc, ops: [{ quote: "New document", replacement: "Iris keeps this plan" }] } }]);
+    assert.match(irisWrote, /Edited "Iris plan"/);
+    const unseen = await ran(eye, [{ name: "office_screenshot", arguments: { id: irisDoc } }]);
+    console.log(`n. another agent's document: ${JSON.stringify(unseen.results[0])}`);
+    assert.match(unseen.results[0], /error:not_found There is no document with that id/);
+    assert.deepEqual(unseen.images, []);
+
+    // Two agents' shots at once: both taken, the browser's one at a time.
+    const since = Date.now() - 1000;
+    const t1 = Date.now();
+    const [mine, theirs] = await Promise.all([ran(eye, [{ name: "office_screenshot", arguments: { id: sheet, range: "A1:B3" } }]), ran(irisChat, [{ name: "office_screenshot", arguments: { id: irisDoc } }])]);
+    console.log(`n. two shots at once: ${Date.now() - t1} ms\nn. the default agent's: ${JSON.stringify(mine.results[0])}\nn. Iris's: ${JSON.stringify(theirs.results[0])}`);
+    assert.match(mine.results[0], /Sheet "Sheet1" A1:B3 at 100 %/);
+    assert.match(theirs.results[0], /Page 1 of 1 of "Iris plan" .*\n\n\[1\] Iris keeps this plan/s);
+    pictureOf(mine, 0, "at-once-sheet");
+    pictureOf(theirs, 0, "at-once-word");
+    await delay(1000);
+    const runs = shotRuns(since, Date.now());
+    console.log(`n. the relay's picture runs: ${JSON.stringify(runs.map((r) => [Math.round(r.start - since), Math.round(r.end - since)]))}`);
+    assert.equal(runs.length, 2, "two runs of the picture client");
+    assert.ok(runs[1].start >= runs[0].end, "the second began after the first had ended");
+
+    // The debugging port: the agents' browser's address on its network, from the person's browser (the Office page).
+    const agent = JSON.parse(execFileSync("docker", ["inspect", `${PREFIX}-agent`], { encoding: "utf8" }))[0];
+    assert.deepEqual(Object.keys(agent.NetworkSettings.Networks), [`${PREFIX}-agents`], "the browser is on the agents' network alone");
+    assert.ok(!Object.values(agent.HostConfig.PortBindings ?? {}).some((b) => Array.isArray(b) && b.length), "and publishes no port");
+    const ip = agent.NetworkSettings.Networks[`${PREFIX}-agents`].IPAddress as string;
+    const browserPath = execFileSync("docker", ["exec", `${PREFIX}-relay`, "node", "-e", `require("dns").promises.lookup(process.argv[1]).then(a => fetch("http://" + a.address + ":9222/json/version")).then(r => r.json()).then(j => console.log(new URL(j.webSocketDebuggerUrl).pathname))`, `${PREFIX}-agent`], { encoding: "utf8" }).trim();
+    assert.match(browserPath, /^\/devtools\/browser\//, "the relay reaches it");
+    const fromMachine = await fetch(`http://${ip}:9222/json/version`, { signal: AbortSignal.timeout(5000) }).then((r) => `HTTP ${r.status}`, (e: Error) => `failed (${e.message})`);
+    console.log(`n. from the machine the person's browser runs on, ${ip}:9222: ${fromMachine}`);
+    assert.match(fromMachine, /^failed/);
+    const probe = (where: string[]) => `(async function () { var out = {}; for (var url of ${JSON.stringify(where)}) { out[url] = await fetch(url + '/json/version', { signal: AbortSignal.timeout(5000) }).then(function (r) { return 'read ' + r.status; }, function (e) { return 'failed: ' + e.message; }); out[url + ' ws'] = await new Promise(function (ok) { var w = new WebSocket(url.replace('http', 'ws') + ${JSON.stringify(browserPath)}); w.onopen = function () { ok('open'); }; w.onerror = function () { ok('refused'); }; setTimeout(function () { ok('no answer'); }, 5000); }); } return JSON.stringify(out); })()`;
+    const fromPerson = JSON.parse((await page.evaluate(probe([`http://${ip}:9222`, `http://${ip}:9223`]))) as string) as Record<string, string>;
+    console.log(`n. from the person's browser: ${JSON.stringify(fromPerson)}`);
+    for (const [what, how] of Object.entries(fromPerson)) assert.match(how, what.endsWith(" ws") ? /^(refused|no answer)$/ : /^failed/, what);
+    // From a page in the agents' browser (its seat page, through the relay as the picture client reaches it).
+    const inside = `
+      const dns = require("dns");
+      (async () => {
+        const a = (await dns.promises.lookup(process.argv[1])).address;
+        const list = await (await fetch("http://" + a + ":9222/json/list")).json();
+        const seat = list.find((p) => p.type === "page" && /\\/seat\\//.test(p.url));
+        const ws = new WebSocket("ws://" + a + ":9222" + seat.webSocketDebuggerUrl.replace(/^ws:\\/\\/[^/]+/, ""));
+        await new Promise((ok) => (ws.onopen = ok));
+        ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.id === 1) { console.log(m.result.result.value); process.exit(0); } };
+        ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: process.argv[2], awaitPromise: true, returnByValue: true } }));
+      })().catch((e) => { console.log("FAILED " + e.message); process.exit(0); });`;
+    const fromPage = JSON.parse(execFileSync("docker", ["exec", `${PREFIX}-relay`, "node", "--no-warnings", "-e", inside, `${PREFIX}-agent`, probe([`http://${PREFIX}-agent:9222`, `http://${ip}:9222`, "http://127.0.0.1:9223"])], { encoding: "utf8", timeout: 60_000 }).trim()) as Record<string, string>;
+    console.log(`n. from a page in the agents' browser: ${JSON.stringify(fromPage)}`);
+    for (const [what, how] of Object.entries(fromPage)) assert.match(how, what.endsWith(" ws") ? /^(refused|no answer)$/ : /^failed/, what);
+    await personCloses(page);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

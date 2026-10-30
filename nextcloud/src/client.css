@@ -317,16 +317,3 @@
   font-size: 0.72rem;
 }
 
-/* ---- instance switcher (more than one Nextcloud): which of them the pages talk to ---- */
-
-.nc-instance-select {
-  width: 100%;
-  border: 1px solid var(--line);
-  background: var(--raised);
-  color: var(--fg);
-  font-size: 0.78rem;
-  padding: 0.32rem 0.55rem;
-  border-radius: 7px;
-  cursor: pointer;
-  margin-bottom: 0.35rem;
-}

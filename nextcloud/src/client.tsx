@@ -93,18 +93,15 @@ function NextcloudPanel({ panel }: PanelProps) {
   }
   return (
     <div className="space-y-2 p-2">
-      {instances.length > 1 && (
-        <select
-          className="nc-instance-select"
-          value={held?.name ?? selected ?? ""}
-          onChange={(e) => setSelected(e.target.value)}
-          aria-label={t("Which of the Nextclouds the pages talk to")}
-        >
-          {instances.map((inst) => (
-            <option key={inst.name} value={inst.name}>{inst.name}</option>
-          ))}
-        </select>
-      )}
+      {instances.length > 1 &&
+        portal.ui.Select({
+          value: held?.name ?? selected ?? "",
+          onChange: (value) => setSelected(value),
+          options: instances.map((inst) => ({ value: inst.name, label: inst.name })),
+          size: "sm",
+          className: "w-full",
+          "aria-label": t("Which of the Nextclouds the pages talk to"),
+        })}
       <div className="nc-tabs" role="tablist">
         {offered.map((def) => {
           const Icon = TAB_ICONS[def.id];

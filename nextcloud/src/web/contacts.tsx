@@ -53,7 +53,8 @@ export default function Contacts() {
   const [editNote, setEditNote] = useState("");
   const [contactProblem, setContactProblem] = useState<string | null>(null);
 
-  // the new contact form: its words as they stand
+  // the new contact form, which stays folded until its button is pressed (Nextcloud does it the same way)
+  const [creating, setCreating] = useState(false);
   const [newFn, setNewFn] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newPhone, setNewPhone] = useState("");
@@ -211,6 +212,7 @@ export default function Contacts() {
         setNewPhone("");
         setNewOrg("");
         setNewNote("");
+        setCreating(false);
         loadContacts(bookUri, search);
       } catch (error) {
         setListProblem(sayError(error));
@@ -275,7 +277,42 @@ export default function Contacts() {
             ))}
           </div>
 
-          <input className={portal.ui.classes.input} value={search} placeholder={t("Search the contacts")} aria-label={t("Search the contacts")} onChange={(e) => setSearch(e.target.value)} />
+          <div className="flex items-center gap-1">
+            <input
+              className={portal.ui.classes.input}
+              style={{ flex: 1, minWidth: 0 }}
+              value={search}
+              placeholder={t("Search the contacts")}
+              aria-label={t("Search the contacts")}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <button type="button" className={portal.ui.classes.ghost} disabled={creating || busy} onClick={() => setCreating(!creating)} aria-expanded={creating}>
+              <LuPlus size={14} /> {t("New contact")}
+            </button>
+          </div>
+
+          {creating ? (
+            <form className="nc-form">
+              <p className="nc-form-title">{t("A new contact in this book")}</p>
+              <input className={portal.ui.classes.input} value={newFn} placeholder={t("Full name")} aria-label={t("Full name")} onChange={(e) => setNewFn(e.target.value)} />
+              <div className="flex gap-1">
+                <input className={portal.ui.classes.input} type="email" value={newEmail} placeholder={t("E-mail address")} aria-label={t("E-mail address")} onChange={(e) => setNewEmail(e.target.value)} />
+                <input className={portal.ui.classes.input} value={newPhone} placeholder={t("Phone number")} aria-label={t("Phone number")} onChange={(e) => setNewPhone(e.target.value)} />
+              </div>
+              <div className="flex gap-1">
+                <input className={portal.ui.classes.input} value={newOrg} placeholder={t("Organization")} aria-label={t("Organization")} onChange={(e) => setNewOrg(e.target.value)} />
+                <input className={portal.ui.classes.input} value={newNote} placeholder={t("Note")} aria-label={t("Note")} onChange={(e) => setNewNote(e.target.value)} />
+              </div>
+              <div className="flex gap-1">
+                <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || newFn.trim() === ""} onClick={() => void createContact()}>
+                  {t("Add")}
+                </button>
+                <button type="button" className={portal.ui.classes.ghost} onClick={() => setCreating(false)}>
+                  {t("Cancel")}
+                </button>
+              </div>
+            </form>
+          ) : null}
 
           {rows === null ? (
             listProblem !== null ? (
@@ -298,30 +335,6 @@ export default function Contacts() {
               ))}
             </ul>
           )}
-
-          <form
-            className="nc-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              createContact();
-            }}
-          >
-            <p className="nc-form-title">
-              <LuPlus size={12} /> {t("A new contact in this book")}
-            </p>
-            <input className={portal.ui.classes.input} value={newFn} placeholder={t("Full name")} aria-label={t("Full name")} onChange={(e) => setNewFn(e.target.value)} />
-            <div className="flex gap-1">
-              <input className={portal.ui.classes.input} type="email" value={newEmail} placeholder={t("E-mail address")} aria-label={t("E-mail address")} onChange={(e) => setNewEmail(e.target.value)} />
-              <input className={portal.ui.classes.input} value={newPhone} placeholder={t("Phone number")} aria-label={t("Phone number")} onChange={(e) => setNewPhone(e.target.value)} />
-            </div>
-            <div className="flex gap-1">
-              <input className={portal.ui.classes.input} value={newOrg} placeholder={t("Organization")} aria-label={t("Organization")} onChange={(e) => setNewOrg(e.target.value)} />
-              <input className={portal.ui.classes.input} value={newNote} placeholder={t("Note")} aria-label={t("Note")} onChange={(e) => setNewNote(e.target.value)} />
-            </div>
-            <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || newFn.trim() === ""}>
-              {t("Add")}
-            </button>
-          </form>
 
           {listProblem !== null && rows !== null && <portal.ui.ErrorBanner onClose={() => setListProblem(null)}>{listProblem}</portal.ui.ErrorBanner>}
         </>

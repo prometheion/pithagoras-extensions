@@ -213,6 +213,8 @@ export const de = {
   "Organization": "Organisation",
   "Note": "Notiz",
   "Has a photo": "Hat ein Foto",
+  "New contact": "Neuer Kontakt",
+  "Cancel": "Abbrechen",
   "A new contact in this book": "Ein neuer Kontakt in diesem Buch",
   "This card carries more than one e-mail or phone; this panel only changes the first of each.":
     "Dieser Kontakt hat mehrere E-Mails oder Nummern; dieses Panel ändert jeweils nur die erste davon.",

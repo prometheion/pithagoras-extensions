@@ -2,7 +2,7 @@
 
 `@pithagoras/nextcloud` brings your [Nextcloud](https://nextcloud.com) into Pithagoras: the extension runs the
 [Nextcloud MCP server](https://github.com/cbcoutinho/nextcloud-mcp-server) in containers of its own through Docker for
-extensions — one per instance, or a container you already run that it takes over without touching it — registers each
+extensions — one per instance, each made and kept by the extension — registers each
 server in pi's MCP config under its own name so every agent can reach your clouds, and adds a Nextcloud panel to every
 chat with ten working tabs: **Shopping List**, **Cookbook**, **Notes**, **Files** (sharing built in, as on Nextcloud), **Deck**, **Calendar**,
 **Contacts**, **Mail**, **News** and **Collectives**.
@@ -24,7 +24,7 @@ This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the 
 ## Installing
 
 In Settings → Extensions → Discover → Install by name: `npm:@pithagoras/nextcloud`. Then open **Settings → Nextcloud**
-and add an instance: its name (the first one stands as `nextcloud`), the host (like `https://cloud.example.org`), the
+and add an instance: its name, the host (like `https://cloud.example.org`), the
 user name and that app password — and press **Save and apply**. The container starts with them, the server is
 registered in pi's config under the instance's own name, and the page's status shows each part: the container (and how
 long it has been coming up), the entry in pi's config, and whether the server answers at its `/mcp` address.

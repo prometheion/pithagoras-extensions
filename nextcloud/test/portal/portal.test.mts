@@ -139,7 +139,7 @@ test("a saved instance stands in a container of its own, on the portal's network
   const answer = await fetch(`${at}/instances`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "uni", url: "https://cloud.uni.example", username: "anna@uni.example", password: "the-password" }) });
   assert.equal(answer.status, 200);
   const body = (await answer.json()) as any;
-  assert.deepEqual(body.instances[0], { name: "uni", url: "https://cloud.uni.example", username: "anna@uni.example", passwordSet: true, configured: true, container: "own" }); // a fresh instance carries no capability choices yet
+  assert.deepEqual(body.instances[0], { name: "uni", url: "https://cloud.uni.example", username: "anna@uni.example", passwordSet: true, configured: true }); // a fresh instance carries no capability choices yet
 
   const made = ncContainer("pithagoras-nextcloud-mcp-uni");
   assert.ok(made, "a container of its own stands");
@@ -151,7 +151,7 @@ test("a saved instance stands in a container of its own, on the portal's network
   const row = (await until((s) => s.instances.some((i: any) => i.name === "uni" && i.capabilities), "the instance in the status, with what its server offers")).instances.find((i: any) => i.name === "uni");
   assert.deepEqual(row.capabilities.available, Object.fromEntries(CAPABILITIES.map((cap) => [cap.id, false]))); // the stand-in serves no tools, so nothing stands offered
   const { capabilities, ...plain } = row;
-  assert.deepEqual(plain, { name: "uni", mode: "own", containerName: "pithagoras-nextcloud-mcp-uni", state: "running", address: `http://127.0.0.1:${mcpPort}/mcp`, mcp: { registered: true, on: true, url: `http://127.0.0.1:${mcpPort}/mcp` }, health: { ok: true, server: { name: "mock-nextcloud-mcp", version: "9.9.9" } }, configured: true });
+  assert.deepEqual(plain, { name: "uni", containerName: "pithagoras-nextcloud-mcp-uni", state: "running", url: "https://cloud.uni.example", address: `http://127.0.0.1:${mcpPort}/mcp`, mcp: { registered: true, on: true, url: `http://127.0.0.1:${mcpPort}/mcp` }, health: { ok: true, server: { name: "mock-nextcloud-mcp", version: "9.9.9" } }, configured: true });
 });
 
 test("a tool call goes over this instance's server and back with its answer raw", async () => {
@@ -192,7 +192,6 @@ test("a second instance gets a container of its own, and the port the first one 
   assert.deepEqual(made.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)], "the first's freed port is the lowest free one again");
 
   const row = (await until((s) => s.instances.some((i: any) => i.name === "second"), "the second instance in the status")).instances.find((i: any) => i.name === "second");
-  assert.equal(row.mode, "own");
   assert.equal(row.address, `http://127.0.0.1:${mcpPort}/mcp`);
   assert.equal(row.mcp.registered, true);
   assert.deepEqual(row.health, { ok: true, server: { name: "mock-nextcloud-mcp", version: "9.9.9" } }, "the stand-in answers on that port as it always does");

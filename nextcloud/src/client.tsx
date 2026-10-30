@@ -8,6 +8,15 @@ import { de } from "./de";
 import { TABS, tabOffered } from "./capabilities";
 import { api, InstanceContext, NextcloudStatus } from "./web/api";
 
+/** What this conversation may use of the tools it is offered, as the portal's tool switch answers it: its list --
+ * each with who registered it -- and the names that are off for this one chat. `live` is false while pi does not
+ * run to ask: then nothing is known, and nothing is hidden on a guess. */
+interface ChatToolPolicy {
+  live: boolean;
+  off: string[];
+  tools: { name: string; source: string }[];
+}
+
 /**
  * @pithagoras/nextcloud: its browser half. One panel beside every chat -- the Nextcloud of the keys on this portal,
  * by tabs, one per capability family the instance's server provides: the shopping lists, the cookbook and the notes,
@@ -49,12 +58,15 @@ const TAB_ICONS: Record<string, ComponentType> = {
 
 /** The Nextcloud panel beside a chat: the switcher over its instances, and the tabs of whichever it holds. While it
  * has nothing to say (no Nextcloud set) it says that, with the way to where the keys are kept. */
-function NextcloudPanel({ panel }: PanelProps) {
+function NextcloudPanel({ chat, panel }: PanelProps) {
   portal.locale.use();
   // Files stands first and is the view the panel opens on (Simeon, 2026-10-30).
   const [tab, setTab] = useState<string>("files");
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
   const [selected, setSelected] = useState<string | undefined>(undefined);
+  // What this chat's own tool switch says of the instances' servers: an instance the conversation turned off does
+  // not stand in its switcher -- what a chat may not call on is offered nowhere to it (Simeon, 2026-10-30).
+  const [policy, setPolicy] = useState<ChatToolPolicy | null>(null);
   useEffect(() => {
     let gone = false;
     void api.status().then((s) => !gone && setStatus(s), () => {});
@@ -62,14 +74,43 @@ function NextcloudPanel({ panel }: PanelProps) {
       gone = true;
     };
   }, []);
+  useEffect(() => {
+    if (!chat?.id) return;
+    let gone = false;
+    void portal.api
+      .json<ChatToolPolicy>(`/api/sessions/${encodeURIComponent(chat.id)}/tools`)
+      .then((r) => !gone && setPolicy(r))
+      .catch(() => {});
+    return () => {
+      gone = true;
+    };
+  }, [chat?.id, status]);
   // The first instance is what the pages talk to, as long as it stands; a chosen one that went gets its place.
   const instances = status?.instances ?? [];
+  // What stands in this chat's switcher: every instance, save one this conversation switched off. The off list
+  // speaks the portal's <server>_<tool> spelling, and an entry claims to whichever instance its front matches --
+  // longest first, for "nextcloud" is a front of "nextcloud_uni", and the longer name has the claim (Simeon:
+  // a server a chat turned off is offered nowhere in it). Nothing of an instance named off here stands unknown,
+  // and unknown is offered: what was never asked for is not hidden.
+  const ownerOf = (name: string): string | undefined => {
+    let best: string | undefined;
+    for (const inst of instances)
+      if ((name === inst.name || name.startsWith(inst.name + "_")) && (!best || inst.name.length > best.length))
+        best = inst.name;
+    return best;
+  };
+  const visible = !policy
+    ? instances
+    : instances.filter((inst) => {
+        if (!policy.off.some((name) => ownerOf(name) === inst.name)) return true; // none of it stands off here
+        return policy.tools.some((tool) => tool.source === inst.name && !policy.off.includes(tool.name));
+      });
   useEffect(() => {
     if (!status) return;
-    const names = status.instances.map((inst) => inst.name);
+    const names = visible.map((inst) => inst.name);
     if (names.length && (!selected || !names.includes(selected))) setSelected(names[0]);
-  }, [status, selected]);
-  const held = instances.find((inst) => inst.name === selected) ?? (instances.length ? instances[0] : undefined);
+  }, [status, selected, visible]);
+  const held = visible.find((inst) => inst.name === selected) ?? (visible.length ? visible[0] : undefined);
   // The tabs that stand for the instance held: what its endpoint provides of each family beside what its choices
   // turned on -- asked live by the status, so a tab goes away where its server does not have it. Before any early
   // return: a hook after one stands in fewer renders than the others, and React throws where their count changed.
@@ -92,13 +133,20 @@ function NextcloudPanel({ panel }: PanelProps) {
       </div>
     );
   }
+  if (visible.length === 0) {
+    return (
+      <div className="p-3">
+        <portal.ui.Empty>{t("Every one of your Nextclouds is switched off in this chat's tools.")}</portal.ui.Empty>
+      </div>
+    );
+  }
   return (
     <div className="space-y-2 p-2">
-      {instances.length > 1 && (
+      {visible.length > 1 && (
         <portal.ui.Select
           value={held?.name ?? selected ?? ""}
           onChange={(value) => setSelected(value)}
-          options={instances.map((inst) => ({ value: inst.name, label: inst.name }))}
+          options={visible.map((inst) => ({ value: inst.name, label: inst.name }))}
           size="sm"
           className="w-full"
           aria-label={t("Which of the Nextclouds the pages talk to")}

@@ -14,6 +14,8 @@ export const de = {
     "Die Einkaufslisten, das Kochbuch, die Notizen, Dateien, Deck, Kalender, Kontakte, E-Mails, Nachrichten und Gemeinschaften der Nextclouds dieses Portals",
   "No Nextcloud is set yet: add an instance on the Nextcloud page in Settings.":
     "Es ist noch kein Nextcloud eingestellt: Lege eine Instanz auf der Nextcloud-Seite in den Einstellungen an.",
+  "Every one of your Nextclouds is switched off in this chat's tools.":
+    "All deine Nextclouds sind in den Tools dieses Chats ausgeschaltet.",
   "This Nextcloud ({name}) is not set up completely yet: fill it in on the Nextcloud page in Settings.":
     "Dieses Nextcloud ({name}) ist noch nicht ganz eingerichtet: Fülle es auf der Nextcloud-Seite in den Einstellungen aus.",
   "Which of the Nextclouds the pages talk to": "Welches der Nextclouds die Seiten ansprechen",

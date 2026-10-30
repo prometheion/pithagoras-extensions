@@ -83,7 +83,7 @@ export const TABS: PanelTab[] = [
   { id: "shopping", label: "Shopping List", capabilityIds: ["shopping"] },
   { id: "cookbook", label: "Cookbook", capabilityIds: ["cookbook"] },
   { id: "notes", label: "Notes", capabilityIds: ["notes"] },
-  { id: "files", label: "Files & Sharing", capabilityIds: ["files", "sharing"] },
+  { id: "files", label: "Files", capabilityIds: ["files", "sharing"] },
   { id: "deck", label: "Deck", capabilityIds: ["deck"] },
   { id: "calendar", label: "Calendar", capabilityIds: ["calendar"] },
   { id: "contacts", label: "Contacts", capabilityIds: ["contacts"] },

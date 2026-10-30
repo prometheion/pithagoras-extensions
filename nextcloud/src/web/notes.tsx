@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { LuNotebookPen } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
 
@@ -91,18 +92,23 @@ export default function Notes() {
   if (chosenId === null) {
     return (
       <div className="space-y-2">
-        <form
-          className="flex gap-1"
-          onSubmit={(e) => {
-            e.preventDefault();
-            search(query.trim());
-          }}
-        >
-          <input className={portal.ui.classes.input} value={query} placeholder={t("Search the notes")} aria-label={t("Search the notes")} onChange={(e) => setQuery(e.target.value)} />
-          <button type="submit" className={portal.ui.classes.primarySmall}>
-            {t("Search")}
-          </button>
-        </form>
+        {/* The search is the whole of this tab while no note is open: it stands in one bordered block under a
+            title, not as bare controls above an empty page. */}
+        <div className="nc-note-intro">
+          <p className="nc-form-title">{t("Search your notes")}</p>
+          <form
+            className="flex gap-1"
+            onSubmit={(e) => {
+              e.preventDefault();
+              search(query.trim());
+            }}
+          >
+            <input className={portal.ui.classes.input} value={query} placeholder={t("Search the notes")} aria-label={t("Search the notes")} onChange={(e) => setQuery(e.target.value)} />
+            <button type="submit" className={portal.ui.classes.primarySmall}>
+              {t("Search")}
+            </button>
+          </form>
+        </div>
         {results === null ? (
           problem ? (
             <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The notes could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
@@ -116,8 +122,9 @@ export default function Notes() {
             {results.map((row) => (
               <li key={row.id}>
                 <button type="button" className="nc-open" onClick={() => open(row.id)}>
+                  <LuNotebookPen className="shrink-0 text-fg-subtle" />
                   <span className="nc-open-title">{row.title}</span>
-                  {row.category && row.category !== "" && <span className="nc-open-date">{row.category}</span>}
+                  {row.category && row.category !== "" && <span className="nc-chip nc-chip-dim">{row.category}</span>}
                 </button>
               </li>
             ))}

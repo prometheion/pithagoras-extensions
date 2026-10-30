@@ -4,7 +4,7 @@
 [Nextcloud MCP server](https://github.com/cbcoutinho/nextcloud-mcp-server) in containers of its own through Docker for
 extensions — one per instance, or a container you already run that it takes over without touching it — registers each
 server in pi's MCP config under its own name so every agent can reach your clouds, and adds a Nextcloud panel to every
-chat with ten working tabs: **Shopping List**, **Cookbook**, **Notes**, **Files & Sharing**, **Deck**, **Calendar**,
+chat with ten working tabs: **Shopping List**, **Cookbook**, **Notes**, **Files** (sharing built in, as on Nextcloud), **Deck**, **Calendar**,
 **Contacts**, **Mail**, **News** and **Collectives**.
 
 This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the service it talks to.
@@ -63,7 +63,7 @@ where they were shown on the page, so putting the instance back starts it withou
   - **Cookbook** — the recipes with ingredients and steps, searched by name or keyword, and a recipe imported from its
     URL wherever a site has marked it up (schema.org).
   - **Notes** — all the notes, searched as you type, opened for reading, edited and saved back in place.
-  - **Files & Sharing** — browse your files, preview images and text and pull a file down; beside it the shares: who
+  - **Files** (sharing built in, as on Nextcloud) — browse your files, preview images and text and pull a file down; beside it the shares: who
     has what with what permission, new ones added, taken away again, and a short public link made of a path.
   - **Deck** — your boards' stacks and cards by their order, due date and labels; new cards set off at the top of a
     stack, a card's text read and written back.

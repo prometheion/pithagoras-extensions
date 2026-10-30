@@ -4,7 +4,6 @@ export const de = {
   "Shopping List": "Einkaufsliste",
   "Cookbook": "Rezepte",
   "Notes": "Notizen",
-  "Files & Sharing": "Dateien & Freigaben",
   "Deck": "Deck",
   "Calendar": "Kalender",
   "Contacts": "Kontakte",
@@ -40,6 +39,7 @@ export const de = {
   "Import": "Importieren",
 
   // Notizen
+  "Search your notes": "Deine Notizen durchsuchen",
   "Search the notes": "Notizen durchsuchen",
   "Search": "Suchen",
   "The notes could not be read: {error}": "Die Notizen konnten nicht gelesen werden: {error}",
@@ -103,7 +103,14 @@ export const de = {
   "The PDF's text as the server extracted it; the layout stays on Nextcloud.":
     "Der Text der PDF so, wie ihn der Server rausgezogen hat; das Layout bleibt bei Nextcloud.",
   "Open in Nextcloud": "In Nextcloud öffnen",
-  "Open or download this file": "Diese Datei öffnen oder herunterladen",
+  "Open or download this file": "Diesen Eintrag öffnen oder herunterladen",
+  "Share this one": "Diesen freigeben",
+  "Shares of this one": "Freigaben dieses Eintrags",
+  "What is shared at this one": "Was an diesem freigegeben ist",
+  "Close this box": "Dieses Feld schließen",
+  "Go to it in the list": "Dazu in der Liste gehen",
+  "What others hold on you": "Was andere für dich halten",
+  "What they may do": "Was sie dürfen",
   "The name of it": "Wie sie heißt",
   "My shares": "Meine Freigaben",
   "Shared with me": "Mit mir geteilt",

@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { LuChevronRight, LuDownload, LuExternalLink, LuFileText, LuFolder } from "react-icons/lu";
+import { LuChevronRight, LuExternalLink, LuFileText, LuFolder, LuShare2, LuUsers } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, sayError, useNextcloudInstance } from "./api";
-import { SubTabs } from "./widgets";
 
-/** The Files & Sharing tab: its files view walks the WebDAV tree from the root down -- a folder is opened by
- * choosing it, a readable file (text, a common image, a PDF as the server's extracted text) is read into this
- * panel, and everything else is only downloaded; and its shares view lists who has what and what they may do with
- * it, adds a share, takes one away, and makes a short public download link. All of it as a tool call on the server. */
+/** The Files tab: one view that walks the WebDAV tree -- a folder is opened by choosing it, a readable file (text,
+ * a common image, a PDF as the server's extracted text) is read into this panel, and everything else is only
+ * downloaded. Sharing sits inside it the way Nextcloud itself keeps it: an entry that has shares wears the mark,
+ * and a box opens under it where those are seen, added (their permissions picked as chips), taken away, and where
+ * a short public download link for it is made. A list of what others hold on you stands beside the tree. All of it
+ * as tool calls on the server. */
 
 type Rec = Record<string, unknown>;
 
@@ -54,12 +55,58 @@ const formatBytes = (n: number): string => {
   return `${(n / 1024 ** 3).toFixed(1)} GB`;
 };
 
-export default function FilesAndSharing() {
+/** The OCS tool answers paths with or without a leading slash; the tree's rows have none. Compare on both stripped. */
+const normPath = (p: string): string => p.replace(/^\/+/, "");
+
+/** The kinds of share, as the list draws them and the form picks them. */
+const knownShareTypes = new Map<number, string>([
+  [0, "User"],
+  [1, "Group"],
+  [3, "Public link"],
+  [4, "E-Mail address"],
+  [6, "Federated (ownCloud)"],
+  [7, "Circle"],
+  [10, "Talk conversation"],
+  [12, "Deck card"],
+]);
+
+const shareTypes: [number, string][] = [
+  [0, "User"],
+  [1, "Group"],
+  [4, "E-Mail address"],
+];
+
+const permissionBits: [number, string][] = [
+  [1, "read"],
+  [2, "update"],
+  [4, "create"],
+  [8, "delete"],
+  [16, "share"],
+];
+
+const mapShares = (data: unknown): ShareRow[] => {
+  let list: unknown = data;
+  if (typeof data === "object" && data !== null && Array.isArray((data as Rec).shares)) list = (data as Rec).shares;
+  return Array.isArray(list)
+    ? list.map((s) => {
+        const r = s as Rec;
+        return {
+          id: Number(r.id ?? 0),
+          shareType: numOf(r.share_type ?? r.shareType) ?? -1,
+          withName: strOf(r.share_with_display_name ?? r.shareWithDisplayName) ?? strOf(r.share_with ?? r.shareWith) ?? "",
+          target: normPath(strOf(r.path ?? r.file_target) ?? ""),
+          permission: numOf(r.permission) ?? 0,
+          expires: strOf(r.expiration),
+        };
+      })
+    : [];
+};
+
+export default function Files() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the file and share calls go
-  const [view, setView] = useState<"files" | "shares">("files");
 
-  // the files view: where it stands, what it shows, and one file read into the panel
+  // the tree: where it stands, what it shows, and one file read into the panel
   const [path, setPath] = useState("");
   const [rows, setRows] = useState<FileRow[] | null>(null);
   const [fileProblem, setFileProblem] = useState<string | null>(null);
@@ -67,17 +114,15 @@ export default function FilesAndSharing() {
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewProblem, setPreviewProblem] = useState<string | null>(null);
 
-  // the shares view: the list and what it is shown of (mine or others'), plus the forms that change it
-  const [shares, setShares] = useState<ShareRow[] | null>(null);
+  // sharing as it stands across the cloud (what badges the entries and feeds their boxes), what is on you,
+  // and the one entry whose box is open under its row
+  const [allShares, setAllShares] = useState<ShareRow[] | null>(null);
+  const [withMe, setWithMe] = useState(false);
+  const [withMeShares, setWithMeShares] = useState<ShareRow[] | null>(null);
   const [shareProblem, setShareProblem] = useState<string | null>(null);
-  const [sharedWithMe, setSharedWithMe] = useState(false);
-  const [form, setForm] = useState({ path: "", shareWith: "", shareType: 0, read: true, update: false, create: false, del: false, share: false });
-  const [linkPath, setLinkPath] = useState("");
-  const [linkMinutes, setLinkMinutes] = useState("30");
-  const [linkResult, setLinkResult] = useState<{ url: string; downloadUrl?: string } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [boxFor, setBoxFor] = useState<string | null>(null);
 
-  // ---- the files view ------------------------------------------------------
+  // ---- the tree --------------------------------------------------------------
 
   const loadListing = (at: string) => {
     setRows(null);
@@ -143,6 +188,7 @@ export default function FilesAndSharing() {
   const open = async (row: FileRow): Promise<void> => {
     if (row.directory) {
       setPreview(null);
+      setBoxFor(null);
       setPath(row.path);
       return;
     }
@@ -189,72 +235,221 @@ export default function FilesAndSharing() {
     }
   };
 
-  const crumbs = path === "" ? [] : path.split("/");
-  const shareTypes: [number, string][] = [
-    [0, t("User")],
-    [1, t("Group")],
-    [4, t("E-Mail address")],
-  ];
-  const knownShareTypes = new Map<number, string>([
-    [0, t("User")],
-    [1, t("Group")],
-    [3, t("Public link")],
-    [4, t("E-Mail address")],
-    [6, t("Federated (ownCloud)")],
-    [7, t("Circle")],
-    [10, t("Talk conversation")],
-    [12, t("Deck card")],
-  ]);
+  // ---- sharing -----------------------------------------------------------------
 
-  // ---- the shares view -----------------------------------------------------
-
-  const loadShares = () => {
-    setShares(null);
-    setShareProblem(null);
+  const loadShareIndex = () => {
     void api
-      .tool("nc_share_list", sharedWithMe ? { shared_with_me: true } : {}, instance)
+      .tool("nc_share_list", {}, instance)
+      .then((result) => setAllShares(mapShares(partText(result).data)))
+      .catch((error) => setShareProblem(sayError(error)));
+  };
+
+  useEffect(() => {
+    loadShareIndex();
+  }, []);
+
+  const loadWithMe = () => {
+    setWithMeShares(null);
+    void api
+      .tool("nc_share_list", { shared_with_me: true }, instance)
       .then((result) => {
-        const data = partText(result).data;
-        let list: unknown = data;
-        if (typeof data === "object" && data !== null && Array.isArray((data as Rec).shares)) list = (data as Rec).shares;
-        const mapped: ShareRow[] = Array.isArray(list)
-          ? list.map((s) => {
-              const r = s as Rec;
-              return {
-                id: Number(r.id ?? 0),
-                shareType: numOf(r.share_type ?? r.shareType) ?? -1,
-                withName: strOf(r.share_with_display_name ?? r.shareWithDisplayName) ?? strOf(r.share_with ?? r.shareWith) ?? "",
-                target: strOf(r.path ?? r.file_target) ?? "",
-                permission: numOf(r.permission) ?? 0,
-                expires: strOf(r.expiration),
-              };
-            })
-          : [];
+        const mapped = mapShares(partText(result).data);
         mapped.sort((a, b) => a.target.localeCompare(b.target));
-        setShares(mapped);
+        setWithMeShares(mapped);
       })
       .catch((error) => setShareProblem(sayError(error)));
   };
 
   useEffect(() => {
-    if (view === "shares") loadShares();
-  }, [view]);
+    if (withMe) loadWithMe();
+  }, [withMe]);
+
+  /** What is shared at one entry of the tree -- its box and its mark draw from this. */
+  const sharesAt = (at: string): ShareRow[] => (allShares ?? []).filter((s) => s.target === at);
+
+  /** Where a "shared with me" entry lives: its folder, walked to in the tree. */
+  const gotoShare = (share: ShareRow) => {
+    setWithMe(false);
+    setPreview(null);
+    const i = share.target.lastIndexOf("/");
+    setPath(i > 0 ? share.target.slice(0, i) : "");
+  };
+
+  const crumbs = path === "" ? [] : path.split("/");
+
+  // ---- what is drawn ---------------------------------------------------------------
+
+  return (
+    <div className="space-y-2">
+      {preview !== null ? (
+        <>
+          <div className="flex items-center gap-1">
+            <button type="button" className={portal.ui.classes.ghost} onClick={() => setPreview(null)}>
+              ← {t("Back to the list")}
+            </button>
+            <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">{preview.row.name}</span>
+            {preview.row.url !== undefined && (
+              <a href={preview.row.url} target="_blank" rel="noreferrer" className={portal.ui.classes.ghost} title={t("Open in Nextcloud")}>
+                <LuExternalLink />
+              </a>
+            )}
+          </div>
+          {preview.kind === "image" && preview.dataUrl !== undefined ? (
+            <img src={preview.dataUrl} alt={preview.row.name} className="nc-preview-img" />
+          ) : (
+            <>
+              {preview.kind === "pdf" && <p className="px-1 text-xs text-fg-subtle">{t("The PDF's text as the server extracted it; the layout stays on Nextcloud.")}</p>}
+              <pre className="nc-file-text">{preview.body ?? ""}</pre>
+            </>
+          )}
+          {previewProblem !== null && <portal.ui.ErrorBanner onClose={() => setPreviewProblem(null)}>{previewProblem}</portal.ui.ErrorBanner>}
+        </>
+      ) : withMe ? (
+        <>
+          <div className="nc-crumbs" aria-label={t("Where you are")}>
+            <button type="button" onClick={() => { setWithMe(false); }}>{t("Files")}</button>
+            <LuChevronRight size={11} className="text-fg-subtle" />
+            <span className="truncate">{t("Shared with me")}</span>
+          </div>
+          {withMeShares === null ? (
+            shareProblem !== null ? (
+              <portal.ui.ErrorBanner onClose={() => setShareProblem(null)}>{t("The shares could not be read: {error}", { error: shareProblem })}</portal.ui.ErrorBanner>
+            ) : (
+              <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
+            )
+          ) : withMeShares.length === 0 ? (
+            <portal.ui.Empty>{t("Nothing is shared with you.")}</portal.ui.Empty>
+          ) : (
+            <ul className="space-y-1">
+              {withMeShares.map((share) => (
+                <li key={share.id}>
+                  <button type="button" className="nc-file" onClick={() => gotoShare(share)} title={t("Go to it in the list")}>
+                    <LuUsers className="shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm">{share.withName || t("Unknown share")}</span>
+                      <span className="block truncate text-xs text-fg-subtle" title={share.target}>{share.target}</span>
+                    </span>
+                    <span className="nc-chip nc-chip-dim shrink-0">{t(knownShareTypes.get(share.shareType) ?? "Public link")}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="nc-crumbs" aria-label={t("Where you are")}>
+            <button type="button" onClick={() => { setPath(""); }}>{t("Files")}</button>
+            {crumbs.map((segment, i) => (
+              <span key={i} className="inline-flex min-w-0 items-center gap-0.5">
+                <LuChevronRight size={11} className="text-fg-subtle" />
+                <button type="button" onClick={() => setPath(crumbs.slice(0, i + 1).join("/"))}>
+                  {segment}
+                </button>
+              </span>
+            ))}
+            <span className="ml-auto shrink-0">
+              <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => setWithMe(true)} title={t("What others hold on you")}>
+                <LuUsers />
+                <span>{t("Shared with me")}</span>
+              </button>
+            </span>
+          </div>
+          {rows === null ? (
+            fileProblem !== null ? (
+              <portal.ui.ErrorBanner onClose={() => setFileProblem(null)}>{t("The files could not be read: {error}", { error: fileProblem })}</portal.ui.ErrorBanner>
+            ) : (
+              <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
+            )
+          ) : rows.length === 0 ? (
+            <portal.ui.Empty>{t("No files here.")}</portal.ui.Empty>
+          ) : (
+            <ul className="space-y-0.5">
+              {rows.map((row) => {
+                const shares = sharesAt(row.path);
+                // A row is a pick (open or download) beside a mark of its own (the box under it): two controls,
+                // so the pick is a button inside the row, not the row itself -- nested buttons would not stand.
+                return (
+                  <li key={row.path}>
+                    <div className="nc-file" title={row.directory ? row.name : t("Open or download this file")}>
+                      <button type="button" className="nc-file-main" disabled={previewBusy} onClick={() => void open(row)}>
+                        {row.directory ? <LuFolder className="nc-file-dir shrink-0" /> : <LuFileText className="shrink-0" />}
+                        <span className="nc-file-name">{row.name}</span>
+                        {!row.directory && row.size !== undefined && <span className="nc-file-size">{formatBytes(row.size)}</span>}
+                      </button>
+                      <button
+                        type="button"
+                        className={`nc-row-share${shares.length > 0 ? " is-shared" : ""}`}
+                        title={shares.length > 0 ? t("What is shared at this one") : t("Share this one")}
+                        aria-label={t("Shares of this one")}
+                        onClick={() => setBoxFor(boxFor === row.path ? null : row.path)}
+                      >
+                        <LuShare2 />
+                      </button>
+                    </div>
+                    {boxFor === row.path && (
+                      <SharingBox
+                        entryPath={row.path}
+                        shares={shares}
+                        instance={instance}
+                        onChanged={() => {
+                          setBoxFor(row.path); // a fresh box on the same path, so its lists and forms look again
+                          loadShareIndex();
+                        }}
+                        onClose={() => setBoxFor(null)}
+                      />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {previewProblem !== null && rows !== null && (
+            <portal.ui.ErrorBanner onClose={() => setPreviewProblem(null)}>{previewProblem}</portal.ui.ErrorBanner>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The box that opens under one entry of the tree: what is shared at it and who with, the way a new share of it
+ * is added (the permission picked as chips, not boxes), and the short public link for it. It calls the same tools
+ * on the server and tells its list to look again where anything moved. */
+function SharingBox({
+  entryPath,
+  shares,
+  instance,
+  onChanged,
+  onClose,
+}: {
+  entryPath: string;
+  shares: ShareRow[];
+  instance?: string;
+  onChanged(): void;
+  onClose(): void;
+}) {
+  portal.locale.use();
+  const [form, setForm] = useState({ shareWith: "", shareType: 0, read: true, update: false, create: false, del: false, share: false });
+  const [minutes, setMinutes] = useState("30");
+  const [linkResult, setLinkResult] = useState<{ url: string; downloadUrl?: string } | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const permissionValue = (): number =>
     (form.read ? 1 : 0) | (form.update ? 2 : 0) | (form.create ? 4 : 0) | (form.del ? 8 : 0) | (form.share ? 16 : 0);
 
   const addShare = async () => {
-    const at = form.path.trim();
     const with_ = form.shareWith.trim();
-    if (busy || at === "" || with_ === "") return;
+    if (busy || with_ === "") return;
     setBusy(true);
-    setShareProblem(null);
+    setProblem(null);
     try {
-      await api.tool("nc_share_create", { path: at, share_with: with_, share_type: form.shareType, permissions: permissionValue() }, instance);
-      setForm({ ...form, path: "", shareWith: "" });
-      loadShares();
+      await api.tool("nc_share_create", { path: entryPath, share_with: with_, share_type: form.shareType, permissions: permissionValue() }, instance);
+      setForm({ ...form, shareWith: "" });
+      onChanged();
     } catch (error) {
-      setShareProblem(sayError(error));
+      setProblem(sayError(error));
     } finally {
       setBusy(false);
     }
@@ -264,234 +459,120 @@ export default function FilesAndSharing() {
     if (busy) return;
     if (!window.confirm(t("Take this share away?"))) return;
     setBusy(true);
-    setShareProblem(null);
+    setProblem(null);
     try {
       await api.tool("nc_share_delete", { share_id: id }, instance);
-      loadShares();
+      onChanged();
     } catch (error) {
-      setShareProblem(sayError(error));
+      setProblem(sayError(error));
     } finally {
       setBusy(false);
     }
   };
 
   const makeLink = async () => {
-    const at = linkPath.trim();
-    if (busy || at === "") return;
+    if (busy) return;
     setBusy(true);
-    setShareProblem(null);
+    setProblem(null);
     setLinkResult(null);
     try {
-      const result = await api.tool("nc_share_create_public_link", { path: at, expires_in_minutes: Number(linkMinutes) > 0 ? Number(linkMinutes) : 30 }, instance);
+      const result = await api.tool("nc_share_create_public_link", { path: entryPath, expires_in_minutes: Number(minutes) > 0 ? Number(minutes) : 30 }, instance);
       const data = partText(result).data;
       if (typeof data === "object" && data !== null && typeof (data as Rec).url === "string") {
         setLinkResult({ url: (data as Rec).url as string, downloadUrl: strOf((data as Rec).download_url) });
-        setLinkPath("");
       } else {
-        setShareProblem(t("The link did not answer in a way this panel reads."));
+        setProblem(t("The link did not answer in a way this panel reads."));
       }
     } catch (error) {
-      setShareProblem(sayError(error));
+      setProblem(sayError(error));
     } finally {
       setBusy(false);
     }
   };
 
-  const permissionBits: [number, string][] = [
-    [1, t("read")],
-    [2, t("update")],
-    [4, t("create")],
-    [8, t("delete")],
-    [16, t("share")],
-  ];
-
-  // ---- what is drawn -------------------------------------------------------
+  const toggleBit = (key: "read" | "update" | "create" | "del" | "share") => setForm({ ...form, [key]: !form[key] });
 
   return (
-    <div className="space-y-2">
-      <SubTabs
-        tabs={[
-          { id: "files", label: t("Files") },
-          { id: "shares", label: t("Shares") },
-        ]}
-        active={view}
-        onChange={(id) => setView(id as "files" | "shares")}
-      />
+    <div className="nc-sharebox">
+      <div className="flex items-center gap-1">
+        <LuShare2 className="shrink-0 text-fg-muted" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("Shares")}</span>
+        <button type="button" className={portal.ui.classes.ghost} onClick={onClose} aria-label={t("Close this box")}>
+          ×
+        </button>
+      </div>
 
-      {view === "files" && (
-        <div className="space-y-2">
-          {preview !== null ? (
-            <>
-              <div className="flex items-center gap-1">
-                <button type="button" className={portal.ui.classes.ghost} onClick={() => setPreview(null)}>
-                  ← {t("Back to the list")}
-                </button>
-                <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">{preview.row.name}</span>
-                {preview.row.url !== undefined && (
-                  <a href={preview.row.url} target="_blank" rel="noreferrer" className={portal.ui.classes.ghost} title={t("Open in Nextcloud")}>
-                    <LuExternalLink />
-                  </a>
-                )}
-              </div>
-              {preview.kind === "image" && preview.dataUrl !== undefined ? (
-                <img src={preview.dataUrl} alt={preview.row.name} className="nc-preview-img" />
-              ) : (
-                <>
-                  {preview.kind === "pdf" && <p className="px-1 text-xs text-fg-subtle">{t("The PDF's text as the server extracted it; the layout stays on Nextcloud.")}</p>}
-                  <pre className="nc-file-text">{preview.body ?? ""}</pre>
-                </>
-              )}
-              {previewProblem !== null && <portal.ui.ErrorBanner onClose={() => setPreviewProblem(null)}>{previewProblem}</portal.ui.ErrorBanner>}
-            </>
-          ) : (
-            <>
-              <div className="nc-crumbs" aria-label={t("Where you are")}>
-                <button type="button" onClick={() => { setPreview(null); setPath(""); }}>{t("Files")}</button>
-                {crumbs.map((segment, i) => (
-                  <span key={i} className="inline-flex items-center gap-0.5">
-                    <LuChevronRight size={11} className="text-fg-subtle" />
-                    <button type="button" onClick={() => setPath(crumbs.slice(0, i + 1).join("/"))}>
-                      {segment}
-                    </button>
-                  </span>
-                ))}
-              </div>
-              {rows === null ? (
-                fileProblem !== null ? (
-                  <portal.ui.ErrorBanner onClose={() => setFileProblem(null)}>{t("The files could not be read: {error}", { error: fileProblem })}</portal.ui.ErrorBanner>
-                ) : (
-                  <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
-                )
-              ) : rows.length === 0 ? (
-                <portal.ui.Empty>{t("No files here.")}</portal.ui.Empty>
-              ) : (
-                <ul className="space-y-0.5">
-                  {rows.map((row) => (
-                    <li key={row.path}>
-                      <button type="button" className="nc-file" disabled={previewBusy} onClick={() => void open(row)} title={row.directory ? row.name : t("Open or download this file")}>
-                        {row.directory ? <LuFolder className="nc-file-dir shrink-0" /> : <LuFileText className="shrink-0" />}
-                        <span className="nc-file-name">{row.name}</span>
-                        {!row.directory && row.size !== undefined && <span className="nc-file-size">{formatBytes(row.size)}</span>}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {previewProblem !== null && rows !== null && (
-                <div className="flex items-start gap-1">
-                  <span className="mt-1 shrink-0 text-fg-muted"><LuDownload /></span>
-                  <portal.ui.ErrorBanner onClose={() => setPreviewProblem(null)}>{previewProblem}</portal.ui.ErrorBanner>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {view === "shares" && (
-        <div className="space-y-2">
-          <div className="flex items-center gap-1">
-            <SubTabs
-              tabs={[
-                { id: "mine", label: t("My shares") },
-                { id: "withme", label: t("Shared with me") },
-              ]}
-              active={sharedWithMe ? "withme" : "mine"}
-              onChange={(id) => setSharedWithMe(id === "withme")}
-            />
-          </div>
-
-          {shares === null ? (
-            shareProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setShareProblem(null)}>{t("The shares could not be read: {error}", { error: shareProblem })}</portal.ui.ErrorBanner>
-            ) : (
-              <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
-            )
-          ) : shares.length === 0 ? (
-            <portal.ui.Empty>{sharedWithMe ? t("Nothing is shared with you.") : t("No shares yet.")}</portal.ui.Empty>
-          ) : (
-            <ul className="space-y-1">
-              {shares.map((share) => (
-                <li key={share.id} className="nc-share">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="min-w-0 flex-1 truncate text-sm">{share.withName || t("Unknown share")}</span>
-                    <span className="nc-chip">{knownShareTypes.get(share.shareType) ?? share.shareType}</span>
-                  </div>
-                  {share.target !== "" && <p className="min-w-0 truncate pl-1 text-xs text-fg-subtle" title={share.target}>{share.target}</p>}
-                  <div className="flex flex-wrap items-center gap-1 pl-1">
-                    {permissionBits.filter(([bit]) => (share.permission & bit) !== 0).map(([_, label]) => (
-                      <span key={label} className="nc-chip">{label}</span>
-                    ))}
-                    {share.expires !== undefined && <span className="nc-chip nc-chip-dim">{share.expires}</span>}
-                    {!sharedWithMe && (
-                      <button type="button" className={`${portal.ui.classes.ghost} ml-auto`} disabled={busy} onClick={() => void removeShare(share.id)} aria-label={t("Take this share away")}>
-                        ×
-                      </button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {form.shareType === 3 ? null : (
-            <form
-              className="nc-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void addShare();
-              }}
-            >
-              <p className="nc-form-title">{t("Add a share")}</p>
-              <input className={portal.ui.classes.input} value={form.path} placeholder={t("Path, e.g. docs/invite.pdf")} aria-label={t("Path of the file or folder")} onChange={(e) => setForm({ ...form, path: e.target.value })} />
-              <div className="flex gap-1">
-                <select className={portal.ui.classes.inputSmall} value={form.shareType} aria-label={t("Shared with")} onChange={(e) => setForm({ ...form, shareType: Number(e.target.value), shareWith: "" })}>
-                  {shareTypes.map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-                <input className={portal.ui.classes.input} value={form.shareWith} placeholder={t("The name of it")} aria-label={t("The name of the user, group or address")} onChange={(e) => setForm({ ...form, shareWith: e.target.value })} />
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                {permissionBits.map(([bit, label]) => (
-                  <label key={bit} className="inline-flex items-center gap-1">
-                    <input type="checkbox" checked={Boolean(form[bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share"])} onChange={(e) => setForm({ ...form, [bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share"]: e.target.checked })} />
-                    {label}
-                  </label>
-                ))}
-              </div>
-              <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || form.path.trim() === "" || form.shareWith.trim() === "" || permissionValue() === 0}>
-                {t("Share")}
+      {shares.length > 0 && (
+        <ul className="space-y-1">
+          {shares.map((share) => (
+            <li key={share.id} className="nc-sharebox-row">
+              <span className="min-w-0 flex-1 truncate text-sm" title={share.withName}>{share.withName || t("Unknown share")}</span>
+              <span className="nc-chip nc-chip-dim shrink-0">{t(knownShareTypes.get(share.shareType) ?? "Public link")}</span>
+              {share.expires !== undefined && <span className="nc-chip nc-chip-dim shrink-0">{share.expires}</span>}
+              <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void removeShare(share.id)} aria-label={t("Take this share away")}>
+                ×
               </button>
-            </form>
-          )}
-
-          <form
-            className="nc-form"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void makeLink();
-            }}
-          >
-            <p className="nc-form-title">{t("A public download link")}</p>
-            <div className="flex gap-1">
-              <input className={portal.ui.classes.input} value={linkPath} placeholder={t("Path of the file or folder")} aria-label={t("Path of the file or folder")} onChange={(e) => setLinkPath(e.target.value)} />
-              <input className={portal.ui.classes.inputSmall} type="number" min={1} value={linkMinutes} aria-label={t("How long, in minutes")} onChange={(e) => setLinkMinutes(e.target.value)} />
-            </div>
-            <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || linkPath.trim() === ""}>
-              {t("Make the link")}
-            </button>
-            {linkResult !== null && (
-              <p className="nc-form-result">
-                <a href={linkResult.url} target="_blank" rel="noreferrer">{linkResult.url}</a>
-                {linkResult.downloadUrl !== undefined && <span className="block text-fg-subtle">{linkResult.downloadUrl}</span>}
-              </p>
-            )}
-          </form>
-
-          {shareProblem !== null && shares !== null && <portal.ui.ErrorBanner onClose={() => setShareProblem(null)}>{shareProblem}</portal.ui.ErrorBanner>}
-        </div>
+            </li>
+          ))}
+        </ul>
       )}
+
+      <form
+        className="nc-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void addShare();
+        }}
+      >
+        <p className="nc-form-title">{t("Add a share")}</p>
+        <div className="flex gap-1">
+          <select className={portal.ui.classes.inputSmall} value={form.shareType} aria-label={t("Shared with")} onChange={(e) => setForm({ ...form, shareType: Number(e.target.value), shareWith: "" })}>
+            {shareTypes.map(([value, label]) => (
+              <option key={value} value={value}>{t(label)}</option>
+            ))}
+          </select>
+          <input className={portal.ui.classes.input} value={form.shareWith} placeholder={t("The name of it")} aria-label={t("The name of the user, group or address")} onChange={(e) => setForm({ ...form, shareWith: e.target.value })} />
+        </div>
+        <div className="nc-perm-row" role="group" aria-label={t("What they may do")}>
+          {permissionBits.map(([bit, label]) => (
+            <button
+              type="button"
+              key={bit}
+              className={`nc-chip${form[bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share"] ? " nc-chip-on" : ""}`}
+              onClick={() => toggleBit(bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share")}
+            >
+              {t(label)}
+            </button>
+          ))}
+        </div>
+        <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || form.shareWith.trim() === "" || permissionValue() === 0}>
+          {t("Share")}
+        </button>
+      </form>
+
+      <form
+        className="nc-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void makeLink();
+        }}
+      >
+        <p className="nc-form-title">{t("A public download link")}</p>
+        <div className="flex gap-1">
+          <input className={portal.ui.classes.inputSmall} type="number" min={1} value={minutes} aria-label={t("How long, in minutes")} onChange={(e) => setMinutes(e.target.value)} />
+          <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy}>
+            {t("Make the link")}
+          </button>
+        </div>
+        {linkResult !== null && (
+          <p className="nc-form-result">
+            <a href={linkResult.url} target="_blank" rel="noreferrer">{linkResult.url}</a>
+            {linkResult.downloadUrl !== undefined && <span className="block text-fg-subtle">{linkResult.downloadUrl}</span>}
+          </p>
+        )}
+      </form>
+
+      {problem !== null && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
     </div>
   );
 }

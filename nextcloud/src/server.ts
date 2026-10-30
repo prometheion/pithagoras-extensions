@@ -216,13 +216,10 @@ const nextcloud: ServerHalf = async (portalArg) => {
       inst.capabilities = Object.keys(next).length > 0 ? next : undefined;
     }
     const saved = saveInstances(insts);
-    let task: string | undefined;
-    try {
-      await ensureApplied();
-    } catch (error) {
-      task = (error as Error).message; // the keys are what they were asked to be; the containers and the entries catch up on the next save or start
-    }
-    res.json({ instances: saved.map(view), task });
+    // Fire-and-forget on purpose (as office's settings route): a first pull takes minutes and must not hold the
+    // response open -- the run stands reported in the status's task, one at a time, and its failures stay there.
+    void ensureApplied().catch(() => {});
+    res.json({ instances: saved.map(view) });
   });
 
   /** One instance gone: its entry out of pi's config, and its container with it. */
@@ -240,19 +237,15 @@ const nextcloud: ServerHalf = async (portalArg) => {
       }
     }
     const saved = saveInstances(insts.filter((i) => i.name !== name));
-    let task: string | undefined;
-    try {
-      await ensureApplied();
-    } catch (error) {
-      task = (error as Error).message;
-    }
-    res.json({ instances: saved.map(view), task });
+    // Fire-and-forget, as the save route above: the run reports itself in the status.
+    void ensureApplied().catch(() => {});
+    res.json({ instances: saved.map(view) });
   });
 
   /** One more pass toward where the instances ask for it: a no-op where all is well; what it does as its task. */
   r.post("/start", json, async (_req, res) => {
+    void ensureApplied().catch(() => {}); // fire-and-forget: a pull must not hold the response open; the status carries it
     try {
-      await ensureApplied();
       res.json(await status());
     } catch (error) {
       res.status(502).json({ error: (error as Error).message });
@@ -261,21 +254,19 @@ const nextcloud: ServerHalf = async (portalArg) => {
 
   /** The containers this extension made gone and the entries in pi's config cleared; the keys stay. */
   r.post("/reset", json, async (_req, res) => {
-    try {
-      await apply("removing the containers this extension made and its entries in pi's config", async () => {
-        const d = docker();
-        const insts = loadInstances();
-        const plans = planOwn(insts);
-        for (const inst of insts) {
-          const name = plans.get(inst.name)?.containerName;
-          if (name) await releaseOwn(d, name);
-          await portal().mcp.set(inst.name, undefined);
-        }
-      });
-      res.json({ ok: true });
-    } catch (error) {
-      res.status(502).json({ error: (error as Error).message });
-    }
+    // Fire-and-forget, like the others: stopping and removing every container must not hold the response open;
+    // the run reports itself in the status.
+    void apply("removing the containers this extension made and its entries in pi's config", async () => {
+      const d = docker();
+      const insts = loadInstances();
+      const plans = planOwn(insts);
+      for (const inst of insts) {
+        const name = plans.get(inst.name)?.containerName;
+        if (name) await releaseOwn(d, name);
+        await portal().mcp.set(inst.name, undefined);
+      }
+    }).catch(() => {});
+    res.json({ ok: true });
   });
 
   /** One tool of the instance's Nextcloud MCP server, called through: its content parts back, raw -- the client

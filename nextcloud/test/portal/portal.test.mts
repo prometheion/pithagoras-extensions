@@ -115,6 +115,12 @@ const until = async (check: (s: any) => boolean, what: string) => {
   }
   assert.fail(`never: ${what}`);
 };
+
+// The save routes fire their run on its own (a first pull must not hold the response open): a read of what a save
+// kept stands behind the run standing done.
+const applyDone = async () => {
+  await until((s) => s.task === undefined, "the run of a save to stand done");
+};
 const ncContainer = (name: string) => docker.containers.find((c: { Name: string }) => c.Name === name);
 
 test("it waits for Docker for extensions, as its package.json requires, and starts once Docker's half runs", async () => {
@@ -129,9 +135,9 @@ test("it waits for Docker for extensions, as its package.json requires, and star
 });
 
 test("no instance yet: it says none is set, and the way it keeps that said", async () => {
-  // what it does on its start may not have stood done as it first answers (it looked through mcp.json for something
-  // to adopt): wait for nothing left doing before reading what it kept.
-  const s = await until((s) => s.task === undefined && s.migrated === undefined, "the startup task to stand done");
+  // what it does on its start may not have stood done as it first answers: wait for nothing left doing before
+  // reading what it kept.
+  const s = await until((s) => s.task === undefined, "the startup run to stand done");
   assert.deepEqual(s, { image: "ghcr.io/cbcoutinho/nextcloud-mcp-server:0.203.0", instances: [], configured: false });
 });
 
@@ -140,6 +146,8 @@ test("a saved instance stands in a container of its own, on the portal's network
   assert.equal(answer.status, 200);
   const body = (await answer.json()) as any;
   assert.deepEqual(body.instances[0], { name: "uni", url: "https://cloud.uni.example", username: "anna@uni.example", passwordSet: true, configured: true }); // a fresh instance carries no capability choices yet
+
+  await applyDone(); // its run stands done before what it kept is read
 
   const made = ncContainer("pithagoras-nextcloud-mcp-uni");
   assert.ok(made, "a container of its own stands");
@@ -164,9 +172,11 @@ test("a tool call goes over this instance's server and back with its answer raw"
 
 test("a save with nothing changed makes nothing again; one that changes the password remakes the container where it stands", async () => {
   await fetch(`${at}/instances`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "uni", url: "https://cloud.uni.example", username: "anna@uni.example", password: "the-password" }) });
+  await applyDone(); // the no-op run of that save stands done
   assert.equal(docker.created.length, 1, "nothing made again where nothing changed");
 
   await fetch(`${at}/instances`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "uni", url: "https://cloud.uni.example", username: "anna@uni.example", password: "the-other" }) });
+  await applyDone(); // its remake stands done
   const uni = ncContainer("pithagoras-nextcloud-mcp-uni");
   assert.equal(uni.made?.Env?.find((e) => e.startsWith("NEXTCLOUD_PASSWORD=")), "NEXTCLOUD_PASSWORD=the-other");
   assert.deepEqual(uni.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)], "remade where it stood: the port stands as it was");
@@ -186,6 +196,7 @@ test("a removed instance leaves nothing of it: its container goes, and no one ma
 test("a second instance gets a container of its own, and the port the first one gave up is given out again", async () => {
   const answer = await fetch(`${at}/instances`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "second", url: "https://cloud.second.example", username: "bob@second.example", password: "the-second" }) });
   assert.equal(answer.status, 200);
+  await applyDone(); // its run stands done (and the remove's before it)
   const made = ncContainer("pithagoras-nextcloud-mcp-second");
   assert.ok(made, "a container of its own stands");
   assert.equal(made.State, "running");

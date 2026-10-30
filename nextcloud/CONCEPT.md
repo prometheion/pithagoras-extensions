@@ -42,7 +42,7 @@ Via **`pithagoras-docker`** (`requires: { "pithagoras-docker": "^1.3.0" }`, exac
 
 ## 4. UI: one panel, ten tabs
 
-Registered as **one** `portal.slots.set("chat.panel", …)` with id `nextcloud` (like office's single panel) and an internal tab bar — matches "one sidebar tab for everything the MCP offers" without flooding every chat with eight nav entries. Deep-linking later: `portal.panels.open("nextcloud")` + `useShown()`.
+Registered as **one** `portal.slots.set("chat.panel", …)` with id `nextcloud` (like office's single panel) and an internal tab bar — matches "one sidebar tab for everything the MCP offers" without flooding every chat with ten nav entries. Deep-linking later: `portal.panels.open("nextcloud")` + `useShown()`.
 
 | Tab | MCP tool group | UI sketch |
 |---|---|---|

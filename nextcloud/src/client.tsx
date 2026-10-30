@@ -176,6 +176,9 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
         <p className="text-sm text-fg-subtle p-1">
           {t("This Nextcloud ({name}) is not set up completely yet: fill it in on the Nextcloud page in Settings.", { name: held.name })}
         </p>
+      ) : offered.length === 0 ? (
+        // Every family turned off or unprovided by the endpoint: mounting a tab anyway would call for what was stood away -- say that instead.
+        <p className="text-sm text-fg-subtle p-1">{t("Everything this Nextcloud offers is switched off: turn a family back on on the Nextcloud page in Settings.")}</p>
       ) : (
         // The open tab remounts where the instance changes: what it shows belongs to that one and no other, and
         // the tabs read the instance their calls go to from here.

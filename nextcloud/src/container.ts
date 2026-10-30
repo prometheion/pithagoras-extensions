@@ -52,7 +52,11 @@ export interface OwnPlan {
 
 function place(plans: Map<string, OwnPlan>, takenNames: Set<string>, takenPorts: Set<number>, inst: NextcloudInstance, port: number): void {
   let name = inst.name === DEFAULT_INSTANCE_NAME ? CONTAINER_BASE : `${CONTAINER_BASE}-${slug(inst.name) || "extra"}`;
-  while (takenNames.has(name)) name = `${name}-${plans.size + 1}`; // two slugs that came to one: apart by number
+  if (takenNames.has(name)) { // two slugs that came to one: apart by number
+    let n = 2;
+    while (takenNames.has(`${name}-${n}`)) n++;
+    name = `${name}-${n}`;
+  }
   takenNames.add(name);
   takenPorts.add(port);
   plans.set(inst.name, { inst, containerName: name, port });

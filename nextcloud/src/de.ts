@@ -387,4 +387,6 @@ export const de = {
   // Das Panel
   "Open": "Öffnen",
   "Open this Nextcloud in the browser": "Diese Nextcloud im Browser öffnen",
+  "Everything this Nextcloud offers is switched off: turn a family back on on the Nextcloud page in Settings.":
+    "Alles, was dieser Nextcloud bietet, ist ausgeschaltet: Schalte auf der Nextcloud-Seite in den Einstellungen eine Familie wieder an.",
 } as const;

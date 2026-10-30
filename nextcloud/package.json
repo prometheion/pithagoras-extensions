@@ -1,0 +1,46 @@
+{
+  "name": "@pithagoras/nextcloud",
+  "version": "0.1.0",
+  "description": "Nextcloud for Pithagoras: runs the Nextcloud MCP server in its own container and brings its Files & Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List and Notes into a chat panel.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "pi": {},
+  "pithagoras": {
+    "client": "./web/client.js",
+    "style": "./web/client.css",
+    "server": "./server.js",
+    "requires": {
+      "pithagoras-docker": "^1.3.0"
+    }
+  },
+  "files": [
+    "src/",
+    "web",
+    "server.js",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs && tsc --noEmit -p .",
+    "test": "node --import tsx --test test/*.test.mts",
+    "test:portal": "node --import tsx --test --test-timeout=120000 test/portal/*.test.mts",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "pithagoras",
+    "extension",
+    "nextcloud",
+    "mcp"
+  ],
+  "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/nextcloud#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prometheion/pithagoras-extensions.git",
+    "directory": "nextcloud"
+  },
+  "bugs": {
+    "url": "https://github.com/prometheion/pithagoras-extensions/issues"
+  },
+  "devDependencies": {
+    "react-icons": "5.7.0"
+  }
+}

@@ -2,7 +2,7 @@ import "./client.css";
 import { Suspense, useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import type { PanelProps, Portal } from "@pithagoras/extension-api";
-import {LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuFiles, LuLayers, LuKanban, LuListChecks, LuMail, LuNewspaper} from "react-icons/lu";
+import {LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuExternalLink, LuFiles, LuLayers, LuKanban, LuListChecks, LuMail, LuNewspaper} from "react-icons/lu";
 import { msg, portal, setPortal, t } from "./portal";
 import { de } from "./de";
 import { TABS, tabOffered } from "./capabilities";
@@ -142,16 +142,32 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
   }
   return (
     <div className="space-y-2 p-2">
-      {visible.length > 1 && (
-        <portal.ui.Select
-          value={held?.name ?? selected ?? ""}
-          onChange={(value) => setSelected(value)}
-          options={visible.map((inst) => ({ value: inst.name, label: inst.name }))}
-          size="sm"
-          className="w-full"
-          aria-label={t("Which of the Nextclouds the pages talk to")}
-        />
-      )}
+      {/* The switcher over the instances, and beside it the way out: this one's own page in the browser. */}
+      <div className="flex items-center gap-1.5">
+        {visible.length > 1 && (
+          <portal.ui.Select
+            value={held?.name ?? selected ?? ""}
+            onChange={(value) => setSelected(value)}
+            options={visible.map((inst) => ({ value: inst.name, label: inst.name }))}
+            size="sm"
+            className="w-full"
+            aria-label={t("Which of the Nextclouds the pages talk to")}
+          />
+        )}
+        {held && held.url !== "" && (
+          <a
+            href={held.url}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-fg-subtle hover:bg-raised hover:text-fg"
+            title={t("Open this Nextcloud in the browser")}
+            aria-label={t("Open this Nextcloud in the browser")}
+          >
+            <LuExternalLink />
+            {t("Open")}
+          </a>
+        )}
+      </div>
       <div className="nc-tabs" role="tablist">
         {offered.map((def) => {
           const Icon = TAB_ICONS[def.id];

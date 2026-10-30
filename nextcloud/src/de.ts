@@ -358,4 +358,8 @@ export const de = {
   "Save the page": "Seite speichern",
   "The page's text": "Der Text der Seite",
   "This page's place in the files could not be read.": "Der Ort dieser Seite in den Dateien konnte nicht gelesen werden.",
+
+  // Das Panel
+  "Open": "Öffnen",
+  "Open this Nextcloud in the browser": "Diese Nextcloud im Browser öffnen",
 } as const;

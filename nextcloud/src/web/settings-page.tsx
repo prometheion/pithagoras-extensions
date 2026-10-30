@@ -19,6 +19,25 @@ const blankDraft = (): Draft => ({ name: "", url: "", username: "", capabilities
 /** Where one draft stands in the switcher, by key: the saved ones by their name, the one not-saved card under its own. */
 const keyOf = (d: Draft): string => (d.exists ? d.name : "new");
 
+/** How an instance's line of standing shows as a dot, as in the office extension: green where it runs and answers
+ * with its entry present, yellow while something of it is not yet there (no start yet, no entry, an entry kept off),
+ * red where it failed or stops answering -- and grey where it simply stands stopped. */
+type InstanceHealth = "ok" | "warn" | "bad" | "idle";
+const DOT: Record<InstanceHealth, string> = { ok: "bg-ok", warn: "bg-warn", bad: "bg-danger", idle: "bg-fg-subtle" };
+const WORD: Record<InstanceHealth, string> = { ok: "text-ok", warn: "text-warn", bad: "text-danger", idle: "" };
+
+function healthOf(s: { state: string; mcp: { registered: boolean; on: boolean }; health: { ok: boolean } }): InstanceHealth {
+  const st = s.state ?? "";
+  if (st === "running") {
+    if (!s.health.ok) return "bad"; // it runs, yet nothing answers -- where it should work, it does not
+    if (!s.mcp.registered || s.mcp.on === false) return "warn"; // it answers, but the chats are not reached
+    return "ok";
+  }
+  if (st === "failed" || st === "dead") return "bad";
+  if (st === "restarting" || st === "") return "warn";
+  return "idle"; // created, exited or removed: stopped
+}
+
 export default function NextcloudSettings() {
   portal.locale.use();
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
@@ -195,7 +214,12 @@ export default function NextcloudSettings() {
 
       {(status?.error || (status?.task && !problem)) && (
         <section className="space-y-1 text-xs">
-          {status.task && <p className="text-fg-muted">{t("Working: {task}", { task: status.task })}</p>}
+          {status.task && (
+            <p className="flex items-center gap-1.5 text-fg-muted">
+              <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-warn" />
+              {t("Working: {task}", { task: status.task })}
+            </p>
+          )}
           {status.error && <portal.ui.ErrorBanner onClose={() => {}}>{status.error}</portal.ui.ErrorBanner>}
         </section>
       )}
@@ -270,12 +294,14 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
       </div>
 
       {status && (
-        <p className="text-xs text-fg-muted">
-          <span>{t("Status")}:</span>{" "}
-          {status.state} ·{" "}
-          {status.mcp.registered ? t("entry present") : t("entry absent")} ·{" "}
-          {status.health.ok ? (t("answering") + (status.health.server ? ` ${status.health.server.name}` : "")) : status.health.error}
-        </p>
+        <div className="flex items-center gap-1.5 text-xs text-fg-muted">
+          <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT[healthOf(status)]}`} />
+          <span>
+            <span className={WORD[healthOf(status)] || undefined}>{status.state}</span> ·{" "}
+            {status.mcp.registered ? t("entry present") : t("entry absent")} ·{" "}
+            {status.health.ok ? (t("answering") + (status.health.server ? ` ${status.health.server.name}` : "")) : status.health.error}
+          </span>
+        </div>
       )}
 
       <div className="flex items-center gap-2">

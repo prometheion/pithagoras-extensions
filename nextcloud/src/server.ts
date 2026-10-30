@@ -144,7 +144,7 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
       // the endpoint did not list its tools right now: availability stays unknown for this pass
     }
   }
-  return { name: inst.name, containerName: name, state, address, mcp, health, configured: configured(inst), ...(capabilities !== undefined ? { capabilities } : {}) };
+  return { name: inst.name, containerName: name, state, address, url: inst.url || undefined, mcp, health, configured: configured(inst), ...(capabilities !== undefined ? { capabilities } : {}) };
 }
 
 /** The names of one endpoint's tools, asked live and answered from memory for a while: the capability check stands

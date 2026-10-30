@@ -24,6 +24,8 @@ export interface InstanceStatus {
   containerName: string;
   state: string; // absent | running | stopped | created | ... Docker's word for it
   address?: string; // where its /mcp endpoint stands, where it does at all
+  /** The Nextcloud host itself -- where the browser opens this one. */
+  url?: string;
   mcp: { registered: boolean; on: boolean; url?: string };
   health: { ok: boolean; server?: { name: string; version: string }; error?: string };
   configured: boolean;

@@ -142,18 +142,22 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
   }
   return (
     <div className="space-y-2 p-2">
-      {/* The switcher over the instances, and beside it the way out: this one's own page in the browser. */}
-      <div className="flex items-center gap-1.5">
-        {visible.length > 1 && (
-          <portal.ui.Select
-            value={held?.name ?? selected ?? ""}
-            onChange={(value) => setSelected(value)}
-            options={visible.map((inst) => ({ value: inst.name, label: inst.name }))}
-            size="sm"
-            className="w-full"
-            aria-label={t("Which of the Nextclouds the pages talk to")}
-          />
-        )}
+      {visible.length > 1 && (
+        <portal.ui.Select
+          value={held?.name ?? selected ?? ""}
+          onChange={(value) => setSelected(value)}
+          options={visible.map((inst) => ({ value: inst.name, label: inst.name }))}
+          size="sm"
+          className="w-full"
+          aria-label={t("Which of the Nextclouds the pages talk to")}
+        />
+      )}
+      {/* The bar of tabs, and in its far corner the way out: this one's own page in the browser. */}
+      <div className="nc-tabs" role="tablist">
+        {offered.map((def) => {
+          const Icon = TAB_ICONS[def.id];
+          return <TabButton key={def.id} active={tab === def.id} onClick={() => setTab(def.id)} icon={<Icon />} label={t(def.label)} />;
+        })}
         {held && held.url !== "" && (
           <a
             href={held.url}
@@ -167,12 +171,6 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
             {t("Open")}
           </a>
         )}
-      </div>
-      <div className="nc-tabs" role="tablist">
-        {offered.map((def) => {
-          const Icon = TAB_ICONS[def.id];
-          return <TabButton key={def.id} active={tab === def.id} onClick={() => setTab(def.id)} icon={<Icon />} label={t(def.label)} />;
-        })}
       </div>
       {held && !held.configured ? (
         <p className="text-sm text-fg-subtle p-1">

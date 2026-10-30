@@ -163,7 +163,7 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
             href={held.url}
             target="_blank"
             rel="noreferrer"
-            className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-fg-subtle hover:bg-raised hover:text-fg"
+            className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-xs text-fg-subtle hover:bg-raised hover:text-fg"
             title={t("Open this Nextcloud in the browser")}
             aria-label={t("Open this Nextcloud in the browser")}
           >

@@ -145,8 +145,31 @@
 
 /* ---- the calendar's month grid ---------------------------------------------------------------------------------- */
 
+/* The pane fills what the panel gives it: where there is slack below the content, the events section -- and
+   with it the week rows of the grid -- takes it, so a tall panel shows a tall calendar instead of a small one
+   above an empty hole. Where the content outgrows the panel, it scrolls as before. */
+.calendar-tab > .tab-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.calendar-pane {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.calendar-events {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 /* Seven days to a row, Monday first: the header is words, the cells are picks of one day each.
-   A cell holds its number and up to two events in short -- more turn into a count, not another line. */
+   A cell holds its number and up to three events in short -- more turn into a count, not another line.
+   The week rows sit on their floor; whether the grid claims extra height below that is measured on the
+   panel itself (a stretch the panel really has room for, never one borrowed from its neighbours). */
 .nc-monthgrid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -214,7 +237,7 @@
 }
 
 .nc-monthchip {
-  font-size: 0.62rem;
+  font-size: 0.65rem;
   line-height: 1.3;
   border-radius: 4px;
   padding: 0 0.25rem;
@@ -236,6 +259,35 @@
   font-size: 0.6rem;
   color: var(--fg-subtle);
   padding: 0 0.25rem;
+}
+
+/* A calendar's chip in the row over the grid, flat without a frame -- a white box here read as noise: where its
+   events are on, it sits in its own colour faintly and stands full; where they are not, it steps back dimmed.
+   Its dot carries the calendar's colour, which the day cells and the agenda rows read from as well. */
+.nc-calpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.72rem;
+  padding: 0.18rem 0.55rem;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.nc-calpill-off {
+  opacity: 0.45;
+}
+
+.nc-caldot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  flex: none;
 }
 
 /* ---- the files view ----------------------------------------------------------------------------------------- */
@@ -534,6 +586,64 @@ button.nc-chip {
   width: 100%;
 }
 
+/* A checkbox is not one of the form's fields: without this, the rule above stretches it across the whole row. */
+.nc-form input[type="checkbox"] {
+  width: auto;
+  flex-shrink: 0;
+}
+
+/* The either-or of how long an event stands: two words in one frame, the chosen one standing out faintly.
+   Self-made on purpose -- where there is a choice between exactly two ways to stand open, a menu is not needed. */
+.nc-seg {
+  display: inline-flex;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border: 1px solid rgb(var(--line));
+  border-radius: 999px;
+  background: rgb(var(--raised) / 0.6);
+}
+
+.nc-seg button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.nc-seg button:hover {
+  color: var(--fg);
+}
+
+/* The chosen word stands out unmistakably: a fuller tint, heavier weight -- and its own little point in front,
+   so one can see the choice even where the theme keeps colors faint. */
+.nc-seg-on {
+  background: rgb(var(--accent) / 0.3);
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.nc-seg-on::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgb(var(--accent));
+  margin-right: 0.35rem;
+  flex-shrink: 0;
+}
+
+.nc-seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* One line of the share form may give its length away: the type pick and the name sit on a row that wraps. */
 .nc-form .flex {
   min-width: 0;
@@ -553,6 +663,57 @@ button.nc-chip {
   word-break: break-all;
   color: var(--fg-muted);
   margin: 0;
+}
+
+/* The panel's own yes-and-no, drawn where it happens -- no window of the browser is part of this page. */
+.nc-ask {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-top: 0.15rem;
+}
+
+.nc-ask p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--fg);
+}
+
+.nc-ask-row {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.4rem;
+}
+
+.nc-ask-no,
+.nc-ask-yes {
+  font-size: 0.78rem;
+  border-radius: 6px;
+  padding: 0.25rem 0.65rem;
+  cursor: pointer;
+}
+
+.nc-ask-no {
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid rgb(var(--line));
+}
+
+.nc-ask-no:hover {
+  background: rgb(var(--raised));
+  color: var(--fg);
+}
+
+.nc-ask-yes {
+  background: transparent;
+  border: 1px solid rgb(var(--danger) / 0.45);
+  color: rgb(var(--danger));
+  font-weight: 600;
+}
+
+.nc-ask-yes:hover {
+  background: rgb(var(--danger) / 0.12);
 }
 
 /* ---- the contacts view -------------------------------------------------------------------------------------------- */

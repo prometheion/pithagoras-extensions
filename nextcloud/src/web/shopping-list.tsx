@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Shopping List tab: the lists -- made, renamed and taken away by name; its items checked (tick), added
  * with their name and measure, edited one by one, and taken away singly, in the checked ones at once, or all
@@ -26,6 +27,9 @@ export default function ShoppingList() {
   const [listId, setListId] = useState<number | null>(null);
   const [items, setItems] = useState<ItemRow[] | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   // the add-item form and the one item open to editing: their words as they stand
@@ -176,10 +180,13 @@ export default function ShoppingList() {
     }
   };
 
-  const deleteList = async () => {
+  const deleteList = async (asked = false) => {
     if (busy || listId === null) return;
     const chosen = lists?.find((l) => l.id === listId);
-    if (!window.confirm(t("Take the list “{title}” away for good?", { title: chosen?.title ?? "" }))) return;
+    if (!asked) {
+      setAsk({ text: t("Take the list “{title}” away for good?", { title: chosen?.title ?? "" }), run() { deleteList(true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -231,6 +238,7 @@ export default function ShoppingList() {
 
   return (
     <div className="space-y-2">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       {manage === "new" ? (
         newListForm
       ) : lists.length === 0 ? (

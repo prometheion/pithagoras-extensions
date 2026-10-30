@@ -1,6 +1,8 @@
 /** The German of the extension's own texts: each by what the code says in English. */
 export const de = {
   "Nextcloud": "Nextcloud",
+  "Yes": "Ja",
+  "No": "Nein",
   "Shopping List": "Einkaufsliste",
   "Cookbook": "Rezepte",
   "Notes": "Notizen",
@@ -177,10 +179,22 @@ export const de = {
   "seven days": "sieben Tage",
   "Previous day": "Vorheriger Tag",
   "Next day": "Nächster Tag",
+  "The days are being asked for again…": "Die Tage werden erneut abgefragt …",
+  "Into which calendar": "In welchen Kalender",
+  "The todos could not be read.": "Die Aufgaben konnten nicht gelesen werden.",
+  "The day of the new event could not be read.": "Der Tag des neuen Termins konnte nicht gelesen werden.",
   "Nothing is on this day.": "An diesem Tag steht nichts.",
   "A new event on this day": "Ein neuer Termin an diesem Tag",
   "What it is": "Worum es geht",
   "All day": "Ganztägig",
+  "A time span": "Ein Zeitfenster",
+  "How long it stands": "Wie lange es steht",
+  "How often it comes back": "Wie oft es wiederkommt",
+  "Once": "Einmalig",
+  "Weekly": "Wöchentlich",
+  "Monthly": "Monatlich",
+  "Every seven days from its first day.": "Alle sieben Tage ab dem ersten Tag.",
+  "On this day of each month, starting at its first day.": "An diesem Tag jedes Monats, beginnend mit dem ersten Tag.",
   "From": "Von",
   "to": "bis",
   "To": "Bis",
@@ -284,9 +298,17 @@ export const de = {
   "Delete this recipe": "Dieses Rezept löschen",
   "Take the recipe “{name}” away for good?": "Das Rezept „{name}“ endgültig entfernen?",
   "Search the recipes": "Rezepte durchsuchen",
+  "The recipe's name": "Der Name des Rezepts",
+  "For how many": "Für wie viele",
+  "Take this one away": "Diesen Eintrag entfernen",
+  "one more ingredient": "eine weitere Zutat",
+  "one more step": "einen weiteren Schritt",
 
   // Notizen -- was das Panel selbst tut
   "A new note": "Eine neue Notiz",
+  "Content": "Inhalt",
+  "What it is about": "Worum es geht",
+  "Write here": "Hier schreiben",
 
   // Dateien & Freigaben -- was das Panel selbst tut
   "A new folder": "Ein neuer Ordner",
@@ -313,6 +335,9 @@ export const de = {
   "The board's name": "Name des Bretts",
   "A new stack": "Ein neuer Stapel",
   "The stack's name": "Name des Stapels",
+  "Rename this stack": "Diesen Stapel umbenennen",
+  "Delete this stack": "Diesen Stapel löschen",
+  "Take the stack “{title}” and all its cards away for good?": "„Den Stapel „{title}“ samt aller Karten endgültig wegräumen?",
 
   // Kalender -- was das Panel selbst tut
   "Previous month": "Vorheriger Monat",

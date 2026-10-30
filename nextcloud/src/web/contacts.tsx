@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { LuPlus } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Contacts tab: one address book chosen of the books; its contacts, with a search that runs over the words of
  * name, e-mail and phone; and one contact open to its detail -- the common fields read and changed (the name, one
@@ -62,6 +63,9 @@ export default function Contacts() {
   const [newNote, setNewNote] = useState("");
 
   const [busy, setBusy] = useState(false);
+
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
 
   // the preferred one leads, as the server's own primary_email does
   const pick = (fields: unknown): string | undefined => {
@@ -178,9 +182,12 @@ export default function Contacts() {
     })();
   };
 
-  const deleteContact = () => {
+  const deleteContact = (asked = false) => {
     if (contact === null || bookUri === null) return;
-    if (!window.confirm(t("Take this contact away for good?"))) return;
+    if (!asked) {
+      setAsk({ text: t("Take this contact away for good?"), run() { deleteContact(true); } });
+      return;
+    }
     void (async () => {
       setBusy(true);
       try {
@@ -227,6 +234,7 @@ export default function Contacts() {
   if (contact !== null) {
     return (
       <div className="space-y-2">
+        {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
         <div className="flex items-center gap-1">
           <button type="button" className={portal.ui.classes.ghost} onClick={() => setContact(null)}>
             ← {t("Back to the list")}

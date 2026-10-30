@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, sayError, NextcloudStatus, InstanceView } from "./api";
+import { Ask, AskState } from "./widgets";
 import { isValidInstanceName } from "../instance-name";
 import { CAPABILITIES } from "../capabilities";
 
@@ -44,6 +45,9 @@ export default function NextcloudSettings() {
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
   const [selected, setSelected] = useState<string>("");
   const [busy, setBusy] = useState(false);
+
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -116,9 +120,12 @@ export default function NextcloudSettings() {
     }
   };
 
-  const removeCard = async (card: Draft) => {
+  const removeCard = async (card: Draft, asked = false) => {
     if (busy || !card.exists) return;
-    if (!window.confirm(t("Remove the instance {name}? Its container goes with it.", { name: card.name }))) return;
+    if (!asked) {
+      setAsk({ text: t("Remove the instance {name}? Its container goes with it.", { name: card.name }), run() { void removeCard(card, true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -152,9 +159,12 @@ export default function NextcloudSettings() {
     }
   };
 
-  const removeEverything = async () => {
+  const removeEverything = async (asked = false) => {
     if (busy) return;
-    if (!window.confirm(t("Remove the containers this extension made and its entries in pi's config? The settings stay."))) return;
+    if (!asked) {
+      setAsk({ text: t("Remove the containers this extension made and its entries in pi's config? The settings stay."), run() { void removeEverything(true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -172,6 +182,7 @@ export default function NextcloudSettings() {
 
   return (
     <div className="space-y-3 p-4">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       {problem && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
       {saved && !problem && <span className="text-xs text-fg-muted">{t("Saved.")}</span>}
 

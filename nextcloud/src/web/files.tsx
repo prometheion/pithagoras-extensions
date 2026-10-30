@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { LuChevronRight, LuExternalLink, LuFileText, LuFolder, LuEllipsis, LuShare2, LuTrash2, LuUsers } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Files tab: one view that walks the WebDAV tree -- a folder is opened by choosing it, a readable file (text,
  * a common image, a PDF as the server's extracted text) is read into this panel, and everything else is only
@@ -591,6 +592,9 @@ function SharingBox({
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
+
   const permissionValue = (): number =>
     (form.read ? 1 : 0) | (form.update ? 2 : 0) | (form.create ? 4 : 0) | (form.del ? 8 : 0) | (form.share ? 16 : 0);
 
@@ -610,9 +614,12 @@ function SharingBox({
     }
   };
 
-  const removeShare = async (id: number) => {
+  const removeShare = async (id: number, asked = false) => {
     if (busy) return;
-    if (!window.confirm(t("Take this share away?"))) return;
+    if (!asked) {
+      setAsk({ text: t("Take this share away?"), run() { void removeShare(id, true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -649,6 +656,7 @@ function SharingBox({
 
   return (
     <div className="nc-sharebox">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       <div className="flex items-center gap-1">
         <LuShare2 className="shrink-0 text-fg-muted" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("Shares")}</span>
@@ -757,6 +765,9 @@ function ActionsBox({
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
+
   const move = async () => {
     const to = moveTarget.trim().replace(/^\/+/, "");
     if (busy || to === "" || to === entry.path) return;
@@ -789,9 +800,12 @@ function ActionsBox({
     }
   };
 
-  const deleteEntry = async () => {
+  const deleteEntry = async (asked = false) => {
     if (busy) return;
-    if (!window.confirm(t("Take {name} to the trash?", { name: entry.name }))) return;
+    if (!asked) {
+      setAsk({ text: t("Take {name} to the trash?", { name: entry.name }), run() { void deleteEntry(true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -807,6 +821,7 @@ function ActionsBox({
 
   return (
     <div className="nc-sharebox">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       <div className="flex items-center gap-1">
         <LuEllipsis className="shrink-0 text-fg-muted" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("What it can be done to")}</span>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Mail tab: the account's mailboxes with their unread counts, one mailbox's messages in it, and the picked
  * message open to its text and its attachments. Opening a message marks it read; one more tap puts it back. All of
@@ -100,6 +101,9 @@ export default function Mail() {
   const [messages, setMessages] = useState<MessageRow[] | null>(null);
   const [open, setOpen] = useState<{ id: number; message: OpenMessage } | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   // the made message's words as they stand in the form: sent away or laid down as a draft where an account is picked
@@ -233,9 +237,12 @@ export default function Mail() {
       .finally(() => setBusy(false));
   };
 
-  const deleteOpen = () => {
+  const deleteOpen = (asked = false) => {
     if (busy || open === null || mailboxId === null) return;
-    if (!window.confirm(t("Take this message to the trash?"))) return;
+    if (!asked) {
+      setAsk({ text: t("Take this message to the trash?"), run() { deleteOpen(true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     void api
@@ -286,6 +293,7 @@ export default function Mail() {
     const m = open.message;
     return (
       <div className="space-y-2">
+        {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
         <div className="flex items-center gap-1">
           <button type="button" className={portal.ui.classes.ghost} onClick={() => setOpen(null)}>
             ← {t("Messages")}

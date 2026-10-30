@@ -72,9 +72,11 @@ where they were shown on the page, so putting the instance back starts it withou
     taken away again, and a short public link made of a path.
   - **Deck** — your boards (a new one set off with its color) and their stacks (new ones added), cards by their order,
     due date and labels; new cards set off at the top of a stack, a card's text read and written back.
-  - **Calendar** — the month at a glance in a grid like Nextcloud's own calendar, the chosen day's events laid out
-    beneath it; an event opened for its time, place and note changed or gone, new ones set off on the day; beside it the
-    open tasks (new ones with their due day), ticked off as they are done.
+  - **Calendar** — the month at a glance in a grid like Nextcloud's own calendar, every calendar overlaid in one and a
+    pill per one standing its events in or out (turning months stays within a held window, so it costs no call); the
+    chosen day's events laid out beneath it; an event opened for its time, place and note changed or gone, new ones set
+    off on the day into any calendar; beside it the open tasks across the shown calendars (new ones with their due day),
+    ticked off as they are done.
   - **Contacts** — your address books' contacts searched as you type, a card opened and amended in place, new ones
     added and taken away again.
   - **Mail** — the accounts' mailboxes and their messages by subject, sender and preview; new mail written at once —

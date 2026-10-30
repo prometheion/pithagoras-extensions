@@ -80,11 +80,20 @@ export const api = {
     }),
   start: () => call<NextcloudStatus>("/start", { method: "POST" }),
   reset: () => call<{ ok: true }>("/reset", { method: "POST" }),
-  tool: (name: string, args: Record<string, unknown> = {}, instance?: string) =>
-    call<ToolResult>("/tool", {
+  /** One tool called through. Where the server reports the call failed (isError), it is rejected with the server's
+   * own words -- so the catch every caller already stands in catches what was before read as an empty answer and
+   * could go by unseen. */
+  tool: async (name: string, args: Record<string, unknown> = {}, instance?: string) => {
+    const result = await call<ToolResult>("/tool", {
       method: "POST",
       body: JSON.stringify({ name, args, instance }),
-    }),
+    });
+    if (result.isError === true) {
+      const part = (result.content ?? []).find((p) => p.type === "text");
+      throw new Error(typeof part?.text === "string" && part.text !== "" ? part.text : `The tool ${name} said no without a word for it.`);
+    }
+    return result;
+  },
 };
 
 /** What one of the server's content parts carries as its text, and what that text says of itself: its JSON where it

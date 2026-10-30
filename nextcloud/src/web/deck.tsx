@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { LuPlus } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Deck tab: one board chosen of the boards; its stacks with their cards; and one card open to its detail --
  * read, renamed or reworded, due-dated, marked done, moved to another stack or taken away. What the deck tools
@@ -11,6 +12,13 @@ type Rec = Record<string, unknown>;
 
 const strOf = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
 const numOf = (value: unknown): number | undefined => (typeof value === "number" ? value : typeof value === "string" && value !== "" ? Number(value) : undefined);
+/** Deck keeps a colour as its word without the mark, and CSS needs the mark -- read it either way back to what
+ * CSS can hold. */
+const cssColor = (color?: string): string | undefined => (color === undefined ? undefined : color.startsWith("#") ? color : `#${color}`);
+/** The board list as the panel reads it: what Deck says, minus whatever is only there because it was taken away.
+ * A deleted board still stands in the answer with its tombstone -- but touching it answers a refusal. */
+const boardRows = (data: unknown) =>
+  (arrayOf(data, "boards") ?? []).map((b) => ({ raw: b as Rec })).filter((x) => !numOf(x.raw.deletedAt)).map((x) => ({ id: Number(x.raw.id), title: String(x.raw.title ?? ""), color: strOf(x.raw.color) }));
 
 interface BoardRow {
   id: number;
@@ -98,6 +106,9 @@ export default function Deck() {
   const [actionProblem, setActionProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
+
   // a new board's words: its name and the colour it stands in
   const [boardFormOpen, setBoardFormOpen] = useState(false);
   const [boardTitle, setBoardTitle] = useState("");
@@ -106,13 +117,17 @@ export default function Deck() {
   const [stackFormOpen, setStackFormOpen] = useState(false);
   const [stackName, setStackName] = useState("");
 
+  /** The stack that is being renamed right now, and the name it will receive. */
+  const [stackEditId, setStackEditId] = useState<number | null>(null);
+  const [stackEditTitle, setStackEditTitle] = useState("");
+
   const loadBoards = () => {
     setBoards(null);
     setBoardProblem(null);
     void api
       .tool("deck_get_boards", {}, instance)
       .then((result) => {
-        const rows = (arrayOf(partText(result).data, "boards") ?? []).map((b) => ({ id: Number(b.id), title: String(b.title ?? ""), color: strOf(b.color) }));
+        const rows = boardRows(partText(result).data);
         setBoards(rows);
         if (rows.length > 0 && boardId === null) chooseBoard(rows[0].id);
       })
@@ -236,9 +251,12 @@ export default function Deck() {
     );
   };
 
-  const deleteCard = () => {
+  const deleteCard = (asked = false) => {
     if (card === null || cardInStack === null || boardId === null) return;
-    if (!window.confirm(t("Take this card away for good?"))) return;
+    if (!asked) {
+      setAsk({ text: t("Take this card away for good?"), run() { deleteCard(true); } });
+      return;
+    }
     void act(
       () => api.tool("deck_delete_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id }, instance),
       () => {
@@ -272,9 +290,10 @@ export default function Deck() {
     setBusy(true);
     setActionProblem(null);
     try {
-      await api.tool("deck_create_board", { title, color: boardColor }, instance);
+      // Deck's own board API takes the colour as at most six characters -- the mark would be a seventh and is refused
+      await api.tool("deck_create_board", { title, color: boardColor.replace(/^#/, "") }, instance);
       const result = await api.tool("deck_get_boards", {}, instance);
-      const rows = (arrayOf(partText(result).data, "boards") ?? []).map((b) => ({ id: Number(b.id), title: String(b.title ?? ""), color: strOf(b.color) }));
+      const rows = boardRows(partText(result).data);
       setBoards(rows);
       const created = rows.find((b) => b.title === title);
       if (created !== undefined) {
@@ -306,12 +325,36 @@ export default function Deck() {
     );
   };
 
+  /** A rename changes the stack's name and nothing besides it. */
+  const renameStack = (stackId: number) => {
+    if (boardId === null || busy || stackEditTitle.trim() === "") return;
+    void act(
+      () => api.tool("deck_update_stack", { board_id: boardId, stack_id: stackId, title: stackEditTitle.trim() }, instance),
+      () => {
+        setStackEditId(null);
+        setStackEditTitle("");
+        loadStacks(boardId);
+      }
+    );
+  };
+
+  /** A stack goes away together with all of its cards -- which is why the question is phrased that way. */
+  const deleteStack = (stack: { id: number; title: string }, asked = false) => {
+    if (boardId === null || busy) return;
+    if (!asked) {
+      setAsk({ text: t("Take the stack “{title}” and all its cards away for good?", { title: stack.title }), run() { deleteStack(stack, true); } });
+      return;
+    }
+    void act(() => api.tool("deck_delete_stack", { board_id: boardId, stack_id: stack.id }, instance), () => loadStacks(boardId));
+  };
+
   // ---- what is drawn -------------------------------------------------------
 
   if (card !== null) {
     const otherStacks = (stacks ?? []).filter((s) => s.id !== cardInStack);
     return (
       <div className="space-y-2">
+        {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
         <div className="flex items-center gap-1">
           <button type="button" className={portal.ui.classes.ghost} onClick={() => setCard(null)}>
             ← {t("Back to the board")}
@@ -334,7 +377,7 @@ export default function Deck() {
             {(card.labels.length > 0 || (card.assignedUsers ?? []).length > 0) && (
               <div className="flex flex-wrap items-center gap-1">
                 {card.labels.map((label) => (
-                  <span key={label.title} className="nc-chip" style={label.color !== undefined ? { background: label.color, color: "#fff", borderColor: label.color } : undefined}>
+                  <span key={label.title} className="nc-chip" style={label.color !== undefined ? { background: cssColor(label.color), color: "#fff", borderColor: cssColor(label.color) } : undefined}>
                     {label.title}
                   </span>
                 ))}
@@ -383,20 +426,21 @@ export default function Deck() {
 
   return (
     <div className="space-y-2">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       {boards === null ? (
         boardProblem !== null ? (
           <portal.ui.ErrorBanner onClose={() => setBoardProblem(null)}>{t("The boards could not be read: {error}", { error: boardProblem })}</portal.ui.ErrorBanner>
         ) : (
           <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
         )
-      ) : boards.length === 0 ? (
-        <portal.ui.Empty>{t("No boards yet.")}</portal.ui.Empty>
       ) : (
         <>
+          {/* With zero boards the way in still stands open -- or nothing could be added from here at all. */}
+          {boards.length === 0 && <portal.ui.Empty>{t("No boards yet.")}</portal.ui.Empty>}
           <div className="flex gap-1" role="group">
             {boards.map((board) => (
               <button key={board.id} type="button" aria-pressed={board.id === boardId} className={`nc-tab${board.id === boardId ? " nc-tab-on" : ""}`} onClick={() => chooseBoard(board.id)}>
-                {board.color !== undefined && <span className="nc-dot" style={{ background: board.color }} />}
+                {board.color !== undefined && <span className="nc-dot" style={{ background: cssColor(board.color) }} />}
                 <span>{board.title}</span>
               </button>
             ))}
@@ -453,7 +497,39 @@ export default function Deck() {
                     <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => { setNewStackId(stack.id); setNewTitle(""); setNewDescription(""); setNewDue(""); }} aria-label={t("A new card in this stack")}>
                       <LuPlus /> {t("New card")}
                     </button>
+                    <button
+                      type="button"
+                      className={portal.ui.classes.ghost}
+                      disabled={busy}
+                      onClick={() => {
+                        if (stackEditId === stack.id) setStackEditId(null);
+                        else {
+                          setStackEditId(stack.id);
+                          setStackEditTitle(stack.title);
+                        }
+                      }}
+                      aria-label={t("Rename this stack")}
+                    >
+                      ✎
+                    </button>
+                    <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => deleteStack(stack)} aria-label={t("Delete this stack")}>
+                      ×
+                    </button>
                   </header>
+
+                  {stackEditId === stack.id && (
+                    <form
+                      className="flex items-center gap-1 p-1"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        renameStack(stack.id);
+                      }}
+                    >
+                      <input className={portal.ui.classes.input} value={stackEditTitle} aria-label={t("The stack's name")} onChange={(e) => setStackEditTitle(e.target.value)} />
+                      <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || stackEditTitle.trim() === ""}>{t("Save")}</button>
+                      <button type="button" className={portal.ui.classes.ghost} onClick={() => setStackEditId(null)}>{t("Cancel")}</button>
+                    </form>
+                  )}
 
                   {newStackId === stack.id && (
                     <form
@@ -484,7 +560,7 @@ export default function Deck() {
                             <span className="min-w-0 flex-1 truncate text-left">{c.title}</span>
                             {c.duedate !== undefined && <span className="shrink-0 text-xs text-fg-subtle">{showDate(c.duedate)}</span>}
                             {c.labels.slice(0, 3).map((label) => (
-                              <span key={label.title} className="nc-chip shrink-0" style={label.color !== undefined ? { background: label.color, color: "#fff", borderColor: label.color } : undefined}>
+                              <span key={label.title} className="nc-chip shrink-0" style={label.color !== undefined ? { background: cssColor(label.color), color: "#fff", borderColor: cssColor(label.color) } : undefined}>
                                 {label.title}
                               </span>
                             ))}

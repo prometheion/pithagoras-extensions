@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Cookbook tab: the recipes by name and date, one chosen open to its ingredients and steps -- made new in
  * a form, reworded in it, taken away with a word; a line to take a recipe in from a page that carries schema.org,
@@ -23,6 +24,9 @@ export default function Cookbook() {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   // the one form the recipes go through: a made recipe fills it empty, an edited one with what stands there now
@@ -30,8 +34,8 @@ export default function Cookbook() {
   const [formName, setFormName] = useState("");
   const [formDesc, setFormDesc] = useState("");
   const [formYield, setFormYield] = useState("");
-  const [formIng, setFormIng] = useState(""); // one ingredient to a line
-  const [formSteps, setFormSteps] = useState(""); // one step to a line
+  const [formIng, setFormIng] = useState<string[]>([]); // every ingredient stands on its own entry
+  const [formSteps, setFormSteps] = useState<string[]>([]); // every step stands on its own entry
 
   const rowOf = (r: Record<string, unknown>): RecipeRow => ({
     id: String(r.id),
@@ -102,8 +106,8 @@ export default function Cookbook() {
     setFormName("");
     setFormDesc("");
     setFormYield("");
-    setFormIng("");
-    setFormSteps("");
+    setFormIng([""]); // one made row each, so the lists never start bare
+    setFormSteps([""]);
   };
 
   /** The opened recipe's words into the form, lines by line where the server answers them joined. */
@@ -114,9 +118,9 @@ export default function Cookbook() {
     setFormDesc(typeof detail.description === "string" ? detail.description : "");
     setFormYield(typeof detail.recipe_yield === "string" ? detail.recipe_yield : typeof detail.recipeYield === "string" ? (detail.recipeYield as string) : "");
     const ings = arrayOf(detail, "recipeIngredient");
-    setFormIng(ings ? ings.map((i) => String(typeof i === "object" && i !== null ? (i as Record<string, unknown>).value ?? "" : i)).filter((l) => l !== "").join("\n") : "");
+    setFormIng(ings ? ings.map((i) => String(typeof i === "object" && i !== null ? (i as Record<string, unknown>).value ?? "" : i)).filter((l) => l !== "") : []);
     const steps = arrayOf(detail, "recipeInstructions") ?? (typeof detail.recipeInstructions === "string" ? [{ value: detail.recipeInstructions }] : undefined);
-    setFormSteps(steps ? steps.map(textOf).filter((l) => l !== "").join("\n") : "");
+    setFormSteps(steps ? steps.map(textOf).filter((l) => l !== "") : []);
   };
 
   const submitForm = async () => {
@@ -124,14 +128,14 @@ export default function Cookbook() {
     setBusy(true);
     setProblem(null);
     try {
-      // one word to a line: the server's own words for what a recipe is made of and done by
-      const lines = (word: string): string[] => word.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+      // every entry is one of the server's own words for what a recipe is made of and done by
+      const words = (list: string[]): string[] => list.map((l) => l.trim()).filter((l) => l !== "");
       const args: Record<string, unknown> = { name: formName.trim() };
       if (formDesc.trim() !== "") args.description = formDesc.trim();
       if (formYield.trim() !== "") args.recipe_yield = formYield.trim();
-      const ings = lines(formIng);
+      const ings = words(formIng);
       if (ings.length > 0) args.ingredients = ings;
-      const steps = lines(formSteps);
+      const steps = words(formSteps);
       if (steps.length > 0) args.instructions = steps;
       if (formOpen === "create") {
         await api.tool("nc_cookbook_create_recipe", args, instance);
@@ -149,9 +153,12 @@ export default function Cookbook() {
     }
   };
 
-  const remove = async () => {
+  const remove = async (asked = false) => {
     if (busy || chosen === null || detail === null) return;
-    if (!window.confirm(t("Take the recipe “{name}” away for good?", { name: String(detail.name ?? "") }))) return;
+    if (!asked) {
+      setAsk({ text: t("Take the recipe “{name}” away for good?", { name: String(detail.name ?? "") }), run() { remove(true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -171,6 +178,7 @@ export default function Cookbook() {
 
   return (
     <div className="space-y-2">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       {recipes === null ? (
         problem ? (
           <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The recipes could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
@@ -240,7 +248,7 @@ export default function Cookbook() {
               desc={formDesc} setDesc={setFormDesc}
               yieldWord={formYield} setYieldWord={setFormYield}
               ings={formIng} setIngs={setFormIng}
-              stepWords={formSteps} setStepWords={setFormSteps}
+              steps={formSteps} setSteps={setFormSteps}
               submitLabel={t("Add")}
               onSubmit={() => void submitForm()}
               onCancel={() => setFormOpen(null)}
@@ -273,7 +281,7 @@ export default function Cookbook() {
               desc={formDesc} setDesc={setFormDesc}
               yieldWord={formYield} setYieldWord={setFormYield}
               ings={formIng} setIngs={setFormIng}
-              stepWords={formSteps} setStepWords={setFormSteps}
+              steps={formSteps} setSteps={setFormSteps}
               submitLabel={t("Save")}
               onSubmit={() => void submitForm()}
               onCancel={() => setFormOpen(null)}
@@ -337,33 +345,69 @@ export default function Cookbook() {
   );
 }
 
-/** The recipe's words in a form: made empty, filled with what stands there when changed -- one line to an
- * ingredient or a step. */
+/** The recipe's words in a form: made empty, filled with what stands there when changed -- every ingredient
+ * and every step is an entry of its own list, so nothing has to be split by hand. */
 function RecipeForm(props: {
   name: string; setName(w: string): void;
   desc: string; setDesc(w: string): void;
   yieldWord: string; setYieldWord(w: string): void;
-  ings: string; setIngs(w: string): void;
-  stepWords: string; setStepWords(w: string): void;
+  ings: string[]; setIngs(w: string[]): void;
+  steps: string[]; setSteps(w: string[]): void;
   submitLabel: string;
   onSubmit(): void;
   onCancel(): void;
   busy: boolean;
 }) {
   const t2 = t;
+  /** One list of the form: a spoken name above, an entry per row with its way out, and the door for one more. */
+  const listOf = (label: string, words: string[], setWords: (w: string[]) => void, addWord: string) => (
+    <div className="space-y-1">
+      <span className="block text-xs font-medium text-fg-muted">{label}</span>
+      {words.map((word, i) => (
+        <div key={i} className="flex items-center gap-1">
+          <input
+            className={portal.ui.classes.input}
+            value={word}
+            aria-label={`${label} ${i + 1}`}
+            onChange={(e) => {
+              const next = words.slice();
+              next[i] = e.target.value;
+              setWords(next);
+            }}
+          />
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => setWords(words.filter((_, j) => j !== i))} aria-label={t2("Take this one away")}>
+            ×
+          </button>
+        </div>
+      ))}
+      <button type="button" className={portal.ui.classes.ghost} onClick={() => setWords([...words, ""])}>
+        + {addWord}
+      </button>
+    </div>
+  );
   return (
     <form
       className="nc-form"
+      style={{ gap: "0.9rem" }}
       onSubmit={(e) => {
         e.preventDefault();
         props.onSubmit();
       }}
     >
-      <input className={portal.ui.classes.input} value={props.name} placeholder={t2("The recipe's name")} aria-label={t2("The recipe's name")} onChange={(e) => props.setName(e.target.value)} />
-      <textarea className="nc-note-text" rows={2} value={props.desc} placeholder={t2("What it is")} aria-label={t2("What it is")} style={{ minHeight: "0" }} onChange={(e) => props.setDesc(e.target.value)} />
-      <input className={portal.ui.classes.inputSmall} value={props.yieldWord} placeholder={t2("For how many")} aria-label={t2("For how many")} onChange={(e) => props.setYieldWord(e.target.value)} />
-      <textarea className="nc-note-text" rows={3} value={props.ings} placeholder={t2("The ingredients, one to a line")} aria-label={t2("The ingredients, one to a line")} style={{ minHeight: "0" }} onChange={(e) => props.setIngs(e.target.value)} />
-      <textarea className="nc-note-text" rows={5} value={props.stepWords} placeholder={t2("The steps, one to a line")} aria-label={t2("The steps, one to a line")} style={{ minHeight: "0" }} onChange={(e) => props.setStepWords(e.target.value)} />
+      <div className="space-y-1">
+        <span className="block text-xs font-medium text-fg-muted">{t2("The recipe's name")}</span>
+        <input className={portal.ui.classes.input} value={props.name} aria-label={t2("The recipe's name")} onChange={(e) => props.setName(e.target.value)} />
+      </div>
+      <div className="space-y-1">
+        <span className="block text-xs font-medium text-fg-muted">{t2("What it is")}</span>
+        <textarea className="nc-note-text" rows={2} value={props.desc} aria-label={t2("What it is")} style={{ minHeight: "0" }} onChange={(e) => props.setDesc(e.target.value)} />
+      </div>
+      <div className="space-y-1">
+        <span className="block text-xs font-medium text-fg-muted">{t2("For how many")}</span>
+        <input className={portal.ui.classes.inputSmall} value={props.yieldWord} aria-label={t2("For how many")} onChange={(e) => props.setYieldWord(e.target.value)} />
+      </div>
+      {listOf(t2("Ingredients"), props.ings, props.setIngs, t2("one more ingredient"))}
+      {listOf(t2("Steps"), props.steps, props.setSteps, t2("one more step"))}
       <div className="flex gap-1">
         <button type="submit" className={portal.ui.classes.primarySmall} disabled={props.busy || props.name.trim() === ""}>
           {props.submitLabel}

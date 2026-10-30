@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { LuNotebookPen } from "react-icons/lu";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { Ask, AskState } from "./widgets";
 
 /** The Notes tab: the notes by a word, one chosen open to its text -- edited and saved (the etag travels with it,
  * so an edit made elsewhere is not quietly lost), or taken away. All of it as a tool call on the server. */
@@ -22,6 +23,9 @@ export default function Notes() {
   const [editedTitle, setEditedTitle] = useState("");
   const [editedContent, setEditedContent] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
+  const [ask, setAsk] = useState<AskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   // the made note's words as they stand: open in the list view where nothing is chosen yet
@@ -102,9 +106,12 @@ export default function Notes() {
     }
   };
 
-  const remove = async () => {
+  const remove = async (asked = false) => {
     if (busy || chosenId === null) return;
-    if (!window.confirm(t("Remove this note for good?"))) return;
+    if (!asked) {
+      setAsk({ text: t("Remove this note for good?"), run() { void remove(true); } });
+      return;
+    }
     setBusy(true);
     setProblem(null);
     try {
@@ -143,18 +150,45 @@ export default function Notes() {
           {creating ? "−" : "+"} {t("A new note")}
         </button>
         {creating && (
-          <div className="nc-note-edit">
-            <input className="nc-note-title" value={newTitle} aria-label={t("Note title")} onChange={(e) => setNewTitle(e.target.value)} />
-            <textarea className="nc-note-text" rows={8} value={newContent} aria-label={t("Note content")} onChange={(e) => setNewContent(e.target.value)} />
-            <div className="flex gap-1 border-t px-3 py-2" style={{ borderColor: "rgb(var(--line))" }}>
-              <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || (newTitle.trim() === "" && newContent.trim() === "")} onClick={() => void create()}>
+          <form
+            className="nc-form"
+            style={{ gap: "0.9rem" }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void create();
+            }}
+          >
+            <p className="nc-form-title">{t("A new note")}</p>
+            <div className="space-y-1">
+              <span className="block text-xs font-medium text-fg-muted">{t("Title")}</span>
+              <input
+                className={portal.ui.classes.input}
+                value={newTitle}
+                placeholder={t("What it is about")}
+                aria-label={t("Title")}
+                onChange={(e) => setNewTitle(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <span className="block text-xs font-medium text-fg-muted">{t("Content")}</span>
+              <textarea
+                className="nc-note-text"
+                rows={8}
+                value={newContent}
+                placeholder={t("Write here")}
+                aria-label={t("Content")}
+                onChange={(e) => setNewContent(e.target.value)}
+              />
+            </div>
+            <div className="flex gap-1">
+              <button type="submit" className={portal.ui.classes.primarySmall} disabled={busy || (newTitle.trim() === "" && newContent.trim() === "")}>
                 {t("Add")}
               </button>
               <button type="button" className={portal.ui.classes.ghost} onClick={() => setCreating(false)}>
                 {t("Cancel")}
               </button>
             </div>
-          </div>
+          </form>
         )}
         {results === null ? (
           problem ? (
@@ -183,6 +217,7 @@ export default function Notes() {
 
   return (
     <div className="space-y-2">
+      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       <div className="flex items-center gap-1">
         <button type="button" className={portal.ui.classes.ghost} onClick={() => setChosenId(null)}>
           ← {t("All notes")}

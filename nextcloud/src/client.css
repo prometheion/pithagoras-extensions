@@ -1,0 +1,817 @@
+/* @pithagoras/nextcloud -- its own chrome: a bar of tabs, one list per tab, and the picked thing below. The colours
+   are the portal's theme variables -- the same RGB triplets its Tailwind utilities wrap in rgb(...), so a chosen
+   theme paints it too (a bare triplet as a colour value is invalid, which left this panel flat before). */
+
+/* ---- the tab bar: pills that wrap to a second row where the panel narrows ------------------------------ */
+
+.nc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.15rem 0.15rem 0.3rem;
+}
+
+/* ---- a tab (the big bar and the sub-tab rows share the look) ------------------------------------------- */
+
+.nc-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.nc-tab > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nc-tab svg {
+  flex: none;
+}
+
+.nc-tab:hover:not(:disabled) {
+  color: var(--fg);
+  background: rgb(var(--raised) / 0.7);
+}
+
+/* The pressed pill is tinted with the theme's accent, not just recoloured. */
+.nc-tab-on,
+.nc-tab-on:hover:not(:disabled) {
+  color: rgb(var(--accent));
+  background: rgb(var(--accent) / 0.14);
+  border-color: rgb(var(--accent) / 0.45);
+  font-weight: 600;
+}
+
+/* ---- a list, and the thing picked from it ---------------------------------------------------------------- */
+
+.nc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.5rem;
+}
+
+.nc-row {
+  appearance: none;
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
+  color: var(--fg);
+  text-align: left;
+  font-size: 0.82rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+}
+
+.nc-row:hover {
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
+}
+
+/* The picked one stands out by an accent edge and a faint tint, not only a darker line. */
+.nc-row-on,
+.nc-row-on:hover {
+  border-color: rgb(var(--accent) / 0.55);
+  background: rgb(var(--accent) / 0.08);
+}
+
+/* ---- the shopping list ----------------------------------------------------------------------------------- */
+
+.nc-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 7px;
+  min-width: 0;
+}
+
+.nc-item:hover {
+  background: rgb(var(--raised) / 0.6);
+}
+
+.nc-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+/* A checked item: struck through and faded, the way a shop's list goes. */
+.nc-item-done .nc-item-name {
+  text-decoration: line-through;
+  color: var(--fg-subtle);
+}
+
+.nc-item button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+}
+
+.nc-item button:hover {
+  color: rgb(var(--danger));
+  background: rgb(var(--raised) / 0.8);
+}
+
+
+/* ---- a switcher of views inside one tab (the sub-tabs) ----------------------------------------------------- */
+
+.nc-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.1rem 0.1rem 0;
+}
+
+/* ---- the calendar's month grid ---------------------------------------------------------------------------------- */
+
+/* The pane fills what the panel gives it: where there is slack below the content, the events section -- and
+   with it the week rows of the grid -- takes it, so a tall panel shows a tall calendar instead of a small one
+   above an empty hole. Where the content outgrows the panel, it scrolls as before. */
+.calendar-tab > .tab-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.calendar-pane {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.calendar-events {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Seven days to a row, Monday first: the header is words, the cells are picks of one day each.
+   A cell holds its number and up to three events in short -- more turn into a count, not another line.
+   The week rows sit on their floor; whether the grid claims extra height below that is measured on the
+   panel itself (a stretch the panel really has room for, never one borrowed from its neighbours). */
+.nc-monthgrid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.nc-monthhead {
+  text-align: center;
+  font-size: 0.65rem;
+  color: var(--fg-subtle);
+  padding: 0.1rem 0;
+}
+
+.nc-monthcell {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 6px;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  min-height: 3.4rem;
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+  font-family: inherit;
+}
+
+.nc-monthcell:hover {
+  background: rgb(var(--raised) / 0.7);
+}
+
+/* The picked day stands out the way a list row does: an accent edge and a faint tint. */
+.nc-monthcell-on,
+.nc-monthcell-on:hover {
+  border-color: rgb(var(--accent) / 0.6);
+  background: rgb(var(--accent) / 0.1);
+}
+
+/* A neighbour month's day is there for the walk to it, not as part of the month shown. */
+.nc-monthcell-out .nc-monthnum {
+  opacity: 0.45;
+}
+
+.nc-monthcell-today .nc-monthnum {
+  font-weight: 700;
+  color: rgb(var(--accent));
+}
+
+.nc-monthnum {
+  font-size: 0.68rem;
+  color: var(--fg-muted);
+  padding: 0 0.2rem;
+}
+
+/* The day's events in short, one under the other as high as the cell allows. */
+.nc-monthevs {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.nc-monthchip {
+  font-size: 0.65rem;
+  line-height: 1.3;
+  border-radius: 4px;
+  padding: 0 0.25rem;
+  background: rgb(var(--accent) / 0.18);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An all-day thing stands apart from the timed ones: no accent, only a line.
+   (The all-day event's word is what the grid reads as its whole of it.) */
+.nc-monthchip-all {
+  background: rgb(var(--line));
+  color: var(--fg-muted);
+}
+
+.nc-monthmore {
+  font-size: 0.6rem;
+  color: var(--fg-subtle);
+  padding: 0 0.25rem;
+}
+
+/* A calendar's chip in the row over the grid, flat without a frame -- a white box here read as noise: where its
+   events are on, it sits in its own colour faintly and stands full; where they are not, it steps back dimmed.
+   Its dot carries the calendar's colour, which the day cells and the agenda rows read from as well. */
+.nc-calpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.72rem;
+  padding: 0.18rem 0.55rem;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.nc-calpill-off {
+  opacity: 0.45;
+}
+
+.nc-caldot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  flex: none;
+}
+
+/* ---- the files view ----------------------------------------------------------------------------------------- */
+
+/* The Files header stands as a column so a long path never pushes the Shared-with-me entry down.
+   A gap under it (the old layout) read as a hole in the view. */
+.nc-files-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.nc-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.1rem;
+  font-size: 0.82rem;
+  min-width: 0;
+}
+
+.nc-crumbs button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nc-crumbs button:hover {
+  color: var(--fg);
+  background: rgb(var(--raised) / 0.7);
+}
+
+/* A row of the file list, a full-width pick.
+   (The events and the contacts dress as one too: same bone, own name.) */
+.nc-file,
+.nc-event,
+.nc-contact {
+  appearance: none;
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
+  color: var(--fg);
+  text-align: left;
+  font-size: 0.82rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.nc-file svg,
+.nc-event svg,
+.nc-contact svg {
+  flex: none;
+  color: var(--fg-subtle);
+}
+
+/* A folder is the only entry that leads somewhere deeper: it wears the accent. */
+.nc-file svg.nc-file-dir {
+  color: rgb(var(--accent));
+}
+
+.nc-file:hover,
+.nc-event:hover,
+.nc-contact:hover {
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
+}
+
+.nc-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nc-file-size {
+  color: var(--fg-subtle);
+  font-size: 0.72rem;
+  flex: 0 0 auto;
+}
+
+/* A row of the tree is two controls beside each other: the pick (open or download) and the mark of its own,
+   where the box under it opens. Nested buttons would not stand, so the row is a plain bone.
+   The pick carries the words; the mark wears the accent where something of it is shared. */
+.nc-file-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.nc-row-share {
+  flex: 0 0 auto;
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0.15rem;
+  margin-right: -0.25rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nc-row-share svg {
+  color: var(--fg-subtle);
+}
+
+.nc-row-share:hover svg,
+.nc-row-share.is-shared svg {
+  color: rgb(var(--accent));
+}
+
+.nc-preview-img {
+  display: block;
+  width: 100%;
+  max-height: 65vh;
+  object-fit: contain;
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--raised) / 0.5);
+}
+
+.nc-file-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--surface));
+  max-height: 55vh;
+  overflow: auto;
+}
+
+/* ---- the shares view ----------------------------------------------------------------------------------------- */
+
+.nc-share {
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
+  border-radius: 8px;
+  padding: 0.45rem 0.65rem;
+  min-width: 0;
+}
+
+/* A small round word: the kind of share, a card's label, a due thing coming. */
+.nc-chip {
+  display: inline-block;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  padding: 0.02rem 0.45rem;
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--raised) / 0.6);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nc-chip-dim {
+  opacity: 0.75;
+}
+
+/* A chip that is a pick (what a share may do): on, it wears the accent rather than a checkbox's tick. */
+.nc-chip-on {
+  border-color: rgb(var(--accent) / 0.55);
+  color: var(--fg);
+  background: rgb(var(--accent) / 0.14);
+}
+
+button.nc-chip {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* The picks of it stand on one line that wraps where the panel is narrow. */
+.nc-perm-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/* A share's box under its row of the tree: those of it seen and added, drawn in from the row's name.
+   Its forms do not add their own spacing again. */
+.nc-sharebox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.3rem 0 0.4rem 1.1rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid rgb(var(--line));
+  border-left: 2px solid rgb(var(--accent) / 0.55);
+  border-radius: 8px;
+  background: rgb(var(--raised) / 0.4);
+}
+
+.nc-sharebox .nc-form {
+  margin-top: 0;
+}
+
+.nc-sharebox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* The colour of a board or a photo's presence: a dot the size of one word. */
+.nc-dot {
+  flex: 0 0 auto;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  display: inline-block;
+  border: 1px solid rgb(var(--line));
+}
+
+/* ---- the deck view ------------------------------------------------------------------------------------------- */
+
+.nc-card {
+  appearance: none;
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
+  color: var(--fg);
+  text-align: left;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.nc-card:hover {
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
+}
+
+/* A done card: the way a checked item goes.
+   (nc-card-done dresses only the title span's words, so it strikes through what is read.) */
+.nc-card-done .nc-chip,
+.nc-card-done > span:first-child {
+  color: var(--fg-subtle);
+}
+
+.nc-card-done > span:first-child {
+  text-decoration: line-through;
+}
+
+/* ---- a small form inside a tab ---------------------------------------------------------------------------------- */
+
+.nc-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed rgb(var(--line));
+  border-radius: 8px;
+}
+
+.nc-form input,
+.nc-form select {
+  min-width: 0;
+  width: 100%;
+}
+
+/* A checkbox is not one of the form's fields: without this, the rule above stretches it across the whole row. */
+.nc-form input[type="checkbox"] {
+  width: auto;
+  flex-shrink: 0;
+}
+
+/* The either-or of how long an event stands: two words in one frame, the chosen one standing out faintly.
+   Self-made on purpose -- where there is a choice between exactly two ways to stand open, a menu is not needed. */
+.nc-seg {
+  display: inline-flex;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border: 1px solid rgb(var(--line));
+  border-radius: 999px;
+  background: rgb(var(--raised) / 0.6);
+}
+
+.nc-seg button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.nc-seg button:hover {
+  color: var(--fg);
+}
+
+/* The chosen word stands out unmistakably: a fuller tint, heavier weight -- and its own little point in front,
+   so one can see the choice even where the theme keeps colors faint. */
+.nc-seg-on {
+  background: rgb(var(--accent) / 0.3);
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.nc-seg-on::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgb(var(--accent));
+  margin-right: 0.35rem;
+  flex-shrink: 0;
+}
+
+.nc-seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* One line of the share form may give its length away: the type pick and the name sit on a row that wraps. */
+.nc-form .flex {
+  min-width: 0;
+}
+
+.nc-form-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+  margin: 0;
+}
+
+.nc-form-result {
+  font-size: 0.8rem;
+  word-break: break-all;
+  color: var(--fg-muted);
+  margin: 0;
+}
+
+/* The panel's own yes-and-no, drawn where it happens -- no window of the browser is part of this page. */
+.nc-ask {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-top: 0.15rem;
+}
+
+.nc-ask p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--fg);
+}
+
+.nc-ask-row {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.4rem;
+}
+
+.nc-ask-no,
+.nc-ask-yes {
+  font-size: 0.78rem;
+  border-radius: 6px;
+  padding: 0.25rem 0.65rem;
+  cursor: pointer;
+}
+
+.nc-ask-no {
+  background: transparent;
+  color: var(--fg-muted);
+  border: 1px solid rgb(var(--line));
+}
+
+.nc-ask-no:hover {
+  background: rgb(var(--raised));
+  color: var(--fg);
+}
+
+.nc-ask-yes {
+  background: transparent;
+  border: 1px solid rgb(var(--danger) / 0.45);
+  color: rgb(var(--danger));
+  font-weight: 600;
+}
+
+.nc-ask-yes:hover {
+  background: rgb(var(--danger) / 0.12);
+}
+
+/* ---- the contacts view -------------------------------------------------------------------------------------------- */
+
+/* ---- the notes view -------------------------------------------------------------------------------------------------- */
+
+/* Where no note is open, the search stands in one block under a title rather than bare controls over an empty page. */
+.nc-note-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--surface));
+}
+
+/* A note in the search list: a file row's bone, its own words. */
+.nc-open {
+  appearance: none;
+  border: 1px solid rgb(var(--line));
+  background: rgb(var(--surface));
+  color: var(--fg);
+  text-align: left;
+  font-size: 0.82rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  cursor: pointer;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.nc-open:hover {
+  border-color: rgb(var(--fg-subtle) / 0.7);
+  background: rgb(var(--raised) / 0.6);
+}
+
+.nc-open-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A note open to editing: title and text in one card, not two bare boxes stacked on the page. */
+.nc-note-edit {
+  border: 1px solid rgb(var(--line));
+  border-radius: 8px;
+  background: rgb(var(--surface));
+  overflow: hidden;
+}
+
+/* The title stands as the card's heading, not as another small input. */
+.nc-note-title {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgb(var(--line));
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.55rem 0.75rem;
+}
+
+.nc-note-title:focus-visible,
+.nc-note-text:focus-visible {
+  outline: 2px solid rgb(var(--accent) / 0.6);
+  outline-offset: -2px;
+}
+
+/* The note's text to edit under its title. */
+.nc-note-text {
+  width: 100%;
+  min-width: 0;
+  display: block;
+  box-sizing: border-box;
+  resize: vertical;
+  background: rgb(var(--raised) / 0.4);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 0.65rem 0.75rem;
+  min-height: 11rem;
+}
+
+.nc-contact-sub {
+  color: var(--fg-subtle);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

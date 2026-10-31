@@ -1,6 +1,6 @@
 {
   "name": "@pithagoras/nextcloud",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Nextcloud for Pithagoras: runs the Nextcloud MCP server in its own container and brings its Files & Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List and Notes into a chat panel.",
   "type": "module",
   "pi": {},

@@ -102,3 +102,21 @@ already stands. The extension is each container's owner: it is created on the fi
 label says whose it is), rebuilt where the host, the user name or the password has changed, and removed again when the
 instance or the extension goes away. Nothing of what you have in your cloud lives inside it; it only speaks to the
 Nextcloud behind the address you gave it.
+
+## Security
+
+The containers are not on a network of their own. Blender's and Godot's stand where no code they run can reach the
+machine or the internet at all, and so should Office's Document Server — but a Nextcloud MCP server that cannot get
+to your cloud could do nothing. So each stands on the portal's shared loopback (Docker for extensions' shared
+network) instead, and what it exposes there is held down to the smallest: its /mcp endpoint binds to `127.0.0.1` of
+that namespace only, so the portal alone can reach it; nothing else listens, and nothing in the container has a way
+to your machine beyond the Nextcloud address you gave it.
+
+The login stands with the extension's own settings: its name, host, user name and app password sit in the
+extension's data folder on the portal's machine, written once and never shown again. Use an **app password** rather
+than your personal one — Settings ▸ Security ▸ Devices & sessions lets you revoke that one on its own when it stops
+being wanted; removing an instance or uninstalling the extension takes the entry away again.
+
+The image itself is the community's (cbcoutinho/nextcloud-mcp-server), pinned to a release: this extension ships no
+code of its, and what runs in the container is that project's — read it where you would read anything else your
+cloud credentials are handed to.

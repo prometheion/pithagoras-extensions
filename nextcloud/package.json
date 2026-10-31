@@ -2,7 +2,6 @@
   "name": "@pithagoras/nextcloud",
   "version": "0.1.0",
   "description": "Nextcloud for Pithagoras: runs the Nextcloud MCP server in its own container and brings its Files & Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List and Notes into a chat panel.",
-  "license": "Apache-2.0",
   "type": "module",
   "pi": {},
   "pithagoras": {
@@ -14,10 +13,12 @@
     }
   },
   "files": [
-    "src/",
     "web",
     "server.js",
-    "README.md"
+    "README.md",
+    "NOTICE",
+    "THIRD-PARTY-LICENSES",
+    "LICENSE"
   ],
   "scripts": {
     "build": "node build.mjs && tsc --noEmit -p .",
@@ -26,6 +27,7 @@
     "prepack": "npm run build"
   },
   "keywords": [
+    "pi-package",
     "pithagoras",
     "extension",
     "nextcloud",
@@ -42,5 +44,7 @@
   },
   "devDependencies": {
     "react-icons": "5.7.0"
-  }
+  },
+  "publishConfig": { "access": "public" },
+  "license": "Apache-2.0"
 }

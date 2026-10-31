@@ -3,6 +3,9 @@ node_modules/
 .DS_Store
 *.log
 *.tgz
+# A local design note that does not go into the package or the repository.
+/nextcloud/CONCEPT.md
+
 # What each extension's build makes (npm pack builds it first): published, not kept in git.
 /*/web/
 /*/server.js

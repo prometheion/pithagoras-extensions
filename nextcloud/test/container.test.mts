@@ -50,6 +50,27 @@ test("the container holds no capability, no new privileges, a memory and process
   assert.ok((spec.Labels as Record<string, string>)[SPEC_LABEL]);
 });
 
+test("the endpoint takes only its own loopback Host and no browser's Origin, and the image's metrics server is off", async () => {
+  const fake = world();
+  const env = (await makeSpec(fake.docker, inst("nextcloud"), 8123)).Env as string[];
+  for (const wanted of ["MCP_DNS_REBINDING_PROTECTION=true", "MCP_ALLOWED_HOSTS=127.0.0.1:8123", "CORS_ALLOW_ORIGINS=http://127.0.0.1:8123", "METRICS_ENABLED=false"])
+    assert.ok(env.includes(wanted), wanted);
+  assert.equal(env.some((e) => e.startsWith("MCP_ALLOWED_ORIGINS=")), false, "no origin is allowed: the SDK then refuses every request that carries one");
+});
+
+test("every start it asks for is checked first, and one the check refuses is not made", async () => {
+  const fake = world();
+  const plan = planOwn([inst("nextcloud")]).get("nextcloud")!;
+  const checks: string[] = [];
+  await assert.rejects(() => ensureOwn(fake.docker, plan, async () => { checks.push("made"); throw new Error("port 8000 is taken"); }), /taken/);
+  assert.equal(fake.calls.some((c) => c.startsWith("start ")), false);
+  await ensureOwn(fake.docker, plan, async () => void checks.push("made, not started"));
+  await ensureOwn(fake.docker, plan, async () => void checks.push("running")); // running: nothing to start, no check
+  await fake.docker.containers.stop(CONTAINER_BASE);
+  await ensureOwn(fake.docker, plan, async () => void checks.push("stopped"));
+  assert.deepEqual(checks, ["made", "made, not started", "stopped"]);
+});
+
 test("a save with nothing changed makes nothing again, although Docker's inspect shows the environment with the image's own variables, in another order", async () => {
   const fake = world();
   const plan = planOwn([inst("nextcloud")]).get("nextcloud")!;

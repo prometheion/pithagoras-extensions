@@ -54,7 +54,7 @@ export default function Collectives() {
   const [searching, setSearching] = useState(false);
   /** The page open: what the list knew of it, its text as it was read, and the etag of its file at that moment -- the
    * save is made against it, so what someone else wrote in between is not quietly written over. */
-  const [open, setOpen] = useState<(PageRow & { content: string; etag?: string }) | null>(null);
+  const [open, setOpen] = useState<(PageRow & { content: string; etag?: string; notEditable?: string }) | null>(null);
   const [pageDraft, setPageDraft] = useState("");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -138,9 +138,10 @@ export default function Collectives() {
       .finally(() => current() && setSearching(false));
   };
 
-  /** A page opened to its text, with the etag of its file when it can be written. `draft` is words to put in it instead (a new page's). */
-  const showPage = async (row: PageRow, draft?: string) => {
-    if (collectiveId === null || row.id === 0) return;
+  /** A page opened to its text, with the etag of its file when it can be written. `draft` is words to put in it instead
+   * (a new page's). Says whether it opened. */
+  const showPage = async (row: PageRow, draft?: string): Promise<boolean> => {
+    if (collectiveId === null || row.id === 0) return false;
     const current = guard("page");
     setOpen(null);
     setSaved(false);
@@ -153,16 +154,24 @@ export default function Collectives() {
       const title = (typeof data.page === "object" && data.page !== null ? String((data.page as Record<string, unknown>).title ?? row.title) : row.title);
       const at = pagePath(row);
       let etag: string | undefined;
+      let notEditable: string | undefined;
       if (canEditHere && at !== undefined) {
-        // The file as it stands now: its etag is what a save is made against (the server writes an existing file only then).
-        const read = partText(await api.tool("nc_webdav_read_file", { path: at }, instance)).data;
-        etag = typeof read === "object" && read !== null ? strOf((read as Record<string, unknown>).etag) : undefined;
+        // The file as it stands now: its etag is what a save is made against (the server writes an existing file only
+        // then). Where it cannot be read (Files switched off for the instance, say), the page still opens, to be read.
+        try {
+          const read = partText(await api.tool("nc_webdav_read_file", { path: at }, instance)).data;
+          etag = typeof read === "object" && read !== null ? strOf((read as Record<string, unknown>).etag) : undefined;
+        } catch (error) {
+          notEditable = sayError(error);
+        }
       }
-      if (!current()) return;
-      setOpen({ ...row, title, content: data.content, etag });
+      if (!current()) return false;
+      setOpen({ ...row, title, content: data.content, etag, notEditable });
       setPageDraft(draft ?? data.content);
+      return true;
     } catch (error) {
       if (current()) setProblem(sayError(error));
+      return false;
     }
   };
 
@@ -232,11 +241,13 @@ export default function Collectives() {
     const content = newPageContent;
     setBusy(true);
     setProblem(null);
+    // The typed text leaves the form only once it stands somewhere else: in the page's file, or in the open page.
+    let made = false;
     try {
       const result = await api.tool("collectives_create_page", { collective_id: collectiveId, parent_id: 0, title }, instance);
+      made = true;
       setPageFormOpen(false);
       setNewPageTitle("");
-      setNewPageContent("");
       // the made page's own words: read back where it stands to find its file in the files
       const list = toPages(await api.tool("collectives_get_pages", { collective_id: collectiveId }, instance), "pages", "results");
       setPages(list);
@@ -245,6 +256,7 @@ export default function Collectives() {
       const id = Number(typeof data === "object" && data !== null ? (data as Record<string, unknown>).id : NaN);
       const created = list.find((r) => r.id === id);
       if (created === undefined) {
+        setPageFormOpen(true); // the words stand in the form again
         setProblem(t("The page “{title}” is made, but its text could not be put in it: the page was not found in the list.", { title }));
         return;
       }
@@ -257,12 +269,17 @@ export default function Collectives() {
         const etag = typeof read === "object" && read !== null ? strOf((read as Record<string, unknown>).etag) : undefined;
         if (etag === undefined) throw new Error(t("The page's file did not say which version it is."));
         await api.tool("nc_webdav_write_file", { path: at, content, if_match: etag }, instance);
+        setNewPageContent("");
         loadPages(collectiveId, true);
       } catch (error) {
-        await showPage(created, content);
+        // The page open with the words in it holds them (to be saved again, or copied where it cannot be written);
+        // where it does not open either, the form does.
+        if (await showPage(created, content)) setNewPageContent("");
+        else setPageFormOpen(true);
         setProblem(t("The page “{title}” is made, but its text could not be put in it: {error}", { title, error: sayError(error) }));
       }
     } catch (error) {
+      if (made) setPageFormOpen(true); // made, but what came after failed: the words stand in the form again
       setProblem(sayError(error));
     } finally {
       setBusy(false);
@@ -293,6 +310,13 @@ export default function Collectives() {
             <portal.ui.Markdown>{open.content}</portal.ui.Markdown>
           ) : (
             <p className="text-sm text-fg-subtle">{t("This page is empty.")}</p>
+          )}
+          {!writable && dirty && (
+            // Words that could not be written (a new page's, where its file cannot be read): kept here to be copied.
+            <textarea className={`${portal.ui.classes.input} w-full min-h-[25%] font-mono text-xs`} value={pageDraft} readOnly aria-label={t("Your text, not saved")} />
+          )}
+          {canEditHere && open.notEditable !== undefined && (
+            <p className="text-xs text-fg-subtle">{t("This page cannot be edited here: {error}", { error: open.notEditable })}</p>
           )}
         </div>
         {writable && (

@@ -7,6 +7,7 @@
  */
 import { createContext, useCallback, useContext, useEffect, useRef } from "react";
 import { portal } from "../portal";
+import { familyOn } from "../capabilities";
 
 /** What GET /status says of where things stand: every instance -- its container, its entry in pi's config, and
  * whether its server answers at all -- beside what a save is doing on the person's behalf right now. */
@@ -68,6 +69,15 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => portal.a
  * instances at once. */
 export const InstanceContext = createContext<string | undefined>(undefined);
 export const useNextcloudInstance = (): string | undefined => useContext(InstanceContext);
+
+/** How the capability families stand for the instance the panel holds (the status's `capabilities` of it): a view
+ * reads whether one it calls into besides its own is on -- the Files tab whether Sharing is -- since the server
+ * refuses a family's tools where it is off. Nothing known (no status of it yet, or a view on its own): on. */
+export const FamiliesContext = createContext<{ available?: Record<string, boolean>; on?: Record<string, boolean> } | undefined>(undefined);
+export const useFamilyOn = (id: string): boolean => {
+  const families = useContext(FamiliesContext);
+  return familyOn(id, families?.available, families?.on ?? {});
+};
 
 export const api = {
   status: () => call<NextcloudStatus>("/status"),

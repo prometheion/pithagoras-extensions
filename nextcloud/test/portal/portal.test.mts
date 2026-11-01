@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import express from "express";
-import { APPROVE_TOOLS, CAPABILITIES } from "../../src/capabilities.ts";
+import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS } from "../../src/capabilities.ts";
 
 /**
  * Nextcloud as a portal runs it: its server half started by Pithagoras' own extension host, after Docker for
@@ -43,6 +43,7 @@ process.env.PITHAGORAS_NEXTCLOUD_PORT = String(mcpPort);
 const dataDir = mkdtempSync(path.join(os.tmpdir(), "nextcloud-portal-data-"));
 process.env.PITHAGORAS_NEXTCLOUD_DATA_DIR = dataDir;
 process.env.PITHAGORAS_NEXTCLOUD_ANSWER_MS = "1500";
+process.env.PITHAGORAS_NEXTCLOUD_SETTLED_MS = "200";
 // Loaded after the environment is set: the port and the container names are read as the module loads.
 const { IMAGE, IMAGE_BY_DIGEST } = await import("../../src/container.ts");
 
@@ -54,13 +55,14 @@ writeFileSync(
   { mode: 0o600 },
 );
 
-// A stand-in of the Nextcloud MCP server's endpoint, on the very port an instance's container is told to hold: it
-// gives a session out on initialize and answers ping, tools/list and tools/call while it stands. `mockName` is what
-// it calls itself (another program on the port is another name), `mockTools` the tools it lists.
+// A stand-in of the Nextcloud MCP server's endpoint, on the very port an instance's container is told to hold, while
+// a container told to hold it runs (the fake Docker starts it, below): it gives a session out on initialize and answers
+// ping, tools/list and tools/call. `mockName` is what it calls itself (another program on the port is another name),
+// `mockTools` the tools it lists.
 const seen = { initialize: 0, tools_call: 0 };
 let mockName = "Nextcloud MCP";
 let mockTools: string[] = [];
-const mock = http.createServer((req, res) => {
+const answer: http.RequestListener = (req, res) => {
   if (req.method === "DELETE") return res.writeHead(200).end();
   if (req.method !== "POST") return res.writeHead(405).end();
   const accept = req.headers.accept ?? "";
@@ -82,8 +84,32 @@ const mock = http.createServer((req, res) => {
     }
     res.writeHead(404, { "content-type": "application/json" }).end("{}");
   });
-});
-await new Promise<void>((resolve) => mock.listen(mcpPort, "127.0.0.1", () => resolve()));
+};
+const mock = http.createServer(answer);
+/** The containers running that hold the stand-in's port: it listens while there is one, as the real server would. */
+const holding = new Set<string>();
+let mockTurn: Promise<void> = Promise.resolve(); // listen and close one after the other
+const mockUp = (name: string) => {
+  holding.add(name);
+  if (holding.size === 1)
+    mockTurn = mockTurn.then(() => new Promise<void>((resolve) => {
+      // where another program holds the port, the container's server cannot listen (as the real one cannot)
+      const refused = () => resolve();
+      mock.once("error", refused);
+      mock.listen(mcpPort, "127.0.0.1", () => {
+        mock.off("error", refused);
+        resolve();
+      });
+    }));
+};
+const mockDown = (name: string) => {
+  if (!holding.delete(name) || holding.size > 0) return;
+  mockTurn = mockTurn.then(() => new Promise<void>((resolve) => {
+    if (!mock.listening) return resolve();
+    mock.closeAllConnections();
+    mock.close(() => resolve());
+  }));
+};
 
 // A stand-in Nextcloud, for the account the status asks it about: the app password it takes is `ncPassword`.
 let ncPassword = "the-password";
@@ -103,6 +129,19 @@ const docker = await fakeDocker();
 process.env.DOCKER_SOCKET = docker.socket;
 docker.images.add(IMAGE);
 docker.images.add(IMAGE_BY_DIGEST); // the tag is the build the digest names
+// A container told to hold the stand-in's port runs it while it runs: started with it, stopped with it.
+const holdsPort = (c: any) => Array.isArray(c.made?.Cmd) && c.made.Cmd.includes(String(mcpPort));
+const stopped = new Map<string, () => void>();
+docker.runs.onStart = (c: any) => {
+  if (!holdsPort(c)) return;
+  mockUp(c.Name);
+  return new Promise<void>((resolve) => stopped.set(c.Name, resolve)); // it runs until it is stopped
+};
+docker.runs.onStop = (c: any) => {
+  mockDown(c.Name);
+  stopped.get(c.Name)?.();
+  stopped.delete(c.Name);
+};
 
 const host = await import(from("core/server/dist/extension-host.js"));
 const db = await import(from("core/server/dist/db.js"));
@@ -128,7 +167,7 @@ after(async () => {
   portal.closeAllConnections();
   portal.close();
   mock.closeAllConnections();
-  mock.close();
+  if (mock.listening) mock.close();
   nextcloud.closeAllConnections();
   nextcloud.close();
   rmSync(dataDir, { recursive: true, force: true });
@@ -137,12 +176,13 @@ after(async () => {
 
 const status = async () => (await fetch(`${at}/status`)).json() as any;
 const until = async (check: (s: any) => boolean, what: string) => {
+  let s: any;
   for (let i = 0; i < 300; i++) {
-    const s = await status();
+    s = await status();
     if (check(s)) return s;
     await new Promise((r) => setTimeout(r, 20));
   }
-  assert.fail(`never: ${what}`);
+  assert.fail(`never: ${what} (the status last said ${JSON.stringify({ task: s?.task, error: s?.error })})`);
 };
 
 /** A request of the page's: from the portal's own origin, as a browser says it. */
@@ -199,7 +239,8 @@ test("a saved instance stands in a container of its own, on the portal's network
   const made = ncContainer("pithagoras-nextcloud-mcp-uni");
   assert.ok(made, "a container of its own stands");
   assert.equal(made.State, "running");
-  assert.deepEqual(made.made?.Env, [`NEXTCLOUD_HOST=${ncUrl}`, "NEXTCLOUD_USERNAME=anna", "NEXTCLOUD_PASSWORD=the-password"]);
+  assert.deepEqual(made.made?.Env?.slice(0, 3), [`NEXTCLOUD_HOST=${ncUrl}`, "NEXTCLOUD_USERNAME=anna", "NEXTCLOUD_PASSWORD=the-password"]);
+  assert.ok(made.made?.Env?.includes(`MCP_ALLOWED_HOSTS=127.0.0.1:${mcpPort}`), "only its own loopback Host is taken");
   assert.deepEqual(made.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)]);
   assert.equal(made.made?.HostConfig?.NetworkMode, "host"); // this portal is on the machine itself: no container between
   assert.equal(made.made?.Image, IMAGE_BY_DIGEST, "from the digest of the build it was tested with");
@@ -234,6 +275,16 @@ test("a person's own list of tools to be asked about is kept; their other tuning
   assert.deepEqual(entry.excludeTools, ["uni_nc_news_*"]);
   assert.equal((await save("uni", { capabilities: {} })).status, 200);
   await applyDone();
+});
+
+test("an entry that holds the list an earlier version wrote gets this version's: the extension's default is not taken for the person's", async () => {
+  const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  file.mcpServers.uni = { ...file.mcpServers.uni, approveTools: EARLIER_APPROVE_TOOLS[0] };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  await post("/start");
+  await applyDone();
+  assert.deepEqual(servers().uni.approveTools, APPROVE_TOOLS);
+  assert.ok(servers().uni.approveTools.includes("talk_send_message"));
 });
 
 test("a tool call goes over this instance's server and back with its answer raw; a family that is off, or none, is refused", async () => {
@@ -294,6 +345,21 @@ test("an address that is not https (unless chosen), has a login in it or is no a
   await applyDone();
 });
 
+test("an address an earlier version saved only trimmed (a trailing slash, capitals in the scheme) is the same host: a save of something else needs no password", async () => {
+  const settings = path.join(dataDir, "settings.json");
+  const stored = JSON.parse(readFileSync(settings, "utf8"));
+  const made = docker.created.length;
+  stored.instances.find((i: any) => i.name === "uni").url = `${ncUrl}/`.replace("http://", "HTTP://");
+  writeFileSync(settings, JSON.stringify(stored));
+  const answer = await save("uni", { password: "", url: ncUrl, capabilities: { news: false } });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  await applyDone();
+  assert.equal(JSON.parse(readFileSync(settings, "utf8")).instances.find((i: any) => i.name === "uni").url, ncUrl, "kept normalized from now on");
+  assert.equal(docker.created.length, made, "the same host: nothing made again for it");
+  await save("uni", { password: "", capabilities: {} });
+  await applyDone();
+});
+
 test("the status asks the Nextcloud itself: a revoked app password shows as refused although the server answers", async () => {
   ncPassword = "changed-on-the-nextcloud";
   await save("uni", { password: "the-other" }); // forgets the answer kept
@@ -340,9 +406,11 @@ test("a server of pi's own that has the instance's name is not taken over: the s
   const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
   file.mcpServers.github = { command: "npx", args: ["-y", "@example/github-mcp"], env: { GITHUB_TOKEN: "t" } };
   file.mcpServers.nextcloud = { url: "https://mcp.example.org/mcp", headers: { Authorization: "Bearer own" } };
+  // a local server of the person's that has the shape this extension's entries have is theirs all the same
+  file.mcpServers.home = { url: "http://127.0.0.1:8100/mcp", lifecycle: "persistent" };
   writeFileSync(mcpFile(), JSON.stringify(file));
   const before = readFileSync(mcpFile(), "utf8");
-  for (const name of ["github", "nextcloud"]) {
+  for (const name of ["github", "nextcloud", "home"]) {
     const answer = await save(name);
     assert.equal(answer.status, 400, name);
     assert.match(((await answer.json()) as any).error, /did not make/);
@@ -353,6 +421,7 @@ test("a server of pi's own that has the instance's name is not taken over: the s
   const copy = JSON.parse(before);
   delete copy.mcpServers.github;
   delete copy.mcpServers.nextcloud;
+  delete copy.mcpServers.home;
   writeFileSync(mcpFile(), JSON.stringify(copy));
 });
 
@@ -362,12 +431,28 @@ test("an entry an earlier version wrote as trusted is taken out of the trusted s
   const stored = JSON.parse(readFileSync(settings, "utf8"));
   assert.equal(stored.entries, 2, "the first version wrote it as 1; this one records 2");
   stored.entries = 1;
+  stored.written = []; // 0.1.0 kept no list of what it wrote
   writeFileSync(settings, JSON.stringify(stored));
   await post("/start");
   await applyDone();
   assert.equal(trusted().includes("second"), false);
   assert.equal(servers().second.url, url, "and the entry is there");
   assert.equal(JSON.parse(readFileSync(settings, "utf8")).entries, 2);
+});
+
+test("while the first version's entries are still being taken over (another instance failing), an entry this version wrote is not taken out and written again", async () => {
+  const settings = path.join(dataDir, "settings.json");
+  const stored = JSON.parse(readFileSync(settings, "utf8"));
+  assert.deepEqual(stored.written, ["second"]);
+  stored.entries = 1; // as a run in which some other instance failed leaves it
+  writeFileSync(settings, JSON.stringify(stored));
+  db.setTrustedMcpServers([...trusted(), "second"]); // trusted by the person, on purpose, since
+  const written = statSync(mcpFile()).mtimeMs;
+  await post("/start");
+  await applyDone();
+  assert.equal(trusted().includes("second"), true, "the person's trust stays");
+  assert.equal(statSync(mcpFile()).mtimeMs, written, "and nothing was written again (every write reloads the open chats)");
+  db.setTrustedMcpServers(trusted().filter((n) => n !== "second"));
 });
 
 test("a server on the port that is another program is not registered: the run says so, and no entry stands for it", async () => {
@@ -385,6 +470,49 @@ test("a server on the port that is another program is not registered: the run sa
   await applyDone();
   assert.equal(servers().third.url, url);
   assert.ok(before);
+});
+
+test("a program on the port before the container starts keeps it from starting, even one that answers as a Nextcloud MCP server", async () => {
+  await post("/instances/remove", { name: "third" });
+  await applyDone();
+  // another Nextcloud MCP server of the person's, for another account, on the port the instance is given
+  const theirs = http.createServer(answer);
+  await new Promise<void>((resolve) => theirs.listen(mcpPort, "127.0.0.1", () => resolve()));
+  await save("third");
+  const failed = await until((s) => s.task === undefined && s.error, "the run to say the port is taken");
+  assert.match(failed.error, new RegExp(`third: port ${mcpPort} of 127\\.0\\.0\\.1 is taken by another program`));
+  assert.equal(servers().third, undefined, "no entry pointing at their server");
+  assert.notEqual(ncContainer("pithagoras-nextcloud-mcp-third")?.State, "running");
+  theirs.closeAllConnections();
+  await new Promise((resolve) => theirs.close(resolve));
+  await post("/start");
+  await applyDone();
+  assert.equal(servers().third.url, url, "the port free, it starts and is written");
+});
+
+test("a container that keeps restarting is not taken for what answers on its port", async () => {
+  const c = ncContainer("pithagoras-nextcloud-mcp-third");
+  const before = servers().third;
+  // Docker starts it again and again (it cannot listen): each time it runs only for a moment
+  const restart = () => {
+    c.started = new Date().toISOString();
+    c.restarts = (c.restarts ?? 0) + 1;
+  };
+  restart();
+  const loop = setInterval(restart, 40);
+  try {
+    await save("third", { capabilities: { news: false } }); // an entry to write: what answers decides
+    const failed = await until((s) => s.task === undefined && s.error, "the run to say the container does not hold");
+    assert.match(failed.error, /third: its server did not come up: its container has not run for long enough/);
+    assert.deepEqual(servers().third, before, "its entry is not written on that answer");
+  } finally {
+    clearInterval(loop);
+  }
+  await post("/start");
+  await applyDone();
+  assert.deepEqual(servers().third.excludeTools, ["third_nc_news_*"], "running without a break, it is written");
+  await save("third", { capabilities: {} });
+  await applyDone();
 });
 
 test("an instance removed while its image is still being downloaded leaves no container and no entry behind", async () => {

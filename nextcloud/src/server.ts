@@ -12,12 +12,13 @@
  * the instance, and the run behind it takes away what no instance stands for any more: every container of this
  * extension that no plan names, and every entry it wrote (it keeps their names) that no instance carries.
  */
+import net from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { writesFromHere } from "../../shared/proxy";
 import { setPortal, portal, docker, personGate } from "./host";
 import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
-import { CAPABILITIES, APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
+import { CAPABILITIES, APPROVE_TOOLS, EARLIER_APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
 import { normalizeUrl, checkAccountSoon, forgetAccount } from "./account";
 import { ensureOwn, releaseOwn, containerState, instanceAddress, ownAddress, planOwn, CONTAINER_BASE, IMAGE, OwnPlan } from "./container";
@@ -82,14 +83,51 @@ function forgetClient(address: string): void {
 
 /** How long a container is given to come up and answer as the Nextcloud MCP server before the run says it did not. */
 const ANSWER_WITHIN_MS = Number(process.env.PITHAGORAS_NEXTCLOUD_ANSWER_MS?.trim()) > 0 ? Number(process.env.PITHAGORAS_NEXTCLOUD_ANSWER_MS) : 60_000;
+/** How long the container must have run without a break when its port answers, before the answer counts as its own:
+ * one that cannot listen because the port is taken exits about when it would have begun to listen, and Docker starts
+ * it again (its restart policy), so a container in that loop is running for a few seconds at a time. */
+const SETTLED_MS = Number(process.env.PITHAGORAS_NEXTCLOUD_SETTLED_MS?.trim()) > 0 ? Number(process.env.PITHAGORAS_NEXTCLOUD_SETTLED_MS) : 8_000;
+
+/** Whether anything takes a connection on that port of the loopback right now (the portal's loopback is the
+ * container's: they share the network namespace). */
+function portAnswers(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const done = (taken: boolean) => {
+      socket.destroy();
+      resolve(taken);
+    };
+    socket.setTimeout(2_000, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** What runs before the run starts an instance's container: whatever answers on its port then is not that container,
+ * and would be taken for it -- another Nextcloud MCP server of the person's, for another account, included. */
+const portFree = (plan: OwnPlan) => async (): Promise<void> => {
+  if (await portAnswers(plan.port))
+    throw new Error(`${plan.inst.name}: port ${plan.port} of 127.0.0.1 is taken by another program, so its container is not started (what answers there would be taken for it). Stop that program or move it to another port, then press Start.`);
+};
+
+/** How long the container has been running without a break, by Docker's word: nothing where it is not running now
+ * (one Docker waits to start again included). */
+async function runningFor(d: ReturnType<typeof docker>, name: string): Promise<number | undefined> {
+  const inspect = (await d.containers.inspect(name).catch(() => undefined)) as { State?: { Status?: string; Restarting?: boolean; StartedAt?: string } } | undefined;
+  const state = inspect?.State;
+  if (state?.Status !== "running" || state.Restarting === true) return undefined;
+  const since = Date.parse(state.StartedAt ?? "");
+  return Number.isNaN(since) ? undefined : Math.max(0, Date.now() - since);
+}
 
 /** The container running, and answering as the Nextcloud MCP server (the server names itself "Nextcloud MCP"): what
- * stands on the port may be another program, or the container may have exited because the port is taken. Only a
- * server that answered goes into pi's config. */
+ * stands on the port may be another program, or the container may have exited because the port is taken. The answer
+ * counts once the container has run without a break for a while: a container that keeps restarting is not what
+ * answers. Only a server that answered goes into pi's config. */
 async function awaitAnswer(d: ReturnType<typeof docker>, plan: OwnPlan): Promise<void> {
   const address = ownAddress(plan.port);
   forgetClient(address); // a handshake of its own: what a session made earlier was told is not what stands now
-  const give = Date.now() + ANSWER_WITHIN_MS;
+  const give = Date.now() + Math.max(ANSWER_WITHIN_MS, SETTLED_MS + 1_000);
   let last = "";
   for (;;) {
     const state = await containerState(d, plan.containerName);
@@ -99,8 +137,15 @@ async function awaitAnswer(d: ReturnType<typeof docker>, plan: OwnPlan): Promise
     }
     try {
       const server = await clientFor(address).ping();
-      if (/nextcloud/i.test(server.name)) return;
-      last = `${address} answers as ${server.name ? `"${server.name}"` : "an unnamed server"}, not as the Nextcloud MCP server`;
+      if (/nextcloud/i.test(server.name)) {
+        const up = await runningFor(d, plan.containerName);
+        if (up !== undefined && up >= SETTLED_MS) return;
+        last = up === undefined
+          ? `${address} answers, but its container is not running (${state}): another program may hold port ${plan.port}`
+          : `its container has not run for long enough yet to tell its answer from another program's on port ${plan.port}; it keeps restarting where that program holds the port`;
+      } else {
+        last = `${address} answers as ${server.name ? `"${server.name}"` : "an unnamed server"}, not as the Nextcloud MCP server`;
+      }
     } catch (error) {
       last = (error as Error).message;
     }
@@ -112,7 +157,9 @@ async function awaitAnswer(d: ReturnType<typeof docker>, plan: OwnPlan): Promise
 
 /** Whether an entry of pi's mcp.json looks like one this extension wrote: the loopback /mcp of a container, kept
  * alive, with no login of its own. What an earlier version wrote and left behind is such an entry, with nothing
- * recorded of it. */
+ * recorded of it -- asked only while that earlier version's entries are being taken over (`entries` below
+ * ENTRIES_VERSION): later, every entry this extension writes stands in `written`, and a person's own local server of
+ * that shape is theirs. */
 function looksOwn(entry: Record<string, unknown>): boolean {
   const login = ["headers", "env", "auth", "oauth", "command", "socket"].some((key) => key in entry) || Object.keys(entry).some((key) => /^bearer/i.test(key));
   return typeof entry.url === "string" && /^http:\/\/127\.0\.0\.1:\d+\/mcp$/.test(entry.url) && entry.lifecycle === "persistent" && !login;
@@ -122,7 +169,7 @@ function looksOwn(entry: Record<string, unknown>): boolean {
  * does not look like its own. */
 function foreignEntry(name: string): boolean {
   const there = portal().mcp.get(name);
-  return !!there && !loadWritten().includes(name) && !looksOwn(there.entry);
+  return !!there && !loadWritten().includes(name) && !(loadEntriesVersion() < ENTRIES_VERSION && looksOwn(there.entry));
 }
 
 /** Bring every instance's container and its entry in pi's config to where the keys ask for them; a no-op where all
@@ -171,16 +218,22 @@ function ensureApplied(): Promise<void> {
         const plan = plans.get(inst.name)!;
         try {
           const there = portal().mcp.get(inst.name);
-          if (there && !written.includes(inst.name) && !looksOwn(there.entry))
+          if (there && !written.includes(inst.name) && !(version < ENTRIES_VERSION && looksOwn(there.entry)))
             throw new Error(`${inst.name}: pi's mcp.json already holds a server of that name that this extension did not write. Rename the instance, or remove that server in Settings -> MCP.`);
-          if (await ensureOwn(d, plan)) forgetClient(ownAddress(plan.port));
+          if (await ensureOwn(d, plan, portFree(plan))) forgetClient(ownAddress(plan.port));
           // Removed while it was made (a download takes minutes): no entry for it; the run behind that removal sweeps it.
           if (!loadInstances().some((i) => i.name === inst.name)) continue;
           await awaitAnswer(d, plan);
-          const entry = { approveTools: APPROVE_TOOLS, ...carryOver(there?.entry), url: ownAddress(plan.port), lifecycle: "persistent", excludeTools: excludeGlobs(inst) };
+          const kept = carryOver(there?.entry);
+          // A list this extension wrote itself, now or in an earlier version, is its default and not the person's
+          // choice: it gets this version's (a wider one reaches every install that ran an earlier one).
+          if ([APPROVE_TOOLS, ...EARLIER_APPROVE_TOOLS].some((list) => isDeepStrictEqual(kept.approveTools, list))) delete kept.approveTools;
+          const entry = { approveTools: APPROVE_TOOLS, ...kept, url: ownAddress(plan.port), lifecycle: "persistent", excludeTools: excludeGlobs(inst) };
           // An entry an earlier version wrote counted as the person's own (trusted). Writing a server again does not
-          // take the name out of Settings -> Guard's trusted servers; removing it does.
-          if (there && version < ENTRIES_VERSION) await portal().mcp.set(inst.name, undefined);
+          // take the name out of Settings -> Guard's trusted servers; removing it does. Only the names that version
+          // wrote: every name in `written` was written by this one (0.1.0 kept no such list), and a removal each run
+          // would take a trust the person gave it since, and reload the open chats, while another instance fails.
+          if (there && version < ENTRIES_VERSION && !written.includes(inst.name)) await portal().mcp.set(inst.name, undefined);
           else if (there && written.includes(inst.name) && isDeepStrictEqual(there.entry, entry)) continue; // nothing to say again: every set reloads the open chats
           await portal().mcp.set(inst.name, entry);
           written = [...written, inst.name];
@@ -348,8 +401,12 @@ const nextcloud: ServerHalf = async (portalArg) => {
       if ("error" in checked) return res.status(400).json({ error: checked.error });
       inst.url = checked.url;
     }
-    // The saved app password belongs to the host and the user it was typed for: it is not carried to another one.
-    if (before && before.password !== "" && (before.url !== inst.url || before.username !== inst.username) && (typeof given.password !== "string" || given.password.trim() === ""))
+    // The saved app password belongs to the host and the user it was typed for: it is not carried to another one. The
+    // address saved is compared as it is normalized now: one an earlier version saved only trimmed (a trailing slash,
+    // capitals in the host, the default port) is the same host.
+    const beforeUrl = before ? normalizeUrl(before.url, true) : undefined;
+    const sameHost = !before || before.url === inst.url || (beforeUrl !== undefined && !("error" in beforeUrl) && beforeUrl.url === inst.url);
+    if (before && before.password !== "" && (!sameHost || before.username !== inst.username) && (typeof given.password !== "string" || given.password.trim() === ""))
       return res.status(400).json({ error: "A new address or user name needs the app password typed again: the saved one is not sent to another host or account." });
     if (given.capabilities !== undefined) {
       const record = given.capabilities;

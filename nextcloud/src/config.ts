@@ -115,7 +115,9 @@ function writeStore(store: Store): void {
   writeAtomic(path.join(settingsRoot(), FILE), Buffer.from(JSON.stringify(store, null, 2) + "\n", "utf8"));
 }
 
-const emptyStore = (): Store => ({ instances: [], written: [], entries: 1 });
+/** No store at all: nothing was ever written, by this version or an earlier one (0.1.0 kept its instances in this
+ * file as well), so there is nothing of an earlier version to take over either. */
+const emptyStore = (): Store => ({ instances: [], written: [], entries: ENTRIES_VERSION });
 
 /** The instances as they stand. */
 export function loadInstances(): NextcloudInstance[] {

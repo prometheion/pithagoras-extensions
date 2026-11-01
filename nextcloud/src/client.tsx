@@ -6,7 +6,7 @@ import {LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuExternalLink, Lu
 import { msg, portal, setPortal, t } from "./portal";
 import { de } from "./de";
 import { TABS, tabOffered } from "./capabilities";
-import { api, InstanceContext, NextcloudStatus, sayError } from "./web/api";
+import { api, FamiliesContext, InstanceContext, NextcloudStatus, sayError } from "./web/api";
 
 /** What this conversation may use of the tools it is offered, as the portal's tool switch answers it: its list --
  * each with who registered it -- and the names that are off for this one chat. `live` is false while pi does not
@@ -209,14 +209,16 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
         // the tabs read the instance their calls go to from here.
         <div key={held?.name ?? selected ?? "none"} role="tabpanel" id="nc-tabpanel" aria-labelledby={shownTab ? `nc-tab-${shownTab}` : undefined}>
           <InstanceContext.Provider value={held?.name}>
-            {(() => {
-              const Shown = shownTab ? components[shownTab] : undefined;
-              return Shown ? (
-                <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}><Shown /></Suspense>
-              ) : (
-                <p className="text-sm text-fg-subtle p-1">{t("Loading…")}</p>
-              );
-            })()}
+            <FamiliesContext.Provider value={held?.capabilities}>
+              {(() => {
+                const Shown = shownTab ? components[shownTab] : undefined;
+                return Shown ? (
+                  <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}><Shown /></Suspense>
+                ) : (
+                  <p className="text-sm text-fg-subtle p-1">{t("Loading…")}</p>
+                );
+              })()}
+            </FamiliesContext.Provider>
           </InstanceContext.Provider>
         </div>
       )}

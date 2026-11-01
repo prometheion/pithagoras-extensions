@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { LuChevronRight, LuExternalLink, LuFileText, LuFolder, LuEllipsis, LuShare2, LuTrash2, LuUsers } from "react-icons/lu";
 import { msg, portal, t } from "../portal";
-import { api, partText, sayError, useGuard, useNextcloudInstance } from "./api";
+import { api, partText, sayError, useFamilyOn, useGuard, useNextcloudInstance } from "./api";
 import { confirmDelete } from "./widgets";
 
 /** The Files tab: one view that walks the WebDAV tree -- a folder is opened by choosing it, a readable file (text,
@@ -115,6 +115,8 @@ export default function Files() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the file and share calls go
   const guard = useGuard();
+  // Sharing switched off for the instance: the server refuses its tools, so no share is read, shown or offered here.
+  const sharing = useFamilyOn("sharing");
 
   // the tree: where it stands, what it shows, and one file read into the panel
   const [path, setPath] = useState("");
@@ -265,6 +267,7 @@ export default function Files() {
   // ---- sharing -----------------------------------------------------------------
 
   const loadShareIndex = () => {
+    if (!sharing) return;
     const current = guard("shares");
     void api
       .tool("nc_share_list", {}, instance)
@@ -485,10 +488,12 @@ export default function Files() {
               ))}
             </nav>
             <div>
-              <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => { setPreview(null); setTrashOpen(false); setWithMe(true); }} title={t("What others hold on you")}>
-                <LuUsers />
-                <span>{t("Shared with me")}</span>
-              </button>
+              {sharing && (
+                <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => { setPreview(null); setTrashOpen(false); setWithMe(true); }} title={t("What others hold on you")}>
+                  <LuUsers />
+                  <span>{t("Shared with me")}</span>
+                </button>
+              )}
               <button type="button" className={`nc-tab${trashOpen ? " nc-tab-on" : ""}`} onClick={() => { setPreview(null); setWithMe(false); setTrashOpen(true); }} title={t("What was taken away")}>
                 <LuTrash2 />
                 <span>{t("Trash")}</span>
@@ -543,15 +548,17 @@ export default function Files() {
                         <span className="nc-file-name">{row.name}</span>
                         {!row.directory && row.size !== undefined && <span className="nc-file-size">{formatBytes(row.size)}</span>}
                       </button>
-                      <button
-                        type="button"
-                        className={`nc-row-share${shares.length > 0 ? " is-shared" : ""}`}
-                        title={shares.length > 0 ? t("What is shared at this one") : t("Share this one")}
-                        aria-label={t("Shares of this one")}
-                        onClick={() => { setActFor(null); setBoxFor(boxFor === row.path ? null : row.path); }}
-                      >
-                        <LuShare2 />
-                      </button>
+                      {sharing && (
+                        <button
+                          type="button"
+                          className={`nc-row-share${shares.length > 0 ? " is-shared" : ""}`}
+                          title={shares.length > 0 ? t("What is shared at this one") : t("Share this one")}
+                          aria-label={t("Shares of this one")}
+                          onClick={() => { setActFor(null); setBoxFor(boxFor === row.path ? null : row.path); }}
+                        >
+                          <LuShare2 />
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={`nc-row-share${actFor === row.path ? " is-shared" : ""}`}
@@ -573,7 +580,7 @@ export default function Files() {
                         onClose={() => setActFor(null)}
                       />
                     )}
-                    {boxFor === row.path && (
+                    {sharing && boxFor === row.path && (
                       <SharingBox
                         entryPath={row.path}
                         shares={shares}

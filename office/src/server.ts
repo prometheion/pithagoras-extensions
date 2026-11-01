@@ -38,7 +38,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import { setPortal, portal, dataDir, missingApi, tooOld } from "./host";
-import { portal339, type RequestPerson } from "./extension-api-339.temporary";
+import { portal339 } from "./extension-api-339.temporary";
 import { chatOwner, defaultHome, ownerKnown } from "./owner";
 import * as container from "./container";
 import { LIMIT_BOUNDS, limitOk, loadSettings, saveSettings, type OfficeSettings } from "./settings";
@@ -55,6 +55,7 @@ import * as seat from "./seat";
 import { PLUGIN_GUID } from "./seat-page";
 import { floatingTag } from "./office-ui";
 import { writesFromHere } from "../../shared/proxy";
+import { personGate as sharedPersonGate } from "../../shared/person-gate";
 
 /* ------------------------------------------------------------------ */
 /* constants                                                           */
@@ -425,29 +426,19 @@ async function liveKey(docId: string, key: string): Promise<boolean> {
  * missingApi, asked as the half starts), else nothing: those are off then, and the rest of Office works as it did. */
 let docchatOff: string | undefined;
 
-/** Methods that only read. */
-const READS = new Set(["GET", "HEAD", "OPTIONS"]);
-
 /**
- * Who is behind a request (http.person): every route but the Document Server's own traffic under /ds (which only an
- * editor config this half signed opens) needs a signed-in person, and a change, or a report of what a person did in
- * an editor, the primary person: what those do lands in the agents' folders, and a comment or a chat message goes to
- * an agent as the primary user's own words (chats.start). A portal without http.person (older than
- * thecodacus/pithagoras#339) has only its own sign-in gate in front of these routes, as before.
+ * Who is behind a request (http.person, shared/person-gate): every route but the Document Server's own traffic under
+ * /ds (which only an editor config this half signed opens) needs a signed-in person, and a change, or a report of
+ * what a person did in an editor, the primary person: what those do lands in the agents' folders, and a comment or a
+ * chat message goes to an agent as the primary user's own words (chats.start). A portal without http.person (older
+ * than thecodacus/pithagoras#339) has only its own sign-in gate in front of these routes, as before.
  */
-function personGate(req: { method?: string; url?: string }, res: { status: (c: number) => { json: (b: unknown) => void } }, next: () => void): void {
-  const http = portal339().http;
-  if (typeof http.person !== "function" || /^\/ds(\/|$|\?)/.test(req.url ?? "")) return next();
-  let person: RequestPerson | undefined;
-  try {
-    person = http.person(req as never);
-  } catch (e) {
-    logLine(`@pithagoras/office: who is behind a request could not be read: ${(e as Error).message}`);
-  }
-  if (!person) return void res.status(401).json({ error: "Sign in to the portal first.", code: "no_person" });
-  if (!READS.has(req.method ?? "GET") && person.role !== "primary") return void res.status(403).json({ error: "Only the portal's primary person may change documents or talk to the agents in them.", code: "not_primary" });
-  next();
-}
+const personGate = sharedPersonGate({
+  http: () => portal339().http,
+  refused: "Only the portal's primary person may change documents or talk to the agents in them.",
+  pass: (req) => /^\/ds(\/|$|\?)/.test(req.url ?? ""),
+  log: (message) => logLine(`@pithagoras/office: who is behind a request could not be read: ${message}`),
+});
 
 /* ------------------------------------------------------------------ */
 /* the UI routes (the portal mounts portal.router at /api/x/@pithagoras/office)*/

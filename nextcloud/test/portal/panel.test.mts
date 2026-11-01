@@ -734,6 +734,30 @@ test("Collectives: a page that cannot be opened says why; a changed page asks be
   await close(page);
 });
 
+test("Collectives: with Files switched off for the instance, a page of an editable collective still opens to its text, and a new page's text is not lost", async () => {
+  const state = collectivesBackend();
+  // the server half refuses a family that is off, as its /tool route does
+  handlers.delete("nc_webdav_read_file");
+  on("nc_webdav_read_file", () => {
+    throw new Error("Files is switched off for uni");
+  });
+  const page = await open("collectives");
+  await page.getByRole("button", { name: /Wiki/ }).click();
+  await page.getByRole("button", { name: /Home/ }).click();
+  await page.getByText("old text").waitFor();
+  await page.getByText(/This page cannot be edited here: Files is switched off/).waitFor();
+  assert.equal(await page.getByRole("alert").count(), 0, "it opened: no failure to say");
+  await page.getByRole("button", { name: /← Pages/ }).click();
+  await page.getByRole("button", { name: /A new page/ }).click();
+  await page.getByLabel("The page's title").fill("Plan");
+  await page.getByLabel("The page's text").fill("the plan");
+  await page.getByRole("button", { name: "Make the page" }).click();
+  await page.getByRole("alert").getByText(/Plan” is made, but its text could not be put in it/).waitFor();
+  assert.equal(await page.getByLabel("Your text, not saved").inputValue(), "the plan", "the words stand on the page opened, to be copied");
+  assert.equal(state.writes.length, 0);
+  await close(page);
+});
+
 // ---- News ------------------------------------------------------------------------------------------------------
 
 test("News: an article's HTML shows as text, a link is only a web address, a failed opening is said, and Back reads the feeds' counts again", async () => {
@@ -1067,6 +1091,31 @@ test("Files: a link made is copyable and the entry wears its share mark at once;
   await page.getByRole("button", { name: "Trash" }).click();
   await page.getByRole("button", { name: "Restore" }).click();
   await page.getByRole("alert").getByText(/already/).waitFor();
+  await close(page);
+});
+
+test("Files: with Sharing switched off for the instance, the files are listed and no share is read or offered", async () => {
+  filesBackend();
+  statusBody = { image: "x", instances: [instanceRow({ capabilities: { available: ALL_ON, on: { sharing: false } } })], configured: true };
+  const page = await open("panel");
+  await page.locator(".nc-file-main", { hasText: "A" }).first().waitFor();
+  await sleep(200);
+  assert.equal(calledWith("nc_share_list").length, 0, "the server would refuse it");
+  assert.equal(await page.getByRole("alert").count(), 0, "no error for a choice the person made");
+  assert.equal(await page.getByRole("button", { name: "Shares of this one" }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Shared with me" }).count(), 0);
+  await close(page);
+});
+
+test("Files: with Files switched off and Sharing on, the Files tab is not offered (its shares stand on the files' rows)", async () => {
+  filesBackend();
+  on("nc_calendar_list_calendars", () => ({ calendars: [] }));
+  statusBody = { image: "x", instances: [instanceRow({ capabilities: { available: ALL_ON, on: { files: false } } })], configured: true };
+  const page = await open("panel");
+  await page.getByRole("tab", { name: "Calendar" }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: "Files" }).count(), 0);
+  await sleep(200);
+  assert.equal(calledWith("nc_webdav_list_directory").length, 0);
   await close(page);
 });
 

@@ -106,17 +106,28 @@ left behind after a removal is not known to the extension: take it out in Settin
     reading and — where one is not kept read-only — written and saved back; new pages made where the collective allows.
 - **The agents reach your clouds too**: every server is registered in pi's config under the instance's name, persistent
   — so a chat can ask "check the milk off the list" or "what did I note down about the fence", and the answer comes
-  from Nextcloud. What it may not reach is exactly what its capability choices turn off.
+  from Nextcloud. What it may not reach is what its capability choices turn off: one choice per family (Files,
+  Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List, Notes, Talk, Tables). The few
+  tools the server has outside these families (its own sign-in helpers and the like) cannot be turned off here, and
+  the panel does not call them.
   - **It is not a trusted server.** What Nextcloud returns is other people's words (mail, news, files and boards others
     share, invitations, recipes from any site), so the portal's guard treats it like any outside content: wrapped,
     scanned for injection, and a chat that has read it is tainted. (Version 0.1.0 registered the servers as trusted;
     the first run of this version takes the names out of Settings → Guard's trusted servers again.)
-  - **The agent asks you first** before it sends mail (`nc_mail_send_message`), makes a public link or a share
-    (`nc_share_create*`, `nc_share_update*`), deletes anything (`*_delete_*`, `nc_share_delete*`) or clears a list
-    (`*_clear_*`). The question comes through pi-mcp-adapter's `approveTools` on the entry; a chat nobody sits at (a
+  - **The agent asks you first** before anything goes out to other people: mail (`nc_mail_send_message`), a Talk
+    message, conversation or participant (`talk_send_message`, `talk_create_conversation`, `talk_add_participant`),
+    and an event or a meeting, which Nextcloud mails to its attendees as an invitation (`nc_calendar_create_event`,
+    `nc_calendar_update_event`, `nc_calendar_create_meeting`; the whole tools, attendees or not, as the question
+    cannot look at the arguments). It asks before a public link or a share (`nc_share_create*`, `nc_share_update*`),
+    and before anything is deleted, cleared or taken to the trash (`*_delete_*`, `nc_share_delete*`, `*_clear_*`,
+    `*_trash_*`, and the calendar's `nc_calendar_bulk_operations` and `nc_calendar_manage_calendar`, which delete by
+    an argument). The question comes through pi-mcp-adapter's `approveTools` on the entry; a chat nobody sits at (a
     routine, a heartbeat) cannot be asked, and the call is refused. Change the list in Settings → MCP (`approveTools`
-    of the entry): a list you set there stays; `false` turns the questions off. Reading, listing, creating notes,
-    events, cards and the like are not asked about.
+    of the entry): a list you set there stays (the extension's own default list is replaced by a newer version's);
+    `false` turns the questions off. A global `approveTools: true` in pi's MCP settings does not reach these
+    servers, since a server's own list takes its place: set `true` on their entries for that. **Not asked about:**
+    reading and listing, creating notes, cards, todos and the like, comments and assignments other users of the
+    Nextcloud see, and overwriting, moving, copying or restoring files and moving mail (to the trash folder too).
 
 ## How it runs
 
@@ -130,9 +141,11 @@ ports at and above 8000 in order of saving, and a port and a name once saved sta
 removing the others does not shift or rename what already stands. The extension is each container's owner: it is
 created on the first save, rebuilt where the hash of what it was made with (kept as a label) differs — a changed host,
 user name, password or port, or a new build of the extension — and removed again when the instance goes away. Every
-run also removes the containers of this extension that no instance stands for. The server's entry in pi's config is
-written only once the container answers as the Nextcloud MCP server (it names itself "Nextcloud MCP"): a program that
-holds the port and answers as something else gets no entry, and the page says so. Nothing of what you have in your
+run also removes the containers of this extension that no instance stands for. A container is started only where
+nothing else answers on its port (another program there, another Nextcloud MCP server of yours included, would be
+taken for it), and the server's entry in pi's config is written only once the container answers as the Nextcloud MCP
+server (it names itself "Nextcloud MCP") and has run for a few seconds without a break (one that cannot listen keeps
+restarting): otherwise no entry is written, and the page says why. Nothing of what you have in your
 cloud lives inside it; it only speaks to the Nextcloud behind the address you gave it.
 
 ## Settings from the environment
@@ -145,6 +158,7 @@ The portal's environment can change these, for a second portal on the same Docke
 | `PITHAGORAS_NEXTCLOUD_PORT` | `8000`: the first instance's port on the loopback; the others take the next free ones above |
 | `PITHAGORAS_NEXTCLOUD_DATA_DIR` | the extension's data folder, where `settings.json` (mode 0600) is kept |
 | `PITHAGORAS_NEXTCLOUD_ANSWER_MS` | `60000`: how long a container is given to answer as the Nextcloud MCP server before the run says it did not |
+| `PITHAGORAS_NEXTCLOUD_SETTLED_MS` | `8000`: how long a container must have run without a break before its answer counts as its own |
 
 ## Security
 
@@ -161,9 +175,14 @@ network) instead, and what that means depends on where the portal runs:
   on the machine can reach it, and it checks nobody**: the Nextcloud MCP server has no login of its own in this mode,
   and its tools run as the account whose app password it holds. A token in front of it would stand on the same
   loopback and protect nothing (Docker for extensions has no network with a way out and no way to the portal's
-  machine; that is what would fix this, and it is not there yet). What the extension does about it: the agent is asked
-  before the tools that send, share and delete (above); the app password is the revocable kind; the container has
-  no capability and is limited. If other people have shell access on that machine, or you run other services that
+  machine; that is what would fix this, and it is not there yet). Web pages in a browser on the machine are kept out:
+  the server is started with the MCP SDK's DNS-rebinding protection on, takes only the `127.0.0.1:<port>` Host and
+  refuses every request to `/mcp` that carries an Origin (a browser's does), and CORS allows only its own origin.
+  The image's `/app` pages and its status route (`/api/v1/status`) are not behind that Host check: a page that
+  rebinds a name to 127.0.0.1 can still read what they say of the server. The image's metrics server (port
+  9090, on every interface) is switched off. What the extension does about the rest: the agent is asked before the
+  tools that send, share and delete (above); the app password is the revocable kind; the container has no capability
+  and is limited. If other people have shell access on that machine, or you run other services that
   you do not trust on its loopback, do not run this extension there, or use an account on your Nextcloud that may only
   do what you are content for any of them to do.
 

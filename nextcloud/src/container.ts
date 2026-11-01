@@ -109,7 +109,8 @@ export function planOwn(insts: NextcloudInstance[]): Map<string, OwnPlan> {
 /** What the server may use: a WebDAV read pulls a file in as base64, and the Python server holds it whole. */
 const MEMORY = 1024 ** 3;
 
-/** How an own container is made from its instance: the image by its digest, environment (the host and the login),
+/** How an own container is made from its instance: the image by its digest, environment (the host and the login,
+ * the endpoint kept from browsers, no metrics server),
  * command and network -- with no capability, no new privileges, a memory, process and log limit, and Docker's
  * restart policy (`stamped`), and the hash of all of it as its label. */
 export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: number): Promise<ContainerSpec> {
@@ -120,6 +121,16 @@ export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: nu
       `NEXTCLOUD_HOST=${inst.url}`,
       `NEXTCLOUD_USERNAME=${inst.username}`,
       `NEXTCLOUD_PASSWORD=${inst.password}`,
+      // The image's defaults answer any web page in a browser on this machine: CORS "*" with credentials (which
+      // Starlette turns into an echo of the page's origin) and the MCP SDK's DNS-rebinding protection off. With the
+      // protection on, only the Host this extension and pi-mcp-adapter send is taken, and any request that carries
+      // an Origin (a browser's) is refused, as no allowed origin is set; neither client sends one.
+      "MCP_DNS_REBINDING_PROTECTION=true",
+      `MCP_ALLOWED_HOSTS=127.0.0.1:${port}`,
+      `CORS_ALLOW_ORIGINS=http://127.0.0.1:${port}`,
+      // Its Prometheus server listens on 0.0.0.0:9090 of the shared namespace, which in host networking is the
+      // network's: tool calls by name, with timings. Nothing of this extension reads it.
+      "METRICS_ENABLED=false",
     ],
     Cmd: ["--host", "127.0.0.1", "--port", String(port)],
     HostConfig: {
@@ -149,9 +160,10 @@ async function claim(docker: Docker, name: string): Promise<boolean> {
  * what the instance says) and running. "What it was made with" is the hash of its spec, kept as a label: Docker's
  * inspect shows the environment with the image's own variables merged in, in another order, so a comparison of that
  * would never hold. A portal's container made again, with a new namespace id, changes the network and so the hash.
- * Says whether it was made anew.
+ * Says whether it was made anew. `beforeStart` runs before every start this asks Docker for (one made, or one that
+ * was not running), and refuses it by throwing: the run checks there that nothing else holds the port.
  */
-export async function ensureOwn(docker: Docker, plan: OwnPlan): Promise<boolean> {
+export async function ensureOwn(docker: Docker, plan: OwnPlan, beforeStart: () => Promise<void> = async () => {}): Promise<boolean> {
   if (!docker) throw new Error("Docker for extensions is not available to this portal");
   const { inst, containerName, port } = plan;
   await docker.images.ensure(IMAGE);
@@ -164,7 +176,10 @@ export async function ensureOwn(docker: Docker, plan: OwnPlan): Promise<boolean>
     const inspect = (await docker.containers.inspect(containerName)) as { Config?: { Labels?: Record<string, string> | null } } | undefined;
     if (inspect?.Config?.Labels?.[SPEC_LABEL] === wanted) {
       const state = await docker.containers.get(containerName);
-      if (!state || state.state !== "running") await docker.containers.start(containerName);
+      if (!state || state.state !== "running") {
+        await beforeStart();
+        await docker.containers.start(containerName);
+      }
       return false;
     }
     // What it was made with is no longer what the instance says: remake it. Docker's update takes the policy and
@@ -172,6 +187,7 @@ export async function ensureOwn(docker: Docker, plan: OwnPlan): Promise<boolean>
     await releaseOwn(docker, containerName);
   }
   await docker.containers.create(containerName, spec);
+  await beforeStart();
   await docker.containers.start(containerName);
   return true;
 }

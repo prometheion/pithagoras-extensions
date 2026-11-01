@@ -47,7 +47,7 @@ test("a save keeps what it is given and only that: a second instance with its po
 test("the entries this extension wrote are remembered beside the instances, and a save of the instances keeps them", () => {
   withHome(() => {
     assert.deepEqual(loadWritten(), []);
-    assert.equal(loadEntriesVersion(), 1, "no store: entries written the way the first version did");
+    assert.equal(loadEntriesVersion(), ENTRIES_VERSION, "no store: nothing an earlier version wrote to take over");
     saveInstances([{ name: "uni", url: "https://a.example.org", username: "u", password: "p" }]);
     saveWritten(["uni", "uni", "home"]);
     assert.deepEqual(loadWritten(), ["uni", "home"]);
@@ -55,6 +55,18 @@ test("the entries this extension wrote are remembered beside the instances, and 
     saveInstances([]);
     assert.deepEqual(loadWritten(), ["uni", "home"], "a save of the list does not forget what was written");
     assert.equal(loadInstances().length, 0);
+  });
+});
+
+test("a store 0.1.0 wrote (its instances, no version) stands at the first version of the entries; no store at all at this one", () => {
+  withHome(() => {
+    fs.mkdirSync(path.dirname(storeFile()), { recursive: true });
+    fs.writeFileSync(storeFile(), JSON.stringify({ instances: [{ name: "nextcloud", url: "https://a.example.org", username: "u", password: "p" }] }));
+    assert.equal(loadEntriesVersion(), 1);
+  });
+  withHome(() => {
+    saveInstances([{ name: "uni", url: "https://a.example.org", username: "u", password: "p" }]);
+    assert.equal(loadEntriesVersion(), ENTRIES_VERSION, "a fresh install's first save is no earlier version's");
   });
 });
 

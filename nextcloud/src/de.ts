@@ -428,4 +428,8 @@ export const de = {
   "Send the app password over plain http": "Das App-Passwort über unverschlüsseltes http senden",
   "http does not encrypt: whoever is on the way to this host can read the password. Only for a Nextcloud on a network you trust.": "http verschlüsselt nicht: Wer auf dem Weg zu diesem Host mithört, kann das Passwort lesen. Nur für eine Nextcloud in einem Netz, dem du traust.",
   "Sharing": "Freigaben",
+  "Talk": "Talk",
+  "Tables": "Tabellen",
+  "Your text, not saved": "Dein Text, nicht gespeichert",
+  "This page cannot be edited here: {error}": "Diese Seite kann hier nicht bearbeitet werden: {error}",
 } as const;

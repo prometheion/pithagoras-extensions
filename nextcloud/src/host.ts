@@ -1,5 +1,6 @@
 import type { ServerPortal } from "@pithagoras/extension-api/server";
 import type { Docker } from "../../shared/docker-api";
+import { personGate as sharedPersonGate } from "../../shared/person-gate";
 
 /**
  * The portal this server half was started with, for every module of it to reach: Docker above all. Set as the
@@ -38,35 +39,13 @@ export function ownName(): string {
   }
 }
 
-/** Who is behind a request to the package's routes (`http.person`, which a Pithagoras of 0.3.0 and later has). */
-interface RequestPerson {
-  id: string;
-  name: string;
-  role: "primary" | "colleague" | "guest" | "unknown";
-}
-
-const READS = new Set(["GET", "HEAD", "OPTIONS"]);
-
 /**
- * For the whole of the routes, after `writesFromHere`: a request that changes something -- saves an instance, calls
- * a tool that sends mail or deletes -- is the primary person's alone; a colleague or a guest of the portal may read.
- * A portal without `http.person` (older than 0.3.0) has only its own sign-in gate in front of these routes, as before.
- * `/tool` is a POST for every tool, read or not, and counts as a change.
+ * For the whole of the routes, after `writesFromHere` (shared/person-gate, as Office's): a request that changes
+ * something -- saves an instance, calls a tool that sends mail or deletes -- is the primary person's alone; a
+ * colleague or a guest of the portal may read. A portal without `http.person` (older than 0.3.0) has only its own
+ * sign-in gate in front of these routes, as before. `/tool` is a POST for every tool, read or not, and counts as a change.
  */
-export function personGate(
-  req: { method?: string },
-  res: { status: (code: number) => { json: (body: unknown) => void } },
-  next: () => void,
-): void {
-  const http = (portal() as unknown as { http: { person?: (req: unknown) => RequestPerson | undefined } }).http;
-  if (typeof http.person !== "function") return next();
-  let person: RequestPerson | undefined;
-  try {
-    person = http.person(req);
-  } catch {
-    person = undefined;
-  }
-  if (!person) return void res.status(401).json({ error: "Sign in to the portal first." });
-  if (!READS.has(req.method ?? "GET") && person.role !== "primary") return void res.status(403).json({ error: "Only the portal's primary person may change this Nextcloud's settings or call its tools." });
-  next();
-}
+export const personGate = sharedPersonGate({
+  http: () => portal().http,
+  refused: "Only the portal's primary person may change this Nextcloud's settings or call its tools.",
+});

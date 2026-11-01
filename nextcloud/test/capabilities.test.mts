@@ -2,7 +2,7 @@
  * tools the agent has to ask before it calls. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_TOOLS, CAPABILITIES, TABS, availableFromTools, capabilityOfTool, excludeGlobs, tabOffered } from "../src/capabilities.ts";
+import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS, TABS, availableFromTools, capabilityOfTool, excludeGlobs, tabOffered } from "../src/capabilities.ts";
 
 /** pi-mcp-adapter's matching (types.ts matchesToolPattern): a glob with * and ?, or a name, against the raw tool name. */
 const matches = (patterns: string[], tool: string) =>
@@ -17,10 +17,29 @@ test("the agent is asked before mail goes out, a link or a share is made, and be
   ]) assert.ok(matches(APPROVE_TOOLS, tool), `${tool} is asked about`);
 });
 
+test("the agent is asked before a Talk message, a conversation or a participant, an event or a meeting (Nextcloud mails its attendees), and deletes behind an argument or to the trash", () => {
+  for (const tool of [
+    "talk_send_message", "talk_create_conversation", "talk_add_participant",
+    "nc_calendar_create_event", "nc_calendar_update_event", "nc_calendar_create_meeting",
+    "nc_calendar_bulk_operations", "nc_calendar_manage_calendar", "collectives_trash_page", "collectives_trash_collective",
+  ]) assert.ok(matches(APPROVE_TOOLS, tool), `${tool} is asked about`);
+});
+
+test("the lists earlier versions wrote are known as this extension's own, and none of them is this version's", () => {
+  assert.ok(EARLIER_APPROVE_TOOLS.length > 0);
+  for (const list of EARLIER_APPROVE_TOOLS) assert.notDeepEqual(list, APPROVE_TOOLS);
+});
+
+test("Talk and Tables are families an instance can turn off, though no tab stands for them", () => {
+  assert.equal(capabilityOfTool("talk_send_message")?.id, "talk");
+  assert.equal(capabilityOfTool("nc_tables_insert_row")?.id, "tables");
+  assert.deepEqual(excludeGlobs({ name: "uni", capabilities: { talk: false, tables: false } }), ["uni_talk_*", "uni_nc_tables_*"]);
+});
+
 test("reading, listing, writing and saving a draft are not asked about", () => {
   for (const tool of [
     "nc_mail_list_messages", "nc_mail_get_message", "nc_mail_save_draft", "nc_mail_set_flags", "nc_share_list", "nc_webdav_list_directory",
-    "nc_webdav_read_file", "nc_webdav_write_file", "nc_notes_create_note", "nc_calendar_create_event", "deck_create_card", "deck_update_card",
+    "nc_webdav_read_file", "nc_webdav_write_file", "nc_notes_create_note", "nc_calendar_create_todo", "deck_create_card", "deck_update_card",
   ]) assert.equal(matches(APPROVE_TOOLS, tool), false, `${tool} runs without asking`);
 });
 

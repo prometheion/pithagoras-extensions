@@ -56,8 +56,10 @@ more under Security.
 
 Nextcloud's containers run the other way: they must reach the person's own Nextcloud across the machine's usual
 networking, which an isolated network cannot do. So each stands on the portal's own loopback (Docker for extensions'
-shared network) and serves its /mcp endpoint to the portal alone, bound to 127.0.0.1 of that loopback, one port per
-instance. Nextcloud's README says more under Security.
+shared network) and serves its /mcp endpoint on 127.0.0.1 of that loopback, one port per instance (8000 and up). For a
+portal in a container on a network of its own that loopback is the container's; for a portal on the host's network (both
+of Pithagoras' Compose files) it is the machine's, and every local process can reach the endpoint, which checks nobody.
+Nextcloud's README says what the extension does about it, under Security.
 
 ## Installing
 

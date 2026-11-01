@@ -1298,6 +1298,31 @@ test("an autofit's inverse compares the size it left once it landed: a person's 
   assert.deepEqual([s1.widths[3], s1.widths[4]], [30, 9], "D the person's, E as it was");
 });
 
+test("a sheet the call made, taken back, stays where a person wrote into it meanwhile, and the answer names it; a copy only where it holds what its sheet does not", async () => {
+  // A person types into the new sheet as soon as it shows; the write after it fails.
+  let typed = false;
+  const book = workbook(["Sheet1"], { poison: "Z9", before: (_n, sheets) => { const made = sheets.find((s) => s.name === "New"); if (made && !typed) { made.cells.A1 = "person typed this"; typed = true; } } });
+  const out = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ addSheet: "New" }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /^op 2: the editor refused the write\. The ops before it are taken back, but not all of them whole\. Kept as a person changed them after this call: the sheet "New" this call made \(a person wrote into it\)\.$/);
+  assert.deepEqual(book.view(), ["Sheet1", "New"]);
+  assert.equal(book.state.sheets[1].cells.A1, "person typed this");
+  // A copy that holds what its sheet holds (and the call's own write into it, taken back) goes again.
+  const copies = workbook(["Sheet1"], { poison: "Z9" });
+  Object.assign(copies.state.sheets[0].cells, { A1: 1, B2: "=A1*2", C3: "text" });
+  const plain = await plugin(copies, { kind: "cell.edit", args: editJob("xlsx", [{ copySheet: "Sheet1", to: "Copy" }, { sheet: "Copy", range: "D4", values: [["mine"]] }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(plain.undone, true, JSON.stringify(plain));
+  assert.deepEqual(copies.view(), ["Sheet1"]);
+  // One a person wrote into stays.
+  let wrote = false;
+  const kept = workbook(["Sheet1"], { poison: "Z9", before: (_n, sheets) => { const copy = sheets.find((s) => s.name === "Copy"); if (copy && copy.cells.A1 === 1 && !wrote) { copy.cells.E5 = "theirs"; wrote = true; } } });
+  Object.assign(kept.state.sheets[0].cells, { A1: 1, B2: "=A1*2" });
+  const theirs = await plugin(kept, { kind: "cell.edit", args: editJob("xlsx", [{ copySheet: "Sheet1", to: "Copy" }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(theirs.error?.code, "partial", JSON.stringify(theirs));
+  assert.match(theirs.error.message, /Kept as a person changed them after this call: the sheet "Copy" this call made \(a person wrote into it\)\.$/);
+  assert.deepEqual(kept.view(), ["Sheet1", "Copy"]);
+});
+
 test("rows inserted and taken back are read for what was written into them in one go, not cell by cell", async () => {
   const book = workbook(["Sheet1"]);
   const [s1] = book.state.sheets;

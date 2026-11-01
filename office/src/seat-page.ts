@@ -1755,6 +1755,14 @@ const CELL_STEP = `function () {
       }
       return { result: { kept: keptCells.length ? keptCells : undefined } };
     }
+    // What a sheet holds, by address: each filled cell's value, or its formula.
+    var filledOf = function (ws) {
+      var u = usedOf(ws), out = {};
+      if (!u) return "{}";
+      var range = ws.GetRange(colName(u.c1) + (u.r1 + 1) + ":" + colName(u.c2) + (u.r2 + 1)), values = grid(range.GetValue()), formulas = grid(range.GetFormula());
+      values.forEach(function (row, r) { row.forEach(function (v, c) { var f = formulas[r] ? formulas[r][c] : "", formula = typeof f === "string" && f.charAt(0) === "="; if (v !== "" || formula) out[colName(u.c1 + c) + (u.r1 + r + 1)] = formula ? f : v; }); });
+      return JSON.stringify(out);
+    };
     // The sheet a format, row or column op names: the first one shown where none is named.
     var sheetOf = function (o) { return o.sheet !== undefined ? named(o.sheet) : shown[0]; };
     var where = function (ws, address) { return JSON.stringify(ws.GetName()) + "!" + address; };
@@ -1953,12 +1961,12 @@ const CELL_STEP = `function () {
     if (op.addSheet !== undefined) {
       // Made after the editor's active sheet, then moved to its place (by default after the last).
       Api.AddSheet(op.addSheet);
-      return { result: { inverse: { dropSheet: op.addSheet, real: true }, expect: { has: op.addSheet }, then: { moveSheet: op.addSheet, position: op.position !== undefined ? op.position : shown.length + 1, fresh: true } } };
+      return { result: { inverse: { dropSheet: op.addSheet, made: true, real: true }, expect: { has: op.addSheet }, then: { moveSheet: op.addSheet, position: op.position !== undefined ? op.position : shown.length + 1, fresh: true } } };
     }
     if (op.copySheet !== undefined) {
       var source = named(op.copySheet).GetName();
       Api.AddSheet(op.to);
-      return { result: { inverse: { dropSheet: op.to, real: true }, expect: { has: op.to }, then: { fillSheet: op.to, from: source, position: op.position } } };
+      return { result: { inverse: { dropSheet: op.to, copyOf: source, real: true }, expect: { has: op.to }, then: { fillSheet: op.to, from: source, position: op.position } } };
     }
     if (op.fillSheet !== undefined) {
       var from = Api.GetSheet(op.from), to = Api.GetSheet(op.fillSheet), address = String(from.GetUsedRange().GetAddress(false, false));
@@ -2015,6 +2023,10 @@ const CELL_STEP = `function () {
     if (op.dropSheet !== undefined) {
       var drop = sheetAt(all.map(function (s) { return { name: s.GetName() }; }), op.dropSheet);
       if (drop === -1) return { result: {} };
+      // A sheet this call made, taken away again: the call's own writes into it are taken back by now, so what it holds
+      // (a new one anything, a copy anything its sheet does not) a person wrote there meanwhile. Then it stays.
+      var copyOf = op.copyOf !== undefined ? Api.GetSheet(op.copyOf) : null;
+      if ((op.made || copyOf) && filledOf(all[drop]) !== (copyOf ? filledOf(copyOf) : "{}")) return { result: { kept: { what: "sheet", sheet: all[drop].GetName(), cells: [], made: true } } };
       all[drop].Delete();
       return { result: { expect: { gone: realNames[drop] } } };
     }
@@ -2524,7 +2536,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
           }
           if (irreversible.length) said += " Not taken back: " + irreversible.map(function (x) { return "the " + x.what + " of " + JSON.stringify(x.sheet) + " that op " + (x.op + 1) + " deleted"; }).join(", ") + ".";
           if (notBack.length) said += " Not taken back either, as the rows or columns of their sheet moved after them for good: " + opsSaid(notBack) + ".";
-          if (kept.length) said += " Kept as a person changed them after this call: " + kept.map(function (k) { return (k.what === "frozen panes" ? "the frozen panes" : k.made ? "the " + k.what + " " + k.cells.join(", ") + " this call made (a person wrote into them)" : k.what === "cells" ? cellsSaid(k.cells) : "the " + k.what + (k.cells.length === 1 ? " " : "s ") + k.cells.join(", ")) + " of " + JSON.stringify(k.sheet); }).join("; ") + ".";
+          if (kept.length) said += " Kept as a person changed them after this call: " + kept.map(function (k) { return k.what === "sheet" ? "the sheet " + JSON.stringify(k.sheet) + " this call made (a person wrote into it)" : (k.what === "frozen panes" ? "the frozen panes" : k.made ? "the " + k.what + " " + k.cells.join(", ") + " this call made (a person wrote into them)" : k.what === "cells" ? cellsSaid(k.cells) : "the " + k.what + (k.cells.length === 1 ? " " : "s ") + k.cells.join(", ")) + " of " + JSON.stringify(k.sheet); }).join("; ") + ".";
           // The rows and columns that stay moved, for the answer to name the people in the workbook.
           var stays = shifted.filter(function (s) { return !s.made || !dropped[shiftKey(s)]; });
           done(job, { error: { code: "partial", op: error.op, message: String(error.message).replace(/\\.?$/, ".") + said, shifted: stays.length ? stays : undefined }, ran: true });

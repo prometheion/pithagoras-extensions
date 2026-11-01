@@ -94,7 +94,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   document as it stands first, and an edit that fails after it changed something is taken back. Where even that
   fails (a person changed the same sheets meanwhile), the agent hears so (`error:partial`) and reads the document
   again. In a spreadsheet, what you changed yourself after the agent's step (a cell you typed into or formatted, a
-  row you wrote into) is never taken back with the agent's call: it stays as you made it, and the agent's answer
+  row or a sheet of the call's you wrote into, frozen panes you moved) is never taken back with the agent's call: it stays as you made it, and the agent's answer
   (`error:partial`) names it. After an edit the Document Server is asked to save the session, and the agent hears the new revision; that
   save holds what you typed until then too.
   Word: replace quoted text, add paragraphs (in any paragraph style the document has) or a table after a paragraph,

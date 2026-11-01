@@ -1674,8 +1674,7 @@ function putValidation(ws, address, text) {
   if (!text) return;
   var a = JSON.parse(text), v = ws.GetRange(address).GetValidation();
   v.Add(a[0], a[1], a[2], a[3], a[4] === null || a[4] === "" ? undefined : a[4]);
-  var setters = [null, null, null, null, null, "SetIgnoreBlank", "SetInCellDropdown", "SetErrorMessage", "SetErrorTitle", "SetInputMessage", "SetInputTitle", "SetShowError", "SetShowInput"];
-  for (var k = 5; k < setters.length; k++) if (a[k] !== null) v[setters[k]](a[k]);
+  // (The setters of the rest send nothing in the editor, messages among them: what Add makes is all that is put back.)
 }
 // Rectangles ({a: address, v: text}) of the cells of a grid of texts that keep() says yes to and that share their text, from the
 // cell at first ({col, row}): rows of runs, each joined to the run above it where it has the same columns and text.
@@ -1699,10 +1698,13 @@ function rectsOf(texts, first, keep) {
     return { a: r.x2 > r.x1 || r.y2 > r.y1 ? a + ":" + colName(first.col + r.x2) + (first.row + r.y2 + 1) : a, v: r.v };
   });
 }
-// The links in a range: [address, sub-address, screen tip, text] each.
+// The links in a range: [address, sub-address, screen tip, text, the cells they are on] each.
 function linksIn(ws, address) {
   var hs = ws.GetRange(address).GetHyperlinks() || [], out = [];
-  for (var k = 0; k < hs.length; k++) out.push([ask(hs[k], "GetAddress"), ask(hs[k], "GetSubAddress"), ask(hs[k], "GetScreenTip"), ask(hs[k], "GetTextToDisplay")]);
+  for (var k = 0; k < hs.length; k++) {
+    var range = ask(hs[k], "GetRange");
+    out.push([ask(hs[k], "GetAddress"), ask(hs[k], "GetSubAddress"), ask(hs[k], "GetScreenTip"), ask(hs[k], "GetTextToDisplay"), range ? String(range.GetAddress(false, false)) : null]);
+  }
   return out;
 }
 // A named range's reference as the editor reads it, or null where there is no such name.
@@ -1732,6 +1734,9 @@ function refuseExtra(ws, op, i) {
       if (seen[text]) return bad("the column names of a table are all different, and " + JSON.stringify(head.GetValue()) + " is in " + cells[c] + " of " + JSON.stringify(name) + " twice");
       seen[text] = true;
     }
+    // OnlyOffice 10.0 breaks the format of a linked cell a table covers: its number format, font and the rest then throw.
+    var tlinked = linksIn(ws, op.asTable).map(function (l) { return l[4]; }).filter(Boolean);
+    if (tlinked.length) return bad("a table over a cell with a link breaks that cell in the editor (its formats can no longer be read), and " + tlinked[0] + " of " + JSON.stringify(name) + " has one (put the table where no cell has a link)");
     var tmerged = mergesIn(ws, op.asTable);
     if (tmerged.length) return bad("a table needs cells that are not merged, and " + tmerged[0] + " of " + JSON.stringify(name) + " is merged (split it first)");
   }
@@ -1760,28 +1765,40 @@ function areasOf(text) {
 // A sheet's conditional formats, validation (over the cells of address), links, filter and charts, for office_read: out
 // of room characters, 50 of each kind at most.
 function extrasLook(ws, address, room) {
-  var out = { rules: [], validation: [], links: [], filter: null, charts: [], size: 0, cut: false };
+  var out = { rules: [], validation: [], links: [], filter: null, charts: [], size: 0, cut: false, failed: [] };
   var take = function (list, item, cost) {
     if (out.size + cost > room || list.length >= 50) { out.cut = true; return false; }
     out.size += cost;
     list.push(item);
     return true;
   };
-  var fc = ws.GetRange(WHOLE_SHEET).GetFormatConditions();
-  for (var k = 1; k <= fc.GetCount(); k++) { var key = ruleKey(fc.GetItem(k)); if (!take(out.rules, JSON.parse(key), key.length)) break; }
-  rectsOf(validationsIn(ws, address), cornerOf(address), function (t) { return t !== ""; }).forEach(function (r) { take(out.validation, { a: r.a, v: JSON.parse(r.v) }, r.a.length + r.v.length); });
-  var links = ws.GetHyperlinks() || [];
-  for (var h = 0; h < links.length; h++) {
-    var range = ask(links[h], "GetRange");
-    if (!take(out.links, [range ? String(range.GetAddress(false, false)) : null, ask(links[h], "GetAddress"), ask(links[h], "GetSubAddress"), ask(links[h], "GetTextToDisplay")], 60)) break;
-  }
-  var filter = ask(ws, "GetAutoFilter"), filtered = filter ? ask(filter, "GetRange") : null;
-  if (filtered) out.filter = String(filtered.GetAddress(false, false));
-  var charts = ws.GetAllCharts() || [];
-  for (var c = 0; c < charts.length; c++) {
-    var at = ask(charts[c], "GetPosition"), title = ask(charts[c], "GetTitle");
-    if (!take(out.charts, [ask(charts[c], "GetChartType"), title ? String(title).replace(/\\s+$/, "") : null, at ? colName(at.fromCol) + (at.fromRow + 1) : null], 60)) break;
-  }
+  // Each part on its own: one the editor cannot give is said to be unread, and does not fail the read.
+  var part = function (name, read) { try { read(); } catch (e) { out.failed.push(name + " (" + String(e && e.message || e) + ")"); } };
+  part("conditional formats", function () {
+    var fc = ws.GetRange(WHOLE_SHEET).GetFormatConditions();
+    for (var k = 1; k <= fc.GetCount(); k++) { var key = ruleKey(fc.GetItem(k)); if (!take(out.rules, JSON.parse(key), key.length)) break; }
+  });
+  part("validation", function () {
+    rectsOf(validationsIn(ws, address), cornerOf(address), function (t) { return t !== ""; }).forEach(function (r) { take(out.validation, { a: r.a, v: JSON.parse(r.v) }, r.a.length + r.v.length); });
+  });
+  part("links", function () {
+    var links = ws.GetHyperlinks() || [];
+    for (var h = 0; h < links.length; h++) {
+      var range = ask(links[h], "GetRange");
+      if (!take(out.links, [range ? String(range.GetAddress(false, false)) : null, ask(links[h], "GetAddress"), ask(links[h], "GetSubAddress"), ask(links[h], "GetTextToDisplay")], 60)) break;
+    }
+  });
+  part("filter", function () {
+    var filter = ask(ws, "GetAutoFilter"), filtered = filter ? ask(filter, "GetRange") : null;
+    if (filtered) out.filter = String(filtered.GetAddress(false, false));
+  });
+  part("charts", function () {
+    var charts = ws.GetAllCharts() || [];
+    for (var c = 0; c < charts.length; c++) {
+      var at = ask(charts[c], "GetPosition"), title = ask(charts[c], "GetTitle");
+      if (!take(out.charts, [ask(charts[c], "GetChartType"), title ? String(title).replace(/\\s+$/, "") : null, at ? colName(at.fromCol) + (at.fromRow + 1) : null], 60)) break;
+    }
+  });
   return out;
 }
 `;
@@ -1804,7 +1821,10 @@ function sheetLook(ws, address, room) {
   room = Math.max(0, room - extras.size);
   var grid = addressesOf(address), h = grid.length, w = grid[0].length, looks = [], fonts = {}, usual = null;
   for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
-    var l = lookOf(ws.GetRange(grid[y][x]), LOOK_KEYS), fk = JSON.stringify([l.font, l.size]);
+    // (A cell the editor cannot read the format of is left out, and said.)
+    var l;
+    try { l = lookOf(ws.GetRange(grid[y][x]), LOOK_KEYS); } catch (e) { l = {}; if (extras.failed.length < 6) extras.failed.push("the format of " + grid[y][x] + " (" + String(e && e.message || e) + ")"); }
+    var fk = JSON.stringify([l.font, l.size]);
     looks.push(l);
     fonts[fk] = (fonts[fk] || 0) + 1;
     if (!usual || fonts[fk] > fonts[usual]) usual = fk;
@@ -1870,7 +1890,7 @@ function sheetLook(ws, address, room) {
   cols.own = fit(cols.own, function () { return 8; });
   rows.own = fit(rows.own, function () { return 10; });
   if (extras.cut) cut = true;
-  return { font: { name: font[0], size: font[1] }, formats: order.map(function (k) { return { look: JSON.parse(k), ranges: groups[k] }; }), merged: merged, cols: cols, rows: rows, frozen: frozenOf(ws), rules: extras.rules, validation: extras.validation, links: extras.links, filter: extras.filter, charts: extras.charts, size: size + extras.size, cut: cut };
+  return { font: { name: font[0], size: font[1] }, formats: order.map(function (k) { return { look: JSON.parse(k), ranges: groups[k] }; }), merged: merged, cols: cols, rows: rows, frozen: frozenOf(ws), rules: extras.rules, validation: extras.validation, links: extras.links, filter: extras.filter, charts: extras.charts, unread: extras.failed, size: size + extras.size, cut: cut };
 }
 `;
 
@@ -2338,6 +2358,7 @@ const CELL_STEP = `function () {
           return sizes;
         } catch (e) { return null; }
       }) } };
+      if (st.restoreName !== undefined) return { result: { name: refOfName(st.restoreName) } };
       if (st.restoreLink) {
         var sl = st.restoreLink, slws = named(sl.sheet);
         return { result: { link: { shown: linksIn(slws, sl.cells).some(function (l) { return l[0] === sl.url; }), looks: readLooks(slws, sl.cells, sl.keys), values: capture(slws, sl.cells) } } };
@@ -2417,14 +2438,16 @@ const CELL_STEP = `function () {
         if (op.check) {
           var vAdd = vws.GetRange(op.validate).GetValidation();
           vAdd.Add(op.check.type, "xlValidAlertStop", op.check.operator, op.check.f1, op.check.f2);
-          if (op.check.message) vAdd.SetErrorMessage(op.check.message);
         }
       } catch (e) {
         // Made in part: the validation the cells had comes back, here.
         try { rectsOf(vBefore, vFirst, function () { return true; }).forEach(function (r) { putValidation(vws, r.a, r.v); }); } catch (e2) {}
         throw e;
       }
-      return { result: { inverse: { restoreValidation: { sheet: vws.GetName(), range: op.validate, format: op.validate, before: vBefore, left: validationsIn(vws, op.validate) }, real: true }, read: vMany } };
+      // The messages of a validation the call replaces cannot be put back: the editor's setters for them send nothing.
+      var vMessages = [];
+      vBefore.forEach(function (row, y) { row.forEach(function (text, x) { if (text && JSON.parse(text).slice(7, 11).some(function (m) { return m; })) vMessages.push(colName(vFirst.col + x) + (vFirst.row + y + 1)); }); });
+      return { result: { inverse: { restoreValidation: { sheet: vws.GetName(), range: op.validate, format: op.validate, before: vBefore, left: validationsIn(vws, op.validate) }, real: true }, read: vMany, unreadable: vMessages.length ? [{ op: i, what: ["validation messages"], where: where(vws, vMessages.length > 8 ? vMessages.slice(0, 8).join(", ") + " and " + (vMessages.length - 8) + " more" : vMessages.join(", ")) }] : undefined } };
     }
     if (op.restoreValidation !== undefined) {
       var rv = op.restoreValidation, rvws = named(rv.sheet), rvNow = validationsIn(rvws, rv.range), rvKept = [], rvCells = addressesOf(rv.range);
@@ -2473,6 +2496,9 @@ const CELL_STEP = `function () {
       ss.left = readLooks(sws, op.sort, sKeys);
       ss.values.left = capture(sws, op.sort);
       var sLost = [{ op: i, what: ["alignment", "borders"], where: where(sws, op.sort) }];
+      // The links move with their cells, and a link set again would take the cell's font over: they stay where it put them.
+      var sLinks = linksIn(sws, op.sort).map(function (l) { return l[4]; }).filter(Boolean);
+      if (sLinks.length) sLost.push({ op: i, what: ["links"], where: where(sws, sLinks.length > 8 ? sLinks.slice(0, 8).join(", ") + " and " + (sLinks.length - 8) + " more" : sLinks.join(", ")) });
       if (sMixed.length) sLost.push({ op: i, what: [sDeep.blind ? "mixed text formatting (or of a text too long to read character by character)" : "mixed text formatting"], where: where(sws, sMixed.length > 8 ? sMixed.slice(0, 8).join(", ") + " and " + (sMixed.length - 8) + " more" : sMixed.join(", ")) });
       return { result: { inverse: { restoreFormat: ss, real: true }, read: sMany, unreadable: sLost } };
     }
@@ -2487,12 +2513,14 @@ const CELL_STEP = `function () {
         if (nWas === null) Api.AddDefName(op.name, nRef);
         else defName(op.name).SetRefersTo(nRef);
       }
-      return { result: { inverse: { restoreName: op.name, was: nWas, left: refOfName(op.name), real: true } } };
+      // A name made shows a moment after the command (the Document Server's lock): its inverse reads it when it does.
+      return { result: { inverse: { restoreName: op.name, was: nWas, left: refOfName(op.name), real: true }, settle: nWas === null && !op.delete ? { name: true } : undefined } };
     }
     if (op.restoreName !== undefined) {
       var rnNow = refOfName(op.restoreName), rnKept = false;
       if (op.was === null) {
-        if (rnNow !== null) { if (rnNow === op.left) defName(op.restoreName).Delete(); else rnKept = true; }
+        // (A name that never showed is deleted whatever it refers to now.)
+        if (rnNow !== null) { if (rnNow === op.left || op.unsettled) defName(op.restoreName).Delete(); else rnKept = true; }
       } else if (op.left !== null) {
         if (rnNow === op.left) defName(op.restoreName).SetRefersTo(op.was); else rnKept = rnNow !== op.was;
       } else if (rnNow === null) Api.AddDefName(op.restoreName, op.was); else rnKept = rnNow !== op.was;
@@ -3092,6 +3120,12 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
         call(cell.step, { op: { settle: r.inverse, real: true }, index: i, pending: pending }, false, function (s) {
           var left = s.result || {}, z = r.settle;
           // A link shows when the cell has it; what it left is read then (not shown in time: not compared).
+          if (z.name) {
+            var named = r.inverse, there = left.name !== null && left.name !== undefined;
+            if (!there && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
+            if (there) named.left = left.name; else named.unsettled = true;
+            return made(r);
+          }
           if (z.link) {
             var linked = r.inverse.restoreLink, seen = Boolean(left.link) && left.link.shown;
             if (!seen && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});

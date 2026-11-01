@@ -183,7 +183,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   comparison with a value, a formula, a colour scale, data bars, the top or bottom n, duplicate or unique values;
   with a fill, a font colour, bold, italic, underline or strike where the kind has a look), **data validation** (a
   list of entries or the cells that hold them, whole numbers, decimals, dates and text lengths with a condition such
-  as `">= 0"` or `"between 1 and 10"`, a message for a refused entry; or taking it off), **links** in cells (http,
+  as `">= 0"` or `"between 1 and 10"`; or taking it off; not an error message, which OnlyOffice's API sets in the
+  agent's own editor only and sends nowhere), **links** in cells (http,
   https or mailto; a cell that holds a text keeps it, one that holds a number or a formula needs the text to show,
   as OnlyOffice would put the address there), **charts** of a range with its header row and label column (column,
   stacked column, bar, stacked bar, line, pie, doughnut, area and scatter; title, axis titles, legend, place and
@@ -192,17 +193,18 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   three of its columns (the cells' formats and formulas move with their rows; merged cells are refused) and makes,
   changes and deletes **named ranges**. The same rule holds for them as for formats: a call is checked first, and
   where a later op fails what the call made is put back: a rule the call added is deleted (one a person changed since
-  stays, and is named), validation goes back to what the cells had (cell by cell), a link to the text, look and link
-  the cell had, a sort to the values, formulas and readable formats the range had (the alignment and borders it moved
+  stays, and is named), validation goes back to what the cells had (cell by cell; the messages of a person's
+  validation are lost with the validation the call replaces, and the answer says so), a link to the text, look and
+  link the cell had, a sort to the values, formulas and readable formats the range had (the alignment and borders it moved
   cannot be read back, so the answer names them), a name to its old reference or none. OnlyOffice's API takes **no chart,
   no table away again, and a filter only whole** (`filter: "none"` takes the sheet's off), and a
   rule cleared cannot be made again: these go last in a call, and the answer names the ones made before the op that
-  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word.
+  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word, and a table over a cell with a link is refused (OnlyOffice 10.0 can no longer read that cell's formats afterwards). A sort moves the links of its cells with them, and where a later op fails the links stay where the sort put them (the answer names them).
   A cell under a conditional format reads the rule's fill as its own in `office_read` (the API gives what is drawn);
   taking back a format of such a cell can then set that fill on it. `office_read` with `formatting: true` says how
   each sheet looks: the font most cells have, the cells that look otherwise (grouped into ranges), merged cells, the
   columns' widths and rows' heights that differ from the sheet's, hidden ones and frozen panes, its conditional
-  formats, the validation of the cells of the used range, its links, its filter and its charts, 50,000 characters of
+  formats, the validation of the cells it lists (of the used range, 20,000 cells at most), its links, its filter and its charts, 50,000 characters of
   it at most. It cannot say the alignment or the borders (OnlyOffice has no getter for them), a formatted table (its
   style, its total row), the data a chart shows or the workbook's named ranges (none is listed by the API; the agent
   deletes the ones it made by name): `office_screenshot` shows the first three. The agent cannot write comments or tracked

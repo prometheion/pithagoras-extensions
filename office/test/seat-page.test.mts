@@ -329,7 +329,7 @@ const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = 
  * unfreeze and an autofit show from the next command on, as in an editor people have co-edited (the Document Server's
  * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does.
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean } = {}) {
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
   const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0, names: {} as Record<string, string> };
@@ -512,7 +512,7 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       }
       return x - y;
     });
-    const maps = [sh.cells, sh.formats, sh.looks, sh.aligns, sh.borders, sh.chars] as Record<string, unknown>[];
+    const maps = [sh.cells, sh.formats, sh.looks, sh.aligns, sh.borders, sh.chars, sh.links] as Record<string, unknown>[];
     const before = maps.map((m) => ({ ...m }));
     maps.forEach((m, i) => {
       for (let c = b.c1; c <= b.c2; c++) rows.forEach((r, k) => {
@@ -578,6 +578,7 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         return took;
       },
       GetNumberFormat: () => {
+        if (options.poisonRead && grid.flat().includes(options.poisonRead)) throw new Error(`the editor refused ${options.poisonRead}`);
         const all = new Set(grid.flat().map((a) => sh.formats[a] ?? "General"));
         return all.size === 1 ? [...all][0] : null;
       },
@@ -803,7 +804,9 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       const m = /^(?:'((?:[^']|'')+)'|([^'!]+))?!?(.*)$/.exec(ref)!;
       const sheetName = (m[1] ?? m[2])?.replace(/''/g, "'");
       if (ref.includes("!") && !sheets.some((x) => x.name === sheetName)) throw new Error("Invalid range.");
-      state.names[name] = ref.includes("!") ? `${/^\w+$/.test(sheetName!) ? sheetName : `'${sheetName!.replace(/'/g, "''")}'`}!${m[3]}` : ref;
+      // A name made shows from the next command on (the lock, measured in e2e 34); a change and a delete are at once.
+      const made = ref.includes("!") ? `${/^\w+$/.test(sheetName!) ? sheetName : `'${sheetName!.replace(/'/g, "''")}'`}!${m[3]}` : ref;
+      later.push({ due: state.commands + 1, fn: () => void (state.names[name] = made) });
       return true;
     },
     GetDefName: (name: string) => {
@@ -2784,7 +2787,7 @@ test("a conditional format taken back leaves one a person changed or took away; 
   assert.deepEqual(t1.rules.map((r) => r.applies), ["D2:D9"], "only the rules that meet the cells went");
 });
 
-test("validation: a list, a number and a message reach the builder after the cells' own validation is deleted (Add refuses cells that have one); taken back it puts the old one back, cell by cell", async () => {
+test("validation: a list and a number reach the builder after the cells' own validation is deleted (Add refuses cells that have one); taken back it puts the old one back, cell by cell", async () => {
   const book = workbook(["Sheet1"], { poisonLook: "Z99" });
   const [s1] = book.state.sheets;
   s1.validations.E3 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true];
@@ -2792,12 +2795,12 @@ test("validation: a list, a number and a message reach the builder after the cel
   s1.validations.F2 = ["xlValidateDecimal", "xlValidAlertStop", "xlGreater", "0", "", true, true, "", "", "", "", true, true];
   const before = extras(book);
   const ok = await plugin(book, formatting([
-    { validate: "E2:E5", set: { list: ["Open", "Done"], message: "Pick one" } },
+    { validate: "E2:E5", set: { list: ["Open", "Done"] } },
     { validate: "B2:B3", set: { whole: "between 1 and 10" } },
     { validate: "F2", set: { clear: true } },
   ]));
   assert.deepEqual(ok.result, { ops: 3, cells: 0 }, JSON.stringify(ok));
-  assert.deepEqual(s1.validations.E3, ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", "", true, true, "Pick one", "", "", "", true, true]);
+  assert.deepEqual(s1.validations.E3, ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", "", true, true, "", "", "", "", true, true]);
   assert.deepEqual(s1.validations.B3?.slice(0, 5), ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "10"]);
   assert.equal(s1.validations.F2, undefined, "cleared");
   const failed = await plugin(book, formatting([
@@ -2810,10 +2813,19 @@ test("validation: a list, a number and a message reach the builder after the cel
   assert.equal(s1.validations.G2, undefined);
   // The same from the start, to be sure "as it was" is the whole state.
   const fresh = workbook(["Sheet1"], { poisonLook: "Z99" });
-  Object.assign(fresh.state.sheets[0].validations, { E3: s1.validations.E3 === undefined ? [] : ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true], E4: ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true] });
+  Object.assign(fresh.state.sheets[0].validations, { E3: ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "", "", "", "", true, true], E4: ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "", "", "", "", true, true] });
   const was = JSON.stringify(fresh.state.sheets[0].validations);
-  await plugin(fresh, formatting([{ validate: "E2:E5", set: { list: ["a"] } }, { format: "Z99", set: { bold: true } }]));
+  const undone = await plugin(fresh, formatting([{ validate: "E2:E5", set: { list: ["a"] } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(undone.undone, true, JSON.stringify(undone));
   assert.equal(JSON.stringify(fresh.state.sheets[0].validations), was, "the old validation of E3 and E4 is back, E2 and E5 have none again");
+  // A validation with messages of a person's: Add puts it back, its messages are not (the editor's setters send nothing).
+  const messages = workbook(["Sheet1"], { poisonLook: "Z99" });
+  messages.state.sheets[0].validations.E3 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true];
+  messages.state.sheets[0].validations.E4 = [...messages.state.sheets[0].validations.E3];
+  const lost = await plugin(messages, formatting([{ validate: "E2:E5", set: { list: ["a"] } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(lost.error?.code, "partial", JSON.stringify(lost));
+  assert.match(lost.error.message, /The editor cannot read back the validation messages of "Sheet1"!E3, E4 \(op 1\), which stay as this call set them\.$/);
+  assert.equal(messages.state.sheets[0].validations.E3?.[3], "1", "the validation itself is back");
   assert.ok(before);
 });
 
@@ -2914,10 +2926,15 @@ test("a sort: the rows of the range ordered by up to three columns through the b
   Object.assign(f1.cells, { A2: "pear", A3: "apple", A4: "fig", B2: 3, B3: 10, B4: 7, C2: "=B2*2", C3: "=B3*2", C4: "=B4*2" });
   f1.formats.B3 = "0.00";
   f1.looks.A3 = { bold: true, fill: "#FF0000" };
+  // A link on a cell moves with its row (the editor sorts the cells whole): put back where it was.
+  f1.links.A3 = { address: "https://example.com/apple", sub: "", tip: "" };
   const start = readable(f1);
+  const links = JSON.stringify(f1.links);
   const undone = await plugin(fresh, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A2:C4", by: ["B desc"] }, { range: "Z9", values: [[1]] }]).args });
   assert.equal(undone.error?.code, "partial", JSON.stringify(undone));
   assert.equal(readable(f1), start, "values, formulas, number formats and looks as they were");
+  assert.match(undone.error.message, /cannot read back the alignment and borders of "Sheet1"!A2:C4 \(op 1\) and the links of "Sheet1"!A2 \(op 1\)|alignment and borders of "Sheet1"!A2:C4 \(op 1\); the links of "Sheet1"!A2 \(op 1\)/);
+  assert.notEqual(JSON.stringify(f1.links), links, "the link went with its cell, and stays where the sort put it: the answer says so");
 });
 
 test("a sort of merged cells is refused before anything is changed; a person's change after the sort stays and is named", async () => {
@@ -2951,7 +2968,7 @@ test("a named range: made, changed and deleted through the workbook, each taken 
 
   const person = workbook(["Sheet1"], { poison: "Z9", before: (n, sheets) => void n });
   const p = person.state.names;
-  const changed = workbook(["Sheet1"], { poison: "Z9", before: (n) => { if (n === 3) { p2.names.Fresh = "Sheet1!$D$4"; p2.names.Edit = "Sheet1!$E$5"; } } });
+  const changed = workbook(["Sheet1"], { poison: "Z9", before: (n) => { if (n === 4) { p2.names.Fresh = "Sheet1!$D$4"; p2.names.Edit = "Sheet1!$E$5"; } } });
   const p2 = changed.state;
   p2.names.Edit = "Sheet1!$A$1";
   const out = await plugin(changed, { kind: "cell.edit", args: editJob("xlsx", [{ name: "Fresh", refersTo: "A1" }, { name: "Edit", refersTo: "B2" }, { range: "Z9", values: [[1]] }]).args });
@@ -3018,6 +3035,10 @@ test("a table, a filter: the builder's calls; a table needs text headers, all di
   s1.cells.B1 = "Name";
   assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /the column names of a table are all different, and "Name" is in B1 of "Sheet1" twice/);
   s1.cells.B1 = "Qty";
+  // OnlyOffice 10.0 breaks the format of a linked cell a table covers (measured in the editor): refused.
+  s1.links.A2 = { address: "https://example.com", sub: "", tip: "" };
+  assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /a table over a cell with a link breaks that cell in the editor \(its formats can no longer be read\), and A2 of "Sheet1" has one/);
+  delete s1.links.A2;
   s1.merges.push("A3:B3");
   assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /a table needs cells that are not merged, and A3:B3 of "Sheet1" is merged/);
 });
@@ -3065,4 +3086,32 @@ test("cell.read with formatting: the editor gives what a conditional format draw
   assert.deepEqual(byRange.B2, { numberFormat: "0.00", size: 14, wrap: true });
   assert.equal(byRange.B3, undefined, "nothing is left to say of B3");
   assert.equal(byRange.D5, undefined, "a whole column's rule covers its cells");
+});
+
+test("cell.read with formatting: a part of a sheet's extras the editor fails at (its charts, say) is said to be unread, and the rest is still read", () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "x", B1: 1 });
+  s1.rules.push({ type: "xlDataBar", applies: "B1:B9" });
+  s1.charts = null as never;
+  const out = book.run(COMMANDS["cell.read"].source, { formatting: true }) as { result: { sheets: { look: any }[] }; error?: unknown };
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  const look = out.result.sheets[0].look;
+  assert.deepEqual(look.rules.map((r: string[]) => r[0]), ["xlDataBar"]);
+  assert.equal(look.unread.length, 1);
+  assert.match(look.unread[0], /^charts \(/);
+});
+
+test("cell.read with formatting: a cell whose format the editor cannot read is left out and said, and the rest of the sheet is read", () => {
+  // A2 throws on its number format (as a linked cell under a table does in the editor).
+  const broken = workbook(["Sheet1"], { poisonRead: "A2" });
+  Object.assign(broken.state.sheets[0].cells, { A1: "x", A2: "y", B2: 5 });
+  broken.state.sheets[0].looks.A1 = { bold: true };
+  broken.state.sheets[0].looks.B2 = { italic: true };
+  const out = broken.run(COMMANDS["cell.read"].source, { formatting: true }) as { result: { sheets: { look: any }[] }; error?: unknown };
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  const look = out.result.sheets[0].look;
+  assert.deepEqual(look.formats.map((f: any) => [f.ranges, f.look]), [[["A1"], { bold: true }], [["B2"], { italic: true }]]);
+  assert.equal(look.unread.length, 1);
+  assert.match(look.unread[0], /^the format of A2 \(the editor refused A2\)/);
 });

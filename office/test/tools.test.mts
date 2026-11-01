@@ -1561,3 +1561,11 @@ test("office_read with formatting (spreadsheet): conditional formats, validation
     'Charts: column "Revenue" at H2; bar at H20; pie "Share" at H40.',
   ].join("\n"));
 });
+
+test("office_read with formatting (spreadsheet): what the editor failed to give of a sheet's extras is said, the rest is read", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ book: [{ name: "Data", hidden: false }], sheets: [{ name: "Data", range: "A1", cells: [], truncated: false, look: { font: { name: "Calibri", size: 11 }, formats: [], merged: [], cols: { usual: 8.43, own: [] }, rows: { usual: 15, own: [] }, frozen: { cols: 0, rows: 0 }, filter: "A1:D9", unread: ["charts (boom)"] } }] });
+  const read = ((await tool(s, "office_read").execute("r1", { id: sheet.docId, formatting: true })) as ToolResult).content[0].text;
+  assert.match(read, /\nFilter: A1:D9\.\n\(not read, the editor failed at them: charts \(boom\)\)$/);
+});

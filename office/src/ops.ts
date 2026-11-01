@@ -1105,8 +1105,9 @@ function sheetLooks(set: Record<string, unknown>, bad: Bad): SheetLooks {
  * what it makes in `set` (flat, like `format`'s; the keys may stand beside the op's first key too):
  * - `{sheet?, conditional: "B2:B9" | "C:C", set}`: a conditional format (`rule`: cell, formula, colorScale, dataBar, top,
  *   duplicates), or `set: {clear: true}` for every rule that touches the range;
- * - `{sheet?, validate: "E2:E9", set}`: data validation (`list`, `whole`, `decimal`, `date` or `length`, `message`), or
- *   `clear: true`;
+ * - `{sheet?, validate: "E2:E9", set}`: data validation (`list`, `whole`, `decimal`, `date` or `length`), or
+ *   `clear: true`; no error message: the editor's setters for it (SetErrorMessage and the like) change the agent's own
+ *   copy and send nothing (measured in the editor, DS 10.0.0.1: the save and a person's editor have none);
  * - `{sheet?, link: "A2", set: {url, text?}}`: a link in a cell;
  * - `{sheet?, chart: "A1:C5", set}`: a chart of the range (`type`, `title`, `xTitle`, `yTitle`, `legend`, `at`, `width`,
  *   `height`, `rows`);
@@ -1125,13 +1126,13 @@ export type CfRule =
   | ({ rule: "duplicates"; unique: boolean } & RuleStyle);
 /** A validation as the builder adds it (ApiValidation.Add): its type, operator and formulas (a list's items joined by
  * commas, or a range as "=$A$1:$A$9"; dates as the serial day number). */
-export type Validation = { type: "xlValidateList" | "xlValidateWholeNumber" | "xlValidateDecimal" | "xlValidateDate" | "xlValidateTextLength"; operator: string; f1: string; f2?: string; message?: string };
+export type Validation = { type: "xlValidateList" | "xlValidateWholeNumber" | "xlValidateDecimal" | "xlValidateDate" | "xlValidateTextLength"; operator: string; f1: string; f2?: string };
 
 export const EXTRA_SHAPES = ["conditional", "validate", "link", "chart", "filter", "asTable"];
 const STYLE_KEYS = ["fill", "color", "bold", "italic", "underline", "strike"];
 const EXTRA_KEYS: Record<string, string[]> = {
   conditional: ["rule", "operator", "value", "value2", "formula", "colors", "rank", "bottom", "percent", "unique", "clear", ...STYLE_KEYS],
-  validate: ["list", "whole", "decimal", "date", "length", "message", "clear"],
+  validate: ["list", "whole", "decimal", "date", "length", "clear"],
   link: ["url", "text"],
   chart: ["type", "title", "xTitle", "yTitle", "legend", "at", "width", "height", "rows"],
   filter: ["column", "criteria", "and", "or"],
@@ -1302,20 +1303,18 @@ function validation(g: Record<string, unknown>, bad: Bad): Validation | null {
     if (g.clear !== true || Object.keys(g).length > 1) throw bad("clear is true, and the only key then: the cells' validation goes");
     return null;
   }
-  if (g.message !== undefined && !lineOf(g.message, 255)) throw bad("set.message is what a refused entry shows (one line, at most 255 characters)");
-  const message = g.message !== undefined ? { message: (g.message as string).trim() } : {};
   if (kind === "list") {
     const v = g.list;
     const ref = typeof v === "string" ? sheetRef(v.replace(/^=/, "")) : null;
-    if (ref) return { type: "xlValidateList", operator: "xlBetween", f1: `=${ref.sheet !== undefined ? `${quoteSheet(ref.sheet)}!` : ""}${ref.address}`, ...message };
+    if (ref) return { type: "xlValidateList", operator: "xlBetween", f1: `=${ref.sheet !== undefined ? `${quoteSheet(ref.sheet)}!` : ""}${ref.address}` };
     const items = Array.isArray(v) ? v.map((x) => (typeof x === "number" && Number.isFinite(x) ? String(x) : x)) : null;
     if (!items || items.length === 0 || items.length > 100 || !items.every((x) => lineOf(x, 255) && !(x as string).includes(","))) throw bad('set.list is the allowed entries, as ["Open", "Done"] (no commas in an entry; 255 characters in all), or the cells that hold them, as "Data!$A$2:$A$9"');
     const joined = (items as string[]).map((x) => x.trim()).join(",");
     if (joined.length > 255) throw bad("set.list holds at most 255 characters in all; put longer lists in cells and give their range");
-    return { type: "xlValidateList", operator: "xlBetween", f1: joined, ...message };
+    return { type: "xlValidateList", operator: "xlBetween", f1: joined };
   }
   const type = { whole: "xlValidateWholeNumber", decimal: "xlValidateDecimal", date: "xlValidateDate", length: "xlValidateTextLength" }[kind] as Validation["type"];
-  return { type, ...condition(g[kind], kind, bad), ...message };
+  return { type, ...condition(g[kind], kind, bad) };
 }
 
 /** A sheet's name as a reference quotes it: in apostrophes, doubled inside. */

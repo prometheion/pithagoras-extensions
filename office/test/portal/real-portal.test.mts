@@ -1785,6 +1785,38 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     console.log(`p2. the saved sheet: merged ${/<mergeCell ref="A1:D1"/.test(sheet)}, frozen ${/<pane [^>]*ySplit="3"[^>]*state="frozen"/.test(sheet)}, fill ${/1F4E79/i.test(styles)}, number format ${/#,##0\.00|numFmtId="4"/.test(styles)}, double border ${/style="double"/.test(styles)}, column A ${/<col [^>]*min="1" max="1"[^>]*width="25/.test(sheet) || /<col [^>]*width="25[^"]*"[^>]*min="1" max="1"/.test(sheet)}, row 3 ${/<row r="3"[^>]* ht="30"/.test(sheet)}, sum ${/<f>SUM\(D4:D8\)<\/f>/.test(sheet)}`);
   });
 
+  /**
+   * p3: the same real model makes a sales sheet with #13 PR 4's parts: a sort, a conditional format, validation, a
+   * link, a named range, a chart and a filter. Counted as p is.
+   */
+  test("p3: a real model makes a sales spreadsheet with a sort, a conditional format, validation, a link, a named range, a chart and a filter through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
+    const task = [
+      'Make a spreadsheet titled "Sales" with office_create, and fill and work on it with the office tools, without asking me anything:',
+      '1. In A1:D1 the headers Item, Qty, Region, Due; in rows 2 to 7 six items: Pear 3 N, Apple 10 S, Fig 700 N, Kiwi 7 E, Date 1200 S, Plum 7 E (the Due column holds the numbers 45000, 45010, 45020, 45030, 45040, 45050).',
+      "2. Sort rows 2 to 7 by Qty, the largest first.",
+      "3. Colour the Qty cells that are over 100 light red (#FFC7CE) with dark red text (#9C0006), so that it follows the numbers when they change.",
+      "4. Region may only be N, S or E (a dropdown), refusing anything else. Qty accepts whole numbers of 0 or more only.",
+      "5. Make the item in A2 a link to https://example.com/top.",
+      '6. A named range "Quantities" for the Qty values in B2:B7.',
+      '7. A column chart of the items and their quantities (A1:B7) titled "Quantity by item", to the right of the data.',
+      "8. Filter buttons on the table A1:D7.",
+      "Then read the sheet with its formatting and fix anything that is not as asked. Answer with one line when done.",
+    ].join("\n");
+    const calls = await realRun("p3", task);
+    const doc = (await state()).docs.find((d) => d.title === "Sales" && d.ext === "xlsx");
+    assert.ok(doc, "the model made the spreadsheet");
+    assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc!.docId)));
+    if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(`${process.env.OFFICE_REAL_MODEL_REPORT}-p3.xlsx`, readFileSync(await fileOf(doc!.docId)));
+    const sheet = (await zip.file("xl/worksheets/sheet1.xml")?.async("string")) ?? "";
+    const strings = (await zip.file("xl/sharedStrings.xml")?.async("string")) ?? "";
+    const names = Object.keys(zip.files);
+    const book = (await zip.file("xl/workbook.xml")?.async("string")) ?? "";
+    const first = /<c r="A2"[^>]*><v>(\d+)<\/v>/.exec(sheet)?.[1];
+    const firstText = first === undefined ? "?" : [...strings.matchAll(/<si>[\s\S]*?<\/si>/g)].map((m) => m[0].replace(/<[^>]+>/g, ""))[Number(first)];
+    console.log(`p3. the saved sheet: first item ${firstText}, cell rule ${/cfRule[^>]*type="cellIs"/.test(sheet)} (fill ${/FFC7CE/i.test(sheet)}), list ${/type="list"/.test(sheet)}, whole ${/type="whole"/.test(sheet)}, link ${/<hyperlink /.test(sheet)}, name ${/definedName name="Quantities"/.test(book)}, chart ${names.some((n) => /charts\/chart\d+\.xml$/.test(n))}, filter ${/<autoFilter /.test(sheet)}`);
+  });
+
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {
     const doc = await newDoc("Stopped", "word");
     const id = await chat();

@@ -645,14 +645,14 @@ test("office_format (spreadsheet): a conditional format that does not hold is re
   refusal(() => formatJob("xlsx", [{ conditional: "B", set: { clear: true } }]), /conditional is the cells, as "B2:B9" or a whole column "C:C" \(got "B"\)/);
 });
 
-test("office_format (spreadsheet): validation: a list, a number, a date or a length with its condition, a message, or clear", () => {
+test("office_format (spreadsheet): validation: a list, a number, a date or a length with its condition, or clear", () => {
   const job = formatJob("xlsx", [
-    { sheet: "Data", validate: "e2:e9", set: { list: ["Open", "Done", " Blocked "], message: "Pick one" } },
+    { sheet: "Data", validate: "e2:e9", set: { list: ["Open", "Done", " Blocked "] } },
     { validate: "E2:E9", set: { list: "Data!A2:A9" } },
     { validate: "E2:E9", set: { list: "'My data'!$B$1:$B$5" } },
     { validate: "E2:E9", set: { list: [1, 2, 3] } },
     { validate: "B2:B9", set: { whole: ">= 0" } },
-    { validate: "B2:B9", whole: "between 1 and 10", message: "1 to 10" },
+    { validate: "B2:B9", whole: "between 1 and 10" },
     { validate: "C2:C9", set: { decimal: "<>0" } },
     { validate: "D2:D9", set: { date: ">= 2026-01-31" } },
     { validate: "D2:D9", set: { date: "notBetween 2026-01-01 and 2026-12-31" } },
@@ -660,12 +660,12 @@ test("office_format (spreadsheet): validation: a list, a number, a date or a len
     { validate: "F2:F9", set: { clear: true } },
   ]);
   assert.deepEqual(job.args.ops, [
-    { sheet: "Data", validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "Open,Done,Blocked", message: "Pick one" } },
+    { sheet: "Data", validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "Open,Done,Blocked" } },
     { validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "='Data'!$A$2:$A$9" } },
     { validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "='My data'!$B$1:$B$5" } },
     { validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "1,2,3" } },
     { validate: "B2:B9", area: { col: 1, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateWholeNumber", operator: "xlGreaterEqual", f1: "0" } },
-    { validate: "B2:B9", area: { col: 1, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateWholeNumber", operator: "xlBetween", f1: "1", f2: "10", message: "1 to 10" } },
+    { validate: "B2:B9", area: { col: 1, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateWholeNumber", operator: "xlBetween", f1: "1", f2: "10" } },
     { validate: "C2:C9", area: { col: 2, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateDecimal", operator: "xlNotEqual", f1: "0" } },
     // The date as its serial day number: 2026-01-31 is day 46053.
     { validate: "D2:D9", area: { col: 3, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateDate", operator: "xlGreaterEqual", f1: "46053" } },
@@ -692,12 +692,11 @@ test("office_format (spreadsheet): a validation that does not hold is refused", 
   no({ length: "> -1" }, /set.length is a condition on the cells' text length/);
   no({ date: "> 31.01.2026" }, /set.date is a condition on the cells' date.*dates as 2026-01-31/);
   no({ date: "> 2026-02-30" }, /set.date is a condition/);
-  no({ whole: "> 1", message: "" }, /set.message is what a refused entry shows/);
-  no({ whole: "> 1", message: "a\nb" }, /set.message/);
-  no({ whole: "> 1", message: "x".repeat(256) }, /set.message/);
-  no({ clear: true, message: "x" }, /clear is true, and the only key then/);
+  no({ clear: true, list: ["a"] }, /give exactly one of list, whole, decimal, date, length or clear \(it has list and clear\)/);
+  // (No message: the editor's setters for it send nothing, so a refused entry shows the editor's own.)
+  no({ whole: "> 1", message: "Pick one" }, /"message" is not a key of validate/);
   no({ clear: 1 }, /clear is true/);
-  no({ whole: "> 1", format: 2 }, /"format" is not a key of validate \(they are list, whole, decimal, date, length, message, clear\)/);
+  no({ whole: "> 1", format: 2 }, /"format" is not a key of validate \(they are list, whole, decimal, date, length, clear\)/);
   refusal(() => formatJob("xlsx", [{ validate: "E:E", set: { clear: true } }]), /validate takes cells \("A1:D9"\), not whole columns or rows/);
 });
 

@@ -30,7 +30,7 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * the merged texts' measured costs (office_read 303 and 336 -> 339, office_edit 974 and 1,061 -> 1,061, office_format 711
  * and 936 -> 941: the table of contents's "it updates itself" and the cell formatting's words, with the sheet's).
  * #13's PR 4, the sheet extras (plan: office_format ~1,050, office_edit ~1,090, office_read ~330): office_format 941 ->
- * 1,153 with a conditional format, validation, a link, a chart, a filter and a table (one example each; the refusals
+ * 1,151 with a conditional format, validation, a link, a chart, a filter and a table (one example each; the refusals
  * name the keys and values the text leaves out), office_edit 1,061 -> 1,140 with sort and names (their five keys in
  * the schema among it), office_read 339 -> 355 with what it now lists of a sheet. */
 const AGREED: Record<string, number> = {
@@ -38,7 +38,7 @@ const AGREED: Record<string, number> = {
   office_create: 200,
   office_read: 355,
   office_edit: 1140,
-  office_format: 1153,
+  office_format: 1151,
   office_comments: 181,
   office_screenshot: 254,
 };
@@ -63,10 +63,20 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 3396);
+  assert.equal(agreed, 3394);
 });
 
 test("office_edit sends formatting to office_format once, for Word and sheets alike", () => {
   const edit = tools().find((t) => t.name === "office_edit")!;
   assert.equal(edit.description.split("Formatting: office_format.").length - 1, 1, edit.description);
+});
+
+test("the sheet extras are named in the tools' texts: office_format's conditional formats, validation, links, charts, filters and tables, with those that cannot be taken back going last; office_edit's sort and names", () => {
+  const all = tools();
+  const format = all.find((t) => t.name === "office_format")!.description;
+  for (const key of ["conditional", "validate", "link", "chart", "filter", "asTable"]) assert.ok(format.includes(`${key}:`), `office_format names ${key}`);
+  assert.match(format, /Charts, filters, tables and cleared rules cannot be taken back: they go last in a call\./);
+  const edit = all.find((t) => t.name === "office_edit")!.description;
+  for (const word of ["sort:", "by:", "name:", "refersTo:", "{name, delete: true}"]) assert.ok(edit.includes(word), `office_edit names ${word}`);
+  assert.match(all.find((t) => t.name === "office_read")!.description, /conditional formats, validation, links, filter, charts/);
 });

@@ -9,7 +9,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { setImmediate as tick } from "node:timers/promises";
-import { BRIDGE_JS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, MAX_SHOWN_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS, SHEET_MOST, VIEW_SETTLE } from "../src/seat-page";
+import { BRIDGE_JS, CELL_EDIT_COMMANDS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, MAX_SHOWN_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS, SETTLE, SHEET_MOST, VIEW_SETTLE } from "../src/seat-page";
+import { editJob, formatJob } from "../src/ops";
 
 /** The seat page running: its polls answered by `order`, what it posts as events, the editors it made, and the
  * scripts it loads (each loaded when the test says). */
@@ -239,8 +240,6 @@ test("cell.read: every sheet of the workbook, hidden ones and empty ones among t
 /* the plugin's spreadsheet edit                                         */
 /* ------------------------------------------------------------------ */
 
-type FakeSheet = { name: string; hidden: boolean; cells: Record<string, unknown>; formats: Record<string, string>; widths: Record<number, number> };
-
 /** A1 addresses of a range, row by row. */
 function cellsOf(range: string): string[][] {
   const m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(range.replace(/\$/g, ""))!;
@@ -250,6 +249,54 @@ function cellsOf(range: string): string[][] {
   return Array.from({ length: Math.abs(r2 - r1) + 1 }, (_, r) => Array.from({ length: Math.abs(c2 - c1) + 1 }, (_, c) => `${name(Math.min(c1, c2) + c)}${Math.min(r1, r2) + r}`));
 }
 
+type Look = { font: string; size: number; bold: boolean; italic: boolean; underline: string; strike: boolean; vertAlign: string; color: string; fill: string; wrap: boolean; rotation: number };
+const DEFAULT_LOOK: Look = { font: "Calibri", size: 11, bold: false, italic: false, underline: "none", strike: false, vertAlign: "baseline", color: "#000000", fill: "none", wrap: false, rotation: 0 };
+type FakeSheet = {
+  name: string;
+  hidden: boolean;
+  cells: Record<string, unknown>;
+  formats: Record<string, string>;
+  widths: Record<number, number>;
+  /** What the builder can read of a cell's look, the cell's own over its column's over its row's. */
+  looks: Record<string, Partial<Look>>;
+  colLooks: Record<number, Partial<Look>>;
+  rowLooks: Record<number, Partial<Look>>;
+  /** What it cannot read: alignment and borders, by cell. */
+  aligns: Record<string, string>;
+  borders: Record<string, string[]>;
+  merges: string[];
+  heights: Record<number, number>;
+  hiddenCols: number[];
+  hiddenRows: number[];
+  frozen: { cols: number; rows: number };
+  /** A text's characters that look otherwise than its cell (rich text), by cell: each character's own, from the first. */
+  chars: Record<string, Partial<Look>[]>;
+};
+const freshSheet = (name: string, hidden = false): FakeSheet => ({ name, hidden, cells: {}, formats: {}, widths: {}, looks: {}, colLooks: {}, rowLooks: {}, aligns: {}, borders: {}, merges: [], heights: {}, hiddenCols: [], hiddenRows: [], frozen: { cols: 0, rows: 0 }, chars: {} });
+
+const colOf = (l: string) => [...l].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+const nameOf = (n: number) => { let out = ""; for (n++; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(65 + ((n - 1) % 26)) + out; return out; };
+/** An address's bounds (from 0): cells "A1:B2", whole columns "C:D", whole rows "5:6". */
+function bounds(address: string): { c1: number; r1: number; c2: number; r2: number; whole?: "columns" | "rows" } {
+  const a = address.replace(/\$/g, "");
+  let m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(a);
+  if (m) {
+    const [c1, r1, c2, r2] = [colOf(m[1]), Number(m[2]) - 1, colOf(m[3] ?? m[1]), Number(m[4] ?? m[2]) - 1];
+    return { c1: Math.min(c1, c2), r1: Math.min(r1, r2), c2: Math.max(c1, c2), r2: Math.max(r1, r2) };
+  }
+  m = /^([A-Z]+):([A-Z]+)$/.exec(a);
+  if (m) return { c1: colOf(m[1]), r1: 0, c2: colOf(m[2]), r2: 1048575, whole: "columns" };
+  m = /^(\d+):(\d+)$/.exec(a);
+  if (m) return { c1: 0, r1: Number(m[1]) - 1, c2: 16383, r2: Number(m[2]) - 1, whole: "rows" };
+  throw new Error(`no address ${address}`);
+}
+const at = (c: number, r: number) => `${nameOf(c)}${r + 1}`;
+const parse = (a: string) => { const m = /^([A-Z]+)(\d+)$/.exec(a)!; return { c: colOf(m[1]), r: Number(m[2]) - 1 }; };
+const inside = (a: string, b: ReturnType<typeof bounds>) => { const p = parse(a); return p.c >= b.c1 && p.c <= b.c2 && p.r >= b.r1 && p.r <= b.r2; };
+const meets = (x: ReturnType<typeof bounds>, y: ReturnType<typeof bounds>) => x.c1 <= y.c2 && y.c1 <= x.c2 && x.r1 <= y.r2 && y.r1 <= x.r2;
+const hexOf = (c: { r: number; g: number; b: number }) => `#${[c.r, c.g, c.b].map((v) => v.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
+const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }; return { ...c, GetRGB: () => c }; };
+
 /**
  * A workbook as the spreadsheet editor's builder API shows it to a command (as the end-to-end test and the probes of
  * DS 10.0 found it): a sheet is made, moved or deleted two commands after it was asked for (the Document Server's
@@ -258,11 +305,24 @@ function cellsOf(range: string): string[][] {
  * taken and SetValue answers false. A moved or made sheet becomes the active one, hiding the active one makes the
  * next visible one active, and a hidden sheet made active is shown again. `poison` makes the first write into that
  * address throw; `never` keeps the Document Server from making what was asked (all of it, or what it names).
+ * Cells' looks as #13 PR 3's first step found them: read through a cell's characters (italic, strike, superscript and
+ * subscript read true or null), superscript and subscript taken by text cells only, no getter for alignment and
+ * borders, a border "None" changing nothing, no "general" alignment, Merge keeping the top-left value, FreezeAt
+ * throwing, an unfreeze taken by the active sheet only and a freeze at a cell by the selection of the active sheet
+ * (and none where the panes are frozen at a cell already), a merge giving the others the top-left one's number format
+ * too, the frozen panes named as DS names them ("1:1" for the first row alone, "A:A" for column A alone), a hidden
+ * column reading no width, a size set showing a hidden line, and a text whose characters differ (`chars`) reading null
+ * (or false for bold, null for italic and the like) where they do; a setter on the whole text makes them alike.
+ * `state.ranges` counts the ranges a command asked for. `poisonLook` makes a look set on that cell throw: an op that
+ * fails in its step, which the check cannot foresee.
+ * `before` runs before each command (with how many ran before it): a person's change between two steps. A freeze, an
+ * unfreeze and an autofit show from the next command on, as in an editor people have co-edited (the Document Server's
+ * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does.
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; never?: boolean | ((what: string) => boolean) } = {}) {
-  const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? { name: s, hidden: false, cells: {}, formats: {}, widths: {} } : { ...s, cells: {}, formats: {}, widths: {} }));
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean } = {}) {
+  const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
-  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[] };
+  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0 };
   const ask = (what: string, fn: () => void) => {
     state.asked.push(what);
     const never = typeof options.never === "function" ? options.never(what) : options.never;
@@ -283,16 +343,106 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     if (/^(true|false)$/i.test(s)) return s.toLowerCase() === "true";
     return s;
   };
-  const rangeOf = (sh: FakeSheet, address: string) => {
-    const grid = cellsOf(address);
-    const one = grid.length === 1 && grid[0].length === 1;
+  const lookAt = (sh: FakeSheet, a: string): Look => {
+    const p = parse(a);
+    return { ...DEFAULT_LOOK, ...sh.rowLooks[p.r], ...sh.colLooks[p.c], ...sh.looks[a] };
+  };
+  /** The cells a setter reaches: a cell range's own, or of whole columns or rows the cells that have anything there. */
+  const reached = (sh: FakeSheet, b: ReturnType<typeof bounds>) => {
+    if (!b.whole) {
+      const out: string[] = [];
+      for (let r = b.r1; r <= b.r2; r++) for (let c = b.c1; c <= b.c2; c++) out.push(at(c, r));
+      return out;
+    }
+    return [...new Set([...Object.keys(sh.cells), ...Object.keys(sh.looks)])].filter((a) => inside(a, b));
+  };
+  const setLook = (sh: FakeSheet, address: string, key: keyof Look, v: unknown) => {
+    const b = bounds(address);
+    if (options.poisonLook && !b.whole && inside(options.poisonLook, b)) throw new Error("the editor refused the format");
+    // A column's or row's own look, where it differs from the default (what the builder reads).
+    const own = (map: Record<number, Partial<Look>>, k: number) => {
+      const next = { ...map[k], [key]: v } as Record<string, unknown>;
+      if (DEFAULT_LOOK[key] === v) delete next[key];
+      if (Object.keys(next).length) map[k] = next as Partial<Look>;
+      else delete map[k];
+    };
+    if (b.whole === "columns") for (let c = b.c1; c <= b.c2; c++) own(sh.colLooks, c);
+    if (b.whole === "rows") for (let r = b.r1; r <= b.r2; r++) own(sh.rowLooks, r);
+    for (const a of reached(sh, b)) {
+      // Set on the whole text: its characters are alike in it from then on.
+      if (sh.chars[a]) sh.chars[a] = sh.chars[a].map((c) => { const { [key]: _, ...rest } = c as Record<string, unknown>; return rest as Partial<Look>; });
+      const own = { ...sh.looks[a], [key]: v } as Partial<Look>;
+      const p = parse(a);
+      // A cell's own look only where it differs from what it would have without it.
+      if ((({ ...DEFAULT_LOOK, ...sh.rowLooks[p.r], ...sh.colLooks[p.c] }) as Record<string, unknown>)[key] === v) delete (own as Record<string, unknown>)[key];
+      if (Object.keys(own).length) sh.looks[a] = own;
+      else delete sh.looks[a];
+    }
+  };
+  const isText = (sh: FakeSheet, a: string) => typeof sh.cells[a] === "string" && sh.cells[a] !== "" && !String(sh.cells[a]).startsWith("=");
+  const usedAddress = (sh: FakeSheet) => {
+    const all = [...Object.keys(sh.cells), ...Object.keys(sh.looks), ...Object.keys(sh.formats), ...Object.keys(sh.aligns)].map(parse);
+    if (!all.length) return "A1";
+    const c1 = Math.min(...all.map((p) => p.c)), c2 = Math.max(...all.map((p) => p.c)), r1 = Math.min(...all.map((p) => p.r)), r2 = Math.max(...all.map((p) => p.r));
+    return c1 === c2 && r1 === r2 ? at(c1, r1) : `${at(c1, r1)}:${at(c2, r2)}`;
+  };
+  /** Rows or columns from `from` moved by `delta` (a delete takes the `-delta` ones from `from` away first). */
+  const shift = (sh: FakeSheet, kind: "rows" | "columns", from: number, delta: number) => {
+    const move = <T,>(map: Record<string, T>) => {
+      const out: Record<string, T> = {};
+      for (const [a, v] of Object.entries(map)) {
+        const p = parse(a), k = kind === "rows" ? p.r : p.c;
+        if (delta < 0 && k >= from && k < from - delta) continue;
+        const n = k >= from ? k + delta : k;
+        out[kind === "rows" ? at(p.c, n) : at(n, p.r)] = v;
+      }
+      return out;
+    };
+    sh.cells = move(sh.cells);
+    sh.formats = move(sh.formats);
+    sh.looks = move(sh.looks);
+    sh.aligns = move(sh.aligns);
+    sh.borders = move(sh.borders);
+  };
+  const rangeOf = (sh: FakeSheet, address: string): Record<string, unknown> => {
+    state.ranges++;
+    const b = bounds(address);
+    const grid = b.whole ? [] : cellsOf(address);
+    const first = at(b.c1, b.r1);
+    const one = !b.whole && grid.length === 1 && grid[0].length === 1;
     const formula = (v: unknown) => typeof v === "string" && v.startsWith("=");
-    return {
+    const each = (fn: (a: string) => void) => reached(sh, b).forEach(fn);
+    const font = (start = 1, count = 1) => {
+      const base = lookAt(sh, first);
+      // The characters asked for: where they differ in a key, it reads null (bold false).
+      const own = sh.chars[first] ? sh.chars[first].slice(start - 1, start - 1 + Math.max(1, count)) : [];
+      const all = own.length ? own.map((c) => ({ ...base, ...c })) : [base];
+      const one = <K extends keyof Look>(k: K): Look[K] | null => (all.every((c) => c[k] === all[0][k]) ? all[0][k] : null);
+      return {
+        GetName: () => one("font"),
+        GetSize: () => one("size"),
+        GetBold: () => one("bold") === true,
+        GetItalic: () => (one("italic") ? true : null),
+        GetStrikethrough: () => (one("strike") ? true : null),
+        GetUnderline: () => `xlUnderlineStyle${(one("underline") ?? "none").charAt(0).toUpperCase()}${(one("underline") ?? "none").slice(1)}`,
+        GetSuperscript: () => (one("vertAlign") === "superscript" ? true : null),
+        GetSubscript: () => (one("vertAlign") === "subscript" ? true : null),
+        GetColor: () => (one("color") === null ? null : colourOf(one("color")!)),
+        // On a text's characters only, as the builder sets them.
+        SetSuperscript: (v: boolean) => { if (isText(sh, first)) setLook(sh, first, "vertAlign", v ? "superscript" : "baseline"); },
+        SetSubscript: (v: boolean) => { if (isText(sh, first)) setLook(sh, first, "vertAlign", v ? "subscript" : "baseline"); },
+      };
+    };
+    const range: Record<string, unknown> = {
       GetValue: () => {
         const rows = grid.map((row) => row.map((a) => (formula(sh.cells[a]) ? 0 : sh.cells[a] ?? "")));
         return one ? rows[0][0] : rows;
       },
-      GetFormula: () => grid.map((row) => row.map((a) => (sh.cells[a] === undefined ? "" : String(sh.cells[a])))),
+      GetFormula: () => {
+        const rows = grid.map((row) => row.map((a) => (sh.cells[a] === undefined ? "" : String(sh.cells[a]))));
+        return one ? rows[0][0] : rows;
+      },
+      GetText: () => String(sh.cells[first] ?? ""),
       SetValue: (v: unknown) => {
         if (options.poison && !state.poisoned && grid.flat().includes(options.poison)) {
           state.poisoned = true;
@@ -315,22 +465,97 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         return all.size === 1 ? [...all][0] : null;
       },
       SetNumberFormat: (f: string) =>
-        grid.flat().forEach((a) => {
+        each((a) => {
           state.formatted.push(a);
           if (f === "General") delete sh.formats[a];
           else sh.formats[a] = f;
         }),
-      GetAddress: () => {
-        const used = Object.keys(sh.cells).sort();
-        return used.length ? `${used[0]}:${used.at(-1)}` : "A1";
-      },
+      GetAddress: () => address,
+      GetRowsCount: () => b.r2 - b.r1 + 1,
+      GetColumnsCount: () => b.c2 - b.c1 + 1,
       // In DS 10.0 a Copy or Paste into another sheet leaves the old sheet's formulas computing no more.
       Copy: () => {
         throw new Error("ApiRange.Copy into another sheet breaks the old sheet's formulas");
       },
-      GetColumnWidth: () => sh.widths[cellsOf(address)[0][0].charCodeAt(0) - 65] ?? 9,
-      SetColumnWidth: (w: number) => (sh.widths[cellsOf(address)[0][0].charCodeAt(0) - 65] = w),
+      // A hidden column reads no width; a size set shows a hidden line (docbuilder, DS 10.0).
+      GetColumnWidth: () => (sh.hiddenCols.includes(b.c1) ? 0 : sh.widths[b.c1] ?? 8.43),
+      SetColumnWidth: (w: number) => { for (let c = b.c1; c <= b.c2; c++) { sh.widths[c] = w; if (sh.hiddenCols.includes(c)) sh.hiddenCols.splice(sh.hiddenCols.indexOf(c), 1); } },
+      GetRowHeight: () => (b.r1 in sh.heights ? sh.heights[b.r1] : 15),
+      SetRowHeight: (h: number) => { for (let r = b.r1; r <= b.r2; r++) { sh.heights[r] = h; if (sh.hiddenRows.includes(r)) sh.hiddenRows.splice(sh.hiddenRows.indexOf(r), 1); } },
+      GetHidden: () => (b.whole === "columns" ? sh.hiddenCols.includes(b.c1) : b.whole === "rows" ? sh.hiddenRows.includes(b.r1) : false),
+      SetHidden: (v: boolean) => {
+        const list = b.whole === "columns" ? sh.hiddenCols : sh.hiddenRows;
+        const [from, to] = b.whole === "columns" ? [b.c1, b.c2] : [b.r1, b.r2];
+        for (let k = from; k <= to; k++) {
+          if (v && !list.includes(k)) list.push(k);
+          if (!v && list.includes(k)) list.splice(list.indexOf(k), 1);
+        }
+        list.sort((x, y) => x - y);
+      },
+      // An editor people have co-edited lays the sizes out after the command (DS 10.0): they show from the next one on;
+      // one nobody else has been in (`autofitAtOnce`) in the command.
+      AutoFit: (rows: boolean, cols: boolean) => {
+        state.calls.push(`AutoFit ${address} ${rows} ${cols}`);
+        const fit = () => {
+          if (cols) for (let c = b.c1; c <= b.c2; c++) sh.widths[c] = 12.5;
+          if (rows) for (let r = b.r1; r <= b.r2; r++) sh.heights[r] = 20;
+        };
+        if (options.autofitAtOnce) fit();
+        else later.push({ due: state.commands + 1, fn: fit });
+      },
+      GetCharacters: (start: number, count: number) => ({ GetFont: () => font(start, count), GetCount: () => String(sh.cells[first] ?? "").length }),
+      GetFillColor: () => (lookAt(sh, first).fill === "none" ? "No Fill" : colourOf(lookAt(sh, first).fill)),
+      GetWrapText: () => lookAt(sh, first).wrap,
+      GetOrientation: () => lookAt(sh, first).rotation,
+      SetFontName: (v: string) => setLook(sh, address, "font", v),
+      SetFontSize: (v: number) => setLook(sh, address, "size", v),
+      SetBold: (v: boolean) => setLook(sh, address, "bold", v),
+      SetItalic: (v: boolean) => setLook(sh, address, "italic", v),
+      SetStrikeout: (v: boolean) => setLook(sh, address, "strike", v),
+      SetUnderline: (v: string) => setLook(sh, address, "underline", v),
+      SetFontColor: (c: { r: number; g: number; b: number }) => setLook(sh, address, "color", hexOf(c)),
+      SetFillColor: (c: string | { r: number; g: number; b: number }) => setLook(sh, address, "fill", c === "No Fill" ? "none" : hexOf(c as { r: number; g: number; b: number })),
+      SetWrap: (v: boolean) => setLook(sh, address, "wrap", v),
+      SetOrientation: (v: string | number) => setLook(sh, address, "rotation", ({ xlHorizontal: 0, xlUpward: 90, xlDownward: -90, xlVertical: 255 } as Record<string, number>)[String(v)] ?? Number(v)),
+      SetAlignHorizontal: (v: string) => (["left", "center", "right", "justify"].includes(v) ? (each((a) => (sh.aligns[a] = v)), true) : false),
+      SetAlignVertical: (v: string) => (["top", "center", "bottom", "justify", "distributed"].includes(v) ? (each((a) => (sh.aligns[a] = `${sh.aligns[a] ?? ""}/${v}`)), true) : false),
+      SetBorders: (side: string, style: string) => {
+        if (style !== "None") each((a) => (sh.borders[a] = [...(sh.borders[a] ?? []), `${side} ${style}`]));
+        return true;
+      },
+      ClearFormats: () => {
+        state.calls.push(`ClearFormats ${address}`);
+        each((a) => {
+          delete sh.looks[a];
+          delete sh.formats[a];
+          delete sh.aligns[a];
+          delete sh.borders[a];
+          delete sh.chars[a];
+        });
+        if (b.whole === "columns") for (let c = b.c1; c <= b.c2; c++) delete sh.colLooks[c];
+        if (b.whole === "rows") for (let r = b.r1; r <= b.r2; r++) delete sh.rowLooks[r];
+        sh.merges = sh.merges.filter((m) => !meets(bounds(m), b));
+      },
+      // The merged cells take the top-left one's value (the others' go) and its formats (DS 10.0).
+      Merge: (across: boolean) => {
+        state.calls.push(`Merge ${address} ${across}`);
+        for (const a of grid.flat().slice(1)) {
+          delete sh.cells[a];
+          if (sh.looks[first]) sh.looks[a] = { ...sh.looks[first] };
+          else delete sh.looks[a];
+          if (sh.formats[first]) sh.formats[a] = sh.formats[first];
+          else delete sh.formats[a];
+        }
+        sh.merges = sh.merges.filter((m) => !meets(bounds(m), b));
+        sh.merges.push(address);
+      },
+      UnMerge: () => { sh.merges = sh.merges.filter((m) => !meets(bounds(m), b)); },
+      Select: () => { state.selected = { sheet: sh, address }; },
+      Insert: (dir: string) => { state.calls.push(`Insert ${address} ${dir}`); shift(sh, b.whole === "columns" ? "columns" : "rows", b.whole === "columns" ? b.c1 : b.r1, b.whole === "columns" ? b.c2 - b.c1 + 1 : b.r2 - b.r1 + 1); },
+      Delete: (dir: string) => { state.calls.push(`Delete ${address} ${dir}`); shift(sh, b.whole === "columns" ? "columns" : "rows", b.whole === "columns" ? b.c1 : b.r1, -(b.whole === "columns" ? b.c2 - b.c1 + 1 : b.r2 - b.r1 + 1)); },
     };
+    Object.defineProperty(range, "MergeArea", { get: () => rangeOf(sh, sh.merges.find((m) => inside(first, bounds(m))) ?? first) });
+    return range;
   };
   const wrap = (sh: FakeSheet) => {
     const w = {
@@ -343,10 +568,24 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       SetName: (n: string) => void (sh.name = n),
       SetActive: () => activate(sh),
       GetRange: (a: string) => rangeOf(sh, a),
-      GetUsedRange: () => {
-        const r = rangeOf(sh, "A1");
-        return { ...rangeOf(sh, r.GetAddress()), GetAddress: r.GetAddress };
-      },
+      GetUsedRange: () => rangeOf(sh, usedAddress(sh)),
+      GetFreezePanes: () => ({
+        GetLocation: () => {
+          const f = sh.frozen;
+          if (!f.cols && !f.rows) return null;
+          // As DS 10.0 names them: "A:A" and "1:1" for one column or row alone.
+          return { GetAddress: () => (!f.rows ? (f.cols === 1 ? "A:A" : `A1:${nameOf(f.cols - 1)}1048576`) : !f.cols ? (f.rows === 1 ? "1:1" : `A1:XFD${f.rows}`) : `A1:${nameOf(f.cols - 1)}${f.rows}`) };
+        },
+        // Every freeze goes through the co-editing lock: it shows in the panes from the next command on (DS 10.0).
+        FreezeRows: (n: number) => void later.push({ due: state.commands + 1, fn: () => void (sh.frozen = { cols: 0, rows: n }) }),
+        FreezeColumns: (n: number) => void later.push({ due: state.commands + 1, fn: () => void (sh.frozen = { cols: n, rows: 0 }) }),
+        // An unfreeze of a sheet that is not the active one changes nothing (docbuilder, DS 10.0).
+        Unfreeze: () => void (state.active === sh && later.push({ due: state.commands + 1, fn: () => void (sh.frozen = { cols: 0, rows: 0 }) })),
+        FreezeAt: () => {
+          state.calls.push("FreezeAt");
+          throw new Error("H.aH is not a function");
+        },
+      }),
       Delete: () => ask(`delete ${sh.name}`, () => sheets.splice(sheets.indexOf(sh), 1)),
       Move: (before?: object, after?: object) =>
         ask(`move ${sh.name}`, () => {
@@ -368,14 +607,26 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     GetActiveSheet: () => wrap(state.active),
     AddSheet: (n: string) =>
       ask(`add ${n}`, () => {
-        const made = { name: n, hidden: false, cells: {}, formats: {}, widths: {} };
+        const made = freshSheet(n);
         sheets.splice(sheets.indexOf(state.active) + 1, 0, made);
         activate(made);
       }),
+    CreateColorFromRGB: (r: number, g: number, b: number) => ({ r, g, b, GetRGB: () => ({ r, g, b }) }),
+    // A freeze at the selected cell, of the active sheet, where the selection is in it.
+    SetFreezePanesType: (type: string) => {
+      const sel = state.selected;
+      if (type !== "cell" || !sel || sel.sheet !== state.active) return;
+      // Where the panes are frozen at a cell already, it does nothing (the builder's SetFreezePanesType, DS 10.0).
+      if (sel.sheet.frozen.cols && sel.sheet.frozen.rows) return;
+      const p = parse(sel.address.split(":")[0]);
+      // It shows in the panes from the next command on (DS 10.0).
+      later.push({ due: state.commands + 1, fn: () => void (sel.sheet.frozen = { cols: p.c, rows: p.r }) });
+    },
     Save: () => void state.saves++,
   };
   /** A command run as the editor runs it: what was asked two commands ago is made first. */
   const run = (source: string, args: unknown) => {
+    options.before?.(state.commands, sheets);
     state.commands++;
     for (const item of later.filter((l) => l.due <= state.commands)) {
       later.splice(later.indexOf(item), 1);
@@ -592,6 +843,535 @@ test("a copied sheet gets the old one's values, formulas, texts, number formats 
   assert.deepEqual(copy.cells, { A1: "00123", B1: 0.1, C1: "=B1*2" });
   assert.deepEqual(copy.formats, { B1: "0%" }, "the text written as text, then its own format back");
   assert.equal(copy.widths[0], 20);
+});
+
+/* ---------------- the spreadsheet's formatting, rows and columns (#13 PR 3) ---------------- */
+
+/** A spreadsheet format job as office_format makes it (ops.ts). */
+const formatting = (ops: unknown[]) => formatJob("xlsx", ops) as { kind: string; args: unknown };
+/** A sheet's state as the builder could read and set it, for "as it was" comparisons (not what it cannot read). */
+const readable = (sh: { cells: unknown; formats: unknown; looks: unknown; colLooks: unknown; rowLooks: unknown; merges: unknown; widths: unknown; heights: unknown; hiddenCols: unknown; hiddenRows: unknown; frozen: unknown }) => {
+  // In a key order of its own: what was taken off and put back again is the same.
+  const sorted = (v: unknown): unknown => (Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted((v as Record<string, unknown>)[k])])) : v);
+  return JSON.stringify(sorted([sh.cells, sh.formats, sh.looks, sh.colLooks, sh.rowLooks, sh.merges, sh.widths, sh.heights, sh.hiddenCols, sh.hiddenRows, sh.frozen]));
+};
+
+test("a sheet's format: each set key reaches the cells through the builder (superscript and subscript on a text's characters), and a merge", async () => {
+  const book = workbook(["Sheet1", "Data"]);
+  const data = book.state.sheets[1];
+  Object.assign(data.cells, { A1: "H2O", B1: 5, A2: "x", C1: "keep", D1: "dropped" });
+  const out = await plugin(book, formatting([
+    { sheet: "data", format: "A1:B2", set: { numberFormat: "0.00", font: "Arial", fontSize: 12, bold: true, italic: true, underline: true, strike: true, color: "#C81E1E", fill: "#FFFF00", align: "center", valign: "top", wrap: true, rotation: 45, borders: { bottom: "single 1.5pt #000000" } } },
+    { sheet: "Data", format: "A1", set: { subscript: true } },
+    { sheet: "Data", format: "C1:D1", set: { merge: true } },
+    { sheet: "Data", format: "E1", set: { rotation: "vertical", fill: "none" } },
+  ]));
+  assert.deepEqual(out.result, { ops: 4, cells: 0 }, JSON.stringify(out));
+  assert.deepEqual(data.looks.B2, { font: "Arial", size: 12, bold: true, italic: true, underline: "single", strike: true, color: "#C81E1E", fill: "#FFFF00", wrap: true, rotation: 45 });
+  assert.equal(data.looks.A1.vertAlign, "subscript");
+  assert.equal(data.looks.E1.rotation, 255);
+  assert.equal(data.formats.B2, "0.00");
+  assert.equal(data.aligns.B2, "center/top");
+  assert.deepEqual(data.borders.A2, ["Bottom Medium"]);
+  assert.deepEqual(data.merges, ["C1:D1"]);
+  assert.deepEqual([data.cells.C1, data.cells.D1], ["keep", undefined], "a merge keeps the top-left value only");
+  assert.deepEqual(book.state.sheets[0].looks, {}, "the other sheet is not touched");
+});
+
+test("a sheet's format: superscript on a number or a formula, a freeze of a hidden sheet, too many cells and an insert past the sheet's end are refused by the check, before the first step changes anything", async () => {
+  const book = workbook(["Sheet1", { name: "Hidden", hidden: true }]);
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { A1: "m2", B1: 5, C1: "=B1*2", C3: 7 });
+  const before = readable(sheet1);
+  // What a format cannot read back (alignment, borders) would stay, were it made before the refusal.
+  const out = await plugin(book, formatting([{ format: "A1:D1", set: { bold: true, align: "center", borders: "all" } }, { format: "A1:B1", set: { superscript: true } }]));
+  assert.deepEqual(out, { jobId: "j1", error: { code: "bad_op", op: 1, message: 'op 2: superscript takes text, and "Sheet1"!B1 holds a number (the editor sets it on a text\'s characters): leave that cell out' } });
+  assert.equal(book.state.commands, 1, "the check alone");
+  assert.equal(readable(sheet1), before);
+  assert.deepEqual([sheet1.aligns, sheet1.borders], [{}, {}]);
+  const formula = await plugin(book, formatting([{ format: "C1", set: { subscript: true } }]));
+  assert.match(formula.error.message, /"Sheet1"!C1 holds a formula/);
+  // A cell an op before merges into another holds nothing by then.
+  const merged = await plugin(book, formatting([{ format: "B3:C3", set: { merge: true } }, { format: "C3", set: { subscript: true } }]));
+  assert.equal(merged.error, undefined, JSON.stringify(merged));
+  sheet1.merges = [];
+  delete sheet1.looks.C3;
+  sheet1.cells.C3 = 7;
+  const commands = book.state.commands;
+  const hidden = await plugin(book, formatting([{ format: "A1", set: { fill: "#FF0000" } }, { sheet: "Hidden", freeze: "B2" }]));
+  assert.deepEqual(hidden.error, { code: "sheet_hidden", op: 1, message: 'op 2: "Hidden" is hidden, and the editor freezes panes of a visible sheet only: show it first' });
+  // Whole columns count the used cells among them: in the check, on the sheet as it stands.
+  sheet1.cells.A400 = 1;
+  const many = await plugin(book, formatting([{ format: "A1:CV190", set: { italic: true } }, { format: "A:Z", set: { bold: true } }]));
+  assert.match(many.error?.message, /^op 2: the call formats more than 20,000 cells/);
+  delete sheet1.cells.A400;
+  // An insert whose cells would move past the sheet's last row, after a write that reaches further down.
+  const past = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ range: "A1048570", values: [[1]] }, { insertRows: "2:10" }]).args });
+  assert.deepEqual(past.error, { code: "bad_op", op: 1, message: "op 2: the sheet's cells would move past its last row" });
+  assert.equal(book.state.commands, commands + 3, "each the check alone");
+  assert.equal(readable(sheet1), before);
+  // The step checks again: an op before can change what it reads.
+  assert.deepEqual(book.run(CELL_EDIT_COMMANDS.step, { op: (formatting([{ format: "B1", set: { subscript: true } }]).args as { ops: unknown[] }).ops[0], index: 3, pending: [] }).error, { code: "bad_op", op: 3, message: 'op 4: subscript takes text, and "Sheet1"!B1 holds a number (the editor sets it on a text\'s characters): leave that cell out' });
+  // Empty cells are left: a text cell among them takes it.
+  const ok = await plugin(book, formatting([{ format: "A1:A3", set: { superscript: true } }]));
+  assert.deepEqual(ok.result, { ops: 1, cells: 0 });
+  assert.equal(sheet1.looks.A1.vertAlign, "superscript");
+});
+
+test("a sheet's format taken back when a later op fails: number formats, fonts, fills, wrap, rotation, clear and merges as they were, the merged cells' values too; alignment and borders stay, and the answer names them", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { A1: "a", B1: "b", C1: 0.3, D1: "d", A5: 7 });
+  sheet1.formats.C1 = "0%";
+  sheet1.looks.A1 = { bold: true, fill: "#00FF00", rotation: 90 };
+  sheet1.looks.D1 = { italic: true, size: 14 };
+  sheet1.merges.push("E1:F1");
+  const before = readable(sheet1);
+  const out = await plugin(book, formatting([
+    { format: "A1:C1", set: { bold: false, italic: true, fill: "#FF0000", numberFormat: "0.00", wrap: true, rotation: 0, align: "center", borders: "all", font: "Arial", fontSize: 9, color: "#123456", underline: true, strike: true } },
+    { format: "A1:B1", set: { merge: true } },
+    { format: "E1:F1", set: { merge: false } },
+    { format: "D1:F1", set: { clear: true } },
+    { format: "Z99", set: { bold: true } },
+  ]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.equal(out.ran, true);
+  assert.equal(out.error.op, 4);
+  assert.equal(out.error.message, 'op 5: the editor refused the format. The ops before it are taken back, but not all of them whole. The editor cannot read back the alignment and borders of "Sheet1"!A1:C1 (op 1), "Sheet1"!A1:B1 (op 2) and "Sheet1"!D1:F1 (op 4), which stay as this call set them.');
+  assert.equal(readable(sheet1), before, "what the builder reads is as it was, B1's value and E1:F1's merge among it");
+  assert.equal(sheet1.aligns.A1, "center", "alignment has no getter: it stays");
+  assert.ok(sheet1.borders.A1.length, "nor do borders");
+});
+
+test("a merge taken back gives the merged cells their own formats back, which the merge had made the top-left one's", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [sheet1] = book.state.sheets;
+  Object.assign(sheet1.cells, { A1: "a", B1: "b", A5: 5 });
+  sheet1.looks.A1 = { bold: true, fill: "#FF0000" };
+  sheet1.looks.B1 = { italic: true };
+  sheet1.formats.B1 = "0.00";
+  const before = readable(sheet1);
+  const out = await plugin(book, formatting([{ format: "A1:B1", set: { merge: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the alignment and borders of "Sheet1"!A1:B1 \(op 1\)/, "a merge gives the others the top-left one's alignment and borders too");
+  assert.equal(readable(sheet1), before);
+});
+
+test("an inverse keeps what a person changed after the step, and names it: a cell typed into after the agent's write, a cell filled after its format, a row written into after its insert", async () => {
+  // check, the writes, the insert, the failing write: the person types between the insert and the failing write.
+  const edit = workbook(["Sheet1"], { poison: "Z9", before: (n, sheets) => { if (n === 3) Object.assign(sheets[0].cells, { A1: "person", A3: "new row" }); } });
+  const [s1] = edit.state.sheets;
+  Object.assign(s1.cells, { A1: 1, B1: 2, A2: "below" });
+  const out = await plugin(edit, { kind: "cell.edit", args: editJob("xlsx", [{ range: "A1:B1", values: [[10, 20]] }, { insertRows: "3" }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /^op 3: the editor refused the write\. The ops before it are taken back, but not all of them whole\. Kept as a person changed them after this call: the rows 3:3 this call made \(a person wrote into them\) of "Sheet1"; A1 of "Sheet1"\.$/);
+  assert.deepEqual(s1.cells, { A1: "person", B1: 2, A2: "below", A3: "new row" }, "B1 is back; A1 and the row the person wrote into stay");
+
+  // check, the format, the failing format: the person fills B1 in between.
+  const look = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 2) sheets[0].looks.B1 = { ...sheets[0].looks.B1, fill: "#0000FF" }; } });
+  const [s2] = look.state.sheets;
+  Object.assign(s2.cells, { A1: "a", B1: "b", A5: 5 });
+  const failed = await plugin(look, formatting([{ format: "A1:C1", set: { bold: true, fill: "#FF0000" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(failed.error?.code, "partial", JSON.stringify(failed));
+  assert.match(failed.error.message, /Kept as a person changed them after this call: B1 of "Sheet1"\.$/);
+  assert.deepEqual(s2.looks, { B1: { bold: true, fill: "#0000FF" } }, "A1 and C1 as they were; B1 as the person left it");
+});
+
+test("columns and rows: widths in characters, heights in points, hidden, shown and autofit, each taken back; the frozen panes never through FreezeAt, at a cell through its sheet made active and the agent's own active sheet after", async () => {
+  const book = workbook(["Sheet1", "Data"], { poisonLook: "Z99" });
+  const data = book.state.sheets[1];
+  data.hiddenCols.push(4);
+  data.widths[1] = 11;
+  data.widths[4] = 9;
+  data.widths[5] = 10;
+  data.cells.A9 = 3;
+  const before = readable(data);
+  const ops = [
+    { sheet: "Data", columns: "B:C", width: 20 },
+    { sheet: "Data", rows: "2:3", height: 30, hide: true },
+    { sheet: "Data", columns: "D", autofit: true },
+    { sheet: "Data", columns: "E", show: true },
+    { sheet: "Data", freeze: "B3" },
+  ];
+  const out = await plugin(book, formatting(ops));
+  assert.deepEqual(out.result, { ops: 5, cells: 0 }, JSON.stringify(out));
+  assert.deepEqual([data.widths, data.heights, data.hiddenRows, data.hiddenCols, data.frozen], [{ 1: 20, 2: 20, 3: 12.5, 4: 9, 5: 10 }, { 1: 30, 2: 30 }, [1, 2], [], { cols: 1, rows: 2 }]);
+  assert.ok(book.state.calls.includes("AutoFit D:D false true"));
+  assert.equal(book.state.active.name, "Sheet1", "the agent's active sheet is its own again");
+  assert.ok(!book.state.calls.includes("FreezeAt"));
+  // Refused by the check where a sheet is not there, before anything.
+  const after = readable(data);
+  const refused = await plugin(book, formatting([{ sheet: "Data", columns: "B:E", width: 5 }, { sheet: "Nope", freeze: "A2" }]));
+  assert.equal(refused.error?.code, "not_found", JSON.stringify(refused));
+  assert.equal(readable(data), after);
+  // Taken back when a later op fails, the freeze too (an unfreeze through its sheet made active).
+  // (An autofit's width, and a freeze at a cell, show only after their command: neither is a person's change.)
+  const undone = await plugin(book, formatting([{ sheet: "Data", columns: "B:E", width: 5, hide: true }, { sheet: "Data", columns: "F", autofit: true }, { sheet: "Data", rows: "2:3", show: true }, { sheet: "Data", freeze: "C4" }, { sheet: "Data", format: "Z99", set: { bold: true } }]));
+  assert.equal(undone.undone, true, JSON.stringify(undone));
+  assert.equal(readable(data), after, "widths, hidden columns and rows and the frozen panes as they were");
+  assert.equal(book.state.active.name, "Sheet1");
+  void before;
+});
+
+test("rows and columns inserted and deleted: an insert is taken back by deleting what it made; deletes come last, and one that a later failure cannot take back is named", async () => {
+  const book = workbook(["Sheet1", "B"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "top", A2: "second", B2: "=A2", C1: "c" });
+  const made = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ insertRows: "2:3" }, { range: "A2", values: [["new"]] }, { insertColumns: "B" }]).args });
+  assert.deepEqual(made.result, { ops: 3, cells: 1, shifted: [{ sheet: "Sheet1", kind: "rows", at: 1, count: 2, made: true }, { sheet: "Sheet1", kind: "columns", at: 1, count: 1, made: true }] }, JSON.stringify(made));
+  assert.deepEqual(s1.cells, { A1: "top", D1: "c", A2: "new", A4: "second", C4: "=A2" });
+  const before = JSON.stringify(s1.cells);
+  const failed = await plugin(book, { kind: "cell.edit", args: { ops: [{ insertColumns: "A:B", from: 0, count: 2 }, { insertRows: "1", from: 0, count: 1 }, { range: "B2", values: [["=SUM("]] }] } });
+  assert.equal(failed.error?.code, "bad_value", JSON.stringify(failed));
+  assert.equal(failed.undone, true);
+  assert.equal(JSON.stringify(s1.cells), before, "the rows and columns it made are gone again");
+  // A delete is the last of the call; one the editor made before a later failure is named.
+  const book2 = workbook(["A", "B"], { never: (what) => what.startsWith("delete") });
+  Object.assign(book2.state.sheets[0].cells, { A1: 1, A2: 2 });
+  const gone = await plugin(book2, { kind: "cell.edit", args: editJob("xlsx", [{ deleteSheet: "B" }, { sheet: "A", deleteRows: "1" }]).args });
+  assert.equal(gone.error?.code, "partial", JSON.stringify(gone));
+  assert.match(gone.error.message, /Not taken back: the rows 1:1 of "A" that op 2 deleted\.$/);
+  assert.deepEqual(book2.state.sheets[0].cells, { A1: 2 });
+});
+
+test("a format of whole columns: the cells of the used range among them one by one, the rest as the columns' own format; taken back so; the cells a call reads count against its cap", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: 1, A2: 2, B3: "x", C1: "out" });
+  s1.looks.B2 = { fill: "#00FF00" };
+  s1.colLooks[1] = { italic: true };
+  const before = readable(s1);
+  const out = await plugin(book, formatting([{ format: "A:B", set: { fill: "#FF0000", bold: true } }, { format: "C1", set: { subscript: true } }, { format: "D1", set: { subscript: true } }]));
+  assert.equal(out.result?.ops, 3, JSON.stringify(out));
+  assert.deepEqual(s1.colLooks, { 0: { fill: "#FF0000", bold: true }, 1: { italic: true, fill: "#FF0000", bold: true } });
+  const after = readable(s1);
+  const failed = await plugin(book, formatting([{ format: "A:B", set: { fill: "#0000FF", italic: false } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(failed.undone, true, JSON.stringify(failed));
+  assert.equal(readable(s1), after);
+  void before;
+  // 19,900 cells of a range, which grows the used range, then a whole column with the 199 cells of the used range among
+  // it: over the cap, in the step (the check counted the used range as the call found it).
+  const big = workbook(["Sheet1"]);
+  big.state.sheets[0].cells.A1 = 1;
+  const capped = await plugin(big, formatting([{ format: "A1:CV199", set: { bold: true } }, { format: "A:A", set: { italic: true } }]));
+  assert.equal(capped.error?.code, "bad_op", JSON.stringify(capped).slice(0, 300));
+  assert.match(capped.error.message, /^op 2: the call formats more than 20,000 cells/);
+});
+
+test("a format of a whole sheet's columns or rows counts the used cells among them without listing them, and reads only those: refused before the agents' browser builds millions of addresses, accepted where they are few", async () => {
+  // A used range of 2,000 rows: "A:Z" is 52,000 used cells, refused at once.
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "top", Z2000: "end" });
+  const t0 = Date.now();
+  const out = await plugin(book, formatting([{ format: "A:XFD", set: { font: "Arial" } }]));
+  assert.match(out.error?.message, /^op 1: the call formats more than 20,000 cells/, JSON.stringify(out).slice(0, 300));
+  assert.ok(Date.now() - t0 < 2000, `answered in ${Date.now() - t0} ms`);
+  assert.ok(book.state.ranges < 50, `${book.state.ranges} ranges asked for`);
+  assert.deepEqual(s1.looks, {});
+  // Every column of a sheet whose used range is A1:B20: 40 used cells and 16,384 columns, within the cap. Only the used
+  // columns' cells are read one by one (not A1:XFD20, 327,680 of them).
+  const small = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s2] = small.state.sheets;
+  Object.assign(s2.cells, { A1: "a", B20: 2 });
+  s2.looks.B20 = { fill: "#00FF00" };
+  const before = readable(s2);
+  const whole = await plugin(small, formatting([{ format: "A:XFD", set: { bold: true } }]));
+  assert.deepEqual(whole.result, { ops: 1, cells: 0 }, JSON.stringify(whole).slice(0, 300));
+  assert.deepEqual([s2.colLooks[1], s2.colLooks[16383], s2.looks.B20], [{ bold: true }, { bold: true }, { fill: "#00FF00" }]);
+  // And taken back so.
+  const back = await plugin(small, formatting([{ format: "A:XFD", set: { italic: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(back.undone, true, JSON.stringify(back).slice(0, 300));
+  const after = JSON.parse(readable(s2));
+  assert.deepEqual([after[2].B20, after[3][16383]], [{ fill: "#00FF00" }, { bold: true }]);
+  void before;
+});
+
+test("a merge taken back compares what a person changed before it puts the merged cells' values and number formats back: a cell whose number format the merge changed is no person's change", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: 1, B1: "x" });
+  s1.formats.A1 = "0.00";
+  s1.looks.A1 = { italic: true };
+  s1.looks.B1 = { fill: "#FFFF00" };
+  const before = readable(s1);
+  const out = await plugin(book, formatting([{ format: "A1:B1", set: { merge: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.doesNotMatch(out.error.message, /Kept as a person changed them/);
+  assert.equal(readable(s1), before, "B1 has its fill and General back, and is not italic");
+});
+
+test("rows deleted before a later failure move the cells below them for good: the ops before it there are not taken back at the old addresses, and the answer names them; cells above them are", async () => {
+  const book = workbook(["Sheet1", "Old"], { never: (what) => what.startsWith("delete") });
+  const [s1] = book.state.sheets;
+  for (let r = 1; r <= 9; r++) s1.cells[`A${r}`] = `r${r}`;
+  s1.cells.A10 = "a";
+  s1.cells.B1 = "b";
+  const out = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ range: "B1", values: [["new"]] }, { range: "A10", values: [[""]] }, { deleteSheet: "Old" }, { deleteRows: "5" }]).args });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, / Not taken back: the rows 5:5 of "Sheet1" that op 4 deleted\. Not taken back either, as the rows or columns of their sheet moved after them for good: op 2\.$/);
+  assert.deepEqual(out.error.shifted, [{ sheet: "Sheet1", kind: "rows", at: 4, count: 1, made: false }], "the rows that stay moved, for the answer to name the people in the workbook");
+  // B1 is back; A10's "a" is not written into A10, which is A11's row now (A9, where "a" was, stays empty).
+  assert.deepEqual(s1.cells, { A1: "r1", A2: "r2", A3: "r3", A4: "r4", A5: "r6", A6: "r7", A7: "r8", A8: "r9", B1: "b" });
+});
+
+test("frozen panes as DS names them: the first row alone reads \"1:1\", so office_read says it and an inverse puts it back; a freeze at a cell where one is already is unfrozen first, and its inverse compares what it left once it landed", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = "head";
+  s1.frozen = { cols: 0, rows: 1 };
+  assert.deepEqual(book.run(COMMANDS["cell.read"].source, { formatting: true }).result.sheets[0].look.frozen, { cols: 0, rows: 1 });
+  const out = await plugin(book, formatting([{ freeze: "C3" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.undone, true, JSON.stringify(out));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 1 }, "the person's frozen row is back");
+  // At B2 already: a freeze at C4 is made, not left at B2.
+  s1.frozen = { cols: 1, rows: 1 };
+  const moved = await plugin(book, formatting([{ freeze: "C4" }]));
+  assert.deepEqual(moved.result, { ops: 1, cells: 0 }, JSON.stringify(moved));
+  assert.deepEqual(s1.frozen, { cols: 2, rows: 3 });
+  // (Unfrozen in a command of its own before: in the editor an Unfreeze in the freeze's command takes the new one off.)
+  assert.ok(book.state.commands >= 4);
+  // Taken back so too: through no freeze, to the cell freeze before.
+  const back = await plugin(book, formatting([{ freeze: "D5" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(back.undone, true, JSON.stringify(back));
+  assert.deepEqual(s1.frozen, { cols: 2, rows: 3 });
+  // A person freezes elsewhere after the agent's freeze at a cell landed: theirs stays.
+  const person = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].frozen = { cols: 0, rows: 5 }; } });
+  const kept = await plugin(person, formatting([{ freeze: "C4" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(kept.error?.code, "partial", JSON.stringify(kept));
+  assert.match(kept.error.message, /Kept as a person changed them after this call: the frozen panes of "Sheet1"\.$/);
+  assert.deepEqual(person.state.sheets[0].frozen, { cols: 0, rows: 5 });
+});
+
+test("every freeze shows a moment after its command, as the co-editing lock makes it: rows, columns and none are read once they show, and taken back whole; inverses wait for the panes they put back", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = "head";
+  // A freeze of rows taken back: nobody touched the panes, so no person's change is named.
+  const rows = await plugin(book, formatting([{ freeze: "A2" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(rows.undone, true, JSON.stringify(rows));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 0 });
+  // "none" over frozen rows, and columns.
+  s1.frozen = { cols: 0, rows: 2 };
+  const none = await plugin(book, formatting([{ freeze: "none" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(none.undone, true, JSON.stringify(none));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 2 });
+  const cols = await plugin(book, formatting([{ freeze: "C1" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(cols.undone, true, JSON.stringify(cols));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 2 });
+  // Two freezes of one sheet in a call, a cell over a cell among them: each inverse reads the panes the one after it
+  // put back.
+  s1.frozen = { cols: 1, rows: 1 };
+  const twice = await plugin(book, formatting([{ freeze: "A3" }, { freeze: "C4" }, { freeze: "D5" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(twice.undone, true, JSON.stringify(twice));
+  assert.deepEqual(s1.frozen, { cols: 1, rows: 1 });
+  // Made: the panes the last freeze asked for.
+  const made = await plugin(book, formatting([{ freeze: "A3" }, { freeze: "C4" }, { freeze: "D5" }]));
+  assert.deepEqual(made.result, { ops: 3, cells: 0 }, JSON.stringify(made));
+  assert.deepEqual(s1.frozen, { cols: 3, rows: 4 });
+  // Frozen so already: nothing asked of the editor, nothing to take back.
+  const commands = book.state.commands;
+  const same = await plugin(book, formatting([{ freeze: "D5" }]));
+  assert.deepEqual(same.result, { ops: 1, cells: 0 }, JSON.stringify(same));
+  assert.equal(book.state.commands, commands + 3, "the check, the step and the save");
+});
+
+test("an autofit whose size lands in its command is not waited for, and the autofits of a call that do not change a size are waited for once, at the end of their run", async () => {
+  // An editor nobody else has been in: the sizes are there in the command.
+  const quick = workbook(["Sheet1"], { autofitAtOnce: true });
+  quick.state.sheets[0].cells.A1 = 1;
+  const out = await plugin(quick, formatting([{ columns: "B", autofit: true }, { columns: "C", autofit: true }, { columns: "D", autofit: true }]));
+  assert.deepEqual(out.result, { ops: 3, cells: 0 }, JSON.stringify(out));
+  assert.equal(quick.state.commands, 5, "the check, three steps and the save");
+  assert.deepEqual([quick.state.sheets[0].widths[1], quick.state.sheets[0].widths[3]], [12.5, 12.5]);
+  // Fitted already: the sizes never change, and are read for at most one settle across the run.
+  const commands = quick.state.commands;
+  const again = await plugin(quick, formatting([{ columns: "B", autofit: true }, { columns: "C", autofit: true }, { columns: "D", autofit: true }, { columns: "E", autofit: true }]));
+  assert.deepEqual(again.result, { ops: 4, cells: 0 }, JSON.stringify(again));
+  assert.ok(quick.state.commands - commands <= 6 + SETTLE.tries + 1, `${quick.state.commands - commands} commands`);
+  // And taken back so: the sizes the autofits left in their command are what the inverses compare.
+  const failed = workbook(["Sheet1"], { autofitAtOnce: true, poisonLook: "Z99" });
+  failed.state.sheets[0].cells.A1 = 1;
+  const back = await plugin(failed, formatting([{ columns: "B:C", autofit: true }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(back.undone, true, JSON.stringify(back));
+  assert.deepEqual(failed.state.sheets[0].widths, { 1: 8.43, 2: 8.43 });
+});
+
+test("clear, superscript and subscript on whole columns and rows reach the used cells among them, and are taken back", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "x", C1: "m2", C2: "note", D1: "y" });
+  s1.looks.C1 = { bold: true, fill: "#FF0000" };
+  s1.colLooks[3] = { italic: true };
+  s1.merges.push("C2:D2");
+  const before = readable(s1);
+  const ok = await plugin(book, formatting([{ format: "C:C", set: { superscript: true } }]));
+  assert.deepEqual(ok.result, { ops: 1, cells: 0 }, JSON.stringify(ok));
+  assert.equal(s1.looks.C1.vertAlign, "superscript");
+  const cleared = await plugin(book, formatting([{ format: "C:D", set: { clear: true } }]));
+  assert.deepEqual(cleared.result, { ops: 1, cells: 0 }, JSON.stringify(cleared));
+  assert.deepEqual([s1.looks.C1, s1.colLooks[3], s1.merges, s1.cells.C1], [undefined, undefined, [], "m2"]);
+  // Taken back when a later op fails: the column's italic, C1's look and the merge.
+  s1.looks.C1 = { bold: true, fill: "#FF0000" };
+  s1.colLooks[3] = { italic: true };
+  s1.merges.push("C2:D2");
+  const again = readable(s1);
+  const failed = await plugin(book, formatting([{ format: "C:D", set: { clear: true } }, { format: "1:1", set: { subscript: true, bold: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(failed.error?.code, "partial", JSON.stringify(failed));
+  assert.equal(readable(s1), again);
+  void before;
+});
+
+test("a text whose characters mix a key the format sets is not flattened by the inverse, and the answer names it as staying", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "ab", B1: "xy", C1: "plain" });
+  s1.chars.A1 = [{ bold: true }, {}];
+  s1.chars.B1 = [{ font: "Arial" }, {}];
+  const out = await plugin(book, formatting([{ format: "A1:C1", set: { font: "Times", fontSize: 20, bold: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the mixed text formatting of "Sheet1"!A1, B1 \(op 1\), which stay as this call set them\.$/);
+  assert.equal(s1.looks.C1, undefined, "the cell of one look is as it was");
+  assert.equal(s1.looks.A1.bold, true, "A1's bold, which its characters mixed, is not set false on the whole text");
+  // office_read does not say a key the characters mix.
+  const read = book.run(COMMANDS["cell.read"].source, { formatting: true }).result.sheets[0].look;
+  assert.ok(read.formats.every((f: { look: Record<string, unknown> }) => !Object.values(f.look).includes(null)), JSON.stringify(read.formats));
+});
+
+test("a text formatted in its middle only (one bold word) reads mixed before the step: the inverse does not flatten it, and the answer names it; a text past the characters a step compares is named so", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "abc", B1: "plain" });
+  s1.chars.A1 = [{}, { bold: true }, {}];
+  const out = await plugin(book, formatting([{ format: "A1:B1", set: { bold: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the mixed text formatting of "Sheet1"!A1 \(op 1\), which stay as this call set them\.$/);
+  assert.equal(s1.looks.A1?.bold, true, "the person's bold b is not taken off with the rest of the text");
+  assert.equal(s1.looks.B1, undefined, "the plain text is as it was");
+  // 40,000 characters are compared one by one; a text of 20,000 more is past the room a step has.
+  const long = workbook(["Sheet1"], { poisonLook: "Z99" });
+  Object.assign(long.state.sheets[0].cells, { A1: "x".repeat(40_000), B1: "y".repeat(20_000) });
+  const past = await plugin(long, formatting([{ format: "A1:B1", set: { italic: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(past.error?.code, "partial", JSON.stringify(past).slice(0, 400));
+  assert.match(past.error.message, /cannot read back the mixed text formatting \(or of a text too long to read character by character\) of "Sheet1"!B1 \(op 1\)/);
+  assert.equal(long.state.sheets[0].looks.A1, undefined, "the text that was compared is put back");
+});
+
+test("a whole column taken back keeps a cell a person formatted after the step beyond the used range it read, and names it", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 2) sheets[0].looks.C50 = { fill: "#FF0000" }; } });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: 1, C1: "c" });
+  const out = await plugin(book, formatting([{ format: "C:C", set: { fill: "#FFFF00" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: C50 of "Sheet1"\.$/);
+  assert.equal(s1.looks.C50?.fill, "#FF0000");
+  assert.equal(s1.colLooks[2], undefined, "the column has no fill of its own again");
+  assert.equal(s1.looks.C1, undefined);
+});
+
+test("a line hidden before the step comes back hidden at its own size: a row's height is put back, a column's width (which a hidden column does not give) is named", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = 1;
+  s1.hiddenRows.push(1);
+  s1.heights[1] = 14.25;
+  s1.hiddenCols.push(3);
+  s1.widths[3] = 11;
+  const rows = await plugin(book, formatting([{ rows: "2", height: 30 }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(rows.undone, true, JSON.stringify(rows));
+  assert.deepEqual([s1.hiddenRows, s1.heights[1]], [[1], 14.25]);
+  const cols = await plugin(book, formatting([{ columns: "D", width: 20 }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(cols.error?.code, "partial", JSON.stringify(cols));
+  assert.match(cols.error.message, /The editor cannot read back the width of "Sheet1"!column D \(op 1\), which stay as this call set them\.$/);
+  assert.deepEqual(s1.hiddenCols, [3], "hidden again");
+});
+
+test("an autofit's inverse compares the size it left once it landed: a person's width after it wins, and is named", async () => {
+  // check, the autofit, its settle read, the failing format: the person sets column D's width before the failing op.
+  const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].widths[3] = 30; } });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = 1;
+  s1.widths[4] = 9;
+  const out = await plugin(book, formatting([{ columns: "D:E", autofit: true }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: the column D of "Sheet1"\.$/);
+  assert.deepEqual([s1.widths[3], s1.widths[4]], [30, 9], "D the person's, E as it was");
+});
+
+test("a sheet the call made, taken back, stays where a person wrote into it meanwhile, and the answer names it; a copy only where it holds what its sheet does not", async () => {
+  // A person types into the new sheet as soon as it shows; the write after it fails.
+  let typed = false;
+  const book = workbook(["Sheet1"], { poison: "Z9", before: (_n, sheets) => { const made = sheets.find((s) => s.name === "New"); if (made && !typed) { made.cells.A1 = "person typed this"; typed = true; } } });
+  const out = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ addSheet: "New" }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /^op 2: the editor refused the write\. The ops before it are taken back, but not all of them whole\. Kept as a person changed them after this call: the sheet "New" this call made \(a person wrote into it\)\.$/);
+  assert.deepEqual(book.view(), ["Sheet1", "New"]);
+  assert.equal(book.state.sheets[1].cells.A1, "person typed this");
+  // A copy that holds what its sheet holds (and the call's own write into it, taken back) goes again.
+  const copies = workbook(["Sheet1"], { poison: "Z9" });
+  Object.assign(copies.state.sheets[0].cells, { A1: 1, B2: "=A1*2", C3: "text" });
+  const plain = await plugin(copies, { kind: "cell.edit", args: editJob("xlsx", [{ copySheet: "Sheet1", to: "Copy" }, { sheet: "Copy", range: "D4", values: [["mine"]] }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(plain.undone, true, JSON.stringify(plain));
+  assert.deepEqual(copies.view(), ["Sheet1"]);
+  // One a person wrote into stays.
+  let wrote = false;
+  const kept = workbook(["Sheet1"], { poison: "Z9", before: (_n, sheets) => { const copy = sheets.find((s) => s.name === "Copy"); if (copy && copy.cells.A1 === 1 && !wrote) { copy.cells.E5 = "theirs"; wrote = true; } } });
+  Object.assign(kept.state.sheets[0].cells, { A1: 1, B2: "=A1*2" });
+  const theirs = await plugin(kept, { kind: "cell.edit", args: editJob("xlsx", [{ copySheet: "Sheet1", to: "Copy" }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(theirs.error?.code, "partial", JSON.stringify(theirs));
+  assert.match(theirs.error.message, /Kept as a person changed them after this call: the sheet "Copy" this call made \(a person wrote into it\)\.$/);
+  assert.deepEqual(kept.view(), ["Sheet1", "Copy"]);
+});
+
+test("rows inserted and taken back are read for what was written into them in one go, not cell by cell", async () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "top", D20: "end" });
+  const out = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ insertRows: "2:5001" }, { range: "A1", values: [["=SUM("]] }]).args });
+  assert.equal(out.undone, true, JSON.stringify(out));
+  assert.deepEqual(s1.cells, { A1: "top", D20: "end" });
+  assert.ok(book.state.ranges < 100, `${book.state.ranges} ranges asked for`);
+});
+
+test("cell.read with formatting: the merged cells and the lines' own sizes take their part of the room, and are cut where it ends", () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = 1;
+  s1.cells.A20000 = 2;
+  for (let r = 0; r < 20000; r += 2) s1.heights[r] = 20;
+  const look = book.run(COMMANDS["cell.read"].source, { formatting: true }).result.sheets[0].look;
+  assert.equal(look.cut, true);
+  assert.ok(look.rows.own.length * 10 <= 50_000, `${look.rows.own.length} rows said`);
+});
+
+test("cell.read with formatting: the sheet's usual font, the cells that look otherwise in rectangles, merged cells, own widths and heights, hidden ones, frozen panes", () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "Region", B1: "Sales", A2: "North", B2: 0.25, A3: "South", B3: 0.5, A4: "x" });
+  for (const a of ["A1", "B1"]) s1.looks[a] = { bold: true, fill: "#1F4E79", color: "#FFFFFF" };
+  for (const a of ["B2", "B3"]) s1.formats[a] = "0%";
+  s1.looks.A4 = { rotation: 90, wrap: true, size: 14 };
+  s1.merges.push("A4:B4");
+  s1.widths[0] = 18;
+  s1.heights[3] = 30;
+  // A height the builder does not give is the usual one.
+  (s1.heights as Record<number, number | null>)[1] = null;
+  s1.hiddenRows.push(2);
+  s1.frozen = { cols: 0, rows: 1 };
+  const out = book.run(COMMANDS["cell.read"].source, { formatting: true });
+  assert.ok(out.result, JSON.stringify(out));
+  const look = out.result.sheets[0].look;
+  assert.deepEqual(look.font, { name: "Calibri", size: 11 });
+  assert.deepEqual(look.formats, [
+    { look: { bold: true, color: "#FFFFFF", fill: "#1F4E79" }, ranges: ["A1:B1"] },
+    { look: { numberFormat: "0%" }, ranges: ["B2:B3"] },
+    { look: { size: 14, wrap: true, rotation: 90 }, ranges: ["A4"] },
+  ]);
+  assert.deepEqual(look.merged, ["A4:B4"]);
+  assert.deepEqual(look.cols, { usual: 8.43, own: [[0, 18]] });
+  assert.deepEqual(look.rows, { usual: 15, own: [[2, 15, true], [3, 30]] });
+  assert.deepEqual(look.frozen, { cols: 0, rows: 1 });
+  assert.equal(book.run(COMMANDS["cell.read"].source, {}).result.sheets[0].look, undefined, "only with formatting");
 });
 
 /* ---------------- comments and the editor's chat ---------------- */
@@ -1003,6 +1783,12 @@ test("view.locate, sheets: frozen panes take their part of the view from a range
   assert.deepEqual(across.frozen, [0, 10]);
   const cols = viewBook([{ name: "S", used: "A1:Z300", frozen: "A1:B1048576" }]);
   assert.deepEqual(command("view.locate", cols.Api, { kind: "cell", range: { col: 1, row: 0, cols: 5, rows: 5 } }).result.view.frozen, [2, 0]);
+  // A freeze of columns alone, as the editor gives its place: "A:B", no row numbers.
+  const bare = viewBook([{ name: "S", used: "A1:Z300", frozen: "A:B" }]);
+  assert.deepEqual(command("view.locate", bare.Api, { kind: "cell", range: { col: 1, row: 0, cols: 5, rows: 5 } }).result.view.frozen, [2, 0]);
+  // And the first row alone: "1:1", no column letters.
+  const row = viewBook([{ name: "S", used: "A1:Z300", frozen: "1:1" }]);
+  assert.deepEqual(command("view.locate", row.Api, { kind: "cell", range: { col: 0, row: 0, cols: 5, rows: 5 } }).result.view.frozen, [0, 1]);
 });
 
 test("the plugin locates a Word page once the page count held still; a spreadsheet's at once", async () => {

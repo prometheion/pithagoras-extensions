@@ -40,9 +40,9 @@ import { canonical, createDoc, docSize, docsForHome, MAX_IMPORT_BYTES, readDoc, 
 import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
-import { editJob, formatJob, OpError, viewJob, type EditJob, type FormatJob } from "./ops";
+import { editJob, formatJob, isSheetOp, OpError, viewJob, type EditJob, type FormatJob, type SheetFormatJob } from "./ops";
 import * as seat from "./seat";
-import { MAX_READ_FORMAT, MAX_SHOWN_TEXT } from "./seat-page";
+import { MAX_READ_FORMAT, MAX_SHOWN_TEXT, SETTLE } from "./seat-page";
 import { PICTURES_MS, type ShotPictures } from "./cdp";
 import * as docchat from "./docchat";
 
@@ -294,6 +294,14 @@ function failed(e: unknown): unknown {
  * most: the editor answers a sheet change in about half a second, and one that answers none in 10 s fails the call. */
 const SHEET_OP_MS = 20_000;
 const MAX_EDIT_MS = 120_000;
+/** What one wait of the plugin for a freeze's panes or a run of autofits' sizes may add (SETTLE, about 2 s, and the
+ * commands that read them). A freeze waits up to twice (a cell freeze over one is unfrozen first) and as often again
+ * where the call is taken back; a run of autofits once, and once more where the call is taken back. */
+const SETTLE_MS = SETTLE.tries * SETTLE.ms + 1_000;
+function settlesOf(ops: readonly object[]) {
+  const freezes = ops.filter((op) => "freeze" in op).length, autofits = ops.filter((op) => (op as { autofit?: unknown }).autofit === true).length;
+  return 4 * freezes + (autofits ? autofits + 1 : 0);
+}
 
 /** What a Word edit or format may add to the time it takes in the agent's editor, per 100 kB of the document's file:
  * each brings a table of contents up to date (seat-page.ts, WORD_TOC_SRC), and each update lays the whole document
@@ -310,13 +318,28 @@ type ToolContext = { model?: { id?: string; name?: string; input?: unknown } };
 /** office_format's description: what the model reads of it (ops.ts formatJob has the full grammar, and its refusals
  * name what a key takes, so value lists that a refusal gives stay out of here). */
 const FORMAT_DESCRIPTION =
-  'Change how a Word document of your library looks, through your own editor in it (office_edit changes what it says); people in it see it at once. One call is made whole or not at all. Each op\'s first key holds the quote of the body\'s text that is its place, exactly as office_read shows it ({format: "Q3 results", set}, {footnote: "unaudited", text}; `nth` picks a repeat, from 1), and `set` what to set. Ops: {format, through?, set}: the quote\'s text, or from it to the end of `through`, and its paragraphs; {defineStyle, type?, basedOn?, change?, set}: a new paragraph style ("character" for text; an existing one changes only with change: true); {formatTable, cells?, set}: the table holding the quote, or its cells ("A1:C2" as office_read shows it); {page, set}: page setup of the quote\'s section ("*" all); {sectionBreak, type?}: a new section after the quote\'s paragraph; {after?, pageBreak: true}; {footnote, text}: at the quote\'s end; {after?, toc: true, levels?}: a table of contents (at the start by default; it updates itself). set is flat ({bold: true, list: "bullet"}), its keys: for text font, fontSize, bold, italic, underline, strike, superscript, subscript, color, highlight, link ("" removes), style (character or paragraph style), clear (direct formatting off); for paragraphs align (left, center, right, justify), spaceBefore, spaceAfter, lineSpacing (1.5, or "14pt" exact), indentLeft, indentRight, firstLine (negative hangs), list ("bullet", "number", "none"; continues the list before), level (1-9), listStart, pageBreakBefore, keepWithNext; for tables tableStyle, width ("100%" or a length), columnWidths, headerRows, and the cell keys for all cells; for cells borders ("all", "outside", "inside", "none" or {top, bottom, left, right, insideH, insideV}, each "single 1pt #000000" or "none"), fill, align, valign, rowHeight, merge (true), and the text keys but link; for the page pageSize (A4, Letter, ... or [w, h]), orientation, margins (one or [top, right, bottom, left]), header, footer ({page}, {pages}; "" removes), differentFirstPage, replace (a header holding more than text). Lengths in points, or "2.5cm", "10mm", "1in"; colours "#RRGGBB". office_read with formatting: true shows the result, office_screenshot a picture of it.';
+  'Change how a document of your library looks, through your own editor in it (office_edit changes what it says); people in it see it at once. One call is made whole or not at all. Word: each op\'s first key holds the quote of the body\'s text that is its place, exactly as office_read shows it ({format: "Q3 results", set}, {footnote: "unaudited", text}; `nth` picks a repeat, from 1), and `set` what to set. Ops: {format, through?, set}: the quote\'s text, or from it to the end of `through`, and its paragraphs; {defineStyle, type?, basedOn?, change?, set}: a new paragraph style ("character" for text; an existing one changes only with change: true); {formatTable, cells?, set}: the table holding the quote, or its cells ("A1:C2" as office_read shows it); {page, set}: page setup of the quote\'s section ("*" all); {sectionBreak, type?}: a new section after the quote\'s paragraph; {after?, pageBreak: true}; {footnote, text}: at the quote\'s end; {after?, toc: true, levels?}: a table of contents (at the start by default; it updates itself). set is flat ({bold: true, list: "bullet"}), its keys: for text font, fontSize, bold, italic, underline, strike, superscript, subscript, color, highlight, link ("" removes), style (character or paragraph style), clear (direct formatting off); for paragraphs align (left, center, right, justify), spaceBefore, spaceAfter, lineSpacing (1.5, or "14pt" exact), indentLeft, indentRight, firstLine (negative hangs), list ("bullet", "number", "none"; continues the list before), level (1-9), listStart, pageBreakBefore, keepWithNext; for tables tableStyle, width ("100%" or a length), columnWidths, headerRows, and the cell keys for all cells; for cells borders ("all", "outside", "inside", "none" or {top, bottom, left, right, insideH, insideV}, each "single 1pt #000000" or "none"), fill, align, valign, rowHeight, merge (true), and the text keys but link; for the page pageSize (A4, Letter, ... or [w, h]), orientation, margins (one or [top, right, bottom, left]), header, footer ({page}, {pages}; "" removes), differentFirstPage, replace (a header holding more than text). Lengths in points, or "2.5cm", "10mm", "1in"; colours "#RRGGBB". Spreadsheets (on the first sheet where none is named): {sheet?, format: "A1:D9" (or "C:D", "5:6"), set} with numberFormat ("#,##0.00", "0%", "dd.mm.yyyy"), font, fontSize, bold, italic, underline, strike, superscript, subscript (text cells), color, fill ("none" removes), align, valign, wrap, rotation (degrees, or "vertical"), borders (as above, {top, …} the range\'s edges; also double, dashed, dotted; never removed but by clear), merge (false splits), clear (all formatting off); {sheet?, columns: "C:D", width (characters) | hide | show | autofit: true}; {sheet?, rows: "5:7", height (points) | hide | show | autofit: true}; {sheet?, freeze: "B2" (rows above, columns left stay) or "none"}. Alignment and borders cannot be read back: when a later op fails they stay (error:partial names them). office_read with formatting: true shows the result, office_screenshot a picture of it.';
 
 /** What office_format's answer adds about the call: the styles it made or changed, and whether the pages moved. */
 function formatSaid(made: unknown): string {
   const r = (made ?? {}) as { styles?: { style: string; made?: boolean; changed?: boolean; paragraphs?: number }[]; reflowed?: boolean };
   const styles = (r.styles ?? []).map((s) => (s.made ? ` Made the style "${s.style}".` : ` Changed the style "${s.style}"${typeof s.paragraphs === "number" ? ` (${s.paragraphs} paragraph${s.paragraphs === 1 ? " uses" : "s use"} it)` : ""}.`));
   return `${styles.join("")}${r.reflowed ? " The document reflowed; office_screenshot shows the pages." : ""}`;
+}
+
+/** What a spreadsheet edit's answer says where it moved cells (rows or columns inserted or deleted) while people are
+ * in the workbook (owner's answer 6 of #13: allowed, and they are named): a person mid-entry there may find their cell
+ * elsewhere, or see it empty until they reload (DS 10.0). Nothing where nobody is in it. */
+function movesSaid(made: unknown, names: string[]): string {
+  const moved = (made as { shifted?: { sheet: string; kind: "rows" | "columns"; at: number; count: number; made: boolean }[] } | null)?.shifted;
+  if (!Array.isArray(moved) || !moved.length || !names.length) return "";
+  const lines = (m: (typeof moved)[number]) => {
+    const name = (k: number) => (m.kind === "rows" ? String(k + 1) : colName(k));
+    const which = m.count === 1 ? `${m.kind === "rows" ? "row" : "column"} ${name(m.at)}` : `${m.kind} ${name(m.at)}:${name(m.at + m.count - 1)}`;
+    return `${which} of ${JSON.stringify(m.sheet)} ${m.made ? "inserted" : "deleted"} (the ${m.kind} ${m.kind === "rows" ? "below" : "right of"} ${m.count === 1 ? "it" : "them"} moved ${m.made ? (m.kind === "rows" ? "down" : "right") : m.kind === "rows" ? "up" : "left"})`;
+  };
+  const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return ` ${who} ${names.length === 1 ? "is" : "are"} in this workbook, and its cells moved: ${moved.map(lines).join("; ")}. A cell someone was typing in may be elsewhere now: tell them if they work there.`;
 }
 
 /** `text` with a details side-channel (the same shape as the portal's document tools). */
@@ -542,7 +565,7 @@ function formatHead(read: WordBlocks): string {
 
 /** A spreadsheet's cells as the agent reads them: every sheet of the workbook first, by its position (from 1) and
  * whether it is hidden, then the cells of each sheet read, `A1: value`, a text in quotes, a formula after its value. */
-type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean }[] };
+type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean; look?: SheetLook }[] };
 function sheetList(book: CellSheets["book"]): string {
   return `Sheets: ${book.map((s, i) => `${i + 1} ${JSON.stringify(s.name)}${s.hidden ? " (hidden)" : ""}`).join(", ")}`;
 }
@@ -555,9 +578,50 @@ function cellText(read: CellSheets): string {
   const sheets = read.sheets.map((s) => {
     const cells = cellLines(s.cells);
     if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
-    return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}`;
+    return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}${s.look ? `\n${sheetLookText(s.look)}` : ""}`;
   });
   return [sheetList(read.book), ...sheets].join("\n\n");
+}
+
+/** A sheet's formatting as cell.read gives it with `formatting` (seat-page.ts CELL_READ_LOOK_SRC). */
+type SheetCellLook = { numberFormat?: string; font?: string; size?: number; bold?: true; italic?: true; strike?: true; wrap?: true; underline?: string; vertAlign?: string; color?: string; fill?: string; rotation?: number };
+type SheetLook = { font?: { name: string | null; size: number | null }; formats?: { look: SheetCellLook; ranges: string[] }[]; merged?: string[]; cols?: { usual: number | null; own: [number, number, boolean?][] }; rows?: { usual: number | null; own: [number, number, boolean?][] }; frozen?: { cols: number; rows: number }; cut?: boolean };
+function cellLookWords(l: SheetCellLook): string {
+  const out: string[] = [];
+  if (l.font || l.size) out.push([l.font, l.size].filter((x) => x !== undefined).join(" "));
+  for (const k of ["bold", "italic", "strike"] as const) if (l[k]) out.push(k);
+  if (l.underline) out.push(l.underline === "single" ? "underline" : `underline ${l.underline}`);
+  if (l.vertAlign) out.push(l.vertAlign);
+  if (l.color) out.push(l.color);
+  if (l.fill) out.push(`fill ${l.fill}`);
+  if (l.numberFormat) out.push(JSON.stringify(l.numberFormat));
+  if (l.wrap) out.push("wrap");
+  if (l.rotation) out.push(l.rotation === 255 ? "vertical" : `rotated ${l.rotation}°`);
+  return out.join(", ");
+}
+/** Columns' or rows' own sizes and hidden ones, runs of the same joined: "A 18, C-E hidden (others 8.43)". */
+function linesSaid(lines: NonNullable<SheetLook["cols"]>, name: (k: number) => string, unit: string): string {
+  const runs: { from: number; to: number; size: number; hidden?: boolean }[] = [];
+  for (const [k, size, hidden] of lines.own) {
+    const last = runs.at(-1);
+    if (last && last.to === k - 1 && last.size === size && Boolean(last.hidden) === Boolean(hidden)) last.to = k;
+    else runs.push({ from: k, to: k, size, hidden });
+  }
+  const size = (v: unknown) => (typeof v === "number" ? `${+v.toFixed(2)}${unit}` : "as the sheet's");
+  const said = runs.map((r) => `${name(r.from)}${r.to > r.from ? `-${name(r.to)}` : ""} ${r.hidden ? "hidden" : size(r.size)}`).join(", ");
+  return `${said}${typeof lines.usual === "number" ? ` (others ${size(lines.usual)})` : ""}`;
+}
+function sheetLookText(l: SheetLook): string {
+  if (!l.formats) return "(its formatting is not read: the sheets before it filled what a read gives of it)";
+  const lines = [`Formatting: font ${[l.font?.name, l.font?.size].filter((x) => x !== null && x !== undefined).join(" ") || "as the editor's"} where no other is said; alignment and borders are not read (office_screenshot shows them).`];
+  if (l.formats.length) lines.push(`Formats: ${l.formats.map((f) => `${f.ranges.join(", ")} ${cellLookWords(f.look)}`).join("; ")}.`);
+  if (l.merged?.length) lines.push(`Merged: ${l.merged.join(", ")}.`);
+  if (l.cols?.own.length) lines.push(`Columns: ${linesSaid(l.cols, colName, "")}.`);
+  if (l.rows?.own.length) lines.push(`Rows: ${linesSaid(l.rows, (k) => String(k + 1), "pt")}.`);
+  const f = l.frozen;
+  if (f && (f.cols || f.rows)) lines.push(`Frozen: ${[f.rows ? (f.rows === 1 ? "row 1" : `rows 1-${f.rows}`) : "", f.cols ? (f.cols === 1 ? "column A" : `columns A-${colName(f.cols - 1)}`) : ""].filter(Boolean).join(" and ")}.`);
+  if (l.cut) lines.push(`(its formatting is cut here: a read gives ${MAX_READ_FORMAT.toLocaleString("en")} characters of it at most; read one sheet with sheet, or look with office_screenshot)`);
+  return lines.join("\n");
 }
 
 /** Why office_read reads the saved file: Office does not run, or the agent's editor is not downloaded. */
@@ -567,8 +631,7 @@ const SAVED_BECAUSE = {
   missing: "your editor is not downloaded: the person starts Office in Settings → Office, which downloads it",
 };
 
-/** What office_read says where `formatting` cannot be given: of a spreadsheet (not read yet), and of a saved file. */
-const NO_SHEET_LOOKS = "\n\n(a spreadsheet's formatting is not read yet: office_screenshot shows it)";
+/** What office_read says where `formatting` cannot be given: of a saved file. */
 const NO_SAVED_LOOKS = "\n\n(formatting is read from the editor only, and this is the saved file)";
 
 /** What office_read says first: the document, and where the text comes from (`saved`: why it is the saved file). */
@@ -688,7 +751,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_read",
     label: LABELS.office_read,
     guard: GUARDS.office_read,
-    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style and list in brackets (\"[2] (Heading 1) Findings\", \"[5] (bullet) Point\"), a table as \"[4] table\" and its rows \"| a | b |\"; `formatting: true` adds how it looks (styles in use, page setup, headers and footers, footnotes, each paragraph's and run's own formatting, tables' and cells' own). A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
+    description: "Read a document of your library by its id, as it stands in the editor right now, with what people typed and have not saved yet. A Word document comes as numbered blocks, \"[3] text\", a paragraph's style and list in brackets (\"[2] (Heading 1) Findings\", \"[5] (bullet) Point\"), a table as \"[4] table\" and its rows \"| a | b |\"; `formatting: true` adds how it looks (styles in use, page setup, headers and footers, footnotes, each paragraph's and run's own formatting, tables' and cells' own; per sheet its cells' formats, merged cells, column widths, row heights, frozen panes; not alignment or borders: office_screenshot shows them). A spreadsheet comes as the list of its sheets (position, name, hidden or not), then per sheet its cells, \"A1: 2\", a text in quotes, a formula after the value (\"A3: 6 (=A1*A2)\"); `sheet` reads one sheet only. Quote text for office_edit exactly as it is shown here. Comments: office_comments. When the person stopped Office it reads the saved file and says so.",
     promptSnippet: "Read an office document as it stands in the editor",
     parameters: {
       type: "object",
@@ -710,12 +773,12 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       let live = false;
       if (state === "running") {
         const mode = mayWrite(doc.path, chatId) ? "edit" : "view";
-        const job = doc.ext === "docx" ? { kind: "word.read", args: looks ? { formatting: true } : {} } : { kind: "cell.read", args: sheet ? { sheet } : {} };
+        const job = { kind: doc.ext === "docx" ? "word.read" : "cell.read", args: { ...(sheet ? { sheet } : {}), ...(looks ? { formatting: true } : {}) } };
         try {
           const read = await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, job, { signal }));
           const words = read as WordBlocks;
           const cut = words.formatCut ? `\n\n(formatting is shown up to [${words.formatCut}]: a read gives ${MAX_READ_FORMAT.toLocaleString("en")} characters of it at most; office_screenshot shows the pages after it)` : "";
-          said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? formatHead(words) + wordText(words) + (words.truncated ? "\n\n(the document goes on: only its first 200,000 characters were read)" : "") + cut : cellText(read as CellSheets) + (looks ? NO_SHEET_LOOKS : "")}`;
+          said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? formatHead(words) + wordText(words) + (words.truncated ? "\n\n(the document goes on: only its first 200,000 characters were read)" : "") + cut : cellText(read as CellSheets)}`;
           live = true;
         } catch (e) {
           // Without its editor the agent still reads the file; an edit waits until a Start downloads it. Office found stopped
@@ -734,7 +797,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_edit",
     label: LABELS.office_edit,
     guard: GUARDS.office_edit,
-    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops (a quote is the body's text inside one paragraph, as office_read shows it; \`nth\` picks a repeat, from 1): {quote, replacement} replaces text (an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: a paragraph style of the document, "Heading 1"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Formatting: office_format. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; values, formulas, number formats and column widths only), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more, or give nth.`,
+    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops (a quote is the body's text inside one paragraph, as office_read shows it; \`nth\` picks a repeat, from 1): {quote, replacement} replaces text (an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: a paragraph style of the document, "Heading 1"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Formatting: office_format. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; values, formulas, number formats and column widths only), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. Rows and columns: {sheet?, insertRows: "5:6"} (new rows 5 and 6), {sheet?, insertColumns: "C"}, {sheet?, deleteRows}, {sheet?, deleteColumns} (last in a call: they cannot be taken back; formulas into them turn #REF!). After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more, or give nth.`,
     promptSnippet: "Edit a Word or spreadsheet document live, through your own editor",
     executionMode: "sequential",
     parameters: {
@@ -767,6 +830,10 @@ function installTools(pi: unknown, home: string, chatId: string): void {
               hideSheet: { type: "string" },
               showSheet: { type: "string" },
               deleteSheet: { type: "string" },
+              insertRows: { type: "string" },
+              insertColumns: { type: "string" },
+              deleteRows: { type: "string" },
+              deleteColumns: { type: "string" },
               to: { type: "string", description: "Spreadsheet: the new name." },
               position: { type: "integer", minimum: 1, description: "Spreadsheet: the sheet's place, 1 = first." },
             },
@@ -778,7 +845,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(async ({ id, ops }, signal) => {
       const doc = visibleDoc(id);
       const job: EditJob = editJob(doc.ext, ops);
-      const kinds = [...new Set(job.args.ops.map((op) => ("quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : "sheets")))].join(", ");
+      const kinds = [...new Set(job.args.ops.map((op) => ("quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "rows and columns")))].join(", ");
       return change(doc, job, "office_edit", "Edited", kinds, signal);
     }),
   });
@@ -788,7 +855,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     label: LABELS.office_format,
     guard: GUARDS.office_format,
     description: FORMAT_DESCRIPTION,
-    promptSnippet: "Format a Word document: text, paragraphs, lists, styles, tables, pages",
+    promptSnippet: "Format a Word document (text, lists, styles, tables, pages) or a spreadsheet's cells",
     executionMode: "sequential",
     parameters: {
       type: "object",
@@ -800,7 +867,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
           items: {
             type: "object",
             // The ops' keys: what each takes is in the tool's description, and ops.ts refuses anything else.
-            properties: Object.fromEntries(["format", "through", "defineStyle", "type", "basedOn", "change", "formatTable", "cells", "page", "sectionBreak", "after", "pageBreak", "footnote", "text", "toc"].map((k) => [k, {}]).concat([["nth", { type: "integer", minimum: 1 }], ["levels", { type: "integer", minimum: 1, maximum: 9 }], ["set", { type: "object" }]])),
+            properties: Object.fromEntries(["format", "through", "defineStyle", "type", "basedOn", "change", "formatTable", "cells", "page", "sectionBreak", "after", "pageBreak", "footnote", "text", "toc", "sheet", "columns", "rows", "freeze", "width", "height", "hide", "show", "autofit"].map((k) => [k, {}]).concat([["nth", { type: "integer", minimum: 1 }], ["levels", { type: "integer", minimum: 1, maximum: 9 }], ["set", { type: "object" }]])),
           },
         },
       },
@@ -809,7 +876,9 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(async ({ id, ops }, signal) => {
       const doc = visibleDoc(id);
       const job = formatJob(doc.ext, ops);
-      const kinds = [...new Set(job.args.ops.map((op) => ("format" in op ? "text" : "defineStyle" in op ? "style" : "formatTable" in op ? "table" : "page" in op ? "page" : "sectionBreak" in op ? "section" : "footnote" in op ? "footnote" : "toc" in op ? "toc" : "page break")))].join(", ");
+      const kinds = job.kind === "cell.format"
+        ? [...new Set(job.args.ops.map((op) => ("format" in op ? "cells" : "columns" in op ? "columns" : "freeze" in op ? "freeze" : "rows")))].join(", ")
+        : [...new Set(job.args.ops.map((op) => ("format" in op ? "text" : "defineStyle" in op ? "style" : "formatTable" in op ? "table" : "page" in op ? "page" : "sectionBreak" in op ? "section" : "footnote" in op ? "footnote" : "toc" in op ? "toc" : "page break")))].join(", ");
       return change(doc, job, "office_format", "Formatted", kinds, signal);
     }),
   });
@@ -819,7 +888,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
    * saved: the agent hears the new revision, or what came of it. Both write the same way, so only where the agent
    * could have written the file, and only while Office runs; every change an agent may have made is in the audit log.
    */
-  async function change(doc: DocMeta, job: EditJob | FormatJob, tool: string, did: string, kinds: string, signal?: AbortSignal) {
+  async function change(doc: DocMeta, job: EditJob | FormatJob | SheetFormatJob, tool: string, did: string, kinds: string, signal?: AbortSignal) {
     assertMayRead(doc, chatId, home);
     // Written with the portal's rights (and the Document Server's save): only where the agent could have written it.
     if (!mayWrite(doc.path, chatId)) throw new Refusal("read_only", `"${doc.title}" is not a file your agent may change: you can read it, not edit it`);
@@ -832,10 +901,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const from = refresh(doc.docId, rootDir())?.mtimeMs ?? doc.mtimeMs;
       const n = job.args.ops.length;
       // An op that makes, moves or deletes a sheet waits for the Document Server's answer (seat-page.ts, cellEdit); a
-      // Word call lays a long document out.
-      const sheetOps = job.kind === "cell.edit" ? job.args.ops.filter((op) => !("range" in op)).length : 0;
+      // sheet format waits for its freezes' panes and autofits' sizes; a Word call lays a long document out.
+      const sheetOps = job.kind === "cell.edit" ? job.args.ops.filter(isSheetOp).length : 0;
+      const settles = job.kind === "cell.format" ? settlesOf(job.args.ops) : 0;
       const bytes = refresh(doc.docId, rootDir())?.sizeBytes ?? doc.sizeBytes;
-      const extraMs = job.kind === "cell.edit" ? SHEET_OP_MS * sheetOps : Math.ceil((WORD_LAYOUT_MS * bytes) / 100_000);
+      const extraMs = job.kind === "cell.edit" ? SHEET_OP_MS * sheetOps : job.kind === "cell.format" ? SETTLE_MS * settles : Math.ceil((WORD_LAYOUT_MS * bytes) / 100_000);
       const what = `${tool}: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
       let made: unknown;
       try {
@@ -845,6 +915,10 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         if (e instanceof seat.SeatError && (e.code === "timeout" || e.code === "editor_closed") && job.kind === "cell.edit" && job.args.ops.some((op) => "deleteSheet" in op)) {
           e = new seat.SeatError(e.code, `${e.message}; a sheet the call deletes may be left as a hidden sheet named "~deleted …", which you can delete`, e.op, e.ran);
         }
+        // Rows or columns that stay moved after a failure (a delete made before it): the people in the workbook are
+        // named as after a call that worked.
+        const stayMoved = e instanceof seat.SeatError && e.shifted ? movesSaid({ shifted: e.shifted }, usersOf(doc.docId).map((u) => u.name || "someone")) : "";
+        if (stayMoved && e instanceof seat.SeatError) e = new seat.SeatError(e.code, `${e.message.replace(/\.$/, "")}.${stayMoved.replace(/\.$/, "")}`, e.op, e.ran, e.shifted);
         // The editor took the edit and then gave no clear answer: it may be in the document, and reach the file with
         // a later save. Recorded all the same, so that every change an agent may have made is in the audit log.
         if (e instanceof seat.SeatError && e.ran) record({ subject: doc.title, reason: `${what}; ${e.code === "editor_not_saved" ? "made in the editor, not saved yet" : e.code === "partial" ? "failed, and not taken back whole" : "outcome unknown"} (${e.code})`, chatId });
@@ -863,6 +937,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // The table of contents follows every change of the document (seat-page.ts, WORD_TOC_SRC).
       const tocSaid = (made as { toc?: unknown } | null)?.toc === true || tocMoved ? ` Updated the table of contents${tocMoved ? ` (${tocMoved === 1 ? "1 comment on its entries was" : `${tocMoved} comments on its entries were`} moved onto the new entries)` : ""}.` : "";
       const watching = usersOf(doc.docId).length;
+      const movedLines = movesSaid(made, usersOf(doc.docId).map((u) => u.name || "someone"));
       const key = seats().keyOf(home, doc.docId);
       const outcome: SaveAfterEdit = key ? await (cfg.save ?? ((k: string) => saveNow(k)))(key) : "failed";
       const now = refresh(doc.docId, rootDir());
@@ -880,7 +955,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         throw new Refusal("editor_not_saved", `your ${action} of "${doc.title}" (${n} op${n === 1 ? "" : "s"}) is made and live in the document, but the Document Server did not save it ${outcome === "timeout" ? "in time" : "now"}: it reaches the file with the editor's next save or when the document closes. Do not make it again.`);
       }
       const seen = watching ? ` ${people(watching)} in the document saw it live.` : "";
-      return text(`${did} "${doc.title}" (${n} op${n === 1 ? "" : "s"}), saved as revision ${to}.${seen}${movedSaid}${looks}${tocSaid}`, { action, id: doc.docId, ops: n, from, to, live: watching, ...(movedComments.length ? { moved: movedComments } : {}) });
+      return text(`${did} "${doc.title}" (${n} op${n === 1 ? "" : "s"}), saved as revision ${to}.${seen}${movedSaid}${looks}${tocSaid}${movedLines}`, { action, id: doc.docId, ops: n, from, to, live: watching, ...(movedComments.length ? { moved: movedComments } : {}) });
     });
   }
 

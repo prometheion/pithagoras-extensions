@@ -38,6 +38,8 @@
  *   becomes 123, "10%" 0.1 with a percent format), except in a cell formatted as text ("@").
  */
 
+import { MAX_FORMAT_CELLS } from "./ops";
+
 /** The plugin's GUID, which only the agents' editor configs name (server.ts): people's editors run no plugin. */
 export const PLUGIN_GUID = "asc.{6f1e2d3c-4b5a-4c69-8e7f-a0b1c2d3e4f5}";
 
@@ -1409,8 +1411,261 @@ function colIndex(letters) { var n = 0; for (var i = 0; i < letters.length; i++)
 function grid(v) { return Array.isArray(v) ? (v.length && !Array.isArray(v[0]) ? [v] : v) : [[v]]; }
 `;
 
+/**
+ * What the spreadsheet builder of DS 10.0 reads and sets of a cell's look (measured with docbuilder and in the editor,
+ * #13 PR 3's first step): a cell's number format, fill ("No Fill" or a colour), wrap, text rotation (degrees, 255 for
+ * stacked letters) and its font through its characters (`GetCharacters(1, n).GetFont()`, of the whole text; an empty
+ * cell's gives the cell's own font, and a text whose characters differ reads null where they do). Bold, italic,
+ * strike, superscript and subscript read true or something else (false, or null where it is not set), so a text whose
+ * characters differ there reads as if none had it: lookOf compares the first and the last character with the whole,
+ * and reads a key they differ in as null (mixed), which is not put back. What a format step reads before it changes
+ * anything compares every character (up to MIXED_CHARS of them a step; a longer text past them reads null in every
+ * key of its font): one bold word inside a text is mixed too. Superscript
+ * and subscript are set on a text's characters only: a number, a formula or an empty cell takes none. There is no
+ * getter for alignment and borders, `SetAlignHorizontal` takes no "general", and `SetBorders` with "None" changes
+ * nothing: only `ClearFormats` (every format, and merges) takes them off. `Merge` keeps the top-left cell's value
+ * only; `UnMerge` gives the others none back.
+ */
+/** The most characters of texts a format step compares one by one, before it changes anything (CELL_LOOK_SRC). */
+const MIXED_CHARS = 50_000;
+
+const CELL_LOOK_SRC = `
+var LOOK_KEYS = ["numberFormat", "font", "size", "bold", "italic", "underline", "strike", "vertAlign", "color", "fill", "wrap", "rotation"];
+var UNDERLINES = { xlUnderlineStyleNone: "none", xlUnderlineStyleSingle: "single", xlUnderlineStyleDouble: "double", xlUnderlineStyleSingleAccounting: "singleAccounting", xlUnderlineStyleDoubleAccounting: "doubleAccounting" };
+function hexOf(c) { return c && typeof c.r === "number" ? "#" + [c.r, c.g, c.b].map(function (v) { return ("0" + v.toString(16)).slice(-2); }).join("").toUpperCase() : null; }
+function colourOf(h) { var n = parseInt(String(h).slice(1), 16); return Api.CreateColorFromRGB((n >> 16) & 255, (n >> 8) & 255, n & 255); }
+function addressesOf(address) {
+  var m = /^\\$?([A-Z]+)\\$?(\\d+)(?::\\$?([A-Z]+)\\$?(\\d+))?$/.exec(address);
+  var c1 = colIndex(m[1]), r1 = Number(m[2]), c2 = m[3] ? colIndex(m[3]) : c1, r2 = m[4] ? Number(m[4]) : r1, out = [];
+  for (var r = Math.min(r1, r2); r <= Math.max(r1, r2); r++) { var row = []; for (var c = Math.min(c1, c2); c <= Math.max(c1, c2); c++) row.push(colName(c) + r); out.push(row); }
+  return out;
+}
+function isText(cell) { var v = cell.GetValue(), f = cell.GetFormula(); return typeof v === "string" && v !== "" && !(typeof f === "string" && f.charAt(0) === "="); }
+function filled(cell) { var v = cell.GetValue(), f = cell.GetFormula(); return v !== "" || (typeof f === "string" && f.charAt(0) === "="); }
+function fontKey(font, key) {
+  if (key === "font") return font.GetName() || null;
+  if (key === "size") return typeof font.GetSize() === "number" ? font.GetSize() : null;
+  if (key === "bold") return font.GetBold() === true;
+  if (key === "italic") return font.GetItalic() === true;
+  if (key === "strike") return font.GetStrikethrough() === true;
+  if (key === "underline") return UNDERLINES[font.GetUnderline()] || "none";
+  if (key === "vertAlign") return font.GetSuperscript() === true ? "superscript" : font.GetSubscript() === true ? "subscript" : "baseline";
+  var c = font.GetColor();
+  return c && c.GetRGB ? hexOf(c.GetRGB()) : null;
+}
+// With \`deep\` ({room, blind}), every character of a text is compared, out of room characters, which it uses up; a text
+// past the room reads null in its font's keys, and is counted in blind.
+function lookOf(cell, keys, deep) {
+  var out = {}, font = null, ends = null, unknown = false;
+  for (var k = 0; k < keys.length; k++) {
+    var key = keys[k];
+    if (key === "numberFormat") out.numberFormat = cell.GetNumberFormat();
+    else if (key === "fill") { var f = cell.GetFillColor(); out.fill = f && typeof f === "object" && f.GetRGB ? hexOf(f.GetRGB()) : "none"; }
+    else if (key === "wrap") out.wrap = cell.GetWrapText() === true;
+    else if (key === "rotation") { var o = cell.GetOrientation(); out.rotation = typeof o === "number" ? o : Number(o) || 0; }
+    else {
+      if (!font) {
+        var n = String(cell.GetText() == null ? "" : cell.GetText()).length, text = n > 1 && isText(cell), every = Boolean(deep) && text && n > 2;
+        font = cell.GetCharacters(1, Math.max(1, n)).GetFont();
+        // A text's characters (its first and last one, or with deep every one): where one differs from the whole, its
+        // characters mix that key.
+        ends = [];
+        if (every && deep.room < n - 2) { unknown = true; deep.blind++; }
+        else if (text) for (var ch = 1; ch <= n; ch++) if (every || ch === 1 || ch === n) ends.push(cell.GetCharacters(ch, 1).GetFont());
+        if (every && !unknown) deep.room -= n - 2;
+      }
+      var v = unknown ? null : fontKey(font, key);
+      for (var e = 0; e < ends.length && v !== null; e++) if (fontKey(ends[e], key) !== v) v = null;
+      out[key] = v;
+    }
+  }
+  return out;
+}
+// A look set on a range of one sheet; null (a text of mixed fonts, read so) is not set.
+function setLook(ws, address, key, v) {
+  if (v === null || v === undefined) return;
+  var range = ws.GetRange(address);
+  if (key === "numberFormat") range.SetNumberFormat(v);
+  else if (key === "font") range.SetFontName(v);
+  else if (key === "size") range.SetFontSize(v);
+  else if (key === "bold") range.SetBold(v);
+  else if (key === "italic") range.SetItalic(v);
+  else if (key === "strike") range.SetStrikeout(v);
+  else if (key === "underline") range.SetUnderline(v);
+  else if (key === "color") range.SetFontColor(colourOf(v));
+  else if (key === "fill") range.SetFillColor(v === "none" ? "No Fill" : colourOf(v));
+  else if (key === "wrap") range.SetWrap(v);
+  else if (key === "rotation") range.SetOrientation(v === 0 ? "xlHorizontal" : v === 255 ? "xlVertical" : v);
+  // On a text's characters: whole columns and rows have none of their own (their used cells are set as cells).
+  else if (key === "vertAlign" && /[A-Z]/.test(address) && /\\d/.test(address)) addressesOf(address).forEach(function (row) { row.forEach(function (a) {
+    var cell = ws.GetRange(a);
+    if (!isText(cell)) return;
+    var f = cell.GetCharacters(1, String(cell.GetText()).length).GetFont();
+    if (v === "superscript") f.SetSuperscript(true); else if (v === "subscript") f.SetSubscript(true); else { f.SetSuperscript(false); f.SetSubscript(false); }
+  }); });
+}
+// The merged areas any cell of the range is in (none where there is no range).
+function mergesIn(ws, address) {
+  var seen = {}, out = [];
+  if (!address) return out;
+  addressesOf(address).forEach(function (row) { row.forEach(function (a) {
+    var m = ws.GetRange(a).MergeArea, at = m ? String(m.GetAddress(false, false)).replace(/\\$/g, "") : a;
+    if (at.indexOf(":") !== -1 && !seen[at]) { seen[at] = true; out.push(at); }
+  }); });
+  return out;
+}
+// The looks of \`keys\` of a range's cells, row by row, each key as runs of [value, how many].
+function readLooks(ws, address, keys, deep) {
+  var runs = {};
+  keys.forEach(function (k) { runs[k] = []; });
+  addressesOf(address).forEach(function (row) { row.forEach(function (a) {
+    var look = lookOf(ws.GetRange(a), keys, deep);
+    keys.forEach(function (k) { var list = runs[k], last = list[list.length - 1]; if (last && last[0] === look[k]) last[1]++; else list.push([look[k], 1]); });
+  }); });
+  return runs;
+}
+function expand(runs) { var out = []; runs.forEach(function (r) { for (var k = 0; k < r[1]; k++) out.push(r[0]); }); return out; }
+// The used range of a sheet as {c1, r1, c2, r2} (from 0), or null where it has nothing.
+function usedOf(ws) {
+  var m = /^\\$?([A-Z]+)\\$?(\\d+)(?::\\$?([A-Z]+)\\$?(\\d+))?$/.exec(String(ws.GetUsedRange().GetAddress(false, false)));
+  if (!m) return null;
+  var u = { c1: colIndex(m[1]), r1: Number(m[2]) - 1, c2: colIndex(m[3] || m[1]), r2: Number(m[4] || m[2]) - 1 };
+  if (u.c1 === u.c2 && u.r1 === u.r2 && !filled(ws.GetRange(m[1] + m[2]))) return null;
+  return u;
+}
+// Frozen panes of a sheet: how many columns and rows stay in view. DS 10.0 names them "A1:B3" (both), "A1:XFD3" or
+// "1:1" (rows alone; one row reads so), "A1:C1048576" or "A:A" (columns alone).
+function frozenOf(ws) {
+  var panes = ws.GetFreezePanes(), loc = panes ? panes.GetLocation() : null, at = loc ? String(loc.GetAddress(false, false)).replace(/\\$/g, "") : "";
+  var lines = /^(\\d+):(\\d+)$/.exec(at);
+  if (lines) return { cols: 0, rows: Number(lines[2]) };
+  var f = /^([A-Z]+)(\\d+)?(?::([A-Z]+)(\\d+)?)?$/.exec(at);
+  if (!f) return { cols: 0, rows: 0 };
+  var ec = colIndex(f[3] || f[1]), er = f[4] || f[2] ? Number(f[4] || f[2]) - 1 : 1048575;
+  return { cols: ec >= 16383 ? 0 : ec + 1, rows: er >= 1048575 ? 0 : er + 1 };
+}
+`;
+
+/**
+ * What a sheet's format op reaches, for cell.check and cell.step alike: its cells, or of whole columns or rows the used
+ * range's cells among them (read one by one) and each column's (row's) own format, which the editor keeps for the rest
+ * of it, read by its first cell beside the used range. `many` (what the op counts against the call's MAX_FORMAT_CELLS)
+ * is worked out before any list is made: a whole sheet's columns never become 32 million addresses here. And the
+ * refusals both make.
+ */
+const CELL_PARTS_SRC = `
+function partsOf(ws, op) {
+  var ar = op.area;
+  if (!ar.whole) return { cells: op.format, many: ar.cols * ar.rows, lines: function () { return []; } };
+  var u = usedOf(ws), cols = ar.whole === "columns", lo = cols ? ar.col : ar.row, hi = lo + (cols ? ar.cols : ar.rows) - 1;
+  // The used cells among them: the used range's part across those lines.
+  var c1 = !u ? 0 : cols ? Math.max(lo, u.c1) : u.c1, c2 = !u ? -1 : cols ? Math.min(hi, u.c2) : u.c2;
+  var r1 = !u ? 0 : cols ? u.r1 : Math.max(lo, u.r1), r2 = !u ? -1 : cols ? u.r2 : Math.min(hi, u.r2);
+  var meet = c1 <= c2 && r1 <= r2;
+  // A line's first cell past the used range (before it, where the used range reaches the sheet's end; none where it
+  // spans the whole line).
+  var a1 = u ? (cols ? u.r1 : u.c1) : 0, a2 = u ? (cols ? u.r2 : u.c2) : -1, most = cols ? 1048575 : 16383;
+  var off = a2 < most ? a2 + 1 : a1 > 0 ? 0 : -1;
+  return {
+    cells: meet ? colName(c1) + (r1 + 1) + ":" + colName(c2) + (r2 + 1) : null,
+    many: (meet ? (c2 - c1 + 1) * (r2 - r1 + 1) : 0) + (off === -1 ? 0 : hi - lo + 1),
+    lines: function () {
+      var out = [];
+      if (off !== -1) for (var k = lo; k <= hi; k++) out.push({ line: cols ? colName(k) + ":" + colName(k) : (k + 1) + ":" + (k + 1), at: cols ? colName(k) + (off + 1) : colName(off) + (k + 1), k: k, cols: cols });
+      return out;
+    },
+  };
+}
+function tooMany(i) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": the call formats more than ${MAX_FORMAT_CELLS.toLocaleString("en")} cells (whole columns and rows count the cells of the used range among them; each one's formats are read first, so that the call can be taken back): split it into several calls" }; }
+function notText(i, vertAlign, at, formula) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": " + vertAlign + " takes text, and " + at + " holds " + (formula ? "a formula" : "a number") + " (the editor sets it on a text's characters): leave that cell out" }; }
+function hiddenFreeze(i, name) { return { code: "sheet_hidden", op: i, message: "op " + (i + 1) + ": " + JSON.stringify(name) + " is hidden, and the editor freezes panes of a visible sheet only: show it first" }; }
+function pastEnd(i, rows) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": the sheet's cells would move past its last " + (rows ? "row" : "column") }; }
+// Whether the cells (rows and columns from 0) of a sheet's used range would move past its end with \`count\` more lines
+// from \`from\` on.
+function overflows(u, rows, from, count) { return Boolean(u) && (rows ? u.r2 >= from && u.r2 + count > 1048575 : u.c2 >= from && u.c2 + count > 16383); }
+`;
+
 /** The most cells of one sheet cell.read gives. */
 export const MAX_READ_CELLS = 20_000;
+
+/**
+ * cell.read's formatting (`formatting`) of one sheet's read range (`address`), within `room` characters: the font
+ * most of its cells have, and what each cell has besides (CELL_LOOK_SRC: number format, font, size, bold, italic,
+ * underline, strike, superscript, subscript, colour, fill, wrap, rotation) grouped into rectangles of cells that look
+ * the same; the merged cells; the columns' widths and rows' heights that differ from the one most of them have (and
+ * the hidden ones); the frozen panes. Alignment and borders have no getter, and are not read.
+ */
+const CELL_READ_LOOK_SRC = `
+function sheetLook(ws, address, room) {
+  var grid = addressesOf(address), h = grid.length, w = grid[0].length, looks = [], fonts = {}, usual = null;
+  for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+    var l = lookOf(ws.GetRange(grid[y][x]), LOOK_KEYS), fk = JSON.stringify([l.font, l.size]);
+    looks.push(l);
+    fonts[fk] = (fonts[fk] || 0) + 1;
+    if (!usual || fonts[fk] > fonts[usual]) usual = fk;
+  }
+  var font = JSON.parse(usual), own = looks.map(function (l) {
+    var o = {};
+    if (l.numberFormat && l.numberFormat !== "General") o.numberFormat = l.numberFormat;
+    if (l.font && l.font !== font[0]) o.font = l.font;
+    if (typeof l.size === "number" && l.size !== font[1]) o.size = l.size;
+    ["bold", "italic", "strike", "wrap"].forEach(function (k) { if (l[k]) o[k] = true; });
+    // (A key the text's characters mix reads null, and is not said.)
+    if (l.underline && l.underline !== "none") o.underline = l.underline;
+    if (l.vertAlign && l.vertAlign !== "baseline") o.vertAlign = l.vertAlign;
+    if (l.color && l.color !== "#000000") o.color = l.color;
+    if (l.fill !== "none") o.fill = l.fill;
+    if (l.rotation) o.rotation = l.rotation;
+    return JSON.stringify(o);
+  });
+  // Rectangles of cells that look the same: from each cell not yet in one, as far right, then as far down, as they go.
+  var taken = {}, groups = {}, order = [], size = 0, cut = false;
+  for (var y2 = 0; y2 < h && !cut; y2++) for (var x2 = 0; x2 < w; x2++) {
+    var at = y2 * w + x2, key = own[at];
+    if (taken[at] || key === "{}") continue;
+    var right = x2;
+    while (right + 1 < w && own[y2 * w + right + 1] === key && !taken[y2 * w + right + 1]) right++;
+    var down = y2;
+    for (var ok = true; ok && down + 1 < h; ) {
+      for (var k = x2; k <= right; k++) if (own[(down + 1) * w + k] !== key || taken[(down + 1) * w + k]) { ok = false; break; }
+      if (ok) down++;
+    }
+    for (var yy = y2; yy <= down; yy++) for (var xx = x2; xx <= right; xx++) taken[yy * w + xx] = true;
+    var range = grid[y2][x2] + (down > y2 || right > x2 ? ":" + grid[down][right] : "");
+    if (size + range.length + (groups[key] ? 2 : key.length) > room) { cut = true; break; }
+    size += range.length + (groups[key] ? 2 : key.length);
+    if (!groups[key]) { groups[key] = []; order.push(key); }
+    groups[key].push(range);
+  }
+  var u = /^([A-Z]+)(\\d+)(?::([A-Z]+)(\\d+))?$/.exec(address), c1 = colIndex(u[1]), r1 = Number(u[2]) - 1, c2 = colIndex(u[3] || u[1]), r2 = Number(u[4] || u[2]) - 1;
+  var lines = function (kind, from, to) {
+    var out = [], one = function (k) { return ws.GetRange(kind === "columns" ? colName(k) + ":" + colName(k) : (k + 1) + ":" + (k + 1)); };
+    var size2 = function (r) { return kind === "columns" ? r.GetColumnWidth() : r.GetRowHeight(); };
+    // The usual size: the one most of them have that are not hidden, the next one's beyond them where it is a tie.
+    var most = kind === "columns" ? 16383 : 1048575, all = [], counts = {}, usualSize = to < most ? size2(one(to + 1)) : null;
+    if (usualSize !== null) counts[usualSize] = 0.5;
+    for (var k = from; k <= to; k++) {
+      var r = one(k), hidden = r.GetHidden() === true, s = size2(r);
+      // A size the builder does not give (null) is the usual one.
+      if (typeof s !== "number" && !hidden) continue;
+      all.push([k, s, hidden]);
+      if (!hidden) { counts[s] = (counts[s] || 0) + 1; if (usualSize === null || counts[s] > counts[usualSize]) usualSize = s; }
+    }
+    all.forEach(function (x) { if (x[2] || x[1] !== usualSize) out.push(x[2] ? [x[0], x[1], true] : [x[0], x[1]]); });
+    return { usual: usualSize, own: out };
+  };
+  // The merged cells and the lines' own sizes take their part of the room too, cut where it ends.
+  var fit = function (list, cost) {
+    var out = [];
+    for (var k = 0; k < list.length && !cut; k++) { if (size + cost(list[k]) > room) cut = true; else { size += cost(list[k]); out.push(list[k]); } }
+    return out;
+  };
+  var merged = fit(mergesIn(ws, address), function (m) { return m.length + 2; }), cols = lines("columns", c1, c2), rows = lines("rows", r1, r2);
+  cols.own = fit(cols.own, function () { return 8; });
+  rows.own = fit(rows.own, function () { return 10; });
+  return { font: { name: font[0], size: font[1] }, formats: order.map(function (k) { return { look: JSON.parse(k), ranges: groups[k] }; }), merged: merged, cols: cols, rows: rows, frozen: frozenOf(ws), size: size, cut: cut };
+}
+`;
 
 /** cell.read: every sheet of the workbook in order, by name and whether it is hidden (`book`, also the empty ones), and
  * each sheet (or the one asked for, named case-insensitively): the cells of its used range that hold anything, by
@@ -1419,11 +1674,13 @@ export const MAX_READ_CELLS = 20_000;
 const CELL_READ = `function () {
   ${CELL_ADDRESS_SRC}
   ${SHEET_MODEL_SRC}
+  ${CELL_LOOK_SRC}
+  ${CELL_READ_LOOK_SRC}
   try {
     var all = Api.GetSheets(), book = all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; });
     var want = Asc.scope.args.sheet, at = want ? sheetAt(book, want) : -1, sheets = want ? [all[at]] : all;
     if (want && at === -1) return { error: { code: "not_found", message: "there is no sheet named " + JSON.stringify(want) + " (the sheets: " + book.map(function (s) { return JSON.stringify(s.name); }).join(", ") + ")" } };
-    var out = [], size = 0;
+    var out = [], size = 0, room = ${MAX_READ_FORMAT};
     for (var i = 0; i < sheets.length; i++) {
       if (size > ${MAX_READ_TEXT}) { out.push({ name: sheets[i].GetName(), range: "", cells: [], truncated: true, skipped: true }); continue; }
       var sheet = sheets[i], used = sheet.GetUsedRange(), address = String(used.GetAddress(false, false));
@@ -1441,7 +1698,12 @@ const CELL_READ = `function () {
         size += cell.a.length + String(v).length + (cell.f ? cell.f.length : 0);
         cells.push(cell);
       }
-      out.push({ name: sheet.GetName(), range: address, cells: cells, truncated: truncated });
+      var read = { name: sheet.GetName(), range: address, cells: cells, truncated: truncated };
+      if (Asc.scope.args.formatting) {
+        read.look = room > 0 ? sheetLook(sheet, truncated ? colName(col0) + (row0 + 1) + ":" + colName(col0 + cols - 1) + (row0 + rows) : address, room) : { cut: true };
+        room -= read.look.size || 0;
+      }
+      out.push(read);
     }
     return { result: { book: book, sheets: out } };
   } catch (e) {
@@ -1459,11 +1721,66 @@ const CELL_READ = `function () {
  * in reverse, with what each step said would undo it; a sheet the edit deletes is only renamed out of the way and
  * hidden until every op is made, and deleted then. Every step finds its sheets by name again, on the workbook as it
  * stands at its turn.
+ *
+ * The check also foresees, on the workbook as it stands, what a step would refuse (`foresee`): superscript or subscript
+ * on a number or a formula, a freeze of a hidden sheet, more cells than a call formats, an insert that would push a
+ * sheet's cells past its end. A call that makes those mistakes is then refused before its first step changes anything
+ * (what a format cannot read back would stay otherwise). The steps check again: an op before can change what they
+ * read (a format beyond the used range grows it, which a whole column counts), and ops after a sheet op are left to
+ * them.
  */
 const CELL_CHECK = `function () {
+  ${CELL_ADDRESS_SRC}
   ${SHEET_MODEL_SRC}
+  ${CELL_LOOK_SRC}
+  ${CELL_PARTS_SRC}
+  function foresee(all, ops) {
+    var budget = ${MAX_FORMAT_CELLS}, merged = {}, used = {}, list = all.map(function (s) { return { name: s.GetName() }; });
+    var where = function (ws, a) { return JSON.stringify(ws.GetName()) + "!" + a; };
+    for (var i = 0; i < ops.length; i++) {
+      var op = ops[i];
+      // The sheets change from a sheet op on: what comes after is the steps' to check.
+      if (["addSheet", "renameSheet", "moveSheet", "copySheet", "hideSheet", "showSheet", "deleteSheet"].some(function (k) { return op[k] !== undefined; })) return null;
+      var at = op.sheet !== undefined ? sheetAt(list, op.sheet) : 0, ws = at === -1 ? null : all[at];
+      if (!ws) continue;
+      var name = ws.GetName();
+      if (op.format !== undefined && op.looks !== undefined) {
+        var parts = partsOf(ws, op);
+        budget -= parts.many;
+        if (budget < 0) return tooMany(i);
+        if (op.looks.vertAlign !== undefined && op.looks.vertAlign !== "baseline" && parts.cells) {
+          var cells = addressesOf(parts.cells), range = ws.GetRange(parts.cells), values = grid(range.GetValue()), formulas = grid(range.GetFormula());
+          for (var y = 0; y < cells.length; y++) for (var x = 0; x < cells[y].length; x++) {
+            var v = values[y] ? values[y][x] : "", f = formulas[y] ? formulas[y][x] : "", formula = typeof f === "string" && f.charAt(0) === "=";
+            // A cell an op before merges into another holds nothing by then.
+            if ((formula || (v !== "" && typeof v !== "string")) && !merged[name + "!" + cells[y][x]]) return notText(i, op.looks.vertAlign, where(ws, cells[y][x]), formula);
+          }
+        }
+        if (op.looks.merge === true) addressesOf(op.format).forEach(function (row, y) { row.forEach(function (a, x) { if (x || y) merged[name + "!" + a] = true; }); });
+      } else if (op.freeze !== undefined) {
+        if (!ws.GetVisible()) return hiddenFreeze(i, name);
+      } else if (typeof op.range === "string" || op.insertRows !== undefined || op.insertColumns !== undefined) {
+        // The used range as the ops before leave it: a write reaches further, an insert moves it on.
+        if (!(name in used)) used[name] = usedOf(ws);
+        var u = used[name];
+        if (typeof op.range === "string") {
+          var m = /^\\$?([A-Z]+)\\$?(\\d+)(?::\\$?([A-Z]+)\\$?(\\d+))?$/.exec(op.range);
+          if (!m) continue;
+          var wc = Math.max(colIndex(m[1]), colIndex(m[3] || m[1])), wr = Math.max(Number(m[2]), Number(m[4] || m[2])) - 1;
+          used[name] = u ? { c1: u.c1, r1: u.r1, c2: Math.max(u.c2, wc), r2: Math.max(u.r2, wr) } : { c1: 0, r1: 0, c2: wc, r2: wr };
+        } else {
+          var rows = op.insertRows !== undefined;
+          if (overflows(u, rows, op.from, op.count)) return pastEnd(i, rows);
+          if (u && rows && u.r2 >= op.from) u.r2 += op.count;
+          if (u && !rows && u.c2 >= op.from) u.c2 += op.count;
+        }
+      }
+    }
+    return null;
+  }
   try {
-    var failed = simulateSheets(Api.GetSheets().map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }), Asc.scope.args.ops);
+    var all = Api.GetSheets(), ops = Asc.scope.args.ops;
+    var failed = simulateSheets(all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }), ops) || foresee(all, ops);
     return failed ? { error: failed } : { result: {} };
   } catch (e) {
     return { error: { code: "failed", message: String(e && e.message || e) } };
@@ -1490,6 +1807,11 @@ const CELL_SAVE = `function () {
   }
 }`;
 
+
+/** How often, and how far apart in ms, the plugin reads what autofits or a freeze left until it shows: up to 2 s each
+ * time (cellEdit's `settle`). */
+export const SETTLE = { tries: 10, ms: 200 };
+
 /**
  * One op of a spreadsheet edit (`Asc.scope.args`: `op`, its `index`, and `pending`, the names the sheets this edit
  * deletes have until it ends, which the op does not see). Besides the sheet ops of ops.ts, the steps the plugin makes
@@ -1504,6 +1826,8 @@ const CELL_SAVE = `function () {
 const CELL_STEP = `function () {
   ${CELL_ADDRESS_SRC}
   ${SHEET_MODEL_SRC}
+  ${CELL_LOOK_SRC}
+  ${CELL_PARTS_SRC}
   var args = Asc.scope.args, op = args.op, i = args.index, pending = args.pending || [];
   try {
     var all = Api.GetSheets(), realNames = all.map(function (s) { return s.GetName(); });
@@ -1531,19 +1855,110 @@ const CELL_STEP = `function () {
       var formats = format === null ? cellsOf(address).map(function (row) { return row.map(function (a) { return sheet.GetRange(a).GetNumberFormat(); }); }) : null;
       return { sheet: sheet.GetName(), range: address, values: values, format: format, formats: formats };
     };
+    var formatAt = function (saved, r, c) { return saved.format !== null ? saved.format : saved.formats[r][c]; };
+    // Cells put back as \`capture\` read them. Where it also read what the step left (\`left\`), a cell that holds or is
+    // formatted otherwise now (a person typed into it after the step) is kept as it is, and answered.
     var restore = function (saved) {
       var sheet = Api.GetSheet(saved.sheet);
       if (!sheet) throw { code: "not_found", op: i, message: "the cells " + saved.range + " of " + JSON.stringify(saved.sheet) + " could not be put back: there is no such sheet any more" };
-      var cells = cellsOf(saved.range), range = sheet.GetRange(saved.range);
+      var cells = cellsOf(saved.range), range = sheet.GetRange(saved.range), kept = [], skip = {};
+      if (saved.left) {
+        var now = capture(sheet, saved.range);
+        cells.forEach(function (row, r) { row.forEach(function (a, c) { if (now.values[r][c] !== saved.left.values[r][c] || formatAt(now, r, c) !== formatAt(saved.left, r, c)) { skip[a] = true; kept.push(a); } }); });
+      }
       // A text the editor would read as something else ("00123", "10%", "TRUE") goes into a cell formatted as text,
       // so that it stays text; the cell's own format comes back after.
-      saved.values.forEach(function (row, r) { row.forEach(function (v, c) { if (typeof v === "string" && v !== "" && v.charAt(0) !== "=") sheet.GetRange(cells[r][c]).SetNumberFormat("@"); }); });
-      range.SetValue(saved.values.length === 1 && saved.values[0].length === 1 ? saved.values[0][0] : saved.values);
+      saved.values.forEach(function (row, r) { row.forEach(function (v, c) { if (!skip[cells[r][c]] && typeof v === "string" && v !== "" && v.charAt(0) !== "=") sheet.GetRange(cells[r][c]).SetNumberFormat("@"); }); });
+      if (!kept.length) range.SetValue(saved.values.length === 1 && saved.values[0].length === 1 ? saved.values[0][0] : saved.values);
+      else cells.forEach(function (row, r) { row.forEach(function (a, c) { if (!skip[a]) sheet.GetRange(a).SetValue(saved.values[r][c]); }); });
       // Only where it differs: a format set on an empty cell would make it part of the sheet's used range.
       cells.forEach(function (row, r) { row.forEach(function (a, c) {
-        var f = saved.format !== null ? saved.format : saved.formats[r][c], cell = sheet.GetRange(a);
+        if (skip[a]) return;
+        var f = formatAt(saved, r, c), cell = sheet.GetRange(a);
         if (cell.GetNumberFormat() !== f) cell.SetNumberFormat(f);
       }); });
+      return kept;
+    };
+    // A format step taken back from what it read (\`s\`): merges, whole columns' or rows' own format (each by its
+    // first cell beside the used range), then the cells. With \`check\`, what reads otherwise than the step left it (a person changed
+    // it after the step) is kept as it is: the answer names it.
+    var lookBack = function (ws, s, check) {
+      var kept = [], keys = s.keys, same = function (m) { var tl = ws.GetRange(m.split(":")[0]).MergeArea; return tl && String(tl.GetAddress(false, false)).replace(/\\$/g, "") === m; };
+      // What a person changed since the step, read before anything is put back: putting back a merge's values puts
+      // their number formats back too, which would read as changed after it.
+      var now = check && s.cells && s.before ? readLooks(ws, s.cells, keys) : null, changed = {};
+      if (now) keys.forEach(function (k) { var n = expand(now[k]), l = expand(s.left[k]); for (var x = 0; x < n.length; x++) if (n[x] !== l[x]) changed[x] = true; });
+      if (s.merges) {
+        // The step's own merges off; the ones before back, where their other cells hold nothing (a merge would drop it).
+        (check ? s.mergesLeft || [] : mergesIn(ws, s.cells)).forEach(function (m) { if (s.merges.indexOf(m) === -1 && same(m)) ws.GetRange(m).UnMerge(); });
+        s.merges.forEach(function (m) {
+          if (same(m)) return;
+          var written = false;
+          addressesOf(m).forEach(function (row, y) { row.forEach(function (a, x) { if ((x || y) && filled(ws.GetRange(a))) written = true; }); });
+          if (written) kept.push(m); else ws.GetRange(m).Merge(false);
+        });
+      }
+      if (s.values) kept = kept.concat(restore(check ? s.values : { sheet: s.values.sheet, range: s.values.range, values: s.values.values, format: s.values.format, formats: s.values.formats }));
+      // Set on each whole column or row (the editor keeps that as its own), the cells of the used range put right after.
+      // A setter on a line reaches every cell of it with a format of its own: the ones a person formatted since the
+      // step, beyond the cells it read, are read first and set back after it, and kept.
+      var u = check && s.lines.length ? usedOf(ws) : null, b = s.cells ? /^([A-Z]+)(\\d+):([A-Z]+)(\\d+)$/.exec(s.cells) : null;
+      var read = b ? { c1: colIndex(b[1]), r1: Number(b[2]) - 1, c2: colIndex(b[3]), r2: Number(b[4]) - 1 } : null, room = ${MAX_FORMAT_CELLS};
+      s.lines.forEach(function (l) {
+        var lnow = lookOf(ws.GetRange(l.at), keys), theirs = [], from = u ? (l.cols ? u.r1 : u.c1) : 0, to = u ? (l.cols ? u.r2 : u.c2) : -1;
+        if (u && l.left && (l.cols ? l.k >= u.c1 && l.k <= u.c2 : l.k >= u.r1 && l.k <= u.r2)) {
+          if (to - from + 1 > room) { if (kept.indexOf(l.line) === -1) kept.push(l.line); return; }
+          room -= to - from + 1;
+          for (var q = from; q <= to; q++) {
+            var c = l.cols ? l.k : q, r = l.cols ? q : l.k;
+            if (read && c >= read.c1 && c <= read.c2 && r >= read.r1 && r <= read.r2) continue;
+            var a = colName(c) + (r + 1), look = lookOf(ws.GetRange(a), keys);
+            if (keys.some(function (k) { return look[k] !== l.left[k]; })) theirs.push({ at: a, look: look });
+          }
+        }
+        keys.forEach(function (k) {
+          if (check && l.left && lnow[k] !== l.left[k]) { if (kept.indexOf(l.line) === -1) kept.push(l.line); return; }
+          // (A line has no characters of its own to set: its used cells are put back as cells.)
+          if (k !== "vertAlign" && l.before[k] !== lnow[k]) setLook(ws, l.line, k, l.before[k]);
+        });
+        theirs.forEach(function (t) {
+          var back = lookOf(ws.GetRange(t.at), keys);
+          keys.forEach(function (k) { if (back[k] !== t.look[k]) setLook(ws, t.at, k, t.look[k]); });
+          if (kept.indexOf(t.at) === -1) kept.push(t.at);
+        });
+      });
+      if (s.cells && s.before) {
+        var grid = addressesOf(s.cells), width = grid[0].length, cur = readLooks(ws, s.cells, keys);
+        keys.forEach(function (k) {
+          var was = expand(s.before[k]), n = now ? expand(now[k]) : null, c = expand(cur[k]);
+          var want = function (x) { return changed[x] ? n[x] : was[x]; };
+          for (var y = 0; y < grid.length; y++) {
+            var x0 = -1;
+            for (var x = 0; x <= width; x++) {
+              var at = y * width + x, go = x < width && want(at) !== null && want(at) !== c[at];
+              if (go && x0 !== -1 && want(at) === want(y * width + x0)) continue;
+              if (x0 !== -1) setLook(ws, grid[y][x0] + (x - 1 > x0 ? ":" + grid[y][x - 1] : ""), k, want(y * width + x0));
+              x0 = go ? x : -1;
+            }
+          }
+        });
+        grid.forEach(function (row, y) { row.forEach(function (a, x) { if (changed[y * width + x]) kept.push(a); }); });
+      }
+      return kept.length ? { what: "cells", sheet: ws.GetName(), cells: kept } : undefined;
+    };
+    var freeze = function (ws, cols, rows) {
+      // On the sheet made active for it (a sheet that is not takes no unfreeze), the agent's own active sheet after.
+      var active = Api.GetActiveSheet(), was = active ? active.GetName() : "";
+      if (was !== ws.GetName()) ws.SetActive();
+      var panes = ws.GetFreezePanes();
+      if (!cols && !rows) panes.Unfreeze();
+      else if (!cols) panes.FreezeRows(rows);
+      else if (!rows) panes.FreezeColumns(cols);
+      // The builder's SetFreezePanesType("cell") takes off a freeze of rows or columns alone and freezes at the
+      // selection, but does nothing where the panes are frozen at a cell already (the freeze step unfreezes them in a
+      // command before: in the editor an Unfreeze in the same command makes it take the new freeze off again).
+      else { ws.GetRange(colName(cols) + (rows + 1)).Select(); Api.SetFreezePanesType("cell"); }
+      if (was && was !== ws.GetName() && Api.GetSheet(was)) Api.GetSheet(was).SetActive();
     };
     if (op.writes !== undefined) {
       var written = [], cells = 0;
@@ -1552,6 +1967,7 @@ const CELL_STEP = `function () {
         try {
           var sheet = write.sheet !== undefined ? named(write.sheet, n) : shown[0];
           saved = capture(sheet, write.range);
+          saved.index = n;
           // One cell takes its value, a range its rows of values.
           var took = sheet.GetRange(write.range).SetValue(write.values.length === 1 && write.values[0].length === 1 ? write.values[0][0] : write.values);
           if (took === false) failed = { code: "bad_value", op: n, message: "op " + (n + 1) + ": the editor did not take the values for " + write.range + " of " + JSON.stringify(sheet.GetName()) + ": a formula it cannot read (check its parentheses and separators), or the sheet is protected" };
@@ -1565,24 +1981,233 @@ const CELL_STEP = `function () {
           for (var u = written.length - 1; u >= 0; u--) { try { restore(written[u]); } catch (e2) { broken = true; } }
           return { error: failed, broken: broken };
         }
+        // What it left, for its inverse to tell a person's later change from it.
+        saved.left = capture(sheet, write.range);
         written.push(saved);
         cells += write.values.length * write.values[0].length;
       }
       return { result: { inverse: { restoreCells: written.reverse(), real: true }, cells: cells } };
     }
     if (op.restoreCells !== undefined) {
-      for (var k = 0; k < op.restoreCells.length; k++) restore(op.restoreCells[k]);
+      var keptCells = [];
+      for (var k = 0; k < op.restoreCells.length; k++) {
+        var stayed = restore(op.restoreCells[k]);
+        if (stayed.length) keptCells.push({ what: "cells", sheet: op.restoreCells[k].sheet, cells: stayed });
+      }
+      return { result: { kept: keptCells.length ? keptCells : undefined } };
+    }
+    // What a sheet holds, by address: each filled cell's value, or its formula.
+    var filledOf = function (ws) {
+      var u = usedOf(ws), out = {};
+      if (!u) return "{}";
+      var range = ws.GetRange(colName(u.c1) + (u.r1 + 1) + ":" + colName(u.c2) + (u.r2 + 1)), values = grid(range.GetValue()), formulas = grid(range.GetFormula());
+      values.forEach(function (row, r) { row.forEach(function (v, c) { var f = formulas[r] ? formulas[r][c] : "", formula = typeof f === "string" && f.charAt(0) === "="; if (v !== "" || formula) out[colName(u.c1 + c) + (u.r1 + r + 1)] = formula ? f : v; }); });
+      return JSON.stringify(out);
+    };
+    // The sheet a format, row or column op names: the first one shown where none is named.
+    var sheetOf = function (o) { return o.sheet !== undefined ? named(o.sheet) : shown[0]; };
+    var where = function (ws, address) { return JSON.stringify(ws.GetName()) + "!" + address; };
+    var linesOf = function (kind, from, count) { return kind === "rows" ? (from + 1) + ":" + (from + count) : colName(from) + ":" + colName(from + count - 1); };
+    // What a format op's set changes that can be read back (LOOK_KEYS), and what cannot be.
+    // A merge gives the merged cells the top-left one's formats, and clear takes them all off: both read them all.
+    var keysOf = function (looks) {
+      if (looks.clear || looks.merge === true) return LOOK_KEYS.slice();
+      var map = { numberFormat: "numberFormat", font: "font", size: "size", bold: "bold", italic: "italic", underline: "underline", strike: "strike", vertAlign: "vertAlign", color: "color", fill: "fill", wrap: "wrap", rotation: "rotation" };
+      return Object.keys(looks).filter(function (k) { return map[k]; }).map(function (k) { return map[k]; });
+    };
+    var unreadableOf = function (looks) {
+      var out = [];
+      if (looks.align !== undefined || looks.valign !== undefined || looks.clear || looks.merge === true) out.push("alignment");
+      if (looks.borders !== undefined || looks.clear || looks.merge === true) out.push("borders");
+      return out;
+    };
+    var SIDES = { top: "Top", bottom: "Bottom", left: "Left", right: "Right", insideH: "InsideHorizontal", insideV: "InsideVertical" };
+    var applyLooks = function (ws, address, looks, cells) {
+      var r = ws.GetRange(address), rgb = function (c) { return Api.CreateColorFromRGB(c.r, c.g, c.b); };
+      if (looks.clear) r.ClearFormats();
+      if (looks.numberFormat !== undefined) r.SetNumberFormat(looks.numberFormat);
+      if (looks.font !== undefined) r.SetFontName(looks.font);
+      if (looks.size !== undefined) r.SetFontSize(looks.size);
+      if (looks.bold !== undefined) r.SetBold(looks.bold);
+      if (looks.italic !== undefined) r.SetItalic(looks.italic);
+      if (looks.underline !== undefined) r.SetUnderline(looks.underline ? "single" : "none");
+      if (looks.strike !== undefined) r.SetStrikeout(looks.strike);
+      if (looks.color !== undefined) r.SetFontColor(rgb(looks.color));
+      if (looks.fill !== undefined) r.SetFillColor(looks.fill === "none" ? "No Fill" : rgb(looks.fill));
+      if (looks.align !== undefined) r.SetAlignHorizontal(looks.align);
+      if (looks.valign !== undefined) r.SetAlignVertical(looks.valign);
+      if (looks.wrap !== undefined) r.SetWrap(looks.wrap);
+      if (looks.rotation !== undefined) r.SetOrientation(looks.rotation === 0 ? "xlHorizontal" : looks.rotation === 255 ? "xlVertical" : looks.rotation);
+      if (looks.borders) Object.keys(looks.borders).forEach(function (side) { var b = looks.borders[side]; r.SetBorders(SIDES[side], b.style, rgb(b.color)); });
+      if (looks.vertAlign !== undefined && cells) setLook(ws, cells, "vertAlign", looks.vertAlign);
+      if (looks.merge === true) r.Merge(false);
+      else if (looks.merge === false) r.UnMerge();
+    };
+    if (op.format !== undefined && op.looks !== undefined) {
+      // (cell.check foresaw these on the workbook as the call found it; an op before this one can change what they
+      // read, as a format beyond the used range grows it.)
+      var fws = sheetOf(op), parts = partsOf(fws, op), keys = keysOf(op.looks), fname = fws.GetName(), many = parts.many;
+      if (many > (args.budget === undefined ? ${MAX_FORMAT_CELLS} : args.budget)) return { error: tooMany(i) };
+      // Superscript and subscript go on a text's characters: a number or a formula takes none (empty cells are left).
+      if (op.looks.vertAlign !== undefined && op.looks.vertAlign !== "baseline" && parts.cells) {
+        var cellRows = addressesOf(parts.cells);
+        for (var y = 0; y < cellRows.length; y++) for (var x = 0; x < cellRows[y].length; x++) {
+          var probe = fws.GetRange(cellRows[y][x]);
+          if (filled(probe) && !isText(probe)) return { error: notText(i, op.looks.vertAlign, where(fws, cellRows[y][x]), String(probe.GetFormula()).charAt(0) === "=") };
+        }
+      }
+      var state = { sheet: fname, format: op.format, keys: keys, cells: parts.cells, lines: parts.lines() };
+      // Every character of the texts compared (one bold word reads mixed), out of a room a step has.
+      var deep = { room: ${MIXED_CHARS}, blind: 0 };
+      if (parts.cells && keys.length) state.before = readLooks(fws, parts.cells, keys, deep);
+      state.lines.forEach(function (l) { l.before = lookOf(fws.GetRange(l.at), keys); });
+      if (op.looks.merge !== undefined || op.looks.clear) state.merges = mergesIn(fws, parts.cells);
+      // A merge keeps the top-left cell's value only: the others' are put back with it.
+      if (op.looks.merge === true) state.values = capture(fws, op.format);
+      // A key of a text whose characters mix it reads null: it is not put back, and the answer names those cells.
+      var mixed = [];
+      if (state.before) {
+        var flat = [].concat.apply([], addressesOf(parts.cells)), fontRuns = keys.filter(function (k) { return ["numberFormat", "fill", "wrap", "rotation"].indexOf(k) === -1; }).map(function (k) { return expand(state.before[k]); });
+        flat.forEach(function (a, x) { if (fontRuns.some(function (v) { return v[x] === null; })) mixed.push(a); });
+      }
+      try {
+        applyLooks(fws, op.format, op.looks, parts.cells);
+      } catch (e) {
+        // Made in part: put back what can be, here, as this step's own.
+        var lost = unreadableOf(op.looks);
+        try { lookBack(fws, state, false); } catch (e2) { lost.push("the rest of what it set"); }
+        return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": " + String(e && e.message || e) }, unreadable: lost.length ? { op: i, what: lost, where: where(fws, op.format) } : undefined };
+      }
+      if (parts.cells && keys.length) state.left = readLooks(fws, parts.cells, keys);
+      state.lines.forEach(function (l) { l.left = lookOf(fws.GetRange(l.at), keys); });
+      if (state.merges) state.mergesLeft = mergesIn(fws, parts.cells);
+      if (state.values) state.values.left = capture(fws, op.format);
+      var lostKeys = unreadableOf(op.looks), lostList = [];
+      if (lostKeys.length) lostList.push({ op: i, what: lostKeys, where: where(fws, op.format) });
+      if (mixed.length) lostList.push({ op: i, what: [deep.blind ? "mixed text formatting (or of a text too long to read character by character)" : "mixed text formatting"], where: where(fws, mixed.length > 8 ? mixed.slice(0, 8).join(", ") + " and " + (mixed.length - 8) + " more" : mixed.join(", ")) });
+      return { result: { inverse: { restoreFormat: state, real: true }, read: many, unreadable: lostList.length ? lostList : undefined } };
+    }
+    if (op.restoreFormat !== undefined) {
+      var rs = op.restoreFormat, rws = named(rs.sheet);
+      return { result: { kept: lookBack(rws, rs, true) } };
+    }
+    if (typeof op.columns === "string" || typeof op.rows === "string") {
+      var lws = sheetOf(op), lkind = typeof op.columns === "string" ? "columns" : "rows", lrange = linesOf(lkind, op.from, op.count);
+      var lineState = function () { var out = { size: [], hidden: [] }; for (var k = 0; k < op.count; k++) { var one = lws.GetRange(linesOf(lkind, op.from + k, 1)); out.size.push(lkind === "columns" ? one.GetColumnWidth() : one.GetRowHeight()); out.hidden.push(one.GetHidden() === true); } return out; };
+      var lbefore = lineState(), lall = lws.GetRange(lrange);
+      if (op.width !== undefined) lall.SetColumnWidth(op.width);
+      if (op.height !== undefined) lall.SetRowHeight(op.height);
+      if (op.autofit) lall.AutoFit(lkind === "rows", lkind === "columns");
+      if (op.hidden !== undefined) lall.SetHidden(op.hidden);
+      // In an editor people have co-edited, an autofit's size lands a moment after the command (the Document Server's
+      // lock, measured in DS 10.0); where nobody else has been in it, in the command. Sizes that read as before here have
+      // not landed, or the autofit changed nothing: the plugin reads them again later, all of a call's together, until
+      // they differ from these (\`settle\`).
+      var lleft = lineState(), lnow = lleft.size.slice();
+      var landed = !op.autofit || lnow.some(function (v, k) { return v !== lbefore.size[k]; });
+      if (!landed) lleft.size = lleft.size.map(function () { return null; });
+      // A hidden column reads no width (0): one this op sized cannot get its width back.
+      var blind = [];
+      if (lkind === "columns" && (op.width !== undefined || op.autofit)) for (var h = 0; h < op.count; h++) if (lbefore.hidden[h]) blind.push(colName(op.from + h));
+      return { result: { inverse: { restoreLines: { sheet: lws.GetName(), kind: lkind, from: op.from, count: op.count, before: lbefore, left: lleft }, real: true }, settle: landed ? undefined : { sizes: lnow }, unreadable: blind.length ? { op: i, what: ["width"], where: where(lws, "column" + (blind.length > 1 ? "s " : " ") + blind.join(", ")) } : undefined } };
+    }
+    // What autofits or a freeze left, read once it landed (after their command): what their inverse compares with, so
+    // that a person's change after them wins there too. The sizes of several autofits in one go (\`lines\`, each null
+    // where its sheet is not found by that name).
+    if (op.settle !== undefined) {
+      var st = op.settle;
+      if (st.lines) return { result: { sizes: st.lines.map(function (sl) {
+        try {
+          var sws = named(sl.sheet), sizes = [];
+          for (var z = 0; z < sl.count; z++) { var one = sws.GetRange(linesOf(sl.kind, sl.from + z, 1)); sizes.push(sl.kind === "columns" ? one.GetColumnWidth() : one.GetRowHeight()); }
+          return sizes;
+        } catch (e) { return null; }
+      }) } };
+      return { result: { frozen: frozenOf(named(st.refreeze)) } };
+    }
+    if (op.restoreLines !== undefined) {
+      var rl = op.restoreLines, rlws = named(rl.sheet), lkept = [];
+      for (var q = 0; q < rl.count; q++) {
+        var at = linesOf(rl.kind, rl.from + q, 1), line = rlws.GetRange(at), size = rl.kind === "columns" ? line.GetColumnWidth() : line.GetRowHeight(), hid = line.GetHidden() === true;
+        // A person's own change to the line after this call's is kept.
+        if ((rl.left.size[q] !== null && size !== rl.left.size[q]) || hid !== rl.left.hidden[q]) { lkept.push(at.split(":")[0]); continue; }
+        // A size set shows the line; a hidden one is hidden again after. A hidden row reads its height, a hidden column
+        // no width (the step named it).
+        if (rl.before.size[q] !== size && !(rl.kind === "columns" && rl.before.hidden[q])) { if (rl.kind === "columns") line.SetColumnWidth(rl.before.size[q]); else line.SetRowHeight(rl.before.size[q]); }
+        if (rl.before.hidden[q] !== (line.GetHidden() === true)) line.SetHidden(rl.before.hidden[q]);
+      }
+      return { result: { kept: lkept.length ? { what: rl.kind === "columns" ? "column" : "row", sheet: rl.sheet, cells: lkept } : undefined } };
+    }
+    if (op.freeze !== undefined) {
+      var zws = sheetOf(op);
+      if (!zws.GetVisible()) return { error: hiddenFreeze(i, zws.GetName()) };
+      var zbefore = frozenOf(zws), zname = zws.GetName();
+      // Frozen so already: nothing to do (the editor would take a freeze asked again off, or leave it).
+      if (zbefore.cols === op.cols && zbefore.rows === op.rows) return { result: {} };
+      // Every freeze goes through the Document Server's lock once people have co-edited the workbook, and shows in the
+      // panes a moment after its command (measured in DS 10.0): the plugin reads them in commands of its own after this
+      // one, until they show (\`settle\`), and the inverse compares what it read then.
+      // Frozen at a cell already: unfrozen in this command, frozen at the new cell in a step after the unfreeze showed
+      // (see freeze). One that has not shown by then fails the op rather than unfreeze again.
+      if (op.cols && op.rows && zbefore.cols && zbefore.rows) {
+        if (op.again) return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not take the frozen panes of " + JSON.stringify(zname) + " off within " + (${SETTLE.tries * SETTLE.ms} / 1000) + " s: a person may be working in that sheet; try again later" } };
+        freeze(zws, 0, 0);
+        return { result: { inverse: { refreeze: zname, cols: zbefore.cols, rows: zbefore.rows, left: null, real: true }, settle: { frozen: { cols: 0, rows: 0 } }, then: { sheet: zname, freeze: op.freeze, cols: op.cols, rows: op.rows, again: true, real: true } } };
+      }
+      freeze(zws, op.cols, op.rows);
+      return { result: { inverse: { refreeze: zname, cols: zbefore.cols, rows: zbefore.rows, left: null, real: true }, settle: { frozen: { cols: op.cols, rows: op.rows } } } };
+    }
+    // Panes put back; they too show after the command: the plugin waits for them (\`settle\`) before the next inverse,
+    // which reads them. A cell freeze over a cell freeze is unfrozen first, and frozen in a second inverse (\`then\`).
+    if (op.refreeze !== undefined) {
+      var bws = named(op.refreeze), bnow = frozenOf(bws), bname = bws.GetName();
+      if (op.left && (bnow.cols !== op.left.cols || bnow.rows !== op.left.rows)) return { result: { kept: { what: "frozen panes", sheet: bname, cells: [] } } };
+      if (!bws.GetVisible() || (bnow.cols === op.cols && bnow.rows === op.rows)) return { result: {} };
+      if (op.cols && op.rows && bnow.cols && bnow.rows) {
+        freeze(bws, 0, 0);
+        return { result: { settle: { frozen: { cols: 0, rows: 0 } }, then: { refreeze: bname, cols: op.cols, rows: op.rows, left: { cols: 0, rows: 0 }, real: true } } };
+      }
+      freeze(bws, op.cols, op.rows);
+      return { result: { settle: { frozen: { cols: op.cols, rows: op.rows } } } };
+    }
+    if (op.insertRows !== undefined || op.insertColumns !== undefined) {
+      var iws = sheetOf(op), ikind = op.insertRows !== undefined ? "rows" : "columns", iu = usedOf(iws);
+      // The sheet's last row or column must stay inside the sheet once its cells move.
+      if (overflows(iu, ikind === "rows", op.from, op.count)) return { error: pastEnd(i, ikind === "rows") };
+      iws.GetRange(linesOf(ikind, op.from, op.count)).Insert(ikind === "rows" ? "down" : "right");
+      return { result: { inverse: { dropLines: iws.GetName(), kind: ikind, from: op.from, count: op.count, real: true }, shifted: { sheet: iws.GetName(), kind: ikind, at: op.from, count: op.count, made: true } } };
+    }
+    if (op.dropLines !== undefined) {
+      // Rows or columns this call made: taken away again where nobody wrote into them meanwhile.
+      var dws = named(op.dropLines), du = usedOf(dws), drange = linesOf(op.kind, op.from, op.count), written = false;
+      if (du) {
+        var dc1 = op.kind === "columns" ? op.from : du.c1, dc2 = op.kind === "columns" ? op.from + op.count - 1 : du.c2, dr1 = op.kind === "rows" ? op.from : du.r1, dr2 = op.kind === "rows" ? op.from + op.count - 1 : du.r2;
+        if (dc1 <= dc2 && dr1 <= dr2 && dc1 <= du.c2 && dc2 >= du.c1 && dr1 <= du.r2 && dr2 >= du.r1) {
+          // Read whole, in one go: an insert may have made thousands of rows.
+          var dbox = dws.GetRange(colName(Math.max(dc1, du.c1)) + (Math.max(dr1, du.r1) + 1) + ":" + colName(Math.min(dc2, du.c2)) + (Math.min(dr2, du.r2) + 1));
+          var dvalues = grid(dbox.GetValue()), dformulas = grid(dbox.GetFormula());
+          dvalues.forEach(function (row, r) { row.forEach(function (v, c) { var f = dformulas[r] ? dformulas[r][c] : ""; if (v !== "" || (typeof f === "string" && f.charAt(0) === "=")) written = true; }); });
+        }
+      }
+      if (written) return { result: { kept: { what: op.kind === "rows" ? "rows" : "columns", sheet: dws.GetName(), cells: [drange], made: true } } };
+      dws.GetRange(drange).Delete(op.kind === "rows" ? "up" : "left");
       return { result: {} };
     }
+    if (op.deleteRows !== undefined || op.deleteColumns !== undefined) {
+      var xws = sheetOf(op), xkind = op.deleteRows !== undefined ? "rows" : "columns", xrange = linesOf(xkind, op.from, op.count);
+      xws.GetRange(xrange).Delete(xkind === "rows" ? "up" : "left");
+      return { result: { irreversible: { op: i, what: xkind + " " + xrange, sheet: xws.GetName() }, shifted: { sheet: xws.GetName(), kind: xkind, at: op.from, count: op.count, made: false } } };
+    }
+
     if (op.addSheet !== undefined) {
       // Made after the editor's active sheet, then moved to its place (by default after the last).
       Api.AddSheet(op.addSheet);
-      return { result: { inverse: { dropSheet: op.addSheet, real: true }, expect: { has: op.addSheet }, then: { moveSheet: op.addSheet, position: op.position !== undefined ? op.position : shown.length + 1, fresh: true } } };
+      return { result: { inverse: { dropSheet: op.addSheet, made: true, real: true }, expect: { has: op.addSheet }, then: { moveSheet: op.addSheet, position: op.position !== undefined ? op.position : shown.length + 1, fresh: true } } };
     }
     if (op.copySheet !== undefined) {
       var source = named(op.copySheet).GetName();
       Api.AddSheet(op.to);
-      return { result: { inverse: { dropSheet: op.to, real: true }, expect: { has: op.to }, then: { fillSheet: op.to, from: source, position: op.position } } };
+      return { result: { inverse: { dropSheet: op.to, copyOf: source, real: true }, expect: { has: op.to }, then: { fillSheet: op.to, from: source, position: op.position } } };
     }
     if (op.fillSheet !== undefined) {
       var from = Api.GetSheet(op.from), to = Api.GetSheet(op.fillSheet), address = String(from.GetUsedRange().GetAddress(false, false));
@@ -1639,6 +2264,10 @@ const CELL_STEP = `function () {
     if (op.dropSheet !== undefined) {
       var drop = sheetAt(all.map(function (s) { return { name: s.GetName() }; }), op.dropSheet);
       if (drop === -1) return { result: {} };
+      // A sheet this call made, taken away again: the call's own writes into it are taken back by now, so what it holds
+      // (a new one anything, a copy anything its sheet does not) a person wrote there meanwhile. Then it stays.
+      var copyOf = op.copyOf !== undefined ? Api.GetSheet(op.copyOf) : null;
+      if ((op.made || copyOf) && filledOf(all[drop]) !== (copyOf ? filledOf(copyOf) : "{}")) return { result: { kept: { what: "sheet", sheet: all[drop].GetName(), cells: [], made: true } } };
       all[drop].Delete();
       return { result: { expect: { gone: realNames[drop] } } };
     }
@@ -1771,6 +2400,7 @@ const VIEW_LOCATE = `function () {
   ${WORD_QUOTE_SRC}
   ${CELL_ADDRESS_SRC}
   ${SHEET_MODEL_SRC}
+  ${CELL_LOOK_SRC}
   var a = Asc.scope.args;
   function word() {
     var doc = Api.GetDocument(), pages = doc.GetPageCount(), page = a.page || 1;
@@ -1854,14 +2484,12 @@ const VIEW_LOCATE = `function () {
       r = { col: 0, row: 0, cols: u ? colIndex(u[3] || u[1]) + 1 : 1, rows: u ? Number(u[4] || u[2]) : 1 };
     }
     // Frozen panes: the first cell after them (0 where none are frozen that way).
+    // (A freeze of columns alone is at "A:A", without row numbers: frozenOf reads that too.)
     var fc = 0, fr = 0;
     try {
-      var panes = ws.GetFreezePanes(), loc = panes ? panes.GetLocation() : null, f = loc ? /^\\$?([A-Z]+)\\$?(\\d+)(?::\\$?([A-Z]+)\\$?(\\d+))?$/.exec(String(loc.GetAddress(false, false))) : null;
-      if (f) {
-        var ec = colIndex(f[3] || f[1]), er = Number(f[4] || f[2]) - 1;
-        fc = ec >= 16383 ? 0 : ec + 1;
-        fr = er >= 1048575 ? 0 : er + 1;
-      }
+      var fz = frozenOf(ws);
+      fc = fz.cols;
+      fr = fz.rows;
     } catch (e) { fc = 0; fr = 0; }
     var colPx = function (c) {
       var name = colName(c);
@@ -1999,14 +2627,37 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
   // back in reverse, and the deleted sheets go at the end. Where that cannot be made whole (an op to take back fails,
   // or a change the editor was asked for may still come, as a sheet deleted at the end), the answer says so: "ran",
   // with the code "partial".
+  // Besides that, what the steps say of themselves: what of a format cannot be read back to put back (unreadable),
+  // what cannot be taken back at all (irreversible: deleted rows and columns, which come last), the rows and columns
+  // that moved (shifted), and, of an inverse, what a person changed after the step and is kept as they made it (kept).
+  // A call taken back with any of these answers "partial", naming them.
+  // Rows or columns deleted (or made and kept, as a person wrote into them) move the cells of their sheet below (right
+  // of) them for good: an inverse of an op before them there would put its cells back at the old addresses, into other
+  // cells, so it is not run (\`moved\`, by sheet), and the answer names those ops as not taken back.
   function cellEdit(job) {
-    var ops = job.args.ops, undo = [], pending = [], deleted = {}, cells = 0, asked = false, broken = "";
+    var ops = job.args.ops, undo = [], undoOps = [], pending = [], deleted = {}, cells = 0, asked = false, broken = "";
+    var unreadable = [], irreversible = [], kept = [], shifted = [], budget = ${MAX_FORMAT_CELLS}, moved = {}, notBack = [], dropped = {}, unsettled = [];
+    function move(sheet, rows, at) { (moved[sheet] = moved[sheet] || []).push({ rows: rows, at: at }); }
+    // A range's bounds from 0 ("A1:B2", "C:D", "5:6"); whole columns reach every row, whole rows every column.
+    function areaOf(address) {
+      var col = function (l) { var n = 0; for (var k = 0; k < l.length; k++) n = n * 26 + l.charCodeAt(k) - 64; return n - 1; };
+      var a = String(address).replace(/\\$/g, ""), m = /^([A-Z]+)(\\d+)(?::([A-Z]+)(\\d+))?$/.exec(a);
+      if (m) return { c2: Math.max(col(m[1]), col(m[3] || m[1])), r2: Math.max(Number(m[2]), Number(m[4] || m[2])) - 1 };
+      if ((m = /^([A-Z]+):([A-Z]+)$/.exec(a))) return { c2: col(m[2]), r2: 1048575 };
+      if ((m = /^(\\d+):(\\d+)$/.exec(a))) return { c2: 16383, r2: Number(m[2]) - 1 };
+      return { c2: 16383, r2: 1048575 };
+    }
+    // Whether cells of \`area\` on \`sheet\` moved after the op: rows from \`at\` on moved, or columns.
+    function stale(sheet, area) { return (moved[sheet] || []).some(function (x) { return x.rows ? area.r2 >= x.at : area.c2 >= x.at; }); }
     call(cell.check, { ops: ops }, false, function (out) {
       if (out.error) return done(job, { error: out.error });
       next(0);
     });
     function next(i) {
-      if (i >= ops.length) return drop(0);
+      // Autofits whose sizes had not changed in their command are read at the end of their run (a call that fits
+      // columns one by one waits once), before the next op and before the save, which would miss them.
+      if (i >= ops.length) return settleAll(function () { drop(0); });
+      if (unsettled.length && !ops[i].autofit) return settleAll(function () { next(i); });
       if (typeof ops[i].range !== "string") return step(ops[i], i, function () { next(i + 1); });
       var writes = [], j = i;
       for (; j < ops.length && typeof ops[j].range === "string"; j++) writes.push({ sheet: ops[j].sheet, range: ops[j].range, values: ops[j].values, index: j });
@@ -2019,8 +2670,20 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
         asked = true;
         return step({ dropSheet: pending[k], real: true, was: gone.name }, gone.op, function () { drop(k + 1); });
       }
-      call(cell.save, {}, true, function () { done(job, { result: { ops: ops.length, cells: cells } }); });
+      call(cell.save, {}, true, function () { done(job, { result: shifted.length ? { ops: ops.length, cells: cells, shifted: shifted } : { ops: ops.length, cells: cells } }); });
     }
+    // A step's own words of what it did, for the answer.
+    function note(r) {
+      if (r.unreadable) unreadable = unreadable.concat(r.unreadable);
+      if (r.irreversible) irreversible.push(r.irreversible);
+      if (r.shifted) {
+        shifted.push(r.shifted);
+        if (!r.shifted.made) move(r.shifted.sheet, r.shifted.kind === "rows", r.shifted.at);
+      }
+    }
+    function shiftKey(s) { return [s.sheet, s.kind, s.at, s.count].join("|"); }
+    function opsSaid(list) { list = list.filter(function (n, k) { return list.indexOf(n) === k; }).sort(function (a, b) { return a - b; }).map(function (n) { return n + 1; }); return list.length === 1 ? "op " + list[0] : "ops " + list.slice(0, -1).join(", ") + " and " + list[list.length - 1]; }
+    function cellsSaid(list) { return list.length > 8 ? list.slice(0, 8).join(", ") + " and " + (list.length - 8) + " more" : list.join(", "); }
     // The sheet a step changes, by the name the agent knows it by.
     function subject(op) {
       var keys = ["was", "addSheet", "to", "moveSheet", "fillSheet", "dropSheet"];
@@ -2028,13 +2691,37 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       return "";
     }
     function step(op, i, then) {
-      call(cell.step, { op: op, index: i, pending: pending }, true, function (out) {
+      call(cell.step, { op: op, index: i, pending: pending, budget: budget }, true, function (out) {
         if (out.error) {
           if (out.broken) broken = "the cells it had written could not all be put back";
+          if (out.unreadable) unreadable = unreadable.concat(out.unreadable);
           return back(out.error);
         }
         var r = out.result || {};
-        if (r.inverse) undo.push(r.inverse);
+        note(r);
+        if (typeof r.read === "number") budget -= r.read;
+        if (r.inverse) {
+          undo.push(r.inverse);
+          undoOps.push(op.writes ? op.writes.map(function (w) { return w.index; }) : [i]);
+        }
+        // An autofit's sizes are read at the end of its run of autofits (settleAll); a freeze's panes now, as the next
+        // op may freeze that sheet again.
+        if (r.settle && r.settle.sizes && r.inverse) unsettled.push(r);
+        else if (r.settle && r.inverse) return settle(r, 0);
+        made(r);
+      });
+      // What a freeze left lands a moment after its command: read until the panes asked for show, for the inverse to
+      // compare with. Panes that do not show in time are not compared.
+      function settle(r, tries) {
+        call(cell.step, { op: { settle: r.inverse, real: true }, index: i, pending: pending }, false, function (s) {
+          var left = s.result || {}, z = r.settle;
+          var shown = Boolean(left.frozen) && left.frozen.cols === z.frozen.cols && left.frozen.rows === z.frozen.rows;
+          if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
+          r.inverse.left = shown ? left.frozen : null;
+          made(r);
+        });
+      }
+      function made(r) {
         if (r.pending) {
           pending.push(r.pending);
           deleted[r.pending] = { name: op.deleteSheet, op: i };
@@ -2048,6 +2735,24 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
           asked = true;
           back({ code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not " + (op.dropSheet !== undefined ? "delete" : "show the change to") + " the sheet " + JSON.stringify(subject(op)) + " within " + (${SHEET_WAIT.tries * SHEET_WAIT.ms} / 1000) + " s: a person may be working in that sheet, or the workbook's structure is protected; try again later" });
         });
+      }
+    }
+    // The sizes of the autofits whose sizes had not changed in their command, read until each differs from that or the
+    // tries are out: then what reads is what the autofit left (it changed nothing, or lands later still), for its
+    // inverse to compare with. All of them in one command a try, so a call of many autofits waits once.
+    function settleAll(then, tries) {
+      if (!unsettled.length) return then();
+      tries = tries || 0;
+      call(cell.step, { op: { settle: { lines: unsettled.map(function (r) { return r.inverse.restoreLines; }) }, real: true }, index: -1, pending: pending }, false, function (s) {
+        var sizes = s.result && s.result.sizes || [];
+        unsettled = unsettled.filter(function (r, k) {
+          var now = sizes[k], shown = Boolean(now) && now.some(function (v, x) { return v !== r.settle.sizes[x]; });
+          if (!shown && now !== null && tries < ${SETTLE.tries}) return true;
+          if (now) r.inverse.restoreLines.left.size = now;
+          return false;
+        });
+        if (!unsettled.length) return then();
+        setTimeout(function () { settleAll(then, tries + 1); }, ${SETTLE.ms});
       });
     }
     function wait(expect, then, tries) {
@@ -2059,27 +2764,67 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       });
     }
     function back(error) {
-      (function one() {
-        var inverse = undo.pop();
+      settleAll(function one() {
+        var inverse = undo.pop(), at = undoOps.pop();
         if (!inverse) return call(cell.save, {}, true, function () {
-          if (!broken && !asked) return done(job, error.op !== undefined ? { error: error, undone: true } : { error: error });
-          var said = broken ? " Not all of the call could be taken back (" + broken + ")." : " The ops before it are taken back, but the change the editor was asked for may still be made.";
-          done(job, { error: { code: "partial", op: error.op, message: String(error.message).replace(/\\.?$/, ".") + said }, ran: true });
+          if (!broken && !asked && !unreadable.length && !irreversible.length && !kept.length && !notBack.length) return done(job, error.op !== undefined ? { error: error, undone: true } : { error: error });
+          var said = broken ? " Not all of the call could be taken back (" + broken + ")." : asked ? " The ops before it are taken back, but the change the editor was asked for may still be made." : " The ops before it are taken back, but not all of them whole.";
+          // What stays of the call, and why.
+          if (unreadable.length) {
+            var groups = [];
+            unreadable.forEach(function (u) { var w = u.what.join(" and "), g = groups[groups.length - 1], at = u.where + " (op " + (u.op + 1) + ")"; if (g && g.w === w) g.at.push(at); else groups.push({ w: w, at: [at] }); });
+            said += " The editor cannot read back " + groups.map(function (g) { return "the " + g.w + " of " + (g.at.length > 1 ? g.at.slice(0, -1).join(", ") + " and " + g.at[g.at.length - 1] : g.at[0]); }).join("; ") + ", which stay as this call set them.";
+          }
+          if (irreversible.length) said += " Not taken back: " + irreversible.map(function (x) { return "the " + x.what + " of " + JSON.stringify(x.sheet) + " that op " + (x.op + 1) + " deleted"; }).join(", ") + ".";
+          if (notBack.length) said += " Not taken back either, as the rows or columns of their sheet moved after them for good: " + opsSaid(notBack) + ".";
+          if (kept.length) said += " Kept as a person changed them after this call: " + kept.map(function (k) { return k.what === "sheet" ? "the sheet " + JSON.stringify(k.sheet) + " this call made (a person wrote into it)" : (k.what === "frozen panes" ? "the frozen panes" : k.made ? "the " + k.what + " " + k.cells.join(", ") + " this call made (a person wrote into them)" : k.what === "cells" ? cellsSaid(k.cells) : "the " + k.what + (k.cells.length === 1 ? " " : "s ") + k.cells.join(", ")) + " of " + JSON.stringify(k.sheet); }).join("; ") + ".";
+          // The rows and columns that stay moved, for the answer to name the people in the workbook.
+          var stays = shifted.filter(function (s) { return !s.made || !dropped[shiftKey(s)]; });
+          done(job, { error: { code: "partial", op: error.op, message: String(error.message).replace(/\\.?$/, ".") + said, shifted: stays.length ? stays : undefined }, ran: true });
         });
         if (inverse.restoreSheet !== undefined && pending.indexOf(inverse.restoreSheet) !== -1) pending.splice(pending.indexOf(inverse.restoreSheet), 1);
+        // A sheet renamed back is the same sheet under its old name.
+        if (inverse.renameSheet !== undefined && moved[inverse.renameSheet]) moved[inverse.to] = moved[inverse.renameSheet];
+        // An inverse of cells that moved since: not run (see cellEdit). A line's size moves only with lines of its kind.
+        var lines = function (kind, from, count) { return kind === "rows" ? { c2: -1, r2: from + count - 1 } : { c2: from + count - 1, r2: -1 }; };
+        if (inverse.restoreCells !== undefined) {
+          var still = inverse.restoreCells.filter(function (c) { if (!stale(c.sheet, areaOf(c.range))) return true; notBack.push(c.index !== undefined ? c.index : at[0]); });
+          if (!still.length) return one();
+          inverse = { restoreCells: still, real: true };
+        } else if (inverse.restoreFormat ? stale(inverse.restoreFormat.sheet, areaOf(inverse.restoreFormat.format)) : inverse.restoreLines ? stale(inverse.restoreLines.sheet, lines(inverse.restoreLines.kind, inverse.restoreLines.from, inverse.restoreLines.count)) : inverse.dropLines !== undefined && stale(inverse.dropLines, lines(inverse.kind, inverse.from, inverse.count))) {
+          notBack = notBack.concat(at);
+          return one();
+        }
         call(cell.step, { op: inverse, index: -1, pending: pending }, true, function (out) {
           if (out.error) {
             if (!broken) broken = String(out.error.message || out.error.code || "an op to take back failed").replace(/^op 0: /, "");
             return one();
           }
           var r = out.result || {};
+          // Panes put back show a moment after: waited for before the next inverse reads them.
+          if (r.settle) return (function look(tries) {
+            call(cell.step, { op: { settle: inverse, real: true }, index: -1, pending: pending }, false, function (s) {
+              var f = s.result && s.result.frozen, shown = Boolean(f) && f.cols === r.settle.frozen.cols && f.rows === r.settle.frozen.rows;
+              if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { look(tries + 1); }, ${SETTLE.ms});
+              if (!shown) {
+                if (r.then) { if (!broken) broken = "the frozen panes of " + JSON.stringify(inverse.refreeze) + " could not be put back"; }
+                else asked = true;
+              } else if (r.then) { undo.push(r.then); undoOps.push(at); }
+              one();
+            });
+          })(0);
+          if (r.kept) {
+            kept = kept.concat(r.kept);
+            // Rows or columns this call made that stay (a person wrote into them) move the cells for the ops before.
+            if (inverse.dropLines !== undefined && [].concat(r.kept).some(function (k) { return k.made; })) move(inverse.dropLines, inverse.kind === "rows", inverse.from);
+          } else if (inverse.dropLines !== undefined) dropped[shiftKey({ sheet: inverse.dropLines, kind: inverse.kind, at: inverse.from, count: inverse.count })] = true;
           if (!r.expect) return one();
           wait(r.expect, function (made) {
             if (!made && !broken) broken = "the editor did not show the sheet " + JSON.stringify(subject(inverse)) + " taken back";
             one();
           });
         });
-      })();
+      });
     }
   }
   // A message in the editor's chat, as the agent: the plugin's own method, not a command (it changes no document).
@@ -2152,7 +2897,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
     })();
   }
   function run(job) {
-    if (job.kind === "cell.edit") return cellEdit(job);
+    if (job.kind === "cell.edit" || job.kind === "cell.format") return cellEdit(job);
     if ((job.kind === "word.reply" || job.kind === "cell.reply") && job.args && job.args.how === "method") return methodReply(job);
     if (job.kind === "chat.send") return chatSend(job);
     if (job.kind === "view.locate") return viewLocate(job);

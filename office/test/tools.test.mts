@@ -1244,7 +1244,8 @@ test("office_format: bad ops, a content op, a spreadsheet, Office stopped and a 
   const fmt = (id: string, ops: unknown) => tool(s, "office_format").execute("f", { id, ops });
   assert.match(await refused(fmt(doc.docId, [{ format: "a", set: { bolt: true } }])), /^error:bad_op op 1: set has "bolt"/);
   assert.match(await refused(fmt(doc.docId, [{ quote: "a", replacement: "b" }])), /^error:bad_op op 1: `quote` is an office_edit op/);
-  assert.match(await refused(fmt(sheet.docId, [{ format: "a", set: { bold: true } }])), /^error:unsupported_format office_format changes how Word documents look/);
+  assert.match(await refused(fmt(sheet.docId, [{ footnote: "a", text: "b" }])), /^error:unsupported_format op 1 is a Word op \(`footnote`\), and this is a spreadsheet/);
+  assert.match(await refused(fmt(doc.docId, [{ range: "A1", values: [[1]] }])), /^error:unsupported_format op 1 is a spreadsheet edit/);
   assert.match(await refused(tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ format: "a", set: { bold: true } }] })), /^error:bad_op op 1: `format` is an office_format op/);
   s.office.state = "stopped";
   assert.match(await refused(fmt(doc.docId, [{ pageBreak: true }])), /^error:office_stopped /);
@@ -1306,10 +1307,7 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
   // Without it, the read asks for none; a list item still says its list.
   s.seat.answer = (run) => (assert.deepEqual(run.args, {}), { blocks: [{ p: "first point", list: "bullet", level: 1 }] });
   assert.match(((await tool(s, "office_read").execute("r2", { id: doc.docId })) as ToolResult).content[0].text, /\n\[1\] \(bullet\) first point$/);
-  // A spreadsheet's and a saved file's formatting are not read, and the read says so.
-  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
-  s.seat.answer = undefined;
-  assert.match(((await tool(s, "office_read").execute("r3", { id: sheet.docId, formatting: true })) as ToolResult).content[0].text, /a spreadsheet's formatting is not read yet: office_screenshot shows it\)$/);
+  // A saved file's formatting is not read, and the read says so.
   s.office.state = "stopped";
   assert.match(((await tool(s, "office_read").execute("r4", { id: doc.docId, formatting: true })) as ToolResult).content[0].text, /formatting is read from the editor only, and this is the saved file\)$/);
   assert.match(await refused(tool(s, "office_read").execute("r5", { id: doc.docId, formatting: "yes" })), /^error:bad_op formatting is true or false/);
@@ -1386,4 +1384,97 @@ test("office_read with formatting: past the most a read gives of it, the read sa
   const doc = await createDoc({ title: "Long", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ blocks: [{ p: "a" }, { p: "b" }], format: { styles: [], sections: [], footnotes: [] }, formatCut: 2 });
   assert.match(((await tool(s, "office_read").execute("r", { id: doc.docId, formatting: true })) as ToolResult).content[0].text, /\(formatting is shown up to \[2\]: a read gives 50,000 characters of it at most; office_screenshot shows the pages after it\)$/);
+});
+
+/* ------------------------------------------------------------------ */
+/* spreadsheets: office_format, rows and columns (#13 PR 3)            */
+/* ------------------------------------------------------------------ */
+
+test("office_format (spreadsheet): the ops go to the agent's editor as one cell.format job, and the audit names their kinds", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  const ok = (await tool(s, "office_format").execute("f1", { id: sheet.docId, ops: [{ format: "A1:B1", set: { bold: true, fill: "#1F4E79" } }, { columns: "A", width: 18 }, { freeze: "A2" }] })) as ToolResult;
+  const to = getDoc(sheet.docId, s.root)!.mtimeMs;
+  assert.equal(ok.content[0].text, `Formatted "Book" (3 ops), saved as revision ${to}.`);
+  assert.deepEqual(s.seat.runs.map((r) => [r.mode, r.kind, r.args, r.timeoutMs]), [["edit", "cell.format", { ops: [{ format: "A1:B1", area: { col: 0, row: 0, cols: 2, rows: 1 }, looks: { bold: true, fill: { r: 31, g: 78, b: 121 } } }, { columns: "A:A", from: 0, count: 1, width: 18 }, { freeze: "A2", cols: 0, rows: 1 }] }, 20_000 + 4 * 3_000]], "a freeze waits for its panes, up to twice and as often again where it is taken back");
+  assert.match(s.seen.records.at(-1)!.reason, /^office_format: 3 op\(s\) \(cells, columns, freeze\) on /);
+  // Eleven autofits (a model fitting columns one by one): one wait for their run and one where they are taken back,
+  // within the edit's two minutes; cells alone keep the seat's own time.
+  await tool(s, "office_format").execute("f3", { id: sheet.docId, ops: "BCDEFGHIJKL".split("").map((c) => ({ columns: c, autofit: true })) });
+  assert.equal(s.seat.runs.at(-1)!.timeoutMs, 20_000 + 12 * 3_000);
+  await tool(s, "office_format").execute("f4", { id: sheet.docId, ops: [{ format: "A1", set: { bold: true } }] });
+  assert.equal(s.seat.runs.at(-1)!.timeoutMs, undefined);
+  // A call the editor took back but not whole (what it cannot read back stays) is partial, and in the audit log.
+  s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: x. The ops before it are taken back, but not all of them whole. The editor cannot read back the alignment of "Sheet1"!A1:B1 (op 1), which stay as this call set them.', 1, true));
+  assert.match(await refused(tool(s, "office_format").execute("f2", { id: sheet.docId, ops: [{ format: "A1:B1", set: { align: "center" } }, { format: "A5", set: { subscript: true } }] })), /^error:partial op 2: x\. .*cannot read back the alignment .* Part of this call may be in the document: read it with office_read before you go on/);
+  assert.match(s.seen.records.at(-1)!.reason, /failed, and not taken back whole \(partial\)$/);
+});
+
+test("office_edit (spreadsheet): rows and columns made and taken away go in the job, are no sheet ops, and while people are in the workbook the answer names them and what moved", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  const t = tool(s, "office_edit");
+  const ops = [{ insertRows: "5:6" }, { sheet: "Data", insertColumns: "C" }, { deleteRows: "9" }];
+  s.seat.answer = () => ({ ops: 3, cells: 0, shifted: [{ sheet: "Sheet1", kind: "rows", at: 4, count: 2, made: true }, { sheet: "Data", kind: "columns", at: 2, count: 1, made: true }, { sheet: "Sheet1", kind: "rows", at: 8, count: 1, made: false }] });
+  const alone = (await t.execute("e1", { id: sheet.docId, ops })) as ToolResult;
+  assert.match(alone.content[0].text, /^Edited "Book" \(3 ops\), saved as revision [\d.]+\.$/, "nobody in it: nothing said of the moves");
+  assert.deepEqual(s.seat.runs[0].args, { ops: [{ insertRows: "5:6", from: 4, count: 2 }, { sheet: "Data", insertColumns: "C:C", from: 2, count: 1 }, { deleteRows: "9:9", from: 8, count: 1 }] });
+  assert.equal(s.seat.runs[0].timeoutMs, undefined, "no wait for the Document Server");
+  assert.match(s.seen.records.at(-1)!.reason, /office_edit: 3 op\(s\) \(rows and columns\) on /);
+  setUser(sheet.docId, { id: "u1", name: "Ann" }, true, { confirmed: true });
+  setUser(sheet.docId, { id: "u2", name: "Bob" }, true, { confirmed: true });
+  const watched = (await t.execute("e2", { id: sheet.docId, ops })) as ToolResult;
+  assert.match(watched.content[0].text, / 2 people in the document saw it live\. Ann and Bob are in this workbook, and its cells moved: rows 5:6 of "Sheet1" inserted \(the rows below them moved down\); column C of "Data" inserted \(the columns right of it moved right\); row 9 of "Sheet1" deleted \(the rows below it moved up\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\.$/);
+  // A delete before an op that can be taken back is refused before anything is sent.
+  assert.match(await refused(t.execute("e3", { id: sheet.docId, ops: [{ deleteColumns: "B" }, { range: "A1", values: [[1]] }] })), /^error:bad_op op 1 cannot be taken back once made \(deleted columns\)/);
+  assert.equal(s.seat.runs.length, 2);
+  // A call that failed after its delete was made leaves the rows moved: the people in the workbook are named there too.
+  s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: the editor did not delete the sheet "Old" within 10 s. The ops before it are taken back, but the change the editor was asked for may still be made. Not taken back: the rows 9:9 of "Sheet1" that op 3 deleted.', 1, true, [{ sheet: "Sheet1", kind: "rows", at: 8, count: 1, made: false }]));
+  assert.match(await refused(t.execute("e4", { id: sheet.docId, ops: [{ range: "A1", values: [[1]] }, { deleteSheet: "Old" }, { deleteRows: "9" }] })), /^error:partial op 2: .* that op 3 deleted\. Ann and Bob are in this workbook, and its cells moved: row 9 of "Sheet1" deleted \(the rows below it moved up\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\. Part of this call may be in the document/);
+});
+
+test("office_read with formatting (spreadsheet): each sheet's cells, then how they look: the usual font, the formats by range, merged cells, own column widths and row heights, hidden ones, frozen panes; alignment and borders said to be unread", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.answer = (run) => {
+    assert.deepEqual([run.kind, run.args], ["cell.read", { sheet: "Data", formatting: true }]);
+    return {
+      book: [{ name: "Data", hidden: false }],
+      sheets: [{
+        name: "Data",
+        range: "A1:D11",
+        cells: [{ a: "A1", v: "Region" }],
+        truncated: false,
+        look: {
+          font: { name: "Calibri", size: 11 },
+          formats: [
+            { look: { font: "Arial", size: 12, bold: true, color: "#FFFFFF", fill: "#1F4E79" }, ranges: ["A5:D5"] },
+            { look: { numberFormat: '#,##0.00 "€"' }, ranges: ["B6:C9", "B11"] },
+            { look: { italic: true, strike: true, underline: "double", vertAlign: "superscript", wrap: true, rotation: 90 }, ranges: ["A10"] },
+            { look: { rotation: 255 }, ranges: ["A11"] },
+          ],
+          merged: ["A3:D3"],
+          cols: { usual: 8.43, own: [[0, 18], [1, 14], [3, 0, true], [4, 0, true]] },
+          rows: { usual: 15, own: [[0, 30], [4, 15, true], [5, 15, true], [6, 15, true], [10, 40], [11, null]] },
+          frozen: { cols: 1, rows: 5 },
+          cut: true,
+        },
+      }],
+    };
+  };
+  const read = ((await tool(s, "office_read").execute("r1", { id: sheet.docId, sheet: "Data", formatting: true })) as ToolResult).content[0].text;
+  assert.equal(read.split("\n\n").slice(2).join("\n\n"), [
+    'Sheet "Data" (A1:D11):',
+    'A1: "Region"',
+    "Formatting: font Calibri 11 where no other is said; alignment and borders are not read (office_screenshot shows them).",
+    'Formats: A5:D5 Arial 12, bold, #FFFFFF, fill #1F4E79; B6:C9, B11 "#,##0.00 \\"€\\""; A10 italic, strike, underline double, superscript, wrap, rotated 90°; A11 vertical.',
+    "Merged: A3:D3.",
+    "Columns: A 18, B 14, D-E hidden (others 8.43).",
+    "Rows: 1 30pt, 5-7 hidden, 11 40pt, 12 as the sheet's (others 15pt).",
+    "Frozen: rows 1-5 and column A.",
+    "(its formatting is cut here: a read gives 50,000 characters of it at most; read one sheet with sheet, or look with office_screenshot)",
+  ].join("\n"));
+  // Without formatting nothing of it is asked for.
+  s.seat.answer = (run) => (assert.deepEqual(run.args, {}), { book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [], truncated: false }] });
+  assert.doesNotMatch(((await tool(s, "office_read").execute("r2", { id: sheet.docId })) as ToolResult).content[0].text, /Formatting/);
 });

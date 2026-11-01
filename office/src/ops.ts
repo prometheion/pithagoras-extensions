@@ -585,7 +585,8 @@ const lengthOf = (set: Record<string, unknown>, key: string, bad: Bad, min = 0) 
   return v;
 };
 
-function textSet(set: Record<string, unknown>, bad: Bad, keys: string[]): { text?: TextSet } {
+/** The text keys of `set` among `keys`; a size in points up to `maxSize` (Word's 1638, a sheet's 409). */
+function textSet(set: Record<string, unknown>, bad: Bad, keys: string[], maxSize = 1638): { text?: TextSet } {
   const out: TextSet = {};
   const has = (k: string) => keys.includes(k) && set[k] !== undefined;
   if (has("font")) {
@@ -594,7 +595,7 @@ function textSet(set: Record<string, unknown>, bad: Bad, keys: string[]): { text
   }
   if (has("fontSize")) {
     const v = set.fontSize;
-    if (typeof v !== "number" || !Number.isFinite(v) || v < 1 || v > 1638) throw bad("set.fontSize is the size in points, from 1 to 1638 (halves too: 10.5)");
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 1 || v > maxSize) throw bad(`set.fontSize is the size in points, from 1 to ${maxSize} (halves too: 10.5)`);
     out.size = Math.round(v * 2);
   }
   for (const k of ["bold", "italic", "underline", "strike"] as const) if (has(k)) out[k] = bool(set, k, bad);
@@ -998,12 +999,9 @@ function sheetLooks(set: Record<string, unknown>, bad: Bad): SheetLooks {
     out.numberFormat = set.numberFormat;
   }
   // The text keys as Word's (textSet), in the sheet's units: points, not half-points.
-  const text = textSet(set, bad, ["font", "fontSize", "bold", "italic", "underline", "strike", "superscript", "subscript"]).text ?? {};
+  const text = textSet(set, bad, ["font", "fontSize", "bold", "italic", "underline", "strike", "superscript", "subscript"], 409).text ?? {};
   if (text.font) out.font = text.font;
-  if (text.size !== undefined) {
-    if (text.size > 409 * 2) throw bad("set.fontSize is the size in points, from 1 to 409");
-    out.size = text.size / 2;
-  }
+  if (text.size !== undefined) out.size = text.size / 2;
   for (const k of ["bold", "italic", "underline", "strike"] as const) if (text[k] !== undefined) out[k] = text[k];
   if (text.vertAlign) out.vertAlign = text.vertAlign;
   if (set.color !== undefined) {

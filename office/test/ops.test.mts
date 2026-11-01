@@ -486,7 +486,8 @@ test("office_format (spreadsheet): what does not hold is refused before anything
   no([{ format: "A1", set: { font: { bold: true } } }], /set.font is a font's name/);
   no([{ format: "A1", set: { text: { bold: true } } }], /set is flat/);
   no([{ format: "A1", set: { numberFormat: "" } }], /set.numberFormat is a number format as Excel writes it/);
-  no([{ format: "A1", set: { fontSize: 500 } }], /from 1 to 409/);
+  // One bound for every size a sheet does not take, the sheet's: below 1 too, not Word's 1638.
+  for (const fontSize of [500, 0.4, 2000]) no([{ format: "A1", set: { fontSize } }], /set\.fontSize is the size in points, from 1 to 409 \(halves too: 10\.5\)$/);
   no([{ format: "A1", set: { color: "auto" } }], /set.color is "#RRGGBB"$/);
   no([{ format: "A1", set: { fill: "red" } }], /set.fill is "#RRGGBB" or "none"/);
   no([{ format: "A1", set: { align: "general" } }], /set.align is left, center, right, justify \(the editor's API sets no "general" back: clear: true/);

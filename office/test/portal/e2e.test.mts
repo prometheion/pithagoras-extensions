@@ -1346,11 +1346,35 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.deepEqual(first.listed, first.laid);
     const planWas = first.laid[1][1];
 
+    // A person comments on the entry "Planning ahead" in their editor (the editor's own call, on the entry's text
+    // selected); the update makes the entries anew, and the comment goes on on the new entry.
+    const person = await personOpens(doc);
+    const note = "Please give this section a shorter name";
+    // The editor's own methods (those a plugin reaches): from the start, the first "Planning ahead" is the entry.
+    const put = await person.frame.evaluate(`(function () {
+      var e = window.Asc.editor;
+      e.pluginMethod_MoveCursorToStart(false);
+      e.pluginMethod_SearchNext({ searchString: "Planning ahead", matchCase: true }, true);
+      if (e.pluginMethod_GetSelectedText() !== "Planning ahead") return "selected " + JSON.stringify(e.pluginMethod_GetSelectedText());
+      e.pluginMethod_AddComment({ UserName: "Ann Example", Text: ${JSON.stringify(note)}, Time: String(Date.now()), Solved: false });
+      return "put";
+    })()`);
+    assert.equal(put, "put");
+    const threads = async () => (await tools.office_comments.execute(`t-c-${Math.random()}`, { id: doc })).content[0].text;
+    assert.ok(await until(async () => (await threads()).includes(note), 20_000), "the agent's editor has the person's comment");
+    console.log(`24. the threads before the edit: ${await threads()}; the person's: ${JSON.stringify(await person.frame.evaluate(`(function () { return window.Asc.editor.pluginMethod_GetAllComments(); })()`))}`);
+    const personComments = () => person.frame.evaluate(`(function () { return (window.Asc.editor.pluginMethod_GetAllComments() || []).map(function (c) { return c.Data.QuoteText + " | " + c.Data.Text; }); })()`) as Promise<string[]>;
+
     // A heading added, and text after it that pushes "Planning ahead" onto a later page.
     const filler = Array.from({ length: 45 }, (_, n) => `Risk line ${n + 1}.`);
     const edited = (await tools.office_edit.execute("t2", { id: doc, ops: [{ after: "First words.", paragraphs: ["Risks"], style: "Heading 1" }, { after: "Risks", paragraphs: filler }] })).content[0].text;
     console.log(`24. office_edit: ${edited}`);
-    assert.match(edited, /saved as revision [\d.]+\. Updated the table of contents\.$/);
+    assert.match(edited, /saved as revision [\d.]+\.( 1 person in the document saw it live\.)? Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+    const after = await threads();
+    console.log(`24. the threads after the edit: ${after}; the person's: ${JSON.stringify(await person.frame.evaluate(`(function () { return window.Asc.editor.pluginMethod_GetAllComments(); })()`))}`);
+    // On the entry's text itself: on the search's hit in the entry's link, the editor took it one character in.
+    assert.ok(after.includes(note) && after.includes('on: "Planning ahead"'), after);
+    assert.ok(await until(async () => (await personComments()).some((c) => c.startsWith("Planning ahead") && c.endsWith(note)), 10_000), `the person's editor: ${JSON.stringify(await personComments())}`);
     const second = await entries("after the edit");
     assert.deepEqual(second.listed.map((e) => e[0]), ["Overview", "Risks", "Planning ahead", "Wide part", "Appendix"]);
     assert.deepEqual(second.listed, second.laid);
@@ -1368,10 +1392,52 @@ async function run(PITHAGORAS: string): Promise<void> {
 
     // office_format: a heading made body text leaves the TOC.
     const formatted = (await tools.office_format.execute("t3", { id: doc, ops: [{ format: "Risks", set: { style: "Normal" } }] })).content[0].text;
-    assert.match(formatted, /Updated the table of contents\.$/);
+    assert.match(formatted, /Updated the table of contents( \(1 comment on its entries was moved onto the new entries\))?\.$/);
     const third = await entries("after the format");
     assert.deepEqual(third.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
     assert.deepEqual(third.listed, third.laid);
+    assert.ok((await threads()).includes(note), "the comment is still there");
+
+    // A call that changed nothing (the style each heading has already) brings nothing up to date.
+    const same = (await tools.office_format.execute("t4", { id: doc, ops: [{ format: "Overview", set: { style: "Heading 1" } }] })).content[0].text;
+    console.log(`24. a format that changed nothing: ${same}`);
+    assert.doesNotMatch(same, /table of contents/);
+    assert.deepEqual((await entries("after nothing changed")).listed, third.listed);
+    await person.page.context().close();
+  });
+
+  test("25. how long a table of contents takes in the real editor on a document of about 340 pages: made, then brought up to date after a heading added at the start; both within the time a Word call of that size has", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Long report", "word");
+    const line = "This paragraph of body text runs over about three lines on a page so that the document gets long, with words and more words to fill the width of the page many times over and again";
+    // 400 sections of a heading and 24 paragraphs, in four calls (an op of each, 200 ops a call).
+    for (let part = 0; part < 4; part++) {
+      const ops = Array.from({ length: 100 }, (_, k) => {
+        const n = part * 100 + k + 1;
+        return [{ paragraphs: [`Section ${n}`], style: "Heading 1" }, { paragraphs: Array.from({ length: 24 }, (_, m) => `${line} ${n}.${m + 1}.`) }];
+      }).flat();
+      const t0 = Date.now();
+      await tools.office_edit.execute(`l-${part}`, { id: doc, ops });
+      console.log(`25. part ${part + 1} of the text: ${Date.now() - t0} ms`);
+    }
+    const bytes = readFileSync(await fileOf(doc)).length;
+    let t0 = Date.now();
+    const made = (await tools.office_format.execute("l-toc", { id: doc, ops: [{ toc: true, levels: 1 }] })).content[0].text;
+    const madeMs = Date.now() - t0;
+    t0 = Date.now();
+    const edited = (await tools.office_edit.execute("l-edit", { id: doc, ops: [{ after: "Section 1", nth: 1, paragraphs: ["Summary first"], style: "Heading 1" }] })).content[0].text;
+    const editMs = Date.now() - t0;
+    const shot = await shoot("25. the last heading", { id: doc, quote: "Section 400" });
+    const read = (await tools.office_read.execute("l-read", { id: doc })).content[0].text;
+    const listed = [...read.matchAll(/^\[\d+\] \(toc 1\) (.+)\t(\d+)$/gm)].map((m) => [m[1], Number(m[2])] as [string, number]);
+    console.log(`25. ${bytes} bytes, ${shot.out.details.pages} pages: the toc op ${madeMs} ms, the update after an edit ${editMs} ms (${edited}); ${listed.length} entries, the last ${JSON.stringify(listed.at(-1))}`);
+    assert.match(edited, /Updated the table of contents\.$/);
+    assert.ok(made.startsWith("Formatted"), made);
+    assert.equal(listed.length, 401);
+    // The entries' page numbers are the pages the editor lays the headings out on (the TOC itself takes ten pages).
+    const heading = await shoot("25. the new heading", { id: doc, quote: "Summary first" });
+    console.log(`25. the new heading's shot: ${heading.text.split("\n").slice(0, 4).join(" / ").slice(0, 600)}`);
+    assert.deepEqual(listed[1], ["Summary first", heading.out.details.page]);
+    assert.deepEqual(listed.at(-1), ["Section 400", shot.out.details.page]);
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

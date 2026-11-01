@@ -296,9 +296,11 @@ const MAX_EDIT_MS = 120_000;
 
 /** What a Word edit or format may add to the time it takes in the agent's editor, per 100 kB of the document's file:
  * each brings a table of contents up to date (seat-page.ts, WORD_TOC_SRC), and each update lays the whole document
- * out (measured in the Document Server's builder, 600 pages of text in a file of 140 kB: about 6 s an update, 9 s the
- * first; the toc op's own AddField 4 s more). MAX_EDIT_MS at most in all. */
-const WORD_LAYOUT_MS = 20_000;
+ * out. Measured in the real editor (e2e 25), 343 pages of text in a file of 129 kB: 16.7 s for an edit with its
+ * update, 16.3 s for the toc op, so about 13 s per 100 kB; the Document Server's builder is about three times faster
+ * (600 pages, 140 kB: 6 s). A call cut off by its time is one of unknown outcome, so this leaves room for a busy
+ * machine. MAX_EDIT_MS at most in all. */
+const WORD_LAYOUT_MS = 30_000;
 
 /** Of what pi hands a tool's execute last (its ExtensionContext), what office_screenshot reads: the chat's model, and
  * whether it takes pictures (`input`). */

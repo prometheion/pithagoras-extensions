@@ -669,8 +669,8 @@ test("office_edit and office_format of Word have time by the size of the documen
     return s.seat.runs.slice(-2).map((r) => r.timeoutMs);
   };
   // 20 s a job, and 20 s for each 100 kB: 600 pages of text are about 140 kB.
-  assert.deepEqual(await sized(140_000), [48_000, 48_000]);
-  assert.deepEqual(await sized(10_000), [22_000, 22_000]);
+  assert.deepEqual(await sized(140_000), [62_000, 62_000]);
+  assert.deepEqual(await sized(10_000), [23_000, 23_000]);
   assert.deepEqual(await sized(5_000_000), [120_000, 120_000]);
 });
 

@@ -1056,6 +1056,9 @@ function scriptedWord(spec: {
   comments?: { at: number; on: string; text: string }[];
   /** The entries are no TOC's (one made into text): UpdateAllTOC leaves them as they are. */
   flatToc?: boolean;
+  /** The entries are links (\\h, as the editor and Word make them): a link of runs, the heading's text, the tab and the
+   * page number; a search hit there takes a comment one character in, the text's run on the text. */
+  tocLinks?: boolean;
   /** Every op sets what is set already: the JSON of paragraphs, tables, styles and sections stays as it was. */
   same?: boolean;
 }) {
@@ -1100,7 +1103,9 @@ function scriptedWord(spec: {
     const label = `para(${p.text})`;
     const list = p.list ? numbering(p.list.num ?? p.list.kind, p.list.kind) : null;
     const link = p.link ? rec(`link(${p.link})`, { GetClassType: () => "hyperlink", GetRange: () => ({ __label: `link range`, GetText: () => p.linkText ?? p.text }), GetElementsCount: () => 1, GetElement: () => rec(`run(${p.link})`, { GetClassType: () => "run", GetTextPr: () => ({ GetStyle: () => styles.Hyperlink }) }) }) : null;
-    const elements = link ? [rec(`run(before ${p.text})`, { GetClassType: () => "run", GetRange: () => ({}), GetTextPr: () => ({ GetStyle: () => null }) }), link] : [];
+    const entryRuns = () => ["", ...now(i).split("\t").flatMap((t, k) => (k ? ["\t", t] : [t]))].map((t) => rec(`run(${t})`, { GetClassType: () => "run", GetText: () => t, GetRange: () => rec(`run(${t})'s range`, { GetText: () => t, AddComment: addComment(`its run ${t} in ${now(i)}`) }) }));
+    const entry = spec.tocLinks && p.style === "toc 1" ? rec(`entry link(${p.text})`, { GetClassType: () => "hyperlink", GetElementsCount: () => entryRuns().length, GetElement: (k: number) => entryRuns()[k] }) : null;
+    const elements = link ? [rec(`run(before ${p.text})`, { GetClassType: () => "run", GetRange: () => ({}), GetTextPr: () => ({ GetStyle: () => null }) }), link] : entry ? [entry] : [];
     const para = rec(label, {
       GetClassType: () => "paragraph",
       GetText: (o?: { Numbering?: boolean }) => `${p.list && o?.Numbering !== false ? "·\t" : ""}${now(i)}\r\n`,
@@ -1426,12 +1431,15 @@ test("a comment a person put on a table of contents' entry goes with the old ent
   const doc = () => scriptedWord({
     paras: [{ text: "Overview\t1", style: "toc 1" }, { text: "Risks\t2", style: "toc 1" }, { text: "Overview", style: "Heading 1" }, { text: "Body text" }, { text: "Risks", style: "Heading 1" }],
     comments: [{ at: 0, on: "Overview", text: "@Aegis rename this section to Summary" }, { at: 3, on: "Body text", text: "Too long" }],
+    tocLinks: true,
   });
   const edit = doc();
   const out = edit.edit([{ quote: "Body", replacement: "Main" }]);
   assert.deepEqual(out.result, { ops: 1, moved: [["00000100", "00007000"]], toc: true, tocMoved: 1 });
-  // On the new entry that holds its text (the quote as it was before the update, not the editor's shifted piece after).
-  assert.deepEqual(edit.madeComments.map((m) => [m.on, m.api.GetText(), m.api.GetAuthorName(), m.api.GetUserId(), m.api.added]), [["Overview in Overview\t1", "@Aegis rename this section to Summary", "Portal", "portal-user", [["Agreed", "Ann", "u-ann"]]]]);
+  // On the new entry that holds its text (the quote as it was before the update, not the editor's shifted piece after),
+  // on the run of its text in the entry's link: on the search's hit there, the editor took it one character in (e2e 24:
+  // "lanning ahead" for "Planning ahead"), and one more each time it was made again so.
+  assert.deepEqual(edit.madeComments.map((m) => [m.on, m.api.GetText(), m.api.GetAuthorName(), m.api.GetUserId(), m.api.added]), [["its run Overview in Overview\t1", "@Aegis rename this section to Summary", "Portal", "portal-user", [["Agreed", "Ann", "u-ann"]]]]);
   assert.ok(edit.calls.includes("made comment.SetTimeUTC(1793108364144)"), edit.calls.join("\n"));
   const format = doc();
   assert.deepEqual(format.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1, toc: true, moved: [["00000100", "00007000"]], tocMoved: 1 });
@@ -1440,6 +1448,9 @@ test("a comment a person put on a table of contents' entry goes with the old ent
   const renamed = scriptedWord({ paras: [{ text: "Intro\t1", style: "toc 1" }, { text: "Overview\t1", renamed: "Summary\t1", style: "toc 1" }, { text: "Intro", style: "Heading 1" }, { text: "Overview", style: "Heading 1" }], comments: [{ at: 1, on: "Overview", text: "rename" }] });
   assert.equal(renamed.edit([{ quote: "Overview", replacement: "Summary" }]).result.tocMoved, 1);
   assert.deepEqual(renamed.madeComments.map((m) => m.on), ["Summary in Summary\t1"]);
+  const renamedLink = scriptedWord({ paras: [{ text: "Intro\t1", style: "toc 1" }, { text: "Overview\t1", renamed: "Summary\t1", style: "toc 1" }, { text: "Intro", style: "Heading 1" }, { text: "Overview", style: "Heading 1" }], comments: [{ at: 1, on: "Overview", text: "rename" }], tocLinks: true });
+  renamedLink.edit([{ quote: "Overview", replacement: "Summary" }]);
+  assert.deepEqual(renamedLink.madeComments.map((m) => m.on), ["its run Summary in Summary\t1"]);
 });
 
 test("an office_format call that changed nothing (each op sets what is set already; the editor parts a run at the quote's ends all the same, into runs of one look) brings no table of contents up to date, and says it changed nothing; one that changed something does", () => {

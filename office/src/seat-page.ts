@@ -201,7 +201,7 @@ function pick(doc, quote, nth, i, what) {
  * Undo of a failed call still takes back exactly that call. What DS 10.0 does that it relies on (probed with its
  * docbuilder, and e2e 24):
  * - `UpdateAllTOC(false)` makes every TOC's entries again from the headings (new paragraphs), `UpdateAllTOC(true)` only
- *   their page numbers; each lays the whole document out first (about 6 s for 600 pages in docbuilder). With no TOC in
+ *   their page numbers; each lays the whole document out first (about 6 s for 600 pages in docbuilder, 17 s for 340 in the editor: e2e 25). With no TOC in
  *   the document either does nothing, and so do paragraphs styled as entries that are no TOC's (one made into text).
  * - An entry's right tab (the dot leader and the page number) is taken from the TOC's entries as they are, a new level's
  *   too, and only where it has none yet (just made, or none found before) from the width of the document's last section,
@@ -260,9 +260,23 @@ function asLast(doc, p) {
     fin.SetPageMargins(back.left, back.top, back.right, back.bottom);
   };
 }
-// An entry's heading text (before its tab and page number) as a range, found by the editor's search in that entry;
-// the whole paragraph where it is not found so.
+// An entry's heading text (before its tab and page number) as a range: in an entry that is a link (\\h, as the editor
+// and Word make them) the link's runs before the tab, else the editor's search hit in that entry, else the whole
+// paragraph. A search hit in a link takes a comment one character in (its quote "lanning ahead" for "Planning ahead",
+// in the builder and the editor, and one more each time it is made again so), its runs' ranges on the text itself.
 function entryText(doc, p) {
+  for (var i = 0; i < p.GetElementsCount(); i++) {
+    var el = p.GetElement(i), first = null, last = null;
+    if (!el || !el.GetClassType || el.GetClassType() !== "hyperlink") continue;
+    for (var k = 0; k < el.GetElementsCount(); k++) {
+      var r = el.GetElement(k);
+      if (!r || r.GetClassType() !== "run") continue;
+      var rt = String(r.GetText() || "");
+      if (rt.indexOf("\\t") !== -1) break;
+      if (rt) { if (!first) first = r; last = r; }
+    }
+    if (first) return first === last ? first.GetRange() : first.GetRange().ExpandTo(last.GetRange());
+  }
   var t = textOf(p).split("\\t")[0], hits = t ? doc.Search(t, true) || [] : [];
   for (var h = 0; h < hits.length; h++) { var hp = hits[h].GetAllParagraphs()[0]; if (hp && hp.GetInternalId() === p.GetInternalId()) return hits[h]; }
   return p.GetRange();
@@ -305,7 +319,7 @@ function freshToc(doc, made, swapped, moved, last) {
     var d = held[id].d, target = null, q = d.quote;
     if (q) {
       var hits = doc.Search(q, true) || [];
-      for (var h = 0; h < hits.length && !target; h++) { var hp = hits[h].GetAllParagraphs()[0]; if (hp && isToc(hp)) target = hits[h]; }
+      for (var h = 0; h < hits.length && !target; h++) { var hp = hits[h].GetAllParagraphs()[0]; if (hp && isToc(hp)) target = entryText(doc, hp); }
       for (var k = 0; k < was.length && !target; k++) if (was[k].text.indexOf(q) !== -1 && now.length) target = entryText(doc, now[Math.min(k, now.length - 1)].p);
     }
     if (!target) { var first = now.length ? now[0].p : (tocsOf(doc)[0] || {}).p; target = first ? entryText(doc, first) : null; }

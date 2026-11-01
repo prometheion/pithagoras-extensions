@@ -115,6 +115,7 @@ const call = (name: string, details: Record<string, unknown>) => ({ name, status
 const EDIT = call("office_edit", { action: "edit", id: "d2", title: "Budget", ext: "xlsx", from: 1, to: 2, ops: 1 });
 const LIST = call("office_list", { action: "list", documents: [{}, {}] });
 const PAGE_SHOT = call("office_screenshot", { action: "screenshot", id: "d1", page: 3, pages: 8, width: 724, height: 1024, bytes: 90_000 });
+const FORMAT = call("office_format", { action: "format", id: "d1", from: 3, to: 4, ops: 5 });
 const RANGE_SHOT = call("office_screenshot", { action: "screenshot", id: "d2", sheet: "Data", range: "A1:H30", zoom: 100, width: 600, height: 500, bytes: 50_000 });
 
 test("a row of the chat's Office panel opens its document in the panel, beside the chat, never the Office tab; back is the list again; a control opens it in the tab", async () => {
@@ -171,6 +172,15 @@ test("office_screenshot's card says which page or range it looked at, and opens 
   await cards.nth(1).click();
   await editorOf(page, "key-d2");
   assert.deepEqual((await seen(page)).opens, [["office", { doc: "d2" }]]);
+  await page.context().close();
+});
+
+test("office_format's card says it formatted the document, the revisions and the ops, and opens that document in the panel", async () => {
+  const page = await chatPage([FORMAT]);
+  assert.match(await page.locator("#conversation").innerText(), /Formatted a document\s+Plan\s+Plan\.docx · Revision 3 to 4 · 5 edits/);
+  await page.locator("#conversation").getByRole("button", { name: "Open in Office" }).click();
+  await editorOf(page, "key-d1");
+  assert.deepEqual((await seen(page)).opens, [["office", { doc: "d1" }]]);
   await page.context().close();
 });
 

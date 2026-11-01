@@ -292,6 +292,27 @@ test("a plugin that stopped polling is taken for dead and its editor opened agai
   }
 });
 
+test("a job given more time (a Word call of a long document) is no dead plugin while it runs: a call behind it waits for it, and one in another mode waits its time before the editor opens anew", async () => {
+  const s = await setup(async (job) => {
+    if (job.kind === "long") await delay(4500);
+    return { done: job.kind };
+  });
+  try {
+    await run("/homes/a", "doc-1", "edit", { kind: "word.read", args: {} });
+    // Longer than the plugin's dead time (600 ms), and than a job's time and its send (1.5 s + 1.5 s).
+    const long = run("/homes/a", "doc-1", "edit", { kind: "long", args: {} }, { timeoutMs: 6000 });
+    await delay(800);
+    const behind = run("/homes/a", "doc-1", "edit", { kind: "next", args: {} });
+    const view = run("/homes/a", "doc-1", "view", { kind: "word.read", args: {} });
+    assert.deepEqual(await long, { done: "long" });
+    assert.deepEqual(await behind, { done: "next" });
+    assert.deepEqual(await view, { done: "word.read" });
+    assert.equal(s.b.opened.length, 2, "opened anew in view mode only");
+  } finally {
+    await s.done();
+  }
+});
+
 test("an editor whose plugin never polls is error:editor_not_ready, and closed", async () => {
   const s = await setup();
   try {
@@ -422,12 +443,13 @@ test("an edit whose changes the editor does not send in time is error:editor_not
   }
 });
 
-test("a view-mode editor is never handed an edit: error:read_only before its plugin is asked", async () => {
+test("a view-mode editor is never handed an edit or a format: error:read_only before its plugin is asked", async () => {
   const handed: string[] = [];
   const s = await setup((job) => handed.push(job.kind));
   try {
     await run("/homes/a", "doc-1", "view", { kind: "word.read", args: {} });
     await assert.rejects(run("/homes/a", "doc-1", "view", { kind: "word.edit", args: {} }), code("read_only"));
+    await assert.rejects(run("/homes/a", "doc-1", "view", { kind: "word.format", args: {} }), code("read_only"));
     assert.deepEqual(handed, ["word.read"]);
   } finally {
     await s.done();
@@ -682,6 +704,7 @@ test("a comment-only editor is handed a reply and never an edit; a view-mode edi
     assert.ok(Date.now() - started >= 290, "waited for the sent reply");
     assert.ok(s.calls.includes("mint /homes/a doc-1 comment"), "minted for comments only");
     await assert.rejects(run("/homes/a", "doc-1", "comment", { kind: "word.edit", args: {} }), code("read_only"));
+    await assert.rejects(run("/homes/a", "doc-1", "comment", { kind: "word.format", args: {} }), code("read_only"));
     await assert.rejects(run("/homes/a", "doc-2", "view", { kind: "cell.reply", args: {} }), code("read_only"));
     assert.deepEqual(handed, ["word.reply"]);
   } finally {

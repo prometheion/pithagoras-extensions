@@ -26,6 +26,8 @@ export const de: Record<string, string | Plural> = {
   "Editing an office document": "Ein Office-Dokument bearbeiten",
   "Export a fresh copy": "Eine frische Kopie exportieren",
   "Failed": "Fehlgeschlagen",
+  "Formatted a document": "Ein Dokument formatiert",
+  "Formatting an office document": "Ein Office-Dokument formatieren",
   "Image tag (pinned)": "Image-Tag (festgelegt)",
   "Its file is gone; it stays listed for a week, in case it comes back.": "Seine Datei ist weg; es bleibt eine Woche gelistet, falls sie zurückkommt.",
   "Kind": "Art",

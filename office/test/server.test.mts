@@ -620,7 +620,7 @@ test("the office tools are given to a chat by the panel's rule: whose the portal
   fs.symlinkSync(w.project, path.join(w.home, "report-link"));
   const bt = await boot(undefined, fakeDocker(), { ...w.chats, "chat-link": path.join(w.home, "report-link") }, w.listed);
   try {
-    const all = ["office_comments", "office_create", "office_edit", "office_list", "office_read", "office_screenshot"];
+    const all = ["office_comments", "office_create", "office_edit", "office_format", "office_list", "office_read", "office_screenshot"];
     for (const chat of ["chat-a", "chat-home", "chat-project", "chat-sub", "chat-link"]) assert.deepEqual(bt.toolsOf(chat), all, chat);
     assert.deepEqual(bt.toolsOf("chat-loose"), [], "in no agent's home nor project");
     assert.deepEqual(bt.toolsOf("chat-gone"), []);
@@ -1753,7 +1753,7 @@ test("on a portal without the extension API of #339, comments and the editor's c
     const scope = async (chat: string) => ((await b.router.dispatch("GET", `/scope?chat=${chat}`)).body as { docIds: string[] }).docIds;
     assert.deepEqual(await scope("chat-a"), [(panel.body as store.DocMeta).docId]);
     assert.equal((await scope("chat-home")).length, 2, "the home's own two");
-    assert.equal(b.toolsOf("chat-a").length, 6);
+    assert.equal(b.toolsOf("chat-a").length, 7);
     // In a folder inside a project, nothing tells whose the chat is here: no documents, no tools, and its New document
     // says why.
     assert.deepEqual(await scope("chat-sub"), []);

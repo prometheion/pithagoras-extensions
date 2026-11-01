@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editJob, MAX_ARGS_BYTES, MAX_OPS, MAX_SHEET_OPS, OpError, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
+import { colour, editJob, formatJob, length, MAX_ARGS_BYTES, MAX_MERGE_CELLS, MAX_OPS, MAX_SET_KEYS, MAX_SHEET_OPS, OpError, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
 import { SHEET_MODEL_SRC, WORD_MODEL_SRC } from "../src/seat-page";
 
 /** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
@@ -46,7 +46,8 @@ test("Word ops: empty lists, missing or extra fields, mixed shapes, line breaks 
   assert.throws(() => editJob("docx", [{ quote: "a", replacement: "b\r\nc" }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{ paragraphs: [] }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{ paragraphs: ["one\ntwo"] }]), refused("bad_op", 0));
-  assert.throws(() => editJob("docx", [{ paragraphs: ["x"], style: "Heading 7" }]), refused("bad_op", 0));
+  assert.throws(() => editJob("docx", [{ paragraphs: ["x"], style: "" }]), refused("bad_op", 0));
+  assert.throws(() => editJob("docx", [{ paragraphs: ["x"], style: "Heading\n1" }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{ after: "", paragraphs: ["x"] }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{ remove: "" }]), refused("bad_op", 0));
   assert.throws(() => editJob("docx", [{}]), refused("bad_op", 0));
@@ -256,4 +257,180 @@ test("sheet ops: at most MAX_SHEET_OPS of them in one call, cell ops beside them
   const adds = (n: number) => Array.from({ length: n }, (_, k) => ({ addSheet: `S${k}` }));
   assert.doesNotThrow(() => editJob("xlsx", [...adds(MAX_SHEET_OPS), { range: "A1", values: [[1]] }]));
   assert.throws(() => editJob("xlsx", adds(MAX_SHEET_OPS + 1)), (e: unknown) => e instanceof OpError && e.code === "bad_op" && /at most 20 sheet ops \(got 21\)/.test(e.message));
+});
+
+test("Word ops take nth, from 1, where they have a quote (or an insert's after); a format op is office_format's and is refused with its name", () => {
+  const ops = [
+    { quote: "Total", replacement: "Sum", nth: 2 },
+    { after: "Findings", nth: 1, paragraphs: ["x"], style: "Callout" },
+    { after: "Findings", nth: 3, table: [["a"]] },
+    { remove: "Note", nth: 2 },
+  ];
+  assert.deepEqual(editJob("docx", ops), { kind: "word.edit", args: { ops } });
+  assert.throws(() => editJob("docx", [{ paragraphs: ["x"], nth: 1 }]), refused("bad_op", 0));
+  assert.throws(() => editJob("docx", [{ quote: "a", replacement: "b", nth: 0 }]), refused("bad_op", 0));
+  assert.throws(() => editJob("docx", [{ quote: "a", replacement: "b", nth: "2" }]), refused("bad_op", 0));
+  assert.throws(() => editJob("docx", [{ format: "a", set: { bold: true } }]), (e: unknown) => e instanceof OpError && e.code === "bad_op" && /`format` is an office_format op/.test(e.message));
+  assert.throws(() => editJob("xlsx", [{ format: "a", set: { bold: true } }]), refused("unsupported_format", 0));
+});
+
+test("lengths are points as numbers, or texts with their unit, in twips; colours are #RRGGBB in either case", () => {
+  assert.equal(length(12), 240);
+  assert.equal(length("12pt"), 240);
+  assert.equal(length("2.54cm"), 1440);
+  assert.equal(length("10mm"), 567);
+  assert.equal(length("1in"), 1440);
+  assert.equal(length(" 0.5 IN "), 720);
+  assert.equal(length("-0.5cm"), -283);
+  for (const bad of ["12", "1 furlong", "cm", "", null, Number.NaN, "1.2.3cm"]) assert.equal(length(bad), null, String(bad));
+  assert.deepEqual(colour("#c81E1e"), { r: 200, g: 30, b: 30 });
+  for (const bad of ["red", "#FFF", "C81E1E", "#GG0000", 0xff0000]) assert.equal(colour(bad), null, String(bad));
+});
+
+test("office_format (Word): every op and set key, given in the agent's words, reaches the command in the builder's units", () => {
+  const job = formatJob("docx", [
+    { format: "annual report", through: "end", nth: 2, set: { font: "Arial", fontSize: 10.5, bold: true, italic: false, underline: true, strike: false, superscript: true, color: "#C81E1E", highlight: "Yellow", link: "https://example.com/a", style: "Callout", clear: true, align: "justify", spaceBefore: 12, spaceAfter: "6pt", lineSpacing: 1.5, indentLeft: "1.27cm", indentRight: 0, firstLine: "-0.5cm", list: "number", level: 2, listStart: 3, pageBreakBefore: true, keepWithNext: false } },
+    { format: "x", set: { subscript: true, color: "auto", link: "", lineSpacing: "14pt" } },
+    { format: "x", set: { superscript: false, highlight: "none" } },
+    { format: "x", set: { highlight: "#ffff00" } },
+    { defineStyle: "Callout", basedOn: "Normal", set: { italic: true, color: "#005AA0", indentLeft: "1.27cm", spaceAfter: 6 } },
+    { defineStyle: "Mark", type: "character", change: true, set: { bold: true } },
+    { formatTable: "Ledger", set: { tableStyle: "Grid Table 4 - Accent 1", width: "100%", columnWidths: ["7cm", 85], headerRows: 1, borders: "all", fill: "#FFFF00", valign: "center", bold: true } },
+    { formatTable: "Ledger", nth: 1, cells: "a1:b1", set: { merge: true, borders: { top: "single 1.5pt #C00000", insideV: "none" }, align: "right", rowHeight: "1cm" } },
+    { formatTable: "Ledger", set: { width: "12cm", borders: "outside" } },
+    { page: "*", set: { pageSize: "a4", orientation: "landscape", margins: "2cm", header: "Meridian Labs — confidential", footer: "Page {page} of {pages}", differentFirstPage: true, replace: true } },
+    { page: "Findings", set: { pageSize: ["21cm", "29.7cm"], margins: [72, "2cm", 72, "1in"], header: "" } },
+    { sectionBreak: "Findings", type: "continuous" },
+    { sectionBreak: "Findings" },
+    { pageBreak: true },
+    { after: "Findings", nth: 2, pageBreak: true },
+    { footnote: "discrepancy", text: "The audit of March." },
+    { toc: true, set: {} },
+    { after: "Title", toc: true, levels: 2 },
+    { formatTable: "Ledger", set: { headerRows: true } },
+  ]);
+  assert.equal(job.kind, "word.format");
+  assert.deepEqual(job.args.ops, [
+    {
+      format: "annual report",
+      through: "end",
+      nth: 2,
+      text: { font: "Arial", size: 21, bold: true, italic: false, underline: true, strike: false, vertAlign: "superscript", color: { r: 200, g: 30, b: 30 }, highlight: "yellow", link: "https://example.com/a", style: "Callout", clear: true },
+      para: { align: "justify", spaceBefore: 240, spaceAfter: 120, indentLeft: 720, indentRight: 0, firstLine: -283, lineSpacing: { line: 360, rule: "auto" }, list: "number", level: 1, listStart: 3, pageBreakBefore: true, keepWithNext: false },
+    },
+    { format: "x", text: { vertAlign: "subscript", color: "auto", link: "" }, para: { lineSpacing: { line: 280, rule: "exact" } } },
+    { format: "x", text: { vertAlign: "baseline", highlight: "none" } },
+    { format: "x", text: { highlight: "yellow" } },
+    { defineStyle: "Callout", type: "paragraph", basedOn: "Normal", text: { italic: true, color: { r: 0, g: 90, b: 160 } }, para: { spaceAfter: 120, indentLeft: 720 } },
+    { defineStyle: "Mark", type: "character", change: true, text: { bold: true } },
+    {
+      formatTable: "Ledger",
+      table: { tableStyle: "Grid Table 4 - Accent 1", width: { percent: 100 }, columnWidths: [3969, 1700], headerRows: 1 },
+      cell: { borders: Object.fromEntries(["top", "bottom", "left", "right", "insideH", "insideV"].map((k) => [k, { type: "single", size: 4, color: { r: 0, g: 0, b: 0 } }])), fill: { r: 255, g: 255, b: 0 }, valign: "center" },
+      text: { bold: true },
+    },
+    { formatTable: "Ledger", nth: 1, cells: { col: 0, row: 0, cols: 2, rows: 1 }, cell: { borders: { top: { type: "single", size: 12, color: { r: 192, g: 0, b: 0 } }, insideV: { type: "none" } }, align: "right", rowHeight: 567, merge: true } },
+    { formatTable: "Ledger", table: { width: { twips: 6803 } }, cell: { borders: Object.fromEntries(["top", "bottom", "left", "right"].map((k) => [k, { type: "single", size: 4, color: { r: 0, g: 0, b: 0 } }])) } },
+    { page: "*", set: { size: { width: 11906, height: 16838 }, orientation: "landscape", margins: { top: 1134, right: 1134, bottom: 1134, left: 1134 }, header: [{ text: "Meridian Labs — confidential" }], footer: [{ text: "Page " }, { field: "page" }, { text: " of " }, { field: "pages" }], differentFirstPage: true, replace: true } },
+    { page: "Findings", set: { size: { width: 11906, height: 16838 }, margins: { top: 1440, right: 1134, bottom: 1440, left: 1440 }, header: [] } },
+    { sectionBreak: "Findings", type: "continuous" },
+    { sectionBreak: "Findings", type: "nextPage" },
+    { pageBreak: true },
+    { after: "Findings", nth: 2, pageBreak: true },
+    { footnote: "discrepancy", text: "The audit of March." },
+    { toc: true, levels: 3 },
+    { after: "Title", toc: true, levels: 2 },
+    { formatTable: "Ledger", table: { headerRows: 1 } },
+  ]);
+  // An op that takes no set refuses one that sets something.
+  assert.throws(() => formatJob("docx", [{ toc: true, set: { bold: true } }]), refused("bad_op", 0));
+});
+
+test("office_format refuses what does not hold before anything is sent, naming the op and what it takes", () => {
+  const no = (ops: unknown[], pattern: RegExp, code = "bad_op", op = 0) =>
+    assert.throws(() => formatJob("docx", ops), (e: unknown) => {
+      assert.ok(e instanceof OpError, String(e));
+      assert.equal(e.code, code, e.message);
+      assert.equal(e.op, op, e.message);
+      assert.match(e.message, pattern);
+      return true;
+    });
+  // Unknown keys: the refusal lists the ones the op takes.
+  no([{ format: "a", set: { bolt: true } }], /set has "bolt", which is not a key of text and paragraphs \(they are font, fontSize, bold,/);
+  no([{ format: "a", set: { paragraph: { list: "bullet" } } }], /set has "paragraph", which is not a key of text and paragraphs \(they are [^)]*\); set is flat: its keys go in it directly/);
+  no([{ format: "a", set: { bold: true }, colour: "x" }], /"colour" is not part of \{format, through, nth, set\}/);
+  no([{ defineStyle: "S", type: "character", set: { align: "center" } }], /not a key of a character style/);
+  no([{ defineStyle: "S", set: { link: "https://x.org" } }], /not a key of a paragraph style/);
+  no([{ formatTable: "a", cells: "A1", set: { tableStyle: "x" } }], /not a key of cells/);
+  // A link lies inside one paragraph, and a cell may hold several: no cell or table key.
+  no([{ formatTable: "a", cells: "A1", set: { link: "https://example.com/" } }], /set has "link", which is not a key of cells/);
+  no([{ formatTable: "a", set: { link: "" } }], /set has "link", which is not a key of a table/);
+  // basedOn is a style's name, refused as one.
+  no([{ defineStyle: "N", basedOn: "", set: { bold: true } }], /^op 1: basedOn is the name of a paragraph style the document has \(or one this call makes\), as office_read with formatting names it$/);
+  no([{ defineStyle: "N", type: "character", basedOn: 3, set: { bold: true } }], /basedOn is the name of a character style/);
+  no([{ page: "a", set: { bold: true } }], /not a key of page setup/);
+  // Shapes.
+  no([{ through: "b", set: { bold: true } }], /must be exactly one of .* \(it has none of them\): through goes in \{format: "<quote>", through, set\}, whose first key names its place$/);
+  // A real model's op without its first key (ten times in a run): the refusal writes out the op its keys belong to.
+  no([{ cells: "B1:B4", set: { align: "right" } }], /\(it has none of them\): cells goes in \{formatTable: "<text in the table>", cells, set\}, whose first key names its place$/);
+  no([{ set: { align: "right" } }], /\(it has none of them\): set goes in \{format: "<quote>", set\}, \{formatTable: "<text in the table>", set\} or \{page: "<quote>" or "\*", set\}/);
+  no([{ levels: 2 }], /levels goes in \{toc: true, levels\}/);
+  no([{ text: "Audit due." }], /text goes in \{footnote: "<quote>", text\}/);
+  no([{ basedOn: "Normal", set: { italic: true } }], /basedOn goes in \{defineStyle: "<style name>", basedOn, set\}/);
+  no([{ format: "a", page: "b", set: {} }], /it has format and page/);
+  no([{ format: "unaudited", footnote: true, text: "x" }], /\(it has format and footnote\): each is an op of its own, its quote the value of its first key \(\{footnote: "<quote>", …\}\)$/);
+  no([{ format: "a" }], /set is an object of what to set/);
+  no([{ format: "a", set: {} }], /set is an object/);
+  no([{ format: "a", set: Object.fromEntries(Array.from({ length: MAX_SET_KEYS + 1 }, (_, k) => [`k${k}`, 1])) }], new RegExp(`at most ${MAX_SET_KEYS} keys`));
+  no([{ format: "", set: { bold: true } }], /format is text of the document's body/);
+  no([{ format: "a\nb", set: { bold: true } }], /one line/);
+  no([{ format: "a", nth: 0, set: { bold: true } }], /nth is a whole number from 1/);
+  no([{ page: "*", nth: 2, set: { margins: 72 } }], /"\*" is every section/);
+  no([{ pageBreak: true, nth: 2 }], /give after with it/);
+  // Content ops are office_edit's, spreadsheet ops a spreadsheet's.
+  no([{ quote: "a", replacement: "b" }], /`quote` is an office_edit op/);
+  no([{ format: "a", set: { bold: true } }, { paragraphs: ["x"] }], /`paragraphs` is an office_edit op/, "bad_op", 1);
+  no([{ range: "A1", values: [[1]] }], /spreadsheet edit/, "unsupported_format");
+  assert.throws(() => formatJob("xlsx", [{ format: "a", set: { bold: true } }]), refused("unsupported_format"));
+  // Values.
+  no([{ format: "a", set: { bold: "yes" } }], /set.bold is true or false/);
+  no([{ format: "a", set: { fontSize: 0 } }], /set.fontSize is the size in points/);
+  no([{ format: "a", set: { color: "red" } }], /set.color is "#RRGGBB" or "auto"/);
+  no([{ format: "a", set: { highlight: "purple" } }], /set.highlight is one of yellow, green/);
+  no([{ format: "a", set: { highlight: "#FFFF01" } }], /or the colour of one: "#FFFF00" is yellow/);
+  no([{ format: "a", set: { link: "javascript:alert(1)" } }], /http, https or mailto/);
+  no([{ format: "a", set: { link: "ftp://x.org/f" } }], /http, https or mailto/);
+  no([{ format: "a", set: { superscript: true, subscript: true } }], /superscript or subscript, not both/);
+  no([{ format: "a", set: { clear: false } }], /set.clear is true/);
+  no([{ format: "a", set: { align: "middle" } }], /set.align is left, center, right, justify/);
+  no([{ format: "a", set: { spaceBefore: "1 furlong" } }], /set.spaceBefore is a length/);
+  no([{ format: "a", set: { spaceBefore: -12 } }], /not negative/);
+  no([{ format: "a", set: { lineSpacing: 20 } }], /set.lineSpacing is a multiple/);
+  no([{ format: "a", set: { list: "dash" } }], /set.list is "bullet", "number" or "none"/);
+  no([{ format: "a", set: { level: 10 } }], /set.level is a list level from 1 to 9/);
+  no([{ format: "a", set: { list: "none", level: 2 } }], /no level or listStart with it/);
+  no([{ defineStyle: "S", type: "table", set: { bold: true } }], /type is "paragraph" \(the default\) or "character"/);
+  no([{ defineStyle: "S", change: false, set: { bold: true } }], /change is true/);
+  no([{ formatTable: "a", set: { merge: true } }], /merge takes cells/);
+  no([{ formatTable: "a", cells: "A1", set: { merge: true } }], /two cells or more/);
+  no([{ formatTable: "a", cells: "A1:J21", set: { merge: true } }], new RegExp(`${MAX_MERGE_CELLS} cells at most`));
+  no([{ formatTable: "a", cells: "A0", set: { fill: "none" } }], /cells is a table's cells as A1:C2/);
+  no([{ formatTable: "a", set: { borders: "double" } }], /set.borders is "all"/);
+  no([{ formatTable: "a", set: { borders: { top: "double 1pt #000000" } } }], /the editor draws single borders only/);
+  no([{ formatTable: "a", set: { borders: { diagonal: "none" } } }], /its sides are top, bottom, left, right, insideH, insideV/);
+  no([{ formatTable: "a", set: { width: "120%" } }], /set.width is a share/);
+  no([{ formatTable: "a", set: { columnWidths: [] } }], /a list of lengths/);
+  no([{ formatTable: "a", set: { columnWidths: ["3cm", "wide"] } }], /set.columnWidths\[1\] is a length/);
+  no([{ page: "a", set: { pageSize: "B5" } }], /set.pageSize is A3, A4, A5, Letter, Legal, or \[width, height\]/);
+  no([{ page: "a", set: { pageSize: [10, 10] } }], /from 1 to 22 inches/);
+  no([{ page: "a", set: { margins: [1, 2] } }], /one length for all four, or \[top, right, bottom, left\]/);
+  no([{ page: "a", set: { header: "a\nb" } }], /set.header is its text, one line/);
+  no([{ page: "a", set: { replace: true } }], /set.replace goes with header or footer/);
+  no([{ sectionBreak: "a", type: "oddish" }], /type is "nextPage" \(the default\)/);
+  no([{ pageBreak: "yes" }], /pageBreak is true/);
+  no([{ footnote: "a", text: "" }], /text is the footnote's text/);
+  no([{ toc: true, levels: 10 }], /levels is a whole number from 1 to 9/);
+  // The caps of every call.
+  assert.throws(() => formatJob("docx", Array.from({ length: MAX_OPS + 1 }, () => ({ pageBreak: true }))), refused("bad_op"));
+  assert.throws(() => formatJob("docx", []), refused("bad_op"));
 });

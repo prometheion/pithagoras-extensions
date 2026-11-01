@@ -469,6 +469,23 @@ export function formatJob(ext: "docx" | "xlsx", ops: unknown): FormatJob | Sheet
 
 const FORMAT_LIST = "{format, through?, nth?, set}, {defineStyle, type?, basedOn?, change?, set}, {formatTable, nth?, cells?, set}, {page, nth?, set}, {sectionBreak, nth?, type?}, {after?, nth?, pageBreak: true}, {footnote, nth?, text} and {after?, nth?, toc: true, levels?}";
 
+/** An op with no first key but one of an op's other keys (a model gave {cells: "B1:B4", set} ten times in a row, the
+ * list of shapes alone not telling it what was missing): the op that key belongs to, written out. */
+const BELONGS: [string, string][] = [
+  ["cells", '{formatTable: "<text in the table>", cells, set}'],
+  ["through", '{format: "<quote>", through, set}'],
+  ["basedOn", '{defineStyle: "<style name>", basedOn, set}'],
+  ["change", '{defineStyle: "<style name>", change: true, set}'],
+  ["levels", "{toc: true, levels}"],
+  ["text", '{footnote: "<quote>", text}'],
+  ["set", '{format: "<quote>", set}, {formatTable: "<text in the table>", set} or {page: "<quote>" or "*", set}'],
+];
+
+function missingFirstKey(op: Record<string, unknown>): string {
+  const [key, shape] = BELONGS.find(([k]) => k in op) ?? [];
+  return key ? `: ${key} goes in ${shape}, whose first key names its place` : "";
+}
+
 function formatOp(op: unknown, i: number): FormatOp {
   const n = i + 1;
   const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
@@ -477,7 +494,7 @@ function formatOp(op: unknown, i: number): FormatOp {
   const content = ["quote", "replacement", "paragraphs", "table", "remove"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the document says): make it with office_edit, and its look here`);
   const shapes = FORMAT_SHAPES.filter((k) => k !== "set" && k in op);
-  if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its quote the value of its first key ({${shapes[1]}: "<quote>", …})` : ""}`, i);
+  if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its quote the value of its first key ({${shapes[1]}: "<quote>", …})` : missingFirstKey(op)}`, i);
   const shape = shapes[0];
   // An op that sets nothing given an empty `set` all the same (a model's habit): nothing to refuse.
   const empty = !["format", "defineStyle", "formatTable", "page"].includes(shape) && isObject(op.set) && Object.keys(op.set).length === 0;

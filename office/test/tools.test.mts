@@ -658,6 +658,22 @@ test("office_edit (spreadsheet): sheet ops go in the same job, with time for the
   assert.equal(s.seat.runs.length, 2);
 });
 
+test("office_edit and office_format of Word have time by the size of the document's file (each lays a long document out to bring its table of contents up to date), two minutes at most", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Long", type: "word", folder: "/f/atlas" }, s.root);
+  const file = getDoc(doc.docId, s.root)!.path;
+  const sized = async (bytes: number) => {
+    fs.writeFileSync(file, Buffer.alloc(bytes, 1));
+    await tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "a", replacement: "b" }] });
+    await tool(s, "office_format").execute("f", { id: doc.docId, ops: [{ format: "b", set: { bold: true } }] });
+    return s.seat.runs.slice(-2).map((r) => r.timeoutMs);
+  };
+  // 20 s a job, and 20 s for each 100 kB: 600 pages of text are about 140 kB.
+  assert.deepEqual(await sized(140_000), [62_000, 62_000]);
+  assert.deepEqual(await sized(10_000), [23_000, 23_000]);
+  assert.deepEqual(await sized(5_000_000), [120_000, 120_000]);
+});
+
 test("office_edit (spreadsheet): many sheet ops get two minutes at most; one cut off that deletes a sheet says what may be left of it", async () => {
   const s = setup();
   const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
@@ -1009,6 +1025,25 @@ test("office_edit: comments its edit would have taken away are moved onto the ne
   docchat.__resetDocchatForTests();
 });
 
+test("office_format: a comment on an entry of the table of contents that its update made anew is moved onto the new entry; its thread follows, and the answer says so apart from comments moved onto the call's own text", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Contents", type: "word", folder: "/f/atlas" }, s.root);
+  docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
+  fs.mkdirSync(path.join(s.root, "state", "threads"), { recursive: true });
+  fs.writeFileSync(path.join(s.root, "state", "threads", `${doc.docId}.json`), JSON.stringify({ version: 1, threads: { "626360df": { createdAt: 1, text: "rename this", inFile: true, agents: {} } }, uiSeen: [] }));
+  s.seat.answer = (run) => (run.kind === "word.format" ? { ops: 1, toc: true, moved: [["626360df", "7164b85f"]], tocMoved: 1 } : {});
+  const res = (await tool(s, "office_format").execute("f", { id: doc.docId, ops: [{ format: "Overview", set: { bold: true } }] })) as ToolResult;
+  assert.match(res.content[0].text, /saved as revision \d+\. Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+  assert.doesNotMatch(res.content[0].text, /onto your new text/);
+  assert.deepEqual(res.details.moved, [["626360df", "7164b85f"]]);
+  assert.deepEqual(Object.keys(docchat.threadsOf(doc.docId)), ["7164b85f"]);
+  // With one of the edit's own besides: each said for itself.
+  s.seat.answer = (run) => (run.kind === "word.edit" ? { ops: 1, toc: true, moved: [["00000001", "00000002"], ["00000003", "00000004"]], tocMoved: 1 } : {});
+  const both = (await tool(s, "office_edit").execute("e", { id: doc.docId, ops: [{ quote: "a", replacement: "b" }] })) as ToolResult;
+  assert.match(both.content[0].text, /1 comment was moved onto your new text\. Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+  docchat.__resetDocchatForTests();
+});
+
 test("a chat of a comment thread or of the editor's chat gets the tools as any chat of its folder, and nothing taken away: the portal keeps it from asking anybody (it is started unattended)", async () => {
   const s = setup("chat-atlas-home");
   docchat.configureDocchat({ root: s.root, folders: () => [], log: () => {} });
@@ -1096,6 +1131,28 @@ test("office_screenshot: a page's part of a long table says which rows it is; te
   assert.equal(cells.content[0].text, 'Sheet "S" A1:Z200 at 75 %, as your editor shows it now. Its hidden rows and columns are not in the picture, and their cells are not listed. Its cells:\n\nA1: 1\n(not all of the cells it shows are listed: a picture gives 20,000 characters of text at most; office_read gives them)');
 });
 
+test("office_screenshot: a Word page taken with the document's pictures still loading, not loadable or not known says so in its first line, never silently; all drawn says nothing", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  const t = tool(s, "office_screenshot");
+  const take = async (pictures: unknown) => {
+    s.seat.shot = () => ({ located: { page: 1, pages: 2, first: 1, blocks: [{ p: "Hello" }], view: { kind: "word", page: 1, pages: 2 } }, image: { data: "/9j/4AAQ", width: 724, height: 1024, pages: 2, pictures } });
+    return (await t.execute("c", { id: doc.docId })) as { content: any[]; details: any };
+  };
+  const head = `Page 1 of 2 of "Report" (id ${doc.docId}), as your editor shows it now.`;
+  let out = await take({ loading: 0, failed: 0 });
+  assert.equal(out.content[0].text, `${head} Its text:\n\n[1] Hello`);
+  assert.deepEqual(out.details, { action: "screenshot", id: doc.docId, page: 1, pages: 2, width: 724, height: 1024, bytes: 6 });
+  out = await take({ loading: 1, failed: 0 });
+  assert.equal(out.content[0].text, `${head} 1 of the document's pictures was still loading after a wait of up to 6 s, so it is missing from the picture if on this page: take it again in a moment. Its text:\n\n[1] Hello`);
+  assert.deepEqual([out.details.picturesLoading, out.details.picturesFailed], [1, 0]);
+  out = await take({ loading: 3, failed: 2 });
+  assert.match(out.content[0].text, /now\. 3 of the document's pictures were still loading after a wait of up to 6 s, so they are missing from the picture if on this page: take it again in a moment\. 2 of the document's pictures could not be loaded by the editor, so they are missing from the picture if on this page\. Its text:/);
+  out = await take(null);
+  assert.match(out.content[0].text, /now\. Whether the document's pictures had all loaded could not be checked: one may be missing from the picture\. Its text:/);
+  assert.equal(out.details.pictures, "unknown");
+});
+
 test("office_screenshot: a model that cannot see pictures is error:no_images before anything is done; one whose input is not known is shown the picture", async () => {
   const s = setup();
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
@@ -1165,6 +1222,19 @@ test("office_format: the ops go to the agent's editor as one word.format job, th
   assert.deepEqual(ok.details, { action: "format", id: doc.docId, ops: 2, from: doc.mtimeMs, to, live: 0 });
   assert.deepEqual(s.seat.runs.map((r) => [r.mode, r.kind, r.args]), [["edit", "word.format", { ops: [{ defineStyle: "Callout", type: "paragraph", text: { italic: true } }, { page: "*", set: { margins: { top: 1134, right: 1134, bottom: 1134, left: 1134 } } }] }]]);
   assert.match(s.seen.records.at(-1)!.reason, new RegExp(`^office_format: 2 op\\(s\\) \\(style, page\\) on ${doc.docId} by /f/atlas; saved as revision ${to}$`));
+});
+
+test("office_edit and office_format say that the table of contents was updated where the editor brought one up to date", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ ops: 1, toc: true });
+  const edited = (await tool(s, "office_edit").execute("e1", { id: doc.docId, ops: [{ after: "New document", paragraphs: ["Outlook"], style: "Heading 1" }] })) as ToolResult;
+  assert.match(edited.content[0].text, /^Edited "Report" \(1 op\), saved as revision \d+\. Updated the table of contents\.$/);
+  const formatted = (await tool(s, "office_format").execute("f1", { id: doc.docId, ops: [{ format: "Outlook", set: { bold: true } }] })) as ToolResult;
+  assert.match(formatted.content[0].text, /^Formatted "Report" \(1 op\), saved as revision \d+\. Updated the table of contents\.$/);
+  s.seat.answer = () => ({ ops: 1 });
+  const plain = (await tool(s, "office_edit").execute("e2", { id: doc.docId, ops: [{ quote: "Outlook", replacement: "View" }] })) as ToolResult;
+  assert.doesNotMatch(plain.content[0].text, /table of contents/);
 });
 
 test("office_format: bad ops, a content op, a spreadsheet, Office stopped and a read-only file are refused before anything is sent; a call not taken back whole is partial and in the audit log", async () => {
@@ -1241,6 +1311,43 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
   s.office.state = "stopped";
   assert.match(((await tool(s, "office_read").execute("r4", { id: doc.docId, formatting: true })) as ToolResult).content[0].text, /formatting is read from the editor only, and this is the saved file\)$/);
   assert.match(await refused(tool(s, "office_read").execute("r5", { id: doc.docId, formatting: "yes" })), /^error:bad_op formatting is true or false/);
+});
+
+test("office_read with formatting: a table's borders, and each cell's own fill, vertical alignment, borders and paragraphs' and runs' formatting on a line of its own under the rows", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({
+    blocks: [
+      {
+        table: [["Region", "Revenue"], ["North", "120 / approx."]],
+        look: {
+          style: "Grid Table 4 - Accent 1",
+          borders: { bottom: "single 1.5pt #C00000" },
+          cells: [
+            { row: 0, cell: 1, fill: "none", para: { align: "right" } },
+            { row: 1, cell: 1, k: 0, of: 2, fill: "#FFFF00", valign: "center", borders: { left: "none", top: "single 1.5pt #C00000" }, para: { align: "right" }, runs: [{ t: "120", look: { bold: true } }] },
+            { row: 1, cell: 1, k: 1, of: 2, para: { align: "center" } },
+          ],
+        },
+      },
+    ],
+    format: { styles: [], sections: [{ width: 11906, height: 16838, margins: [1134, 1134, 1134, 1134], ends: 0 }], footnotes: [] },
+  });
+  const t = ((await tool(s, "office_read").execute("r", { id: doc.docId, formatting: true })) as ToolResult).content[0].text;
+  assert.match(
+    t,
+    new RegExp(
+      `\\n${[
+        '[1] table (style "Grid Table 4 - Accent 1", borders bottom single 1.5pt #C00000)',
+        "| Region | Revenue |",
+        "| North | 120 / approx. |",
+        "    B1: fill none; (right)",
+        '    B2: fill #FFFF00, valign center, borders left none, top single 1.5pt #C00000; paragraph 1 (right) "120": bold; paragraph 2 (center)',
+      ]
+        .join("\n")
+        .replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}$`,
+    ),
+  );
 });
 
 test("office_read with formatting: what a paragraph or run sets off or to zero is said, each footnote at its own mark (in a table's cell too, none shifted), and a section showing an earlier one's header says so", async () => {

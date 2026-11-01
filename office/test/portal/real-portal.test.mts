@@ -1680,7 +1680,9 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
    * got wrong, so the tool texts can be changed until a run has no refusal the text could have prevented. Skipped
    * unless OFFICE_REAL_MODEL_URL (its API's base, ending in /v1) and OFFICE_REAL_MODEL (its id) are set;
    * OFFICE_REAL_MODEL_KEY is its API key where it needs one, OFFICE_REAL_MODEL_IMAGES=1 says it takes pictures,
-   * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls.
+   * OFFICE_REAL_MODEL_CONTEXT its context window (65536). OFFICE_REAL_MODEL_REPORT names a file for the run's calls;
+   * the last request the model got goes beside it (`<report>.request.json`), with its own words and the pictures it saw,
+   * and the saved document (`<report>.docx`).
    * The model gets the office tools alone, and its key never reaches the portal (real-model.mts).
    */
   const realSkip = real && mode === "host" ? false : real ? "a real model runs with the portal on the machine (its proxy listens on the machine's loopback)" : "set OFFICE_REAL_MODEL_URL and OFFICE_REAL_MODEL (see the case's comment)";
@@ -1723,7 +1725,11 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const report = { model: process.env.OFFICE_REAL_MODEL, seconds: Math.round((Date.now() - t0) / 1000), requests: real!.requests.length, calls: calls.length, byTool: calls.reduce((m: Record<string, number>, c) => ((m[c.name] = (m[c.name] ?? 0) + 1), m), {}), refused: refusals.length, codes, refusals: refusals.map((r) => ({ name: r.name, args: r.args.slice(0, 600), result: r.result.slice(0, 600) })) };
     console.log(`${label}. ${JSON.stringify(report, null, 1)}`);
     const file = process.env.OFFICE_REAL_MODEL_REPORT;
-    if (file) writeFileSync(label === "p" ? file : file.replace(/(\.json)?$/, `-${label}.json`), JSON.stringify({ ...report, all: calls }, null, 1));
+    if (file) {
+      const to = label === "p" ? file : file.replace(/(\.json)?$/, `-${label}.json`);
+      writeFileSync(to, JSON.stringify({ ...report, all: calls }, null, 1));
+      writeFileSync(`${to}.request.json`, JSON.stringify(last ?? {}));
+    }
     assert.deepEqual(real!.refused, [], "no request offered the model a tool other than the office tools");
     assert.ok(real!.requests.length > 0 && real!.requests.every((r) => ((r as { tools?: { function?: { name?: string } }[] }).tools ?? []).every((t) => realModelMay(String(t.function?.name)))));
     return calls;
@@ -1745,6 +1751,8 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     // What the run made: the document, formatted, in the default agent's home.
     const doc = (await state()).docs.find((d) => d.title === "Quarterly report");
     assert.ok(doc, "the model made the document");
+    // The saved document beside the report, for a look at its parts after the run.
+    if (process.env.OFFICE_REAL_MODEL_REPORT) writeFileSync(`${process.env.OFFICE_REAL_MODEL_REPORT}.docx`, readFileSync(await fileOf(doc!.docId)));
     assert.ok(calls.some((c) => c.name === "office_format" && /^(\s*<<<[^\n]*\n)?Formatted /.test(c.result)), "and formatted it with office_format");
     const xml = await partOf(doc!.docId, "word/document.xml");
     console.log(`p. the saved document: TOC ${/TOC \\o/.test(xml)}, table style ${/<w:tblStyle /.test(xml)}, header rows ${/<w:tblHeader/.test(xml)}, landscape ${/w:orient="landscape"/.test(xml)}, footnote ${/<w:footnoteReference/.test(xml)}, highlight ${/<w:highlight w:val="yellow"/.test(xml)}, lists ${/<w:numPr>/.test(xml)}`);

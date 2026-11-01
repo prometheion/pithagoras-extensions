@@ -3,7 +3,7 @@
   "private": true,
   "description": "A wild collection of extensions for the Pithagoras Agent, each a package of its own",
   "license": "Apache-2.0",
-  "workspaces": ["blender", "godot", "inline-ui", "office"],
+  "workspaces": ["blender", "godot", "inline-ui", "nextcloud", "office"],
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",

@@ -111,7 +111,19 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   only when the call says `change: true`, and the answer counts the paragraphs that use it), tables (a table style,
   width, column widths, header rows, borders, cell fills, alignment, row heights, merged cells), the page (size,
   orientation, margins, headers and footers with the page number and count, a first page of its own), sections,
-  page breaks, footnotes and a table of contents. Each op names its place by a quote, as `office_edit`'s do. A call
+  page breaks, footnotes and a table of contents. A table of contents follows the document: every `office_edit` and
+  `office_format` call that changes a document holding one brings its entries and page numbers up to date as the last
+  part of the same step (so a failed call's Undo takes that back too), and its answer says so; what was changed by
+  hand in the entries is overwritten then, as Word's own update does. A comment on an entry is made again on the text of
+  the new entry (the one with its text, else the one at its place), with its author, time, state and replies, so its
+  thread and its chat go on; the answer says that too. A table of contents that lists nothing yet is found by the editor's
+  English text for it ("No table of contents entries found.", as Office's editors and an English Word write it): one
+  made in a Word of another language is not brought up to date until it lists something. With two tables of contents
+  that list nothing yet in sections of different widths, the second one's new entries take their page-number tab at
+  the first one's width. Each update lays the whole document out: in the agent's editor about 17 seconds for 340 pages
+  of text (a file of 130 kB), so an `office_edit` or `office_format` call has more time the larger the document's file
+  is (two minutes at most). Each op names its place by a quote, as
+  `office_edit`'s do. A call
   is made whole or not at all: everything it names is checked first (quotes, styles, tables and cells, what a header
   holds), and a call that fails after it changed something is taken back by the editor's own Undo, as one step. A
   header or footer that holds more than text (a picture, a table, a field other than the page number and count) is
@@ -127,8 +139,10 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   each section's page, margins, header and footer (or the earlier section's it shows), the footnotes and where each
   one's mark is (a table's in its cell), and each paragraph's and run's own formatting (not what its style gives it;
   what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a numbered item's number as the editor gives it (`(numbered "3.")`, so a list that
-  goes on and one that starts again are told apart), a table's style, header rows and merged cells; 50,000 characters of
-  it at most. Not read: the saved file's formatting, when Office is stopped.
+  goes on and one that starts again are told apart), a table's style, header rows, merged cells and borders, and
+  each cell's own fill, vertical alignment and borders with its paragraphs' and runs' own formatting (`B2: fill
+  #FFFF00, valign center; (right) "42": bold`, under the table's rows; a table or a content control inside a cell is the
+  cell's text, its paragraphs counted and read with the cell's); 50,000 characters of it at most. Not read: the saved file's formatting, when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
   `='My data'!A1` reach other sheets), insert and delete rows and columns (`{insertRows: "5:6"}` makes new rows 5
   and 6; formulas follow the cells they name, and those that named deleted cells turn `#REF!`), and make, rename,
@@ -175,7 +189,10 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   call (a few seconds). Where you stopped Office, `office_read` reads the saved file and says so, and `office_edit` is
   refused until it runs again: there is no other way to write.
   **The agent sees what it made**: `office_screenshot` gives it a picture (JPEG) of a document as its own editor shows
-  it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still; or
+  it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still and
+  drawn once the document's pictures have loaded (the editor shows a document before its pictures come, and draws
+  nothing where one is missing: the picture waits up to 6 s for them, and where one has still not come, or could not
+  be loaded, takes the page as it is and says so to the agent); or
   a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
   refused beyond that with the largest range from its first cell that fits (about 23 columns by 41 rows of default
   cells at 100 %, 30 by 55 at 75 %); hidden rows and columns are left out. By default a sheet's used range from A1, as
@@ -413,16 +430,17 @@ agents' editor.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
 - `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
-  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A table of
-  contents lists the headings as the editor finds them when it is made, and is not brought up to date by later
-  calls; a link lies inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out cell fills and borders and what a
-  table that holds a picture looks like (`office_screenshot` shows them). For spreadsheets `office_format` leaves out, for now:
+  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A link lies
+  inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out what a table that holds a
+  picture looks like and the cells of a table inside a cell (`office_screenshot` shows them). For spreadsheets `office_format` leaves out, for now:
   conditional formats, data validation, charts, filters, tables, sorting, named ranges, pictures, cell styles, a
   sheet's tab colour, grouped rows and columns, protection and print setup; `office_read` does not read a sheet's
   alignment and borders (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
-  editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most.
+  editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most. A Word picture
+  waits for all of the document's pictures, not only the page's (the editor does not say which are on a page), so a
+  slow picture elsewhere in the document delays it, up to 6 s. A sheet's picture does not wait for pictures.
 
 ## Licences
 
@@ -505,7 +523,8 @@ OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras OFFICE_REAL_MODEL_URL=<its API, end
   node --import tsx --test --test-timeout=1800000 --test-name-pattern='^(the portal|p: )' test/portal/real-portal.test.mts
 ```
 
-(from `office/`; the pattern runs the portal's set-up and case p alone).
+(from `office/`; the pattern runs the portal's set-up and case p alone). With a report named, the last request the
+model got is kept beside it (`calls.json.request.json`): what the model wrote and the pictures office_screenshot gave it.
 
 `scripts/make-fixtures.mjs` makes `fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node
 scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ but not what

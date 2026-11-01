@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
@@ -1179,7 +1180,9 @@ async function run(PITHAGORAS: string): Promise<void> {
       /\] \(numbered lowerLetter "c\.", level 2\) sub point/,
       /\] \(page break before\) Strike me\.\n {4}"Strike me\.": strike/,
       /\] Plain closing words\.\n {4}"Plain closing": bold\n/,
-      /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,
+      /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns, borders bottom single 1\.5pt #C00000\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,
+      // The cell's own formatting under the rows: what the read had left to a screenshot before.
+      /\| Ledger \| 42 \| ok \|(?:\n {4}[A-C]\d: [^\n]*)*\n {4}B2: fill #FFFF00, valign center; \(right\) "42": bold\n/,
     ]) assert.match(read, want);
     // The person's editor has it, without a reload.
     const html = await personHtml(person.frame);
@@ -1308,6 +1311,300 @@ async function run(PITHAGORAS: string): Promise<void> {
     await person.page.context().close();
   });
 
+  test("24. a table of contents follows the agent's calls: a heading added and text that pushes a heading to the next page by office_edit, a heading made body text by office_format; the entries and page numbers are those the editor lays out, also past a landscape section, in the read and the save", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Contents", "word");
+    // Lines that wrap on a portrait page and not on a landscape one: the landscape section's pages, counted at the
+    // portrait width, would be more.
+    const wide = Array.from({ length: 60 }, (_, n) => `Wide line ${n + 1}: words enough to wrap once on a portrait page and not on a landscape one.`);
+    await tools.office_edit.execute("t0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Report" },
+        { after: "Report", paragraphs: ["Overview"], style: "Heading 1" },
+        { after: "Overview", paragraphs: ["First words."] },
+        { after: "First words.", paragraphs: ["Planning ahead"], style: "Heading 1" },
+        { after: "Planning ahead", paragraphs: ["Plan words."] },
+        { paragraphs: ["Wide part"], style: "Heading 1" },
+        { paragraphs: wide },
+        { paragraphs: ["Appendix"], style: "Heading 1" },
+        { paragraphs: ["Closing words."] },
+      ],
+    });
+    const made = (await tools.office_format.execute("t1", { id: doc, ops: [{ sectionBreak: "Plan words.", type: "nextPage" }, { page: "Wide part", set: { orientation: "landscape" } }, { toc: true, levels: 2 }] })).content[0].text;
+    assert.doesNotMatch(made, /Updated the table of contents/, "a TOC the call made");
+    /** The TOC's entries as office_read gives them, and each heading's page as the editor lays it out (the page
+     * office_screenshot finds the heading on; no heading's text is in another paragraph). */
+    const entries = async (label: string) => {
+      const read = (await tools.office_read.execute(`t-${label}`, { id: doc })).content[0].text;
+      const listed = [...read.matchAll(/^\[\d+\] \(toc 1\) (.+)\t(\d+)$/gm)].map((m) => [m[1], Number(m[2])] as [string, number]);
+      const laid: [string, number][] = [];
+      for (const [heading] of listed) laid.push([heading, (await shoot(`24. ${label} ${heading}`, { id: doc, quote: heading })).out.details.page as number]);
+      console.log(`24. ${label}: the TOC ${JSON.stringify(listed)}, the pages ${JSON.stringify(laid)}`);
+      return { listed, laid };
+    };
+    const first = await entries("made");
+    assert.deepEqual(first.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(first.listed, first.laid);
+    const planWas = first.laid[1][1];
+
+    // A person comments on the entry "Planning ahead" in their editor (the editor's own call, on the entry's text
+    // selected); the update makes the entries anew, and the comment goes on on the new entry.
+    const person = await personOpens(doc);
+    const note = "Please give this section a shorter name";
+    // The editor's own methods (those a plugin reaches): from the start, the first "Planning ahead" is the entry.
+    const put = await person.frame.evaluate(`(function () {
+      var e = window.Asc.editor;
+      e.pluginMethod_MoveCursorToStart(false);
+      e.pluginMethod_SearchNext({ searchString: "Planning ahead", matchCase: true }, true);
+      if (e.pluginMethod_GetSelectedText() !== "Planning ahead") return "selected " + JSON.stringify(e.pluginMethod_GetSelectedText());
+      e.pluginMethod_AddComment({ UserName: "Ann Example", Text: ${JSON.stringify(note)}, Time: String(Date.now()), Solved: false });
+      return "put";
+    })()`);
+    assert.equal(put, "put");
+    const threads = async () => (await tools.office_comments.execute(`t-c-${Math.random()}`, { id: doc })).content[0].text;
+    assert.ok(await until(async () => (await threads()).includes(note), 20_000), "the agent's editor has the person's comment");
+    console.log(`24. the threads before the edit: ${await threads()}; the person's: ${JSON.stringify(await person.frame.evaluate(`(function () { return window.Asc.editor.pluginMethod_GetAllComments(); })()`))}`);
+    const personComments = () => person.frame.evaluate(`(function () { return (window.Asc.editor.pluginMethod_GetAllComments() || []).map(function (c) { return c.Data.QuoteText + " | " + c.Data.Text; }); })()`) as Promise<string[]>;
+
+    // A heading added, and text after it that pushes "Planning ahead" onto a later page.
+    const filler = Array.from({ length: 45 }, (_, n) => `Risk line ${n + 1}.`);
+    const edited = (await tools.office_edit.execute("t2", { id: doc, ops: [{ after: "First words.", paragraphs: ["Risks"], style: "Heading 1" }, { after: "Risks", paragraphs: filler }] })).content[0].text;
+    console.log(`24. office_edit: ${edited}`);
+    assert.match(edited, /saved as revision [\d.]+\.( 1 person in the document saw it live\.)? Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+    const after = await threads();
+    console.log(`24. the threads after the edit: ${after}; the person's: ${JSON.stringify(await person.frame.evaluate(`(function () { return window.Asc.editor.pluginMethod_GetAllComments(); })()`))}`);
+    // On the entry's text itself: on the search's hit in the entry's link, the editor took it one character in.
+    assert.ok(after.includes(note) && after.includes('on: "Planning ahead"'), after);
+    assert.ok(await until(async () => (await personComments()).some((c) => c.startsWith("Planning ahead") && c.endsWith(note)), 10_000), `the person's editor: ${JSON.stringify(await personComments())}`);
+    const second = await entries("after the edit");
+    assert.deepEqual(second.listed.map((e) => e[0]), ["Overview", "Risks", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(second.listed, second.laid);
+    assert.ok(second.laid[2][1] > planWas, `"Planning ahead" went from page ${planWas} to ${second.laid[2][1]}`);
+
+    // The save: the entries with those page numbers, each one's page-number tab at the TOC's own section's width.
+    const xml = await partOf(doc, "word/document.xml");
+    const paras = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((m) => m[0]);
+    const textOf = (p: string) => [...p.replace(/<w:pPr>[\s\S]*?<\/w:pPr>/, "").matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:tab\/>/g)].map((m) => (m[0] === "<w:tab/>" ? "\t" : m[1])).join("");
+    const saved = paras.map((p) => [p, /^(.+)\t(\d+)$/.exec(textOf(p))] as const).filter(([, m]) => m);
+    assert.deepEqual(saved.map(([, m]) => [m![1], Number(m![2])]), second.laid, "the saved entries");
+    const sect = /<w:sectPr[\s\S]*?<\/w:sectPr>/.exec(xml)![0];
+    const width = Number(/<w:pgSz [^>]*w:w="(\d+)"/.exec(sect)![1]) - Number(/<w:pgMar [^>]*w:left="(\d+)"/.exec(sect)![1]) - Number(/<w:pgMar [^>]*w:right="(\d+)"/.exec(sect)![1]);
+    for (const [p] of saved) assert.match(p, new RegExp(`<w:tab w:val="right" w:leader="dot" w:pos="${width}"`), "the tab at the portrait section's width");
+
+    // office_format: a heading made body text leaves the TOC.
+    const formatted = (await tools.office_format.execute("t3", { id: doc, ops: [{ format: "Risks", set: { style: "Normal" } }] })).content[0].text;
+    assert.match(formatted, /Updated the table of contents( \(1 comment on its entries was moved onto the new entries\))?\.$/);
+    const third = await entries("after the format");
+    assert.deepEqual(third.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(third.listed, third.laid);
+    assert.ok((await threads()).includes(note), "the comment is still there");
+
+    // A call that changed nothing (the style each heading has already) brings nothing up to date.
+    const same = (await tools.office_format.execute("t4", { id: doc, ops: [{ format: "Overview", set: { style: "Heading 1" } }] })).content[0].text;
+    console.log(`24. a format that changed nothing: ${same}`);
+    assert.doesNotMatch(same, /table of contents/);
+    assert.deepEqual((await entries("after nothing changed")).listed, third.listed);
+    await person.page.context().close();
+  });
+
+  test("25. how long a table of contents takes in the real editor on a document of about 340 pages: made, then brought up to date after a heading added at the start; both within the time a Word call of that size has", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Long report", "word");
+    const line = "This paragraph of body text runs over about three lines on a page so that the document gets long, with words and more words to fill the width of the page many times over and again";
+    // 400 sections of a heading and 24 paragraphs, in four calls (an op of each, 200 ops a call).
+    for (let part = 0; part < 4; part++) {
+      const ops = Array.from({ length: 100 }, (_, k) => {
+        const n = part * 100 + k + 1;
+        return [{ paragraphs: [`Section ${n}`], style: "Heading 1" }, { paragraphs: Array.from({ length: 24 }, (_, m) => `${line} ${n}.${m + 1}.`) }];
+      }).flat();
+      const t0 = Date.now();
+      await tools.office_edit.execute(`l-${part}`, { id: doc, ops });
+      console.log(`25. part ${part + 1} of the text: ${Date.now() - t0} ms`);
+    }
+    const bytes = readFileSync(await fileOf(doc)).length;
+    let t0 = Date.now();
+    const made = (await tools.office_format.execute("l-toc", { id: doc, ops: [{ toc: true, levels: 1 }] })).content[0].text;
+    const madeMs = Date.now() - t0;
+    t0 = Date.now();
+    const edited = (await tools.office_edit.execute("l-edit", { id: doc, ops: [{ after: "Section 1", nth: 1, paragraphs: ["Summary first"], style: "Heading 1" }] })).content[0].text;
+    const editMs = Date.now() - t0;
+    const shot = await shoot("25. the last heading", { id: doc, quote: "Section 400" });
+    const read = (await tools.office_read.execute("l-read", { id: doc })).content[0].text;
+    const listed = [...read.matchAll(/^\[\d+\] \(toc 1\) (.+)\t(\d+)$/gm)].map((m) => [m[1], Number(m[2])] as [string, number]);
+    console.log(`25. ${bytes} bytes, ${shot.out.details.pages} pages: the toc op ${madeMs} ms, the update after an edit ${editMs} ms (${edited}); ${listed.length} entries, the last ${JSON.stringify(listed.at(-1))}`);
+    assert.match(edited, /Updated the table of contents\.$/);
+    assert.ok(made.startsWith("Formatted"), made);
+    assert.equal(listed.length, 401);
+    // The entries' page numbers are the pages the editor lays the headings out on (the TOC itself takes ten pages).
+    const heading = await shoot("25. the new heading", { id: doc, quote: "Summary first" });
+    console.log(`25. the new heading's shot: ${heading.text.split("\n").slice(0, 4).join(" / ").slice(0, 600)}`);
+    assert.deepEqual(listed[1], ["Summary first", heading.out.details.page]);
+    assert.deepEqual(listed.at(-1), ["Section 400", shot.out.details.page]);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* the pictures on a Word page                                          */
+  /* ------------------------------------------------------------------ */
+
+  /** A PNG of `width` x `height` in `rgb`, with noise in its low bits so that it stays large (about 3 bytes a pixel),
+   * as a photo is. */
+  const png = (width: number, height: number, rgb: [number, number, number]) => {
+    const chunk = (type: string, body: Buffer) => {
+      const head = Buffer.alloc(8);
+      head.writeUInt32BE(body.length, 0);
+      head.write(type, 4, "latin1");
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(zlib.crc32(body, zlib.crc32(Buffer.from(type, "latin1"))) >>> 0);
+      return Buffer.concat([head, body, crc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr.set([8, 2, 0, 0, 0], 8);
+    const raw = Buffer.alloc((width * 3 + 1) * height);
+    let seed = 12345;
+    for (let y = 0; y < height; y++) {
+      const row = y * (width * 3 + 1);
+      for (let x = 0; x < width * 3; x++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        const v = rgb[x % 3];
+        raw[row + 1 + x] = v > 127 ? v - (seed >> 16) % 24 : v + (seed >> 16) % 24;
+      }
+    }
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw, { level: 1 })), chunk("IEND", Buffer.alloc(0))]);
+  };
+  /**
+   * A Word document made outside the editor, written over `docId`'s file: A4 pages with a line of text each, a page
+   * break between them, and on each page `pictures` names (1-based) a picture of 15 x 11.25 cm right below its line,
+   * in that page's colour.
+   */
+  async function picturesFile(docId: string, pages: number, pictures: Record<number, [number, number, number]>): Promise<Record<number, number>> {
+    const zip = new JSZip();
+    const bytes: Record<number, number> = {};
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+    const picture = (n: number) =>
+      `<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="5400000" cy="4050000"/><wp:docPr id="${n}" name="Picture ${n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${n}" name="page${n}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdP${n}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="5400000" cy="4050000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const body = Array.from({ length: pages }, (_, k) => {
+      const n = k + 1;
+      return `<w:p><w:r><w:t>Page ${n} of the pictured document</w:t></w:r></w:p>${pictures[n] ? picture(n) : ""}${n < pages ? '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' : ""}`;
+    }).join("");
+    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file("word/_rels/document.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + Object.keys(pictures).map((n) => `<Relationship Id="rIdP${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/page${n}.png"/>`).join("") + "</Relationships>");
+    for (const [n, rgb] of Object.entries(pictures)) {
+      const data = png(1600, 1200, rgb);
+      bytes[Number(n)] = data.length;
+      zip.file(`word/media/page${n}.png`, data);
+    }
+    zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+    return bytes;
+  }
+  /**
+   * The agents' browser's picture fetches held back: through the debugging port from the relay (as cdp.ts reaches
+   * it), every image the seat page or its editors ask for is paused (`Fetch`) and let go `ms` after it was asked for,
+   * as a slow Document Server would answer. It holds until `stop()` (or `seconds`), and says what it held.
+   */
+  function slowPictures(ms: number, seconds = 120): { ready: Promise<void>; stop: () => Promise<string[]> } {
+    const src = `
+      const dns = require("dns");
+      (async () => {
+        const a = (await dns.promises.lookup(process.argv[1])).address;
+        const list = await (await fetch("http://" + a + ":9222/json/list")).json();
+        const seat = list.find((p) => p.type === "page" && /\\/seat\\//.test(p.url));
+        const ws = new WebSocket("ws://" + a + ":9222" + seat.webSocketDebuggerUrl.replace(/^ws:\\/\\/[^/]+/, ""));
+        let n = 0;
+        const send = (method, params) => ws.send(JSON.stringify({ id: ++n, method, params: params || {} }));
+        ws.onmessage = (e) => {
+          const m = JSON.parse(e.data);
+          if (m.method !== "Fetch.requestPaused") return;
+          const at = Date.now();
+          console.log("HELD " + at + " " + m.params.request.url.split("?")[0]);
+          setTimeout(() => { send("Fetch.continueRequest", { requestId: m.params.requestId }); console.log("LET " + Date.now() + " " + m.params.request.url.split("?")[0]); }, Number(process.argv[2]));
+        };
+        await new Promise((ok) => (ws.onopen = ok));
+        send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Image", requestStage: "Request" }] });
+        console.log("READY");
+        setTimeout(() => process.exit(0), Number(process.argv[3]) * 1000);
+        process.stdin.on("data", () => process.exit(0));
+      })().catch((e) => { console.log("FAILED " + e.message); process.exit(0); });`;
+    const child = spawn("docker", ["exec", "-i", `${PREFIX}-relay`, "node", "--no-warnings", "-e", src, `${PREFIX}-agent`, String(ms), String(seconds)], { stdio: ["pipe", "pipe", "inherit"] });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    const ready = new Promise<void>((ok) => child.stdout.on("data", () => /READY|FAILED/.test(out) && ok()));
+    return {
+      ready,
+      stop: async () => {
+        if (child.exitCode === null) {
+          child.stdin.write("x\n");
+          await once(child, "exit");
+        }
+        return out.trim().split("\n");
+      },
+    };
+  }
+
+  test("26. office_screenshot of Word waits for the document's pictures: right after opening and on a later page each picture is in its page though the Document Server serves it slowly; one slower than the wait is taken without it, and the answer says so", { timeout: 600_000 }, async () => {
+    const RED: [number, number, number] = [230, 30, 30];
+    const BLUE: [number, number, number] = [30, 30, 230];
+    // In a page of 724 x 1,024 px (A4) the picture of 15 x 11.25 cm is at about x 88-605, y 105-493: two points in it,
+    // one below it.
+    const inside: [number, number][] = [[300, 250], [500, 420]];
+    const below: [number, number] = [300, 700];
+    const looks = async (label: string, shot: Awaited<ReturnType<typeof shoot>>) => {
+      const [a, b, c] = await pixels(shot.image, [...inside, below]);
+      console.log(`${label}: ${a} ${b} below ${c}`);
+      return { a, b, c };
+    };
+    // As the Document Server serves them: how long its pictures take to come (what the wait's bound rests on).
+    const quick = await agentDoc("Pictured quickly", "word");
+    const sizes = await picturesFile(quick, 4, { 1: RED, 3: BLUE });
+    const q = await shoot("26. quickly, page 1", { id: quick });
+    const fetched = await inEditors<{ name: string; ms: number }[]>(`performance.getEntriesByType("resource").filter(function (r) { return /\\/media\\//.test(r.name); }).map(function (r) { return { name: r.name.split("?")[0].split("/").pop(), ms: Math.round(r.responseEnd - r.startTime) }; })`);
+    console.log(`26. the pictures (${JSON.stringify(sizes)} bytes) as the Document Server serves them: ${JSON.stringify(fetched.find((e) => /Pictured quickly/.test(e.title))?.value)}`);
+    const ql = await looks("26. quickly, page 1", q);
+    assert.ok(red(ql.a) && red(ql.b) && !red(ql.c), "the picture in its page");
+    // Each picture held 4 s: the picture right after opening, and the later page's right after it.
+    const doc = await agentDoc("Pictured slowly", "word");
+    await picturesFile(doc, 4, { 1: RED, 3: BLUE });
+    let slow = slowPictures(4000);
+    await slow.ready;
+    const first = await shoot("26. slowly, page 1 right after opening", { id: doc });
+    const third = await shoot("26. slowly, page 3 right after", { id: doc, page: 3 });
+    const held = await slow.stop();
+    console.log(`26. held: ${held.join(" | ")}`);
+    assert.equal(held.filter((l) => /^HELD .*\/media\/image[12]\.png/.test(l)).length, 2, "both of its pictures were held");
+    const fl = await looks("26. slowly, page 1", first);
+    const tl = await looks("26. slowly, page 3", third);
+    assert.ok(red(fl.a) && red(fl.b) && !red(fl.c), `page 1's picture is in it (${first.took} ms)`);
+    assert.ok(blue(tl.a) && blue(tl.b) && !blue(tl.c), "page 3's picture is in it");
+    assert.ok(first.took >= 2000, `the first waited for its pictures (${first.took} ms)`);
+    for (const shot of [first, third]) {
+      assert.doesNotMatch(shot.text, /pictures/, "all drawn: nothing said");
+      assert.equal(shot.out.details.picturesLoading, undefined);
+    }
+    // A picture held longer than the wait: the page as it is, and the answer says one was still loading.
+    const late = await agentDoc("Pictured late", "word");
+    await picturesFile(late, 2, { 1: RED });
+    slow = slowPictures(20_000);
+    await slow.ready;
+    const gap = await shoot("26. a picture held 20 s", { id: late });
+    console.log(`26. held: ${(await slow.stop()).join(" | ")}`);
+    assert.match(gap.text, /^Page 1 of 2 of "Pictured late" \(id [^)]+\), as your editor shows it now\. 1 of the document's pictures was still loading after a wait of up to 6 s, so it is missing from the picture if on this page: take it again in a moment\. Its text:/);
+    assert.equal(gap.out.details.picturesLoading, 1);
+    assert.ok(gap.took >= 5000 && gap.took < 12_000, `waited its bound and no more (${gap.took} ms)`);
+    const gl = await looks("26. a picture held 20 s", gap);
+    assert.ok(!red(gl.a) && !red(gl.b), "the picture is not in it");
+    // Let go, the next picture has it.
+    let again = gap;
+    for (let i = 0; i < 20 && /still loading/.test(again.text); i++) {
+      await delay(1000);
+      again = await shoot("26. once let go", { id: late });
+    }
+    const al = await looks("26. once let go", again);
+    assert.ok(red(al.a) && red(al.b), "the picture once it came");
+    assert.doesNotMatch(again.text, /pictures/);
+  });
+
   /* ------------------------------------------------------------------ */
   /* office_format in spreadsheets, rows and columns (#13 PR 3)          */
   /* ------------------------------------------------------------------ */
@@ -1376,7 +1673,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   const failOps = (k: number) => [{ sheet: "Fail", format: `Z${(k + 2) * 1000}`, set: { bold: true } }, { sheet: "Fail", format: `${(k + 1) * 1000 + 1}:${(k + 2) * 1000}`, set: { italic: true } }];
   const failSaid = /^error:bad_op op \d+: the call formats more than 20,000 cells/;
 
-  test("24. office_format in a real spreadsheet: one call with every op and key; office_read with formatting says what can be read, the person's editor shows it at once, and the save holds it all", { timeout: 600_000 }, async () => {
+  test("27. office_format in a real spreadsheet: one call with every op and key; office_read with formatting says what can be read, the person's editor shows it at once, and the save holds it all", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Invoice", "cell");
     await tools.office_edit.execute("i0", {
       id: doc,
@@ -1415,10 +1712,10 @@ async function run(PITHAGORAS: string): Promise<void> {
     ];
     const t0 = Date.now();
     const made = (await tools.office_format.execute("i1", { id: doc, ops })).content[0].text;
-    console.log(`24. one call of ${ops.length} ops: ${made} (${Date.now() - t0} ms)`);
+    console.log(`27. one call of ${ops.length} ops: ${made} (${Date.now() - t0} ms)`);
     assert.match(made, /^Formatted "Invoice" \(18 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\.$/);
     const read = await readSheet(doc);
-    console.log(`24. office_read with formatting:\n${read}`);
+    console.log(`27. office_read with formatting:\n${read}`);
     for (const want of [
       /\nFormatting: font Calibri 11 where no other is said; alignment and borders are not read \(office_screenshot shows them\)\.\n/,
       // A merge gives the merged cells the top-left one's formats.
@@ -1439,10 +1736,10 @@ async function run(PITHAGORAS: string): Promise<void> {
     // The person's editor has it, without a reload.
     let now: Record<string, string> = {};
     assert.ok(await until(async () => JSON.stringify((now = await personCells(person.frame, ["A3", "C4", "B3"]))) !== JSON.stringify(shown) && now.A3 !== shown.A3 && now.C4 !== shown.C4 && now.B3 !== shown.B3, 5000), `the person's editor shows the new formats (before ${JSON.stringify(shown)}, now ${JSON.stringify(now)})`);
-    console.log(`24. the person's A3 before ${shown.A3}\n   after ${now.A3}`);
+    console.log(`27. the person's A3 before ${shown.A3}\n   after ${now.A3}`);
     // The save holds what cannot be read too (alignment, borders).
     const saved = await savedSheet(doc);
-    console.log(`24. saved A3 ${JSON.stringify(saved.cell("A3"))}, B3 ${JSON.stringify(saved.cell("B3"))}, D7 ${JSON.stringify(saved.cell("D7"))}`);
+    console.log(`27. saved A3 ${JSON.stringify(saved.cell("A3"))}, B3 ${JSON.stringify(saved.cell("B3"))}, D7 ${JSON.stringify(saved.cell("D7"))}`);
     assert.equal(saved.cell("A3").fill, "1F4E79");
     assert.match(saved.cell("A3").alignment, /horizontal="center"/);
     assert.match(saved.cell("A3").alignment, /vertical="center"/);
@@ -1454,7 +1751,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.match(saved.cell("A10").font, /<i\/>[\s\S]*<strike\/>|<strike\/>[\s\S]*<i\/>/);
     // Set on a cell's whole text, the subscript (and the superscript) is saved as the cell's own font, not as a run of
     // rich text: the strings hold the plain texts.
-    console.log(`24. saved A9 font ${saved.cell("A9").font}, B9 font ${saved.cell("B9").font}; strings ${saved.strings.match(/<si>(?:(?!<\/si>)[\s\S])*?(?:H2O|m2)(?:(?!<\/si>)[\s\S])*?<\/si>/g)?.join(" ")}`);
+    console.log(`27. saved A9 font ${saved.cell("A9").font}, B9 font ${saved.cell("B9").font}; strings ${saved.strings.match(/<si>(?:(?!<\/si>)[\s\S])*?(?:H2O|m2)(?:(?!<\/si>)[\s\S])*?<\/si>/g)?.join(" ")}`);
     assert.match(saved.cell("A9").font, /<vertAlign val="subscript"\/>/);
     assert.match(saved.cell("B9").font, /<vertAlign val="superscript"\/>/);
     // Clear took every format off, the merge too; the values stayed (the read above).
@@ -1467,7 +1764,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     // (A freeze has once reached the file only with the save after the call's: the Document Server got it after the
     // call's other changes. It is in the next one.)
     if (!/<pane [^>]*ySplit="3"[^>]*state="frozen"/.test(saved.sheet)) {
-      console.log("24. the frozen pane is not in the call's own save; one more edit");
+      console.log("27. the frozen pane is not in the call's own save; one more edit");
       await tools.office_edit.execute("i2", { id: doc, ops: [{ range: "Z1", values: [[1]] }] });
     }
     assert.match((await savedSheet(doc)).sheet, /<pane [^>]*ySplit="3"[^>]*state="frozen"/);
@@ -1478,13 +1775,13 @@ async function run(PITHAGORAS: string): Promise<void> {
     for (const [at, want] of [["B2", "row 1 and column A"], ["C4", "rows 1-3 and columns A-B"]]) {
       await tools.office_format.execute(`i-${at}`, { id: doc, ops: [{ freeze: at }] });
       const frozen = /\nFrozen: .*$|$/.exec(await readSheet(doc))![0];
-      console.log(`24. freeze at ${at}: ${frozen.trim() || "(none)"}`);
+      console.log(`27. freeze at ${at}: ${frozen.trim() || "(none)"}`);
       assert.equal(frozen, `\nFrozen: ${want}.`);
     }
     await person.page.context().close();
   });
 
-  test("25. the inverse matrix: each sheet format, column, row, freeze and row and column insert, made and then failed at a last op, is taken back in the agent's editor, the person's and the save; what the editor cannot read back (alignment, borders) stays and the answer names it; the call before stays", { timeout: 900_000 }, async () => {
+  test("28. the inverse matrix: each sheet format, column, row, freeze and row and column insert, made and then failed at a last op, is taken back in the agent's editor, the person's and the save; what the editor cannot read back (alignment, borders) stays and the answer names it; the call before stays", { timeout: 900_000 }, async () => {
     const doc = await agentDoc("Matrix", "cell");
     await tools.office_edit.execute("m0", { id: doc, ops: [{ range: "A1:C5", values: [["a1", "b1", 3], ["a2", "b2", 6], ["a3", "b3", 9], ["a4", "b4", 12], ["note", "x", 15]] }, { range: "A6:B6", values: [["six", "seven"]] }, { range: "D1", values: [["=SUM(C1:C5)"]] }] });
     // The calls before the matrix: a merge and a freeze that stay.
@@ -1518,7 +1815,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       const t0 = Date.now();
       const said = await failing(tools[c.tool].execute(`m-${c.name}`, { id: doc, ops }));
       timings.push(`${c.name} ${Date.now() - t0} ms`);
-      console.log(`25. ${c.name}: ${said}`);
+      console.log(`28. ${c.name}: ${said}`);
       if (c.partial) {
         assert.match(said, /^error:partial op \d+: /, c.name);
         assert.match(said.replace(/ Part of this call may be in the document: .*$/, ""), c.partial, c.name);
@@ -1527,31 +1824,31 @@ async function run(PITHAGORAS: string): Promise<void> {
       // the sheet's default. The used range the read names may then reach further, with nothing more in it.)
       const after = await readSheet(doc, "Sheet1");
       const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
-      if (after !== before.read) console.log(`25. ${c.name}: the read's used range ${/Sheet "Sheet1" \(([^)]*)\)/.exec(before.read)?.[1]} -> ${/Sheet "Sheet1" \(([^)]*)\)/.exec(after)?.[1]}`);
+      if (after !== before.read) console.log(`28. ${c.name}: the read's used range ${/Sheet "Sheet1" \(([^)]*)\)/.exec(before.read)?.[1]} -> ${/Sheet "Sheet1" \(([^)]*)\)/.exec(after)?.[1]}`);
       assert.equal(used(after), used(before.read), `${c.name}: the agent's editor reads as before`);
       let seen: Record<string, string> = {};
       const same = await until(async () => JSON.stringify((seen = await personCells(person.frame, cells))) === JSON.stringify(before.person), 5000);
       const differs = Object.keys(seen).filter((a) => seen[a] !== before.person[a]);
       // What cannot be read back stays: the person sees that alignment (and the borders, which the cell info does not give).
-      if (c.partial) console.log(`25. ${c.name}: the person's cells that differ: ${differs.map((a) => `${a} ${before.person[a]} -> ${seen[a]}`).join("; ")}`);
+      if (c.partial) console.log(`28. ${c.name}: the person's cells that differ: ${differs.map((a) => `${a} ${before.person[a]} -> ${seen[a]}`).join("; ")}`);
       else assert.ok(same, `${c.name}: the person's editor is as it was (differ: ${differs.map((a) => `${a} ${before.person[a]} -> ${seen[a]}`).join("; ")})`);
     }
-    console.log(`25. failing calls: ${timings.join(", ")}`);
+    console.log(`28. failing calls: ${timings.join(", ")}`);
     // The mistake the check foresees (superscript on a number) is refused before the first op changes anything: the
     // alignment op before it, which could not be put back, is not made (B2 stays right-aligned in the save below).
     const foreseen = await failing(tools.office_format.execute("m-foreseen", { id: doc, ops: [{ format: "A1:B2", set: { align: "center", borders: "outside" } }, { format: "C3", set: { subscript: true } }] }));
-    console.log(`25. foreseen: ${foreseen}`);
+    console.log(`28. foreseen: ${foreseen}`);
     assert.match(foreseen, /^error:bad_op op 2: subscript takes text, and "Sheet1"!C3 holds a number/);
     assert.doesNotMatch(foreseen, /taken back/);
     // The save: none of the failed calls' readable formats; the earlier call's merge and italic; what stayed of the last two.
     await tools.office_edit.execute("m-save", { id: doc, ops: [{ range: "Z50", values: [["saved"]] }] });
     const saved = await savedSheet(doc);
-    console.log(`25. saved A1 ${JSON.stringify(saved.cell("A1"))}, B2 ${JSON.stringify(saved.cell("B2"))}, C2 ${JSON.stringify(saved.cell("C2"))}`);
+    console.log(`28. saved A1 ${JSON.stringify(saved.cell("A1"))}, B2 ${JSON.stringify(saved.cell("B2"))}, C2 ${JSON.stringify(saved.cell("C2"))}`);
     assert.match(saved.sheet, /<mergeCell ref="A6:B6"\/>/);
     assert.doesNotMatch(saved.sheet, /<mergeCell ref="A1:B2"\/>/);
     assert.doesNotMatch(saved.sheet, /<pane /, "no frozen pane");
     assert.doesNotMatch(saved.sheet, /hidden="1"/, "no hidden column or row");
-    console.log(`25. saved columns ${/<cols>[\s\S]*?<\/cols>/.exec(saved.sheet)?.[0] ?? "(none)"}; rows ${[...saved.sheet.matchAll(/<row [^>]*>/g)].map((m) => m[0]).join(" ")}`);
+    console.log(`28. saved columns ${/<cols>[\s\S]*?<\/cols>/.exec(saved.sheet)?.[0] ?? "(none)"}; rows ${[...saved.sheet.matchAll(/<row [^>]*>/g)].map((m) => m[0]).join(" ")}`);
     assert.equal(saved.cell("C2").fill, "none");
     assert.equal(saved.cell("C2").numFmt, "General");
     assert.doesNotMatch(saved.cell("A2").font, /<b\/>|Arial/);
@@ -1561,7 +1858,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     await person.page.context().close();
   });
 
-  test("26. a person's change wins over the inverse: a cell they typed into after the agent's write, and one they made bold after its format, stay as they made them, and the answer names them", { timeout: 600_000 }, async () => {
+  test("29. a person's change wins over the inverse: a cell they typed into after the agent's write, and one they made bold after its format, stay as they made them, and the answer names them", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Kept", "cell");
     await tools.office_edit.execute("k0", { id: doc, ops: [{ range: "A1:B2", values: [["one", "two"], [3, 4]] }, { range: "C1", values: [[5]] }] });
     const person = await personOpens(doc);
@@ -1571,7 +1868,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     await person.frame.evaluate(`window.Asc.editor.asc_findCell("A1")`);
     await person.page.keyboard.type("person\n", { delay: 20 });
     const said = await writing;
-    console.log(`26. the write taken back around the person's: ${said}`);
+    console.log(`29. the write taken back around the person's: ${said}`);
     assert.match(said, /^error:partial op 8: .* Kept as a person changed them after this call: A1 of "Sheet1"\./);
     await delay(1500);
     const read = await readSheet(doc);
@@ -1588,46 +1885,46 @@ async function run(PITHAGORAS: string): Promise<void> {
     const formatting = failing(tools.office_format.execute("k3", { id: doc, ops: [{ format: "A1:B1", set: { bold: false, fill: "#FF0000" } }, ...steps, ...failOps(0)] }));
     const plain = await personCell(person.frame, "A2");
     assert.ok(await until(async () => /"FontBold":false/.test(await personCell(person.frame, "B1")) && (await personCell(person.frame, "B1")) !== plain, 10_000), "the person sees the call's first op");
-    console.log(`26. the person sees the first op ${Date.now() - t0} ms into the call`);
+    console.log(`29. the person sees the first op ${Date.now() - t0} ms into the call`);
     await person.frame.evaluate(`window.Asc.editor.asc_findCell("B1")`);
     await person.page.keyboard.press("Control+B");
     const said2 = await formatting;
-    console.log(`26. the format taken back around the person's (${Date.now() - t0} ms): ${said2}`);
+    console.log(`29. the format taken back around the person's (${Date.now() - t0} ms): ${said2}`);
     assert.match(said2, /^error:partial op 153: .* Kept as a person changed them after this call: B1 of "Sheet1"\./);
     await delay(1500);
     const looks = await readSheet(doc, "Sheet1");
-    console.log(`26. after:\n${looks}`);
+    console.log(`29. after:\n${looks}`);
     assert.match(looks, /\nFormats: A1 bold; B1 bold, fill #FF0000\.(\n|$)/, "A1 as it was, B1 as the person left it");
     await person.page.context().close();
   });
 
-  test("27. rows and columns while a person is mid-entry in the sheet: the agent's insert is made, the answer names the people in the workbook; deletes go last and turn formulas into them into #REF!", { timeout: 600_000 }, async () => {
+  test("30. rows and columns while a person is mid-entry in the sheet: the agent's insert is made, the answer names the people in the workbook; deletes go last and turn formulas into them into #REF!", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Moving", "cell");
     await tools.office_edit.execute("v0", { id: doc, ops: [{ range: "A1:A12", values: Array.from({ length: 12 }, (_, k) => [`row ${k + 1}`]) }, { range: "C1", values: [["=A8"]] }] });
     const person = await personOpens(doc);
     await person.frame.evaluate(`window.Asc.editor.asc_findCell("B10")`);
     await person.page.keyboard.type("TYPING", { delay: 20 });
     const inserted = (await tools.office_edit.execute("v1", { id: doc, ops: [{ insertRows: "5" }] })).content[0].text;
-    console.log(`27. ${inserted}`);
+    console.log(`30. ${inserted}`);
     assert.match(inserted, / is in this workbook, and its cells moved: row 5 of "Sheet1" inserted \(the rows below it moved down\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\.$/);
     await person.page.keyboard.press("Enter");
     await delay(2500);
     const agentSees = await readSheet(doc);
     const personSees = { B10: await personCell(person.frame, "B10"), B11: await personCell(person.frame, "B11") };
-    console.log(`27. after the person's Enter: the agent reads ${JSON.stringify(agentSees.split("\n").filter((l) => /^B1[01]:|^A1[01]:/.test(l)))}; the person's editor shows B10 ${personSees.B10}, B11 ${personSees.B11}`);
+    console.log(`30. after the person's Enter: the agent reads ${JSON.stringify(agentSees.split("\n").filter((l) => /^B1[01]:|^A1[01]:/.test(l)))}; the person's editor shows B10 ${personSees.B10}, B11 ${personSees.B11}`);
     assert.match(agentSees, /TYPING/, "the person's entry is in the document");
     assert.match(agentSees, /\nA6: "row 5"\n/, "the rows below moved");
     assert.match(agentSees, /\nC1: "row 8" \(=A9\)\n/, "a formula follows its cell");
     // A delete is refused before an op that can be taken back; last, it is made, and a formula into it turns #REF!.
     assert.match(await failing(tools.office_edit.execute("v2", { id: doc, ops: [{ deleteRows: "9" }, { range: "Z1", values: [[1]] }] })), /^error:bad_op op 1 cannot be taken back once made \(deleted rows\)/);
     const deleted = (await tools.office_edit.execute("v3", { id: doc, ops: [{ range: "Z1", values: [[1]] }, { deleteRows: "9" }, { deleteColumns: "Z" }] })).content[0].text;
-    console.log(`27. ${deleted}`);
+    console.log(`30. ${deleted}`);
     assert.match(deleted, /row 9 of "Sheet1" deleted \(the rows below it moved up\); column Z of "Sheet1" deleted \(the columns right of it moved left\)\./);
     assert.match(await readSheet(doc), /\nC1: "#REF!" \(=#REF!\)\n|\nC1: #REF! \(=#REF!\)\n/);
     await person.page.context().close();
   });
 
-  test("28. after the second review: autofits that land in their command, or change nothing, keep a call short; a freeze over frozen rows and an autofit with a person in are taken back whole", { timeout: 600_000 }, async () => {
+  test("31. after the second review: autofits that land in their command, or change nothing, keep a call short; a freeze over frozen rows and an autofit with a person in are taken back whole", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Fitting", "cell");
     const columns = "BCDEFGHIJKL".split("");
     await tools.office_edit.execute("f0", { id: doc, ops: [{ range: "A1:L1", values: [["head", ...columns.map((c) => `a text long enough to widen column ${c}`)]] }] });
@@ -1636,12 +1933,12 @@ async function run(PITHAGORAS: string): Promise<void> {
       const t0 = Date.now();
       const said = (await tools.office_format.execute(`f-${round}`, { id: doc, ops: columns.map((c) => ({ columns: c, autofit: true })) })).content[0].text;
       const ms = Date.now() - t0;
-      console.log(`28. eleven autofits, ${round}: ${said} (${ms} ms)`);
+      console.log(`31. eleven autofits, ${round}: ${said} (${ms} ms)`);
       assert.match(said, round === "fit" ? /^Formatted "Fitting" \(11 ops\), saved as revision/ : /^Formatted "Fitting" \(11 ops\)|changed nothing/);
       assert.ok(ms < 15_000, `${round}: ${ms} ms`);
     }
     const fitted = await readSheet(doc);
-    console.log(`28. ${/\nColumns: .*/.exec(fitted)?.[0].trim()}`);
+    console.log(`31. ${/\nColumns: .*/.exec(fitted)?.[0].trim()}`);
     // (The read names the width most of them have as the usual one: "Columns: A 8.43, B-C 32.14, … (others 32.29).")
     assert.ok(Number(/\nColumns: A 8\.43, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
     // A person in the workbook: a freeze of no panes over frozen rows, and an autofit, each failed at a last op.
@@ -1652,9 +1949,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     for (const [k, ops] of [[[{ freeze: "none" }]], [[{ columns: "M", autofit: true }]], [[{ freeze: "B5" }, { freeze: "A2" }]]].map((x, k) => [k, x[0]] as const)) {
       const before = await readSheet(doc, "Sheet1");
       const said = await failing(tools.office_format.execute(`f-back-${k}`, { id: doc, ops: [...ops, ...failOps(k)] }));
-      console.log(`28. ${JSON.stringify(ops)} with a person in, failed at a last op: ${said}`);
+      console.log(`31. ${JSON.stringify(ops)} with a person in, failed at a last op: ${said}`);
       assert.match(said, failSaid, JSON.stringify(ops));
-      // (A width put back is the column's own: the used range the read names may reach further, as in 25.)
+      // (A width put back is the column's own: the used range the read names may reach further, as in 28.)
       const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
       assert.equal(used(await readSheet(doc, "Sheet1")), used(before), `${JSON.stringify(ops)}: as before`);
     }

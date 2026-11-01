@@ -161,7 +161,7 @@ let paragraphs = 0;
 const paragraph = (text: string, style?: string, label = "") => {
   const id = `p${++paragraphs}`;
   const st = style ? { GetName: () => style, GetType: () => "paragraph" } : null;
-  return { GetClassType: () => "paragraph", GetText: (o?: { Numbering?: boolean }) => `${o?.Numbering === false ? "" : label}${text}\r\n`, GetParaPr: () => ({ GetStyle: () => st }), GetStyle: () => st, GetInternalId: () => id, GetNumbering: () => null };
+  return { GetClassType: () => "paragraph", GetText: (o?: { Numbering?: boolean }) => `${o?.Numbering === false ? "" : label}${text}\r\n`, GetParaPr: () => ({ GetStyle: () => st }), GetStyle: () => st, GetInternalId: () => id, GetNumbering: () => null, ToJSON: () => JSON.stringify({ content: [{ type: "run", content: [text] }] }) };
 };
 const contentOf = (elements: unknown[]) => ({ GetElementsCount: () => elements.length, GetElement: (i: number) => elements[i] });
 
@@ -1466,7 +1466,7 @@ function wordWithComments(text: string, comments: { id: number; from: number; to
     };
     return r;
   };
-  const para: any = { ...paragraph(""), GetText: () => `${state.text}\r\n`, GetRange: () => range(0, state.text.length), GetNext: () => null, GetPrevious: () => null, Delete() {} };
+  const para: any = { ...paragraph(""), ToJSON: () => JSON.stringify({ content: [{ type: "run", content: [state.text] }] }), GetText: () => `${state.text}\r\n`, GetRange: () => range(0, state.text.length), GetNext: () => null, GetPrevious: () => null, Delete() {} };
   const doc = {
     ...contentOf([para]),
     GetStyle: () => null,
@@ -1824,7 +1824,7 @@ test("the plugin locates a Word page once the page count held still; a spreadshe
 function scriptedWord(spec: {
   /** A paragraph's link covers `linkText` (all of the paragraph's text where none is given); in a table, its cell is in
    * row `row` (from 0), with the cell's `tcPr` as the table's JSON has it; `section` is its section (from 0). */
-  paras: { text: string; style?: string; list?: { kind: "bullet" | "number"; level?: number; num?: string }; link?: string; linkText?: string; table?: string; row?: number; tcPr?: Record<string, unknown>; section?: number }[];
+  paras: { text: string; renamed?: string; style?: string; list?: { kind: "bullet" | "number"; level?: number; num?: string }; link?: string; linkText?: string; table?: string; row?: number; tcPr?: Record<string, unknown>; section?: number; field?: boolean }[];
   elsewhere?: Record<string, ("header" | "toc")[]>;
   styles?: Record<string, "paragraph" | "run" | "table">;
   /** The style each style is based on, by name (in its JSON, by id). */
@@ -1837,8 +1837,24 @@ function scriptedWord(spec: {
   parted?: string[];
   /** Quotes whose text is highlighted (ApiTextPr.GetHighlight is "none" for the others). */
   highlighted?: string[];
+  /** Comments on the text `on` (of the paragraph `at`, from 0); the full TOC update takes away those on an entry, as
+   * the editor does, and their quote is then a piece shifted by one, as the editor gives it. */
+  comments?: { at: number; on: string; text: string }[];
+  /** The entries are no TOC's (one made into text): UpdateAllTOC leaves them as they are. */
+  flatToc?: boolean;
+  /** The entries are links (\\h, as the editor and Word make them): a link of runs, the heading's text, the tab and the
+   * page number; a search hit there takes a comment one character in, the text's run on the text. */
+  tocLinks?: boolean;
+  /** Every op sets what is set already: the JSON of paragraphs, tables, styles and sections stays as it was. */
+  same?: boolean;
 }) {
   const calls: string[] = [];
+  // In the JSON of what an op may change: how many calls were made by then (none counted with \`same\`).
+  const v = () => (spec.same ? 0 : calls.length);
+  // UpdateAllTOC(false) makes the entries anew: new paragraphs, so new internal ids.
+  let tocMade = 0;
+  const comments = (spec.comments ?? []).map((c, k) => ({ ...c, gone: false, api: { ...apiComment(0x100 + k, { author: "Portal", userId: "portal-user", time: 1793108364144 + k, text: c.text, replies: [{ author: "Ann", userId: "u-ann", time: 1793108365000, text: "Agreed" }] }), GetQuoteText: () => (comments[k].gone ? c.on.slice(1) : c.on) } }));
+  const madeComments: { on: string; api: ReturnType<typeof apiComment> }[] = [];
   const show = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? `[${v.map(show).join(", ")}]` : typeof v === "object" && v && (v as { __label?: string }).__label ? String((v as { __label: string }).__label) : JSON.stringify(v));
   /** An object answering `own`, writing every other call down under `label`. */
   const rec = (label: string, own: Record<string, unknown> = {}): any =>
@@ -1856,7 +1872,7 @@ function scriptedWord(spec: {
       },
     });
   const styles: Record<string, any> = {};
-  const style = (name: string, type: string) => (styles[name] = rec(`style(${name})`, { GetName: () => name, GetType: () => type, GetTextPr: () => rec(`style(${name}).text`), GetParaPr: () => rec(`style(${name}).para`), ToJSON: () => JSON.stringify({ styleId: name, ...(spec.basedOn?.[name] ? { basedOn: spec.basedOn[name] } : {}) }) }));
+  const style = (name: string, type: string) => (styles[name] = rec(`style(${name})`, { GetName: () => name, GetType: () => type, GetTextPr: () => rec(`style(${name}).text`), GetParaPr: () => rec(`style(${name}).para`, { GetOutlineLvl: () => (/^Heading \d$/.test(name) ? Number(name.slice(-1)) - 1 : undefined) }), ToJSON: () => JSON.stringify({ styleId: name, ...(spec.basedOn?.[name] ? { basedOn: spec.basedOn[name] } : {}), v: v() }) }));
   for (const [name, type] of Object.entries({ Normal: "paragraph", "Heading 1": "paragraph", "toc 1": "paragraph", Hyperlink: "run", "Table Grid": "table", ...spec.styles })) style(name, type);
   const numberings: Record<string, any> = {};
   const numbering = (id: string, kind: string) =>
@@ -1867,17 +1883,23 @@ function scriptedWord(spec: {
   let made = 0;
   const tables: Record<string, any> = {};
   const body: any[] = [];
+  // A paragraph's text now: an entry's `renamed` once the update made the entries anew.
+  const now = (i: number) => (tocMade && spec.paras[i].renamed !== undefined ? spec.paras[i].renamed! : spec.paras[i].text);
   const paras = spec.paras.map((p, i) => {
     const label = `para(${p.text})`;
     const list = p.list ? numbering(p.list.num ?? p.list.kind, p.list.kind) : null;
     const link = p.link ? rec(`link(${p.link})`, { GetClassType: () => "hyperlink", GetRange: () => ({ __label: `link range`, GetText: () => p.linkText ?? p.text }), GetElementsCount: () => 1, GetElement: () => rec(`run(${p.link})`, { GetClassType: () => "run", GetTextPr: () => ({ GetStyle: () => styles.Hyperlink }) }) }) : null;
-    const elements = link ? [rec(`run(before ${p.text})`, { GetClassType: () => "run", GetRange: () => ({}), GetTextPr: () => ({ GetStyle: () => null }) }), link] : [];
+    const entryRuns = () => ["", ...now(i).split("\t").flatMap((t, k) => (k ? ["\t", t] : [t]))].map((t) => rec(`run(${t})`, { GetClassType: () => "run", GetText: () => t, GetRange: () => rec(`run(${t})'s range`, { GetText: () => t, AddComment: addComment(`its run ${t} in ${now(i)}`) }) }));
+    const entry = spec.tocLinks && p.style === "toc 1" ? rec(`entry link(${p.text})`, { GetClassType: () => "hyperlink", GetElementsCount: () => entryRuns().length, GetElement: (k: number) => entryRuns()[k] }) : null;
+    const elements = link ? [rec(`run(before ${p.text})`, { GetClassType: () => "run", GetRange: () => ({}), GetTextPr: () => ({ GetStyle: () => null }) }), link] : entry ? [entry] : [];
     const para = rec(label, {
       GetClassType: () => "paragraph",
-      GetText: (o?: { Numbering?: boolean }) => `${p.list && o?.Numbering !== false ? "·\t" : ""}${p.text}\r\n`,
+      GetText: (o?: { Numbering?: boolean }) => `${p.list && o?.Numbering !== false ? "·\t" : ""}${now(i)}\r\n`,
+      GetRange: () => rec(`${label}'s range`, { AddComment: addComment(`all of ${now(i)}`) }),
       GetStyle: () => (p.style ? styles[p.style] : null),
       GetParaPr: () => ({ GetStyle: () => (p.style ? styles[p.style] : null) }),
-      GetInternalId: () => `id${i}`,
+      // A TOC's paragraphs (its entries, or the field's paragraph of one without: \`field\`) are made anew by the update.
+      GetInternalId: () => ((p.style === "toc 1" || p.field) && tocMade ? `id${i}.${tocMade}` : `id${i}`),
       GetNumbering: () => (list ? list.GetLevel(p.list!.level ?? 0) : null),
       GetPrevious: () => (i > 0 && !spec.paras[i - 1].table ? paras[i - 1] : null),
       GetNext: () => null,
@@ -1888,6 +1910,9 @@ function scriptedWord(spec: {
       GetElementsCount: () => elements.length,
       GetElement: (k: number) => elements[k],
       GetAllDrawingObjects: () => [],
+      // With \`same\`, a quote's paragraph as the editor gives it once a range of it was set: its run parted in two of
+      // the same look.
+      ToJSON: () => JSON.stringify({ v: v(), content: spec.same && calls.some((c) => c.startsWith("range(")) ? [{ type: "run", rPr: { b: true }, content: [p.text.slice(0, 4)] }, { type: "run", rPr: { b: true }, content: [p.text.slice(4)] }] : [{ type: "run", rPr: { b: true }, content: [p.text] }] }),
     });
     return para;
   });
@@ -1902,16 +1927,23 @@ function scriptedWord(spec: {
       const cells = ks.map((k) => rec(`cell(${spec.paras[k].text})`, { GetContent: () => contentOf([paras[k]]) }));
       return rec(count === 1 ? `row(${p.table})` : `row(${p.table}:${r + 1})`, { GetCellsCount: () => cells.length, GetCell: (c: number) => cells[c] });
     });
-    const json = () => JSON.stringify({ content: rows.map((ks) => ({ content: ks.map((k) => ({ tcPr: spec.paras[k].tcPr ?? {} })) })) });
+    const json = () => JSON.stringify({ v: v(), content: rows.map((ks) => ({ content: ks.map((k) => ({ tcPr: spec.paras[k].tcPr ?? {} })) })) });
     tables[p.table] = rec(`table(${p.table})`, { GetClassType: () => "table", GetRowsCount: () => count, GetRow: (r: number) => recs[r], GetColumnsCount: () => rows[0].length, ToJSON: json });
     body.push(tables[p.table]);
   });
   const own = (where: string, kind?: "text" | "picture") => rec(`${where} content`, { GetElementsCount: () => 1, GetElement: () => rec(`${where} paragraph`, { GetClassType: () => "paragraph", ToJSON: () => JSON.stringify({ content: [{ type: "run", content: kind === "picture" ? [{ docPr: {} }] : ["Old header"] }] }) }) });
   const sections = (spec.sections ?? [{ header: spec.header }]).map((x, k) => {
     const label = k === 0 ? "" : `section${k + 1} `;
-    return rec(k === 0 ? "section" : `section${k + 1}`, { GetHeader: (_k: string, make: boolean) => (x.header || make ? own(`${label}header`, x.header) : null), GetFooter: (_k: string, make: boolean) => (make ? own(`${label}footer`) : null), GetPageWidth: () => (x.landscape ? 16838 : 11906), GetPageHeight: () => (x.landscape ? 11906 : 16838), GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134 });
+    return rec(k === 0 ? "section" : `section${k + 1}`, { GetHeader: (_k: string, make: boolean) => (x.header || make ? own(`${label}header`, x.header) : null), GetFooter: (_k: string, make: boolean) => (make ? own(`${label}footer`) : null), GetPageWidth: () => (x.landscape ? 16838 : 11906), GetPageHeight: () => (x.landscape ? 11906 : 16838), GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134, ToJSON: () => JSON.stringify({ v: v() }) });
   });
-  const hit = (q: string, at: number, extra: Record<string, unknown> = {}) => rec(`range(${q}${at ? `@${at}` : ""})`, { GetText: () => q, GetTextPr: () => ({ GetHighlight: () => (spec.highlighted?.includes(q) ? "yellow" : "none") }), GetAllParagraphs: () => [extra.para ?? paras[at]], GetStartPos: () => at * 1000, GetEndPos: () => at * 1000 + q.length, IntersectWith: () => ({ GetText: () => q }), ExpandTo: (r: any) => rec(`range(${q}..${r.GetText()})`, { GetAllParagraphs: () => [paras[at], ...r.GetAllParagraphs()], GetText: () => q, IntersectWith: () => ({ GetText: () => q }) }), ...extra });
+  const addComment = (on: string) => (text: string, author: string, userId: string) => {
+    calls.push(`AddComment on ${JSON.stringify(on)}: ${JSON.stringify(text)}`);
+    const api = apiComment(0x7000 + madeComments.length, { author, userId, time: 0, text });
+    Object.assign(api, { SetTimeUTC: (t: number) => calls.push(`made comment.SetTimeUTC(${t})`), SetSolved: (b: boolean) => calls.push(`made comment.SetSolved(${b})`) });
+    madeComments.push({ on, api });
+    return api;
+  };
+  const hit = (q: string, at: number, extra: Record<string, unknown> = {}) => rec(`range(${q}${at ? `@${at}` : ""})`, { AddComment: addComment(`${q} in ${now(at)}`), GetText: () => q, GetTextPr: () => ({ GetHighlight: () => (spec.highlighted?.includes(q) ? "yellow" : "none") }), GetAllParagraphs: () => [extra.para ?? paras[at]], GetStartPos: () => at * 1000, GetEndPos: () => at * 1000 + q.length, IntersectWith: () => ({ GetText: () => q }), ExpandTo: (r: any) => rec(`range(${q}..${r.GetText()})`, { GetAllParagraphs: () => [paras[at], ...r.GetAllParagraphs()], GetText: () => q, IntersectWith: () => ({ GetText: () => q }) }), ...extra });
   const doc = rec("doc", {
     ...contentOf(body),
     GetStyle: (name: string) => styles[name] ?? null,
@@ -1919,7 +1951,7 @@ function scriptedWord(spec: {
     CreateStyle: (name: string, type: string) => (calls.push(`doc.CreateStyle(${JSON.stringify(name)}, ${JSON.stringify(type)})`), style(name, type)),
     CreateNumbering: (kind: string) => (calls.push(`doc.CreateNumbering(${JSON.stringify(kind)})`), numbering(`new${++made}`, kind)),
     Search: (q: string) => {
-      const found = spec.parted?.includes(q) ? [] : spec.paras.flatMap((p, i) => (p.text.includes(q) ? [hit(q, i)] : []));
+      const found = spec.parted?.includes(q) ? [] : spec.paras.flatMap((_p, i) => (now(i).includes(q) ? [hit(q, i)] : []));
       for (const where of spec.elsewhere?.[q] ?? []) {
         const stray = where === "toc" ? rec("toc entry", { GetInternalId: () => "toc", GetStyle: () => styles["toc 1"] }) : rec("header paragraph", { GetInternalId: () => "header" });
         found.unshift(hit(q, 0, { para: stray }));
@@ -1930,11 +1962,17 @@ function scriptedWord(spec: {
     GetFinalSection: () => sections[sections.length - 1],
     GetRange: (a: number, b: number) => rec(`doc.range(${a}, ${b})`),
     AddFootnote: () => (calls.push("doc.AddFootnote()"), rec("footnote", { GetElement: () => rec("footnote paragraph") })),
-    GetAllComments: () => [],
+    GetAllComments: () => [...comments.filter((c) => !c.gone).map((c) => c.api), ...madeComments.map((m) => m.api)],
+    UpdateAllTOC: (pages: boolean) => {
+      calls.push(`doc.UpdateAllTOC(${pages})`);
+      if (pages || spec.flatToc || !spec.paras.some((p) => p.style === "toc 1" || p.field)) return;
+      tocMade++;
+      for (const c of comments) if (spec.paras[c.at].style === "toc 1") c.gone = true;
+    },
     CreateSection: (p: { __label: string }) => (calls.push(`doc.CreateSection(${p.__label})`), rec("new section")),
   });
   const Api = rec("Api", { GetDocument: () => doc, CreateTextPr: () => rec("textPr"), CreateParagraph: () => rec("new paragraph", { GetRange: () => rec("new paragraph's range"), GetSection: () => sections[0] }) });
-  return { Api, calls, run: (ops: unknown[]) => command("word.format", Api, { ops }) };
+  return { Api, calls, madeComments, run: (ops: unknown[]) => command("word.format", Api, { ops }), edit: (ops: unknown[]) => command("word.edit", Api, { ops }) };
 }
 
 test("word.format: text and paragraph keys go to the quote's range and its paragraphs; a character style through a text property, never ApiRange.SetStyle; a paragraph style on the paragraphs", () => {
@@ -2104,26 +2142,159 @@ test("word.format: a header that holds more than text is replaced only with repl
   assert.deepEqual(plain.calls.filter((c) => c.startsWith("section")), ["section.SetPageSize(16838, 11906, false)", "section.SetPageMargins(4, 1, 2, 3)", "section.SetTitlePage(true)", 'section.RemoveHeader("default")']);
 });
 
-test("word.format: a table of contents in a portrait section before a landscape one is made while the last section has the TOC's section's width (the editor sets the entries' page-number tab by the last section's), which it gets back after", () => {
-  const w = scriptedWord({ paras: [{ text: "Title" }, { text: "Wide" }], sections: [{}, { landscape: true }] });
+test("word.format: a table of contents in a portrait section before a landscape one is made while the last section has the TOC's section's width (the editor sets the entries' page-number tab by the last section's), which it gets back after; its page numbers are counted then", () => {
+  const w = scriptedWord({ paras: [{ text: "Title" }, { text: "Findings", style: "Heading 1" }, { text: "Wide", section: 1 }], sections: [{}, { landscape: true }] });
   assert.deepEqual(w.run([{ toc: true, levels: 2 }]).result, { ops: 1, reflowed: true });
-  const made = w.calls.filter((c) => /^section2\.Set|AddField|UpdateAllTOC/.test(c));
+  const made = w.calls.filter((c) => /^section2\.Set|AddField|UpdateAllTOC|Api\.Save/.test(c));
   assert.deepEqual(made, [
     "section2.SetPageSize(11906, 11906, true)",
     "section2.SetPageMargins(1134, 1134, 1134, 1134)",
     'new paragraph\'s range.AddField("TOC \\\\o \\"1-2\\" \\\\h \\\\z \\\\u")',
+    "section2.SetPageSize(16838, 11906, false)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    // The page numbers with the last section as it is (AddField gives 0; counted with the other width, the pages came
+    // out one too many). The entries are as AddField made them after every other op: not made a second time.
+    "doc.UpdateAllTOC(true)",
+    "Api.Save()",
+  ]);
+  // A later op of the call may change the headings: the entries again then (they keep the tab AddField gave them).
+  const later = scriptedWord({ paras: [{ text: "Title" }, { text: "Findings", style: "Heading 1" }, { text: "Wide", section: 1 }], sections: [{}, { landscape: true }] });
+  later.run([{ toc: true, levels: 2 }, { format: "Findings", text: { bold: true } }]);
+  assert.deepEqual(later.calls.filter((c) => /UpdateAllTOC/.test(c)), ["doc.UpdateAllTOC(false)", "doc.UpdateAllTOC(true)"]);
+  // Without headings the new TOC lists nothing, and an update would only add an empty paragraph after it.
+  const bare = scriptedWord({ paras: [{ text: "Title" }, { text: "Wide", section: 1 }], sections: [{}, { landscape: true }] });
+  bare.run([{ toc: true, levels: 2 }]);
+  assert.ok(!bare.calls.some((c) => /UpdateAllTOC/.test(c)), bare.calls.join("\n"));
+  // One section, or sections alike across: nothing changed for it, and the page numbers are not counted a second time.
+  const one = scriptedWord({ paras: [{ text: "Title" }, { text: "Findings", style: "Heading 1" }] });
+  one.run([{ toc: true, levels: 2 }]);
+  assert.ok(!one.calls.some((c) => /SetPageSize|SetPageMargins/.test(c)), one.calls.join("\n"));
+  assert.deepEqual(one.calls.filter((c) => /UpdateAllTOC/.test(c)), ["doc.UpdateAllTOC(true)"]);
+  const oneLater = scriptedWord({ paras: [{ text: "Title" }, { text: "Findings", style: "Heading 1" }] });
+  oneLater.run([{ toc: true, levels: 2 }, { format: "Findings", text: { bold: true } }]);
+  assert.deepEqual(oneLater.calls.filter((c) => /UpdateAllTOC/.test(c)), ["doc.UpdateAllTOC(false)"]);
+});
+
+test("a table of contents follows every office_edit and office_format call that changed its document: its entries again, in the same command before the save; one with entries keeps their tab, so the last section keeps its width and the page numbers are not counted twice", () => {
+  const doc = () => scriptedWord({ paras: [{ text: "Findings\t1", style: "toc 1" }, { text: "Findings", style: "Heading 1" }, { text: "Body text" }, { text: "Wide", section: 1 }], sections: [{}, { landscape: true }] });
+  const toc = (calls: string[]) => calls.filter((c) => /^section2\.Set|UpdateAllTOC|Api\.Save/.test(c));
+  // Each update lays the whole document out (about 6 s for 600 pages): one, where the entries keep their own tab.
+  const after = ["doc.UpdateAllTOC(false)", "Api.Save()"];
+  const edit = doc();
+  assert.deepEqual(edit.edit([{ after: "Body text", paragraphs: ["Outlook"], style: "Heading 1" }]).result, { ops: 1, toc: true });
+  assert.deepEqual(toc(edit.calls), after);
+  const format = doc();
+  assert.deepEqual(format.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1, toc: true });
+  assert.deepEqual(toc(format.calls), after);
+  // A TOC that lists no entries yet, in a portrait section before a landscape one: its new entries take their tab from
+  // the last section, so that has the TOC's section's width for the entries; the page numbers are counted again after.
+  const empty = scriptedWord({ paras: [{ text: "No table of contents entries found.", field: true }, { text: "Findings", style: "Heading 1" }, { text: "Body text" }, { text: "Wide", section: 1 }], sections: [{}, { landscape: true }] });
+  assert.deepEqual(empty.edit([{ quote: "Body", replacement: "Main" }]).result, { ops: 1, toc: true });
+  assert.deepEqual(toc(empty.calls), [
+    "section2.SetPageSize(11906, 11906, true)",
+    "section2.SetPageMargins(1134, 1134, 1134, 1134)",
     "doc.UpdateAllTOC(false)",
     "section2.SetPageSize(16838, 11906, false)",
     "section2.SetPageMargins(1134, 1134, 1134, 1134)",
+    "doc.UpdateAllTOC(true)",
+    "Api.Save()",
   ]);
-  // One section, or sections alike across: nothing changed for it.
-  const one = scriptedWord({ paras: [{ text: "Title" }] });
-  one.run([{ toc: true, levels: 2 }]);
-  assert.ok(!one.calls.some((c) => /SetPageSize|SetPageMargins/.test(c)), one.calls.join("\n"));
+  // No TOC (that text typed by a person is no TOC): nothing is updated, and the answer says nothing of it.
+  const none = scriptedWord({ paras: [{ text: "No table of contents entries found." }, { text: "Body text" }] });
+  assert.deepEqual(none.edit([{ quote: "Body", replacement: "Main" }]).result, { ops: 1 });
+  assert.deepEqual(none.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1 });
+  assert.ok(!none.calls.some((c) => /UpdateAllTOC/.test(c)), none.calls.join("\n"));
+  // A call that fails is not followed by an update: the plugin's Undo takes back exactly that call.
+  const failed = doc();
+  assert.equal(failed.edit([{ quote: "nowhere", replacement: "x" }]).error.code, "quote_not_found");
+  const late = scriptedWord({ paras: [{ text: "Findings\t1", style: "toc 1" }, { text: "Body text" }], throwOn: "range(Body text@1).SetItalic" });
+  const out = late.run([{ format: "Body text", text: { bold: true } }, { format: "Body text", text: { italic: true } }]);
+  assert.equal(out.touched, true);
+  assert.ok(![...failed.calls, ...late.calls].some((c) => /UpdateAllTOC|Api\.Save/.test(c)), late.calls.join("\n"));
+});
+
+test("a comment a person put on a table of contents' entry goes with the old entries in the update, and is made again on the new entry with its author, time and replies, and named as moved (office_edit and office_format); one on the body stays", () => {
+  const doc = () => scriptedWord({
+    paras: [{ text: "Overview\t1", style: "toc 1" }, { text: "Risks\t2", style: "toc 1" }, { text: "Overview", style: "Heading 1" }, { text: "Body text" }, { text: "Risks", style: "Heading 1" }],
+    comments: [{ at: 0, on: "Overview", text: "@Aegis rename this section to Summary" }, { at: 3, on: "Body text", text: "Too long" }],
+    tocLinks: true,
+  });
+  const edit = doc();
+  const out = edit.edit([{ quote: "Body", replacement: "Main" }]);
+  assert.deepEqual(out.result, { ops: 1, moved: [["00000100", "00007000"]], toc: true, tocMoved: 1 });
+  // On the new entry that holds its text (the quote as it was before the update, not the editor's shifted piece after),
+  // on the run of its text in the entry's link: on the search's hit there, the editor took it one character in (e2e 24:
+  // "lanning ahead" for "Planning ahead"), and one more each time it was made again so.
+  assert.deepEqual(edit.madeComments.map((m) => [m.on, m.api.GetText(), m.api.GetAuthorName(), m.api.GetUserId(), m.api.added]), [["its run Overview in Overview\t1", "@Aegis rename this section to Summary", "Portal", "portal-user", [["Agreed", "Ann", "u-ann"]]]]);
+  assert.ok(edit.calls.includes("made comment.SetTimeUTC(1793108364144)"), edit.calls.join("\n"));
+  const format = doc();
+  assert.deepEqual(format.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1, toc: true, moved: [["00000100", "00007000"]], tocMoved: 1 });
+  // An entry whose text is gone (its heading renamed by the call): the entry at its place takes it; with no entries
+  // left, the TOC's own paragraph.
+  const renamed = scriptedWord({ paras: [{ text: "Intro\t1", style: "toc 1" }, { text: "Overview\t1", renamed: "Summary\t1", style: "toc 1" }, { text: "Intro", style: "Heading 1" }, { text: "Overview", style: "Heading 1" }], comments: [{ at: 1, on: "Overview", text: "rename" }] });
+  assert.equal(renamed.edit([{ quote: "Overview", replacement: "Summary" }]).result.tocMoved, 1);
+  assert.deepEqual(renamed.madeComments.map((m) => m.on), ["Summary in Summary\t1"]);
+  const renamedLink = scriptedWord({ paras: [{ text: "Intro\t1", style: "toc 1" }, { text: "Overview\t1", renamed: "Summary\t1", style: "toc 1" }, { text: "Intro", style: "Heading 1" }, { text: "Overview", style: "Heading 1" }], comments: [{ at: 1, on: "Overview", text: "rename" }], tocLinks: true });
+  renamedLink.edit([{ quote: "Overview", replacement: "Summary" }]);
+  assert.deepEqual(renamedLink.madeComments.map((m) => m.on), ["its run Summary in Summary\t1"]);
+});
+
+test("an office_format call that changed nothing (each op sets what is set already; the editor parts a run at the quote's ends all the same, into runs of one look) brings no table of contents up to date, and says it changed nothing; one that changed something does", () => {
+  const paras = [{ text: "Findings\t1", style: "toc 1" }, { text: "Findings", style: "Heading 1" }, { text: "Body text" }];
+  const same = scriptedWord({ paras, same: true });
+  assert.deepEqual(same.run([{ format: "Body", text: { bold: true } }, { page: "*", set: { margins: { top: 1134, right: 1134, bottom: 1134, left: 1134 } } }, { defineStyle: "Heading 1", change: true, text: { bold: true } }]).result, { ops: 3, changed: false, styles: [{ style: "Heading 1", changed: true, paragraphs: 1 }] });
+  assert.ok(!same.calls.some((c) => /UpdateAllTOC/.test(c)), same.calls.join("\n"));
+  assert.ok(same.calls.includes("Api.Save()"));
+  // A footnote, a header, a section break or a page break always changes the document.
+  for (const op of [{ footnote: "Body", text: "A note." }, { page: "*", set: { header: [{ text: "Top" }] } }, { sectionBreak: "Body text", type: "nextPage" }, { after: "Body text", pageBreak: true }]) {
+    const w = scriptedWord({ paras, same: true });
+    const out = w.run([op]);
+    assert.equal(out.result.changed, undefined, JSON.stringify(op));
+    assert.ok(w.calls.includes("doc.UpdateAllTOC(false)"), JSON.stringify(op));
+  }
+  const changed = scriptedWord({ paras });
+  assert.deepEqual(changed.run([{ format: "Body", text: { bold: true } }]).result, { ops: 1, toc: true });
+});
+
+test("paragraphs styled as entries of a table of contents that is no field (one made into text) are not said to be updated", () => {
+  const flat = scriptedWord({ paras: [{ text: "Findings\t1", style: "toc 1" }, { text: "Body text" }], flatToc: true });
+  assert.deepEqual(flat.edit([{ quote: "Body", replacement: "Main" }]).result, { ops: 1 });
+  assert.deepEqual(flat.run([{ format: "Body text", text: { bold: true } }]).result, { ops: 1 });
+});
+
+test("a table of contents without entries (the editor's text for it, its field in no JSON) is brought up to date where there are headings to list, and left as it is where there are none; the same sentence typed is no TOC", () => {
+  const empty = (paras: { text: string; style?: string }[]) => scriptedWord({ paras: [{ text: "Report" }, { text: "No table of contents entries found.", field: true }, ...paras] });
+  const headed = empty([{ text: "Body text" }]);
+  assert.deepEqual(headed.edit([{ after: "Body text", paragraphs: ["Outlook"], style: "Heading 1" }]).result, { ops: 1 });
+  // The fake's body does not grow by the insert: a heading is in it from the start for the update.
+  const withHeading = empty([{ text: "Outlook", style: "Heading 1" }, { text: "Body text" }]);
+  assert.deepEqual(withHeading.edit([{ quote: "Body", replacement: "Main" }]).result, { ops: 1, toc: true });
+  assert.deepEqual(withHeading.calls.filter((c) => /UpdateAllTOC/.test(c)), ["doc.UpdateAllTOC(false)"]);
+  // No headings: no update (each would add an empty paragraph after the TOC, or take it away again).
+  assert.ok(!headed.calls.some((c) => /UpdateAllTOC/.test(c)), headed.calls.join("\n"));
+  const typed = scriptedWord({ paras: [{ text: "No table of contents entries found." }, { text: "Outlook", style: "Heading 1" }] });
+  assert.deepEqual(typed.edit([{ quote: "Outlook", replacement: "View" }]).result, { ops: 1 });
+});
+
+test("with two tables of contents, the last section takes the width of the one without entries for the update (the one with entries keeps its tab)", () => {
+  // A TOC with entries in a landscape section, an empty one in a portrait section, and a landscape last section.
+  const two = scriptedWord({
+    paras: [{ text: "Findings\t1", style: "toc 1", section: 0 }, { text: "No table of contents entries found.", field: true, section: 1 }, { text: "Findings", style: "Heading 1", section: 2 }],
+    sections: [{ landscape: true }, {}, { landscape: true }],
+  });
+  assert.deepEqual(two.edit([{ quote: "Findings", nth: 1, replacement: "Results" }]).result, { ops: 1, toc: true });
+  assert.deepEqual(two.calls.filter((c) => /^section3\.Set|UpdateAllTOC/.test(c)), [
+    "section3.SetPageSize(11906, 11906, true)",
+    "section3.SetPageMargins(1134, 1134, 1134, 1134)",
+    "doc.UpdateAllTOC(false)",
+    "section3.SetPageSize(16838, 11906, false)",
+    "section3.SetPageMargins(1134, 1134, 1134, 1134)",
+    "doc.UpdateAllTOC(true)",
+  ]);
 });
 
 test("word.format: a page break and a table of contents go after their paragraph (a TOC at the start where none is given, as a TOC field); a footnote at the quote's end", () => {
-  const w = scriptedWord({ paras: [{ text: "Title" }, { text: "There was a discrepancy." }] });
+  const w = scriptedWord({ paras: [{ text: "Title" }, { text: "There was a discrepancy." }, { text: "Findings", style: "Heading 1" }] });
   const out = w.run([{ after: "Title", pageBreak: true }, { toc: true, levels: 2 }, { footnote: "discrepancy", text: "The audit." }, { sectionBreak: "Title", type: "continuous" }]);
   assert.deepEqual(out.error, undefined, JSON.stringify(out));
   assert.deepEqual(out.result, { ops: 4, reflowed: true });
@@ -2256,6 +2427,70 @@ test("word.read with formatting: what is set off or to zero is direct formatting
   assert.deepEqual(t1.look, { notes: [{ at: "cellnote", note: "Note in the cell.", row: 0, cell: 1 }] });
   assert.deepEqual(p3.look, { notes: [{ at: "Tail para", note: "Note at the tail." }] });
   assert.deepEqual(out.result.format.sections.map((x: { header?: unknown; headerAs?: number }) => [Boolean(x.header), x.headerAs]), [[true, undefined], [false, 1], [false, 1]]);
+});
+
+test("word.read with formatting: a table's own borders, and each cell's own fill, vertical alignment and borders and its paragraphs' and runs' own formatting, as the table's JSON has them; cells that set nothing are left out", () => {
+  const run = (rPr: Record<string, unknown>, text: string) => ({ type: "run", rPr, content: [text] });
+  const cellPara = (id: string, json: Record<string, unknown>) => ({ GetClassType: () => "paragraph", GetText: () => "", GetParaPr: () => ({ GetStyle: () => null }), GetStyle: () => null, GetInternalId: () => id, GetNumbering: () => null, GetAllDrawingObjects: () => [], ToJSON: () => JSON.stringify(json), GetElementsCount: () => 0, GetElement: () => null });
+  const red = { auto: false, r: 192, g: 0, b: 0 };
+  // Rows of cells: each its tcPr (as DS 10.0's JSON has it: the left border as "start") and its paragraphs.
+  const cells = [
+    [{ tcPr: { tcBorders: {} }, paras: [cellPara("a1", { content: [run({}, "Region")] })] }, { tcPr: { shd: { val: "nil", fill: { auto: false, r: 255, g: 255, b: 255 } }, tcBorders: {} }, paras: [cellPara("b1", { content: [run({}, "Revenue")] })] }],
+    [
+      { tcPr: { tcBorders: {} }, paras: [cellPara("a2", { content: [run({}, "North")] })] },
+      { tcPr: { shd: { val: "clear", fill: { auto: false, r: 255, g: 255, b: 0 } }, vAlign: "center", tcBorders: { start: { value: "none", sz: 0, color: { auto: true } }, top: { value: "single", sz: 12, color: red } } }, paras: [cellPara("b2", { pPr: { jc: "end" }, content: [run({ b: true }, "120")] }), cellPara("b2b", { pPr: { jc: "center" }, content: [run({}, "approx.")] })] },
+    ],
+  ];
+  const table = {
+    GetClassType: () => "table",
+    GetInternalId: () => "t1",
+    GetRowsCount: () => cells.length,
+    GetRow: (r: number) => ({ GetCellsCount: () => cells[r].length, GetCell: (c: number) => ({ GetContent: () => contentOf(cells[r][c].paras) }) }),
+    ToJSON: () => JSON.stringify({ tblPr: { tblBorders: { bottom: { value: "single", sz: 12, color: red } } }, content: cells.map((row) => ({ content: row.map((c) => ({ tcPr: c.tcPr, content: { content: [] } })) })) }),
+  };
+  const section = { GetPageWidth: () => 11906, GetPageHeight: () => 16838, GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134, GetHeader: () => null, GetFooter: () => null, ToJSON: () => "{}" };
+  const doc = { ...contentOf([table]), GetAllStyles: () => [], GetAllImages: () => [], GetStyle: () => null, GetDefaultTextPr: () => ({ ToJSON: () => "{}" }), GetSections: () => [section], GetFootnotesFirstParagraphs: () => [] };
+  const out = command("word.read", { GetDocument: () => doc }, { formatting: true });
+  assert.deepEqual(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(out.result.blocks[0].look, {
+    borders: { bottom: "single 1.5pt #C00000" },
+    cells: [
+      { row: 0, cell: 1, fill: "none" },
+      { row: 1, cell: 1, k: 0, of: 2, para: { align: "right" }, runs: [{ t: "120", look: { bold: true } }], fill: "#FFFF00", valign: "center", borders: { left: "none", top: "single 1.5pt #C00000" } },
+      { row: 1, cell: 1, k: 1, of: 2, para: { align: "center" } },
+    ],
+  });
+  // The editor gives a command's answer back only where it is nested 10 deep at most (DS 10.0's Asc.C3c): deeper, the
+  // plugin got undefined and the read failed.
+  const fits = (v: unknown, depth = 0): boolean => depth <= 10 && (typeof v !== "object" || v === null || Object.values(v).every((x) => fits(x, depth + 1)));
+  assert.ok(fits(out), "the answer is nested 10 deep at most");
+  // Without formatting, none of it.
+  assert.equal(command("word.read", { GetDocument: () => doc }, {}).result.blocks[0].look, undefined);
+});
+
+test("word.read with formatting: a cell's paragraphs are counted as its text in the rows shows them, a nested table's and a content control's among them, and each is read", () => {
+  const run = (rPr: Record<string, unknown>, text: string) => ({ type: "run", rPr, content: [text] });
+  const cellPara = (id: string, text: string, rPr: Record<string, unknown> = {}) => ({ GetClassType: () => "paragraph", GetText: () => `${text}\r\n`, GetParaPr: () => ({ GetStyle: () => null }), GetStyle: () => null, GetInternalId: () => id, GetNumbering: () => null, GetAllDrawingObjects: () => [], ToJSON: () => JSON.stringify({ content: [run(rPr, text)] }), GetElementsCount: () => 0, GetElement: () => null });
+  const inner = { GetClassType: () => "table", GetRowsCount: () => 1, GetRow: () => ({ GetCellsCount: () => 1, GetCell: () => ({ GetContent: () => contentOf([cellPara("x", "x")]) }) }) };
+  const control = { GetClassType: () => "blockLvlSdt", GetContent: () => contentOf([cellPara("c", "c", { i: true })]) };
+  // One cell: "a", a nested table holding "x", "b" in bold, and a content control holding "c" in italic.
+  const content = [cellPara("a", "a"), inner, cellPara("b", "b", { b: true }), control];
+  const table = {
+    GetClassType: () => "table",
+    GetInternalId: () => "t1",
+    GetRowsCount: () => 1,
+    GetRow: () => ({ GetCellsCount: () => 1, GetCell: () => ({ GetContent: () => contentOf(content) }) }),
+    ToJSON: () => JSON.stringify({ content: [{ content: [{ tcPr: {}, content: { content: [] } }] }] }),
+  };
+  const section = { GetPageWidth: () => 11906, GetPageHeight: () => 16838, GetPageMarginTop: () => 1134, GetPageMarginRight: () => 1134, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1134, GetHeader: () => null, GetFooter: () => null, ToJSON: () => "{}" };
+  const doc = { ...contentOf([table]), GetAllStyles: () => [], GetAllImages: () => [], GetStyle: () => null, GetDefaultTextPr: () => ({ ToJSON: () => "{}" }), GetSections: () => [section], GetFootnotesFirstParagraphs: () => [] };
+  const out = command("word.read", { GetDocument: () => doc }, { formatting: true });
+  assert.deepEqual(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(out.result.blocks[0].table, [["a / x / b / c"]]);
+  assert.deepEqual(out.result.blocks[0].look.cells, [
+    { row: 0, cell: 0, k: 2, of: 4, runs: [{ t: "b", look: { bold: true } }] },
+    { row: 0, cell: 0, k: 3, of: 4, runs: [{ t: "c", look: { italic: true } }] },
+  ]);
 });
 
 test("word.read with formatting: a numbered item carries its label as the editor numbers it, so a list going on and one starting again are told apart; a bullet and a read without formatting carry none", () => {

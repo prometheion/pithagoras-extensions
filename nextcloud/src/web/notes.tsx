@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { LuNotebookPen } from "react-icons/lu";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState } from "./widgets";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete } from "./widgets";
 
 /** The Notes tab: the notes by a word, one chosen open to its text -- edited and saved (the etag travels with it,
  * so an edit made elsewhere is not quietly lost), or taken away. All of it as a tool call on the server. */
@@ -16,6 +16,7 @@ interface NoteRow {
 export default function Notes() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the note calls go
+  const guard = useGuard();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<NoteRow[] | null>(null);
   const [chosenId, setChosenId] = useState<number | null>(null);
@@ -23,25 +24,27 @@ export default function Notes() {
   const [editedTitle, setEditedTitle] = useState("");
   const [editedContent, setEditedContent] = useState("");
   const [busy, setBusy] = useState(false);
-
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null); // a change or an opening that failed: drawn in whatever view stands
+  const [loadError, setLoadError] = useState<string | null>(null); // the list that could not be read
+  const [saved, setSaved] = useState(false);
 
   // the made note's words as they stand: open in the list view where nothing is chosen yet
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newContent, setNewContent] = useState("");
 
-  const search = (text: string) => {
-    setResults(null);
+  const search = (text: string, keep = false) => {
+    const current = guard("list");
+    if (!keep) setResults(null);
+    setLoadError(null);
     void api
       .tool("nc_notes_search_notes", { query: text }, instance)
       .then((result) => {
+        if (!current()) return;
         const rows = (arrayOf(partText(result).data, "results") ?? []).map((r) => ({ id: Number(r.id), title: String(r.title ?? ""), category: typeof r.category === "string" ? r.category : undefined }));
         setResults(rows);
       })
-      .catch((error) => setProblem(sayError(error)));
+      .catch((error) => current() && setLoadError(sayError(error)));
   };
 
   useEffect(() => {
@@ -49,11 +52,14 @@ export default function Notes() {
   }, []);
 
   const open = (id: number) => {
+    const current = guard("note");
     setChosenId(id);
     setNote(null);
+    setProblem(null);
     void api
       .tool("nc_notes_get_note", { note_id: id }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         if (typeof data === "object" && data !== null && typeof (data as Record<string, unknown>).etag === "string") {
           const n = data as Record<string, unknown>;
@@ -64,21 +70,41 @@ export default function Notes() {
           setProblem(t("The note did not answer in a way this panel reads."));
         }
       })
-      .catch((error) => setProblem(sayError(error)));
+      .catch((error) => {
+        if (!current()) return;
+        setChosenId(null); // back to the list, with the reason above it
+        setProblem(sayError(error));
+      });
   };
+
+  const dirty = note !== null && (editedTitle !== note.title || editedContent !== note.content);
+  portal.ui.useUnsavedDraft(dirty || (creating && (newTitle.trim() !== "" || newContent.trim() !== "")));
 
   const save = async () => {
     if (busy || chosenId === null || note === null) return;
     setBusy(true);
     setProblem(null);
+    setSaved(false);
     try {
       await api.tool("nc_notes_update_note", { note_id: chosenId, etag: note.etag, title: editedTitle, content: editedContent, category: null }, instance);
       open(chosenId); // the etag moved; read it back as it stands now
+      setSaved(true);
+      search(query, true);
     } catch (error) {
-      setProblem(sayError(error));
+      const said = sayError(error);
+      // Changed elsewhere since it was opened: said as that, and the words stay in the form.
+      setProblem(/412|precondition|etag|changed|modified|conflict/i.test(said) ? t("The note was changed elsewhere since you opened it. Your words are still here; open the note again to see the new text. ({error})", { error: said }) : said);
     } finally {
       setBusy(false);
     }
+  };
+
+  const back = async () => {
+    if (dirty && !(await portal.ui.confirm({ title: t("Leave this note without saving?"), message: t("What you changed in it is lost."), confirmLabel: t("Leave"), danger: true }))) return;
+    setChosenId(null);
+    setNote(null);
+    setSaved(false);
+    setProblem(null);
   };
 
   const create = async () => {
@@ -106,12 +132,9 @@ export default function Notes() {
     }
   };
 
-  const remove = async (asked = false) => {
+  const remove = async () => {
     if (busy || chosenId === null) return;
-    if (!asked) {
-      setAsk({ text: t("Remove this note for good?"), run() { void remove(true); } });
-      return;
-    }
+    if (!(await confirmDelete(t("Remove this note for good?"), note?.title, t("Delete this note")))) return;
     setBusy(true);
     setProblem(null);
     try {
@@ -126,9 +149,12 @@ export default function Notes() {
     }
   };
 
+  const banner = problem ? <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner> : null;
+
   if (chosenId === null) {
     return (
       <div className="space-y-2">
+        {banner}
         {/* The search is the whole of this tab while no note is open: it stands in one bordered block under a
             title, not as bare controls above an empty page. */}
         <div className="nc-note-intro">
@@ -191,8 +217,8 @@ export default function Notes() {
           </form>
         )}
         {results === null ? (
-          problem ? (
-            <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The notes could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
+          loadError ? (
+            <portal.ui.LoadFailed error={t("The notes could not be read: {error}", { error: loadError })} onRetry={() => search(query.trim())} />
           ) : (
             <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
           )
@@ -217,9 +243,9 @@ export default function Notes() {
 
   return (
     <div className="space-y-2">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
+      {banner}
       <div className="flex items-center gap-1">
-        <button type="button" className={portal.ui.classes.ghost} onClick={() => setChosenId(null)}>
+        <button type="button" className={portal.ui.classes.ghost} onClick={() => void back()}>
           ← {t("All notes")}
         </button>
         <span className="flex-1" />
@@ -229,6 +255,7 @@ export default function Notes() {
         <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || note === null || (editedTitle === note.title && editedContent === note.content)} onClick={() => void save()}>
           {t("Save")}
         </button>
+        {saved && !dirty && <span className="text-xs text-fg-subtle" role="status">{t("Saved.")}</span>}
       </div>
       {note === null ? (
         <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
@@ -238,7 +265,6 @@ export default function Notes() {
           <textarea className="nc-note-text" rows={8} value={editedContent} aria-label={t("Note content")} onChange={(e) => setEditedContent(e.target.value)} />
         </div>
       )}
-      {problem && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
     </div>
   );
 }

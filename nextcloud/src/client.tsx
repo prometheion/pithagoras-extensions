@@ -6,7 +6,7 @@ import {LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuExternalLink, Lu
 import { msg, portal, setPortal, t } from "./portal";
 import { de } from "./de";
 import { TABS, tabOffered } from "./capabilities";
-import { api, InstanceContext, NextcloudStatus } from "./web/api";
+import { api, FamiliesContext, InstanceContext, NextcloudStatus, sayError } from "./web/api";
 
 /** What this conversation may use of the tools it is offered, as the portal's tool switch answers it: its list --
  * each with who registered it -- and the names that are off for this one chat. `live` is false while pi does not
@@ -60,18 +60,36 @@ const TAB_ICONS: Record<string, ComponentType> = {
  * has nothing to say (no Nextcloud set) it says that, with the way to where the keys are kept. */
 function NextcloudPanel({ chat, panel }: PanelProps) {
   portal.locale.use();
-  // Files stands first and is the view the panel opens on (Simeon, 2026-10-30).
+  // Files stands first and is the view the panel opens on.
   const [tab, setTab] = useState<string>("files");
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | undefined>(undefined);
   // What this chat's own tool switch says of the instances' servers: an instance the conversation turned off does
-  // not stand in its switcher -- what a chat may not call on is offered nowhere to it (Simeon, 2026-10-30).
+  // not stand in its switcher -- what a chat may not call on is offered nowhere to it.
   const [policy, setPolicy] = useState<ChatToolPolicy | null>(null);
+  /** How things stand, read again. A failure is kept and drawn (the server half may not be up yet), with a way to try again. */
+  const loadStatus = () => {
+    void api.status().then(
+      (s) => {
+        setStatus(s);
+        setStatusError(null);
+      },
+      (error) => setStatusError(sayError(error)),
+    );
+  };
+  // At the start, and again whenever the panel is looked at again: a Save in Settings while it stood open changed
+  // the instances and the tabs it shows.
   useEffect(() => {
-    let gone = false;
-    void api.status().then((s) => !gone && setStatus(s), () => {});
+    loadStatus();
+    const again = () => {
+      if (document.visibilityState === "visible") loadStatus();
+    };
+    window.addEventListener("focus", again);
+    document.addEventListener("visibilitychange", again);
     return () => {
-      gone = true;
+      window.removeEventListener("focus", again);
+      document.removeEventListener("visibilitychange", again);
     };
   }, []);
   useEffect(() => {
@@ -89,9 +107,9 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
   const instances = status?.instances ?? [];
   // What stands in this chat's switcher: every instance, save one this conversation switched off. The off list
   // speaks the portal's <server>_<tool> spelling, and an entry claims to whichever instance its front matches --
-  // longest first, for "nextcloud" is a front of "nextcloud_uni", and the longer name has the claim (Simeon:
-  // a server a chat turned off is offered nowhere in it). Nothing of an instance named off here stands unknown,
-  // and unknown is offered: what was never asked for is not hidden.
+  // longest first, for "nextcloud" is a front of "nextcloud_uni", and the longer name has the claim: a server a
+  // chat turned off is offered nowhere in it. Nothing of an instance named off here stands unknown, and unknown
+  // is offered: what was never asked for is not hidden.
   const ownerOf = (name: string): string | undefined => {
     let best: string | undefined;
     for (const inst of instances)
@@ -115,15 +133,19 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
   // turned on -- asked live by the status, so a tab goes away where its server does not have it. Before any early
   // return: a hook after one stands in fewer renders than the others, and React throws where their count changed.
   const offered = TABS.filter((def) => tabOffered(def, held?.capabilities?.available, held?.capabilities?.on ?? {}));
-  useEffect(() => {
-    if (offered.length && !offered.some((def) => def.id === tab)) setTab(offered[0].id);
-  }, [held]);
+  // The tab shown is worked out from what is offered, not set after the render: a tab the instance does not offer is
+  // never mounted, not even for one render.
+  const shownTab = offered.some((def) => def.id === tab) ? tab : offered[0]?.id;
   // Where the status has not stood yet, nothing is offered at all: a tab mounted before its instance is known
   // would call for one there is none of, and its red answer flashes where there is nothing to say.
   if (!status)
     return (
       <div className="p-3">
-        <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
+        {statusError !== null ? (
+          <portal.ui.LoadFailed error={t("How the Nextclouds stand could not be read: {error}", { error: statusError })} onRetry={loadStatus} />
+        ) : (
+          <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
+        )}
       </div>
     );
   if (status.instances.length === 0) {
@@ -152,12 +174,15 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
           aria-label={t("Which of the Nextclouds the pages talk to")}
         />
       )}
-      {/* The bar of tabs, and in its far corner the way out: this one's own page in the browser. */}
-      <div className="nc-tabs" role="tablist">
-        {offered.map((def) => {
-          const Icon = TAB_ICONS[def.id];
-          return <TabButton key={def.id} active={tab === def.id} onClick={() => setTab(def.id)} icon={<Icon />} label={t(def.label)} />;
-        })}
+      {statusError !== null && <portal.ui.ErrorBanner onClose={() => setStatusError(null)}>{t("How the Nextclouds stand could not be read: {error}", { error: statusError })}</portal.ui.ErrorBanner>}
+      {/* The bar of tabs, and beside it the way out: this one's own page in the browser (outside the tab list: it is no tab). */}
+      <div className="flex flex-wrap items-center gap-1">
+        <div className="nc-tabs" role="tablist" aria-label={t("The parts of this Nextcloud")} onKeyDown={portal.ui.tabKeys}>
+          {offered.map((def) => {
+            const Icon = TAB_ICONS[def.id];
+            return <TabButton key={def.id} id={def.id} active={shownTab === def.id} onClick={() => setTab(def.id)} icon={<Icon />} label={t(def.label)} />;
+          })}
+        </div>
         {held && held.url !== "" && (
           <a
             href={held.url}
@@ -182,16 +207,18 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
       ) : (
         // The open tab remounts where the instance changes: what it shows belongs to that one and no other, and
         // the tabs read the instance their calls go to from here.
-        <div key={held?.name ?? selected ?? "none"}>
+        <div key={held?.name ?? selected ?? "none"} role="tabpanel" id="nc-tabpanel" aria-labelledby={shownTab ? `nc-tab-${shownTab}` : undefined}>
           <InstanceContext.Provider value={held?.name}>
-            {(() => {
-              const Shown = components[tab];
-              return Shown ? (
-                <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}><Shown /></Suspense>
-              ) : (
-                <p className="text-sm text-fg-subtle p-1">{t("Loading…")}</p>
-              );
-            })()}
+            <FamiliesContext.Provider value={held?.capabilities}>
+              {(() => {
+                const Shown = shownTab ? components[shownTab] : undefined;
+                return Shown ? (
+                  <Suspense fallback={<portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />}><Shown /></Suspense>
+                ) : (
+                  <p className="text-sm text-fg-subtle p-1">{t("Loading…")}</p>
+                );
+              })()}
+            </FamiliesContext.Provider>
           </InstanceContext.Provider>
         </div>
       )}
@@ -203,12 +230,15 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
 const components: Record<string, ComponentType> = {};
 
 /** One of the working tabs: its name and its mark, chosen as pressed. */
-function TabButton({ active, onClick, icon, label }: { active: boolean; onClick(): void; icon: React.ReactNode; label: string }) {
+function TabButton({ id, active, onClick, icon, label }: { id: string; active: boolean; onClick(): void; icon: React.ReactNode; label: string }) {
   return (
     <button
       type="button"
       role="tab"
+      id={`nc-tab-${id}`}
       aria-selected={active}
+      aria-controls="nc-tabpanel"
+      tabIndex={active ? 0 : -1}
       className={`nc-tab${active ? " nc-tab-on" : ""}`}
       onClick={onClick}
     >

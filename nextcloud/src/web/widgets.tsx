@@ -1,53 +1,26 @@
-/** Small pieces the tabs share: a switcher of sub-views in one tab (the same chip look as the list pickers), and the
- * panel's own yes-and-no, where the browser's question window would otherwise stand. */
+/** Small pieces the tabs share: the portal's question before something goes away, and two readers of the words the
+ * server gives (an HTML body as text, a moment of the tools as a Date). The portal's own pieces (Segments, confirm,
+ * LoadFailed, Field, format) are used directly: a tab keeps no copy of them. */
 
-import { t } from "../portal";
+import { portal, t } from "../portal";
 
-export interface SubTab {
-  id: string;
-  label: string;
+/** The portal's own question before something goes away for good: its dialog over the page (focus on the safe button,
+ * Escape to leave, and the person's setting to be asked or not), in place of a question drawn in the panel. */
+export function confirmDelete(title: string, message?: string, confirmLabel: string = t("Delete")): Promise<boolean> {
+  return portal.ui.confirm({ title, message, confirmLabel, danger: true, deletes: true });
 }
 
-export function SubTabs({ tabs, active, onChange }: { tabs: SubTab[]; active: string; onChange(id: string): void }) {
-  return (
-    <div className="nc-subtabs" role="group">
-      {tabs.map((tab) => (
-        <button key={tab.id} type="button" aria-pressed={tab.id === active} className={`nc-tab${tab.id === active ? " nc-tab-on" : ""}`} onClick={() => onChange(tab.id)}>
-          <span>{tab.label}</span>
-        </button>
-      ))}
-    </div>
-  );
+/** A message the server gave as HTML, as the text it says: tags gone, line breaks kept. DOMParser makes an inert
+ * document -- nothing in it runs or loads -- and its text is all that is taken. */
+export function htmlToText(html: string): string {
+  const doc = new DOMParser().parseFromString(html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n"), "text/html");
+  doc.querySelectorAll("script, style, head").forEach((node) => node.remove());
+  return (doc.body.textContent ?? "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** What stands for the one thing about to go: its words, and the two ways out of it. */
-export interface AskState {
-  text: string;
-  run(): void;
-}
-
-/** The panel asks before something goes away -- its own yes-and-no. No window of the browser is part of this page, so
- * nothing here may be one either (Simeon, 2026-11): every question stands drawn where it happens. */
-export function Ask({ ask, onNo }: { ask: AskState; onNo(): void }) {
-  return (
-    <div className="nc-ask" role="alertdialog" aria-label={ask.text}>
-      <p>{ask.text}</p>
-      <div className="nc-ask-row">
-        <button type="button" className="nc-ask-no" onClick={onNo}>
-          {t("No")}
-        </button>
-        <button
-          type="button"
-          className="nc-ask-yes"
-          onClick={() => {
-            const go = ask.run;
-            onNo();
-            go();
-          }}
-        >
-          {t("Yes")}
-        </button>
-      </div>
-    </div>
-  );
+/** A moment the tools gave as a word, as a Date. A bare day ("2025-03-15", what an all-day event carries) is that
+ * day in the reader's own zone: `new Date("2025-03-15")` is UTC midnight, which west of Greenwich is still the 14th. */
+export function parseWhen(word: string): Date {
+  const bare = /^(\d{4})-(\d{2})-(\d{2})$/.exec(word);
+  return bare ? new Date(Number(bare[1]), Number(bare[2]) - 1, Number(bare[3])) : new Date(word);
 }

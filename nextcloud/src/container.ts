@@ -5,20 +5,30 @@
  *
  * A container this extension makes runs on the portal's own loopback (Docker for extensions' sharedNetwork), not on
  * an isolated network: it must reach the person's Nextcloud host across the machine's usual networking, which a
- * container with no way out cannot do. There it serves its /mcp endpoint to the portal alone, bound to 127.0.0.1 of
- * that shared namespace -- not on every interface, so nothing but the portal reaches it. The image's entry point
- * already runs `nextcloud-mcp-server run --host 0.0.0.0` (for its Kubernetes chart); the `--host 127.0.0.1 --port`
- * appended to the command line takes the place of that and says on which port, as click reads an option named twice
- * and keeps the last. Where several instances keep their containers, each listens on its own port of that loopback.
+ * container with no way out cannot do. There it serves its /mcp endpoint on 127.0.0.1 of that shared namespace --
+ * not on every interface. For a portal on the machine itself that namespace is the machine's: the endpoint is then
+ * reachable by every local process, and it checks nobody (the server has no login of its own in this mode, and
+ * a token in front of it would be as reachable as it is -- the README says so). What keeps the damage down is what
+ * the portal does with it: the person is asked before mail goes out, a link is made, something is shared or deleted
+ * (the `approveTools` of its entry), and the container is made without capabilities, with limits.
+ * The image's entry point already runs `nextcloud-mcp-server run --host 0.0.0.0` (for its Kubernetes chart); the
+ * `--host 127.0.0.1 --port` appended to the command line takes the place of that and says on which port, as click
+ * reads an option named twice and keeps the last. Where several instances keep their containers, each listens on
+ * its own port of that loopback.
  */
-import type { Docker } from "../../shared/docker-api";
+import type { ContainerSpec, Docker } from "../../shared/docker-api";
+import { SPEC_LABEL, stamped } from "../../shared/service";
 import { NextcloudInstance, DEFAULT_INSTANCE_NAME } from "./config";
 import { ownName } from "./host";
 
 /** The image by its release tag: what latest pointed to when this version was made (0.203.0, 2026-10-29), and
- * what it is tested with. Pinned so an update of the server's own code is the person's choice, not a pull. The tags
- * on GHCR carry no v prefix, whatever the project's releases call themselves. */
+ * what it is tested with. It is downloaded by this tag (Docker for extensions takes an image by its tag), and a
+ * container is made from the digest below: a tag that is pushed again, to another build, is not run -- the next
+ * Start downloads it again and refuses. The tags on GHCR carry no v prefix, whatever the project's releases call themselves. */
 export const IMAGE = "ghcr.io/cbcoutinho/nextcloud-mcp-server:0.203.0";
+/** What the tag named on 2026-11-01 (the image index, read from the registry). A container is made from this. */
+export const IMAGE_DIGEST = "sha256:e021187a3f87acfe5e3f9b460a4f8a04932f9ed2fcd9490a8a27bf4780e24fe1";
+export const IMAGE_BY_DIGEST = `${IMAGE.slice(0, IMAGE.lastIndexOf(":"))}@${IMAGE_DIGEST}`;
 
 /** The name an own container stands under by its default, and how each instance's is made from it: the base for the
  * instance an earlier version carried, the base with its slug of the instance's name beside (overridable as every
@@ -38,62 +48,100 @@ function slug(name: string): string {
 }
 
 /** How each instance stands where the list of instances says it does: its container by its name, and the loopback
- * port of its server. A port that is already saved with the instance (see planOwn's caller keep it there) stands as
- * long as it is a real port no other instance claims; the rest take the lowest free ports at and above the base.
- * Adding, removing or reordering the others then does not shift what already stands -- a container is remade where
- * its own data changed, never where its neighbor went. The name of the one an earlier version carried stands as it
- * did, the rest get their slug of the instance's name beside the base -- and two slugs that came to one stand apart
- * by number. */
+ * port of its server. A port and a container name that are already saved with the instance stand as long as they
+ * are real and no other instance claims them; the rest take the lowest free ports at and above the base, and a
+ * name from the slug of the instance's name beside the base (two slugs that came to one stand apart by number). The
+ * name of the default instance is the base itself. Adding, removing or reordering the others then does not shift or
+ * rename what already stands -- a container is remade where its own data changed, never where its neighbor went. */
 export interface OwnPlan {
   inst: NextcloudInstance;
   containerName: string;
   port: number;
 }
 
-function place(plans: Map<string, OwnPlan>, takenNames: Set<string>, takenPorts: Set<number>, inst: NextcloudInstance, port: number): void {
+/** Whether a saved container name is one this extension may have given: the base, or the base and a dash. */
+const isOwnName = (name: string | undefined): name is string =>
+  typeof name === "string" && (name === CONTAINER_BASE || (name.startsWith(`${CONTAINER_BASE}-`) && /^[a-z0-9][a-z0-9_.-]*$/.test(name)));
+
+function freshName(takenNames: Set<string>, inst: NextcloudInstance): string {
   let name = inst.name === DEFAULT_INSTANCE_NAME ? CONTAINER_BASE : `${CONTAINER_BASE}-${slug(inst.name) || "extra"}`;
   if (takenNames.has(name)) { // two slugs that came to one: apart by number
     let n = 2;
     while (takenNames.has(`${name}-${n}`)) n++;
     name = `${name}-${n}`;
   }
-  takenNames.add(name);
-  takenPorts.add(port);
-  plans.set(inst.name, { inst, containerName: name, port });
+  return name;
 }
 
 export function planOwn(insts: NextcloudInstance[]): Map<string, OwnPlan> {
   const plans = new Map<string, OwnPlan>();
   const takenNames = new Set<string>();
   const takenPorts = new Set<number>();
+  // The names that stand saved are reserved first, so that a new instance whose slug comes to the same cannot take one.
+  const named = new Map<string, string>();
+  for (const inst of insts) {
+    if (isOwnName(inst.container) && !takenNames.has(inst.container)) {
+      named.set(inst.name, inst.container);
+      takenNames.add(inst.container);
+    }
+  }
+  const place = (inst: NextcloudInstance, port: number): void => {
+    const name = named.get(inst.name) ?? freshName(takenNames, inst);
+    takenNames.add(name);
+    takenPorts.add(port);
+    plans.set(inst.name, { inst, containerName: name, port });
+  };
   const unplaced: NextcloudInstance[] = [];
   for (const inst of insts) {
     const port = typeof inst.port === "number" && Number.isInteger(inst.port) && inst.port > 0 && inst.port <= 65535 ? inst.port : undefined;
     if (port === undefined || takenPorts.has(port)) unplaced.push(inst); // its saved port is not one it may keep: a fresh one below
-    else place(plans, takenNames, takenPorts, inst, port);
+    else place(inst, port);
   }
   for (const inst of unplaced) {
     let port = PORT;
     while (takenPorts.has(port)) port++;
     if (port > 65535) throw new Error(`Too many own containers: the ports above ${PORT} run out.`);
-    place(plans, takenNames, takenPorts, inst, port);
+    place(inst, port);
   }
   return plans;
 }
 
-/** How an own container is made from its instance: image, environment (the host and the login), command and network. */
-export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: number): Promise<Record<string, unknown>> {
+/** What the server may use: a WebDAV read pulls a file in as base64, and the Python server holds it whole. */
+const MEMORY = 1024 ** 3;
+
+/** How an own container is made from its instance: the image by its digest, environment (the host and the login,
+ * the endpoint kept from browsers, no metrics server),
+ * command and network -- with no capability, no new privileges, a memory, process and log limit, and Docker's
+ * restart policy (`stamped`), and the hash of all of it as its label. */
+export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: number): Promise<ContainerSpec> {
   const networkMode = await docker.sharedNetwork();
-  return {
-    Image: IMAGE,
+  return stamped({
+    Image: IMAGE_BY_DIGEST,
     Env: [
       `NEXTCLOUD_HOST=${inst.url}`,
       `NEXTCLOUD_USERNAME=${inst.username}`,
       `NEXTCLOUD_PASSWORD=${inst.password}`,
+      // The image's defaults answer any web page in a browser on this machine: CORS "*" with credentials (which
+      // Starlette turns into an echo of the page's origin) and the MCP SDK's DNS-rebinding protection off. With the
+      // protection on, only the Host this extension and pi-mcp-adapter send is taken, and any request that carries
+      // an Origin (a browser's) is refused, as no allowed origin is set; neither client sends one.
+      "MCP_DNS_REBINDING_PROTECTION=true",
+      `MCP_ALLOWED_HOSTS=127.0.0.1:${port}`,
+      `CORS_ALLOW_ORIGINS=http://127.0.0.1:${port}`,
+      // Its Prometheus server listens on 0.0.0.0:9090 of the shared namespace, which in host networking is the
+      // network's: tool calls by name, with timings. Nothing of this extension reads it.
+      "METRICS_ENABLED=false",
     ],
     Cmd: ["--host", "127.0.0.1", "--port", String(port)],
-    HostConfig: { NetworkMode: networkMode },
-  };
+    HostConfig: {
+      NetworkMode: networkMode,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges"],
+      Memory: MEMORY,
+      PidsLimit: 256,
+      LogConfig: { Type: "json-file", Config: { "max-size": "5m", "max-file": "2" } },
+    },
+  });
 }
 
 /** A container that stands in a name: taken as its own where this extension made it, refused anywhere else. One that
@@ -108,35 +156,40 @@ async function claim(docker: Docker, name: string): Promise<boolean> {
 }
 
 /**
- * Bring an own container to where its instance asks for it: made (or remade where its environment, command or network
- * is no longer what the instance says) and running. What an answer of sharedNetwork says that changes -- a portal's
- * container made again, with a new namespace id -- makes the old one not match, so it is remade then as well.
+ * Bring an own container to where its instance asks for it: made (or remade where what it was made with is no longer
+ * what the instance says) and running. "What it was made with" is the hash of its spec, kept as a label: Docker's
+ * inspect shows the environment with the image's own variables merged in, in another order, so a comparison of that
+ * would never hold. A portal's container made again, with a new namespace id, changes the network and so the hash.
+ * Says whether it was made anew. `beforeStart` runs before every start this asks Docker for (one made, or one that
+ * was not running), and refuses it by throwing: the run checks there that nothing else holds the port.
  */
-export async function ensureOwn(docker: Docker, plan: OwnPlan): Promise<void> {
+export async function ensureOwn(docker: Docker, plan: OwnPlan, beforeStart: () => Promise<void> = async () => {}): Promise<boolean> {
   if (!docker) throw new Error("Docker for extensions is not available to this portal");
   const { inst, containerName, port } = plan;
   await docker.images.ensure(IMAGE);
-  const spec = (await makeSpec(docker, inst, port)) as { Image: string; Env: string[]; Cmd: string[] } & Record<string, unknown>;
+  if (!(await docker.images.present(IMAGE_BY_DIGEST)))
+    throw new Error(`${IMAGE} is not the build this version of the extension runs (${IMAGE_DIGEST}): it is not started.`);
+  const spec = await makeSpec(docker, inst, port);
+  const wanted = (spec.Labels as Record<string, string>)[SPEC_LABEL];
   const exists = await claim(docker, containerName);
   if (exists) {
-    const inspect = (await docker.containers.inspect(containerName)) as
-      | { Config?: { Env?: string[]; Cmd?: string[] | null }; HostConfig?: { NetworkMode?: unknown } }
-      | undefined;
-    const envWantsSame = JSON.stringify(inspect?.Config?.Env ?? []) === JSON.stringify(spec.Env);
-    const cmdWantsSame = JSON.stringify(inspect?.Config?.Cmd ?? null) === JSON.stringify(spec.Cmd);
-    const wantedNetwork = (spec.HostConfig as { NetworkMode?: unknown } | undefined)?.NetworkMode;
-    const networkWantsSame = inspect?.HostConfig?.NetworkMode === wantedNetwork;
-    if (envWantsSame && cmdWantsSame && networkWantsSame) {
+    const inspect = (await docker.containers.inspect(containerName)) as { Config?: { Labels?: Record<string, string> | null } } | undefined;
+    if (inspect?.Config?.Labels?.[SPEC_LABEL] === wanted) {
       const state = await docker.containers.get(containerName);
-      if (!state || state.state !== "running") await docker.containers.start(containerName);
-      return;
+      if (!state || state.state !== "running") {
+        await beforeStart();
+        await docker.containers.start(containerName);
+      }
+      return false;
     }
-    // What it runs is no longer what the instance says: remake it. Docker's update takes the policy and resources,
-    // not the environment -- there is no way to change it in place.
+    // What it was made with is no longer what the instance says: remake it. Docker's update takes the policy and
+    // resources, not the environment -- there is no way to change it in place.
     await releaseOwn(docker, containerName);
   }
   await docker.containers.create(containerName, spec);
+  await beforeStart();
   await docker.containers.start(containerName);
+  return true;
 }
 
 /** An own container gone, stopped where it ran; nothing where there was none already -- and never one of another's. */

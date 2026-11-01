@@ -17,7 +17,7 @@
   appearance: none;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
   font-size: 0.78rem;
   font-weight: 500;
   display: inline-flex;
@@ -40,7 +40,7 @@
 }
 
 .nc-tab:hover:not(:disabled) {
-  color: var(--fg);
+  color: rgb(var(--fg));
   background: rgb(var(--raised) / 0.7);
 }
 
@@ -66,7 +66,7 @@
   appearance: none;
   border: 1px solid rgb(var(--line));
   background: rgb(var(--surface));
-  color: var(--fg);
+  color: rgb(var(--fg));
   text-align: left;
   font-size: 0.82rem;
   padding: 0.45rem 0.65rem;
@@ -111,17 +111,33 @@
   font-size: 0.85rem;
 }
 
+/* The tick and the name of an item share one label; the measure stands beside the name, quieter. */
+.nc-item-check {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.nc-item-unit {
+  flex: none;
+  font-size: 0.78rem;
+  color: rgb(var(--fg-subtle));
+}
+
 /* A checked item: struck through and faded, the way a shop's list goes. */
 .nc-item-done .nc-item-name {
   text-decoration: line-through;
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
 }
 
 .nc-item button {
   appearance: none;
   border: none;
   background: transparent;
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
   cursor: pointer;
   font-size: 0.78rem;
   padding: 0.15rem 0.35rem;
@@ -133,15 +149,6 @@
   background: rgb(var(--raised) / 0.8);
 }
 
-
-/* ---- a switcher of views inside one tab (the sub-tabs) ----------------------------------------------------- */
-
-.nc-subtabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
-  padding: 0.1rem 0.1rem 0;
-}
 
 /* ---- the calendar's month grid ---------------------------------------------------------------------------------- */
 
@@ -179,7 +186,7 @@
 .nc-monthhead {
   text-align: center;
   font-size: 0.65rem;
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
   padding: 0.1rem 0;
 }
 
@@ -223,7 +230,7 @@
 
 .nc-monthnum {
   font-size: 0.68rem;
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
   padding: 0 0.2rem;
 }
 
@@ -242,7 +249,7 @@
   border-radius: 4px;
   padding: 0 0.25rem;
   background: rgb(var(--accent) / 0.18);
-  color: var(--fg);
+  color: rgb(var(--fg));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -252,12 +259,12 @@
    (The all-day event's word is what the grid reads as its whole of it.) */
 .nc-monthchip-all {
   background: rgb(var(--line));
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
 }
 
 .nc-monthmore {
   font-size: 0.6rem;
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
   padding: 0 0.25rem;
 }
 
@@ -271,7 +278,7 @@
   border-radius: 999px;
   border: none;
   background: transparent;
-  color: var(--fg);
+  color: rgb(var(--fg));
   font-size: 0.72rem;
   padding: 0.18rem 0.55rem;
   cursor: pointer;
@@ -315,7 +322,7 @@
   appearance: none;
   border: none;
   background: transparent;
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
   cursor: pointer;
   font-size: 0.82rem;
   padding: 0.15rem 0.35rem;
@@ -327,7 +334,7 @@
 }
 
 .nc-crumbs button:hover {
-  color: var(--fg);
+  color: rgb(var(--fg));
   background: rgb(var(--raised) / 0.7);
 }
 
@@ -339,7 +346,7 @@
   appearance: none;
   border: 1px solid rgb(var(--line));
   background: rgb(var(--surface));
-  color: var(--fg);
+  color: rgb(var(--fg));
   text-align: left;
   font-size: 0.82rem;
   padding: 0.45rem 0.65rem;
@@ -356,7 +363,7 @@
 .nc-event svg,
 .nc-contact svg {
   flex: none;
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
 }
 
 /* A folder is the only entry that leads somewhere deeper: it wears the accent. */
@@ -380,7 +387,7 @@
 }
 
 .nc-file-size {
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
   font-size: 0.72rem;
   flex: 0 0 auto;
 }
@@ -416,7 +423,7 @@
 }
 
 .nc-row-share svg {
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
 }
 
 .nc-row-share:hover svg,
@@ -468,7 +475,7 @@
   border: 1px solid rgb(var(--line));
   background: rgb(var(--raised) / 0.6);
   border-radius: 999px;
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -482,7 +489,7 @@
 /* A chip that is a pick (what a share may do): on, it wears the accent rather than a checkbox's tick. */
 .nc-chip-on {
   border-color: rgb(var(--accent) / 0.55);
-  color: var(--fg);
+  color: rgb(var(--fg));
   background: rgb(var(--accent) / 0.14);
 }
 
@@ -539,7 +546,7 @@ button.nc-chip {
   appearance: none;
   border: 1px solid rgb(var(--line));
   background: rgb(var(--surface));
-  color: var(--fg);
+  color: rgb(var(--fg));
   text-align: left;
   font-size: 0.82rem;
   padding: 0.4rem 0.6rem;
@@ -561,7 +568,7 @@ button.nc-chip {
    (nc-card-done dresses only the title span's words, so it strikes through what is read.) */
 .nc-card-done .nc-chip,
 .nc-card-done > span:first-child {
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
 }
 
 .nc-card-done > span:first-child {
@@ -592,58 +599,6 @@ button.nc-chip {
   flex-shrink: 0;
 }
 
-/* The either-or of how long an event stands: two words in one frame, the chosen one standing out faintly.
-   Self-made on purpose -- where there is a choice between exactly two ways to stand open, a menu is not needed. */
-.nc-seg {
-  display: inline-flex;
-  gap: 0.1rem;
-  padding: 0.15rem;
-  border: 1px solid rgb(var(--line));
-  border-radius: 999px;
-  background: rgb(var(--raised) / 0.6);
-}
-
-.nc-seg button {
-  appearance: none;
-  border: none;
-  background: transparent;
-  color: var(--fg-muted);
-  font-family: inherit;
-  font-size: 0.78rem;
-  padding: 0.3rem 0.75rem;
-  border-radius: 999px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-}
-
-.nc-seg button:hover {
-  color: var(--fg);
-}
-
-/* The chosen word stands out unmistakably: a fuller tint, heavier weight -- and its own little point in front,
-   so one can see the choice even where the theme keeps colors faint. */
-.nc-seg-on {
-  background: rgb(var(--accent) / 0.3);
-  color: var(--fg);
-  font-weight: 700;
-}
-
-.nc-seg-on::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: rgb(var(--accent));
-  margin-right: 0.35rem;
-  flex-shrink: 0;
-}
-
-.nc-seg button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
 /* One line of the share form may give its length away: the type pick and the name sit on a row that wraps. */
 .nc-form .flex {
   min-width: 0;
@@ -654,66 +609,15 @@ button.nc-chip {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
   margin: 0;
 }
 
 .nc-form-result {
   font-size: 0.8rem;
   word-break: break-all;
-  color: var(--fg-muted);
+  color: rgb(var(--fg-muted));
   margin: 0;
-}
-
-/* The panel's own yes-and-no, drawn where it happens -- no window of the browser is part of this page. */
-.nc-ask {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-  padding-top: 0.15rem;
-}
-
-.nc-ask p {
-  margin: 0;
-  font-size: 0.82rem;
-  color: var(--fg);
-}
-
-.nc-ask-row {
-  display: flex;
-  flex-shrink: 0;
-  gap: 0.4rem;
-}
-
-.nc-ask-no,
-.nc-ask-yes {
-  font-size: 0.78rem;
-  border-radius: 6px;
-  padding: 0.25rem 0.65rem;
-  cursor: pointer;
-}
-
-.nc-ask-no {
-  background: transparent;
-  color: var(--fg-muted);
-  border: 1px solid rgb(var(--line));
-}
-
-.nc-ask-no:hover {
-  background: rgb(var(--raised));
-  color: var(--fg);
-}
-
-.nc-ask-yes {
-  background: transparent;
-  border: 1px solid rgb(var(--danger) / 0.45);
-  color: rgb(var(--danger));
-  font-weight: 600;
-}
-
-.nc-ask-yes:hover {
-  background: rgb(var(--danger) / 0.12);
 }
 
 /* ---- the contacts view -------------------------------------------------------------------------------------------- */
@@ -736,7 +640,7 @@ button.nc-chip {
   appearance: none;
   border: 1px solid rgb(var(--line));
   background: rgb(var(--surface));
-  color: var(--fg);
+  color: rgb(var(--fg));
   text-align: left;
   font-size: 0.82rem;
   padding: 0.5rem 0.65rem;
@@ -778,7 +682,7 @@ button.nc-chip {
   background: transparent;
   border: none;
   border-bottom: 1px solid rgb(var(--line));
-  color: var(--fg);
+  color: rgb(var(--fg));
   font-family: inherit;
   font-size: 0.95rem;
   font-weight: 600;
@@ -799,7 +703,7 @@ button.nc-chip {
   box-sizing: border-box;
   resize: vertical;
   background: rgb(var(--raised) / 0.4);
-  color: var(--fg);
+  color: rgb(var(--fg));
   font-family: inherit;
   font-size: 0.85rem;
   line-height: 1.5;
@@ -808,10 +712,43 @@ button.nc-chip {
 }
 
 .nc-contact-sub {
-  color: var(--fg-subtle);
+  color: rgb(var(--fg-subtle));
   font-size: 0.72rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+/* ---- the cookbook's recipe ---------------------------------------------------------------------------------------- */
+
+.nc-thumb {
+  flex: none;
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.nc-open-date {
+  flex: none;
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: rgb(var(--fg-subtle));
+}
+
+.nc-detail-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+  color: rgb(var(--fg));
+}
+
+.nc-detail-heading {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgb(var(--fg-muted));
 }

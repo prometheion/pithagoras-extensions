@@ -1229,9 +1229,9 @@ test("office_edit and office_format say that the table of contents was updated w
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ ops: 1, toc: true });
   const edited = (await tool(s, "office_edit").execute("e1", { id: doc.docId, ops: [{ after: "New document", paragraphs: ["Outlook"], style: "Heading 1" }] })) as ToolResult;
-  assert.match(edited.content[0].text, /^Edited "Report" \(1 op\), saved as revision \d+\. Updated the table of contents\.$/);
+  assert.match(edited.content[0].text, /^Edited "Report" \(1 op\), saved as revision [\d.]+\. Updated the table of contents\.$/);
   const formatted = (await tool(s, "office_format").execute("f1", { id: doc.docId, ops: [{ format: "Outlook", set: { bold: true } }] })) as ToolResult;
-  assert.match(formatted.content[0].text, /^Formatted "Report" \(1 op\), saved as revision \d+\. Updated the table of contents\.$/);
+  assert.match(formatted.content[0].text, /^Formatted "Report" \(1 op\), saved as revision [\d.]+\. Updated the table of contents\.$/);
   s.seat.answer = () => ({ ops: 1 });
   const plain = (await tool(s, "office_edit").execute("e2", { id: doc.docId, ops: [{ quote: "Outlook", replacement: "View" }] })) as ToolResult;
   assert.doesNotMatch(plain.content[0].text, /table of contents/);

@@ -1289,8 +1289,14 @@ test("office_format (spreadsheet): the ops go to the agent's editor as one cell.
   const ok = (await tool(s, "office_format").execute("f1", { id: sheet.docId, ops: [{ format: "A1:B1", set: { bold: true, fill: "#1F4E79" } }, { columns: "A", width: 18 }, { freeze: "A2" }] })) as ToolResult;
   const to = getDoc(sheet.docId, s.root)!.mtimeMs;
   assert.equal(ok.content[0].text, `Formatted "Book" (3 ops), saved as revision ${to}.`);
-  assert.deepEqual(s.seat.runs.map((r) => [r.mode, r.kind, r.args, r.timeoutMs]), [["edit", "cell.format", { ops: [{ format: "A1:B1", area: { col: 0, row: 0, cols: 2, rows: 1 }, looks: { bold: true, fill: { r: 31, g: 78, b: 121 } } }, { columns: "A:A", from: 0, count: 1, width: 18 }, { freeze: "A2", cols: 0, rows: 1 }] }, undefined]]);
+  assert.deepEqual(s.seat.runs.map((r) => [r.mode, r.kind, r.args, r.timeoutMs]), [["edit", "cell.format", { ops: [{ format: "A1:B1", area: { col: 0, row: 0, cols: 2, rows: 1 }, looks: { bold: true, fill: { r: 31, g: 78, b: 121 } } }, { columns: "A:A", from: 0, count: 1, width: 18 }, { freeze: "A2", cols: 0, rows: 1 }] }, 20_000 + 4 * 3_000]], "a freeze waits for its panes, up to twice and as often again where it is taken back");
   assert.match(s.seen.records.at(-1)!.reason, /^office_format: 3 op\(s\) \(cells, columns, freeze\) on /);
+  // Eleven autofits (a model fitting columns one by one): one wait for their run and one where they are taken back,
+  // within the edit's two minutes; cells alone keep the seat's own time.
+  await tool(s, "office_format").execute("f3", { id: sheet.docId, ops: "BCDEFGHIJKL".split("").map((c) => ({ columns: c, autofit: true })) });
+  assert.equal(s.seat.runs.at(-1)!.timeoutMs, 20_000 + 12 * 3_000);
+  await tool(s, "office_format").execute("f4", { id: sheet.docId, ops: [{ format: "A1", set: { bold: true } }] });
+  assert.equal(s.seat.runs.at(-1)!.timeoutMs, undefined);
   // A call the editor took back but not whole (what it cannot read back stays) is partial, and in the audit log.
   s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: x. The ops before it are taken back, but not all of them whole. The editor cannot read back the alignment of "Sheet1"!A1:B1 (op 1), which stay as this call set them.', 1, true));
   assert.match(await refused(tool(s, "office_format").execute("f2", { id: sheet.docId, ops: [{ format: "A1:B1", set: { align: "center" } }, { format: "A5", set: { subscript: true } }] })), /^error:partial op 2: x\. .*cannot read back the alignment .* Part of this call may be in the document: read it with office_read before you go on/);

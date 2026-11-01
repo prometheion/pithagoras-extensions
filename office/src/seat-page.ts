@@ -1556,6 +1556,10 @@ const CELL_SAVE = `function () {
 }`;
 
 
+/** How often, and how far apart in ms, the plugin reads what autofits or a freeze left until it shows: up to 2 s each
+ * time (cellEdit's `settle`). */
+export const SETTLE = { tries: 10, ms: 200 };
+
 /**
  * One op of a spreadsheet edit (`Asc.scope.args`: `op`, its `index`, and `pending`, the names the sheets this edit
  * deletes have until it ends, which the op does not see). Besides the sheet ops of ops.ts, the steps the plugin makes
@@ -1833,24 +1837,30 @@ const CELL_STEP = `function () {
       if (op.height !== undefined) lall.SetRowHeight(op.height);
       if (op.autofit) lall.AutoFit(lkind === "rows", lkind === "columns");
       if (op.hidden !== undefined) lall.SetHidden(op.hidden);
-      // An autofit's size lands in the editor a moment after the command (measured in DS 10.0): the plugin reads what it
-      // left in commands of its own after this one, until the sizes differ from these (\`settle\`).
+      // In an editor people have co-edited, an autofit's size lands a moment after the command (the Document Server's
+      // lock, measured in DS 10.0); where nobody else has been in it, in the command. Sizes that read as before here have
+      // not landed, or the autofit changed nothing: the plugin reads them again later, all of a call's together, until
+      // they differ from these (\`settle\`).
       var lleft = lineState(), lnow = lleft.size.slice();
-      if (op.autofit) lleft.size = lleft.size.map(function () { return null; });
+      var landed = !op.autofit || lnow.some(function (v, k) { return v !== lbefore.size[k]; });
+      if (!landed) lleft.size = lleft.size.map(function () { return null; });
       // A hidden column reads no width (0): one this op sized cannot get its width back.
       var blind = [];
       if (lkind === "columns" && (op.width !== undefined || op.autofit)) for (var h = 0; h < op.count; h++) if (lbefore.hidden[h]) blind.push(colName(op.from + h));
-      return { result: { inverse: { restoreLines: { sheet: lws.GetName(), kind: lkind, from: op.from, count: op.count, before: lbefore, left: lleft }, real: true }, settle: op.autofit ? { sizes: lnow } : undefined, unreadable: blind.length ? { op: i, what: ["width"], where: where(lws, "column" + (blind.length > 1 ? "s " : " ") + blind.join(", ")) } : undefined } };
+      return { result: { inverse: { restoreLines: { sheet: lws.GetName(), kind: lkind, from: op.from, count: op.count, before: lbefore, left: lleft }, real: true }, settle: landed ? undefined : { sizes: lnow }, unreadable: blind.length ? { op: i, what: ["width"], where: where(lws, "column" + (blind.length > 1 ? "s " : " ") + blind.join(", ")) } : undefined } };
     }
-    // What an autofit or a freeze at a cell left, read once it landed (after their command): what their inverse compares
-    // with, so that a person's change after them wins there too.
+    // What autofits or a freeze left, read once it landed (after their command): what their inverse compares with, so
+    // that a person's change after them wins there too. The sizes of several autofits in one go (\`lines\`, each null
+    // where its sheet is not found by that name).
     if (op.settle !== undefined) {
       var st = op.settle;
-      if (st.restoreLines) {
-        var sl = st.restoreLines, sws = named(sl.sheet), sizes = [];
-        for (var z = 0; z < sl.count; z++) { var one = sws.GetRange(linesOf(sl.kind, sl.from + z, 1)); sizes.push(sl.kind === "columns" ? one.GetColumnWidth() : one.GetRowHeight()); }
-        return { result: { size: sizes } };
-      }
+      if (st.lines) return { result: { sizes: st.lines.map(function (sl) {
+        try {
+          var sws = named(sl.sheet), sizes = [];
+          for (var z = 0; z < sl.count; z++) { var one = sws.GetRange(linesOf(sl.kind, sl.from + z, 1)); sizes.push(sl.kind === "columns" ? one.GetColumnWidth() : one.GetRowHeight()); }
+          return sizes;
+        } catch (e) { return null; }
+      }) } };
       return { result: { frozen: frozenOf(named(st.refreeze)) } };
     }
     if (op.restoreLines !== undefined) {
@@ -1869,23 +1879,34 @@ const CELL_STEP = `function () {
     if (op.freeze !== undefined) {
       var zws = sheetOf(op);
       if (!zws.GetVisible()) return { error: hiddenFreeze(i, zws.GetName()) };
-      var zbefore = frozenOf(zws);
-      // Frozen at a cell already: unfrozen in this command, frozen at the new cell in the next (see freeze).
+      var zbefore = frozenOf(zws), zname = zws.GetName();
+      // Frozen so already: nothing to do (the editor would take a freeze asked again off, or leave it).
+      if (zbefore.cols === op.cols && zbefore.rows === op.rows) return { result: {} };
+      // Every freeze goes through the Document Server's lock once people have co-edited the workbook, and shows in the
+      // panes a moment after its command (measured in DS 10.0): the plugin reads them in commands of its own after this
+      // one, until they show (\`settle\`), and the inverse compares what it read then.
+      // Frozen at a cell already: unfrozen in this command, frozen at the new cell in a step after the unfreeze showed
+      // (see freeze). One that has not shown by then fails the op rather than unfreeze again.
       if (op.cols && op.rows && zbefore.cols && zbefore.rows) {
+        if (op.again) return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not take the frozen panes of " + JSON.stringify(zname) + " off within " + (${SETTLE.tries * SETTLE.ms} / 1000) + " s: a person may be working in that sheet; try again later" } };
         freeze(zws, 0, 0);
-        return { result: { inverse: { refreeze: zws.GetName(), cols: zbefore.cols, rows: zbefore.rows, left: { cols: 0, rows: 0 }, real: true }, then: { sheet: zws.GetName(), freeze: op.freeze, cols: op.cols, rows: op.rows, real: true } } };
+        return { result: { inverse: { refreeze: zname, cols: zbefore.cols, rows: zbefore.rows, left: null, real: true }, settle: { frozen: { cols: 0, rows: 0 } }, then: { sheet: zname, freeze: op.freeze, cols: op.cols, rows: op.rows, again: true, real: true } } };
       }
       freeze(zws, op.cols, op.rows);
-      // A freeze at a cell (through the selection) shows in the panes a moment after the command (measured in DS 10.0):
-      // the plugin reads what it left in commands of its own after this one, until it shows (\`settle\`).
-      var cellFreeze = Boolean(op.cols && op.rows);
-      return { result: { inverse: { refreeze: zws.GetName(), cols: zbefore.cols, rows: zbefore.rows, left: cellFreeze ? null : frozenOf(zws), real: true }, settle: cellFreeze ? { frozen: { cols: op.cols, rows: op.rows } } : undefined } };
+      return { result: { inverse: { refreeze: zname, cols: zbefore.cols, rows: zbefore.rows, left: null, real: true }, settle: { frozen: { cols: op.cols, rows: op.rows } } } };
     }
+    // Panes put back; they too show after the command: the plugin waits for them (\`settle\`) before the next inverse,
+    // which reads them. A cell freeze over a cell freeze is unfrozen first, and frozen in a second inverse (\`then\`).
     if (op.refreeze !== undefined) {
-      var bws = named(op.refreeze), bnow = frozenOf(bws);
-      if (op.left && (bnow.cols !== op.left.cols || bnow.rows !== op.left.rows)) return { result: { kept: { what: "frozen panes", sheet: bws.GetName(), cells: [] } } };
-      if (bws.GetVisible()) freeze(bws, op.cols, op.rows);
-      return { result: {} };
+      var bws = named(op.refreeze), bnow = frozenOf(bws), bname = bws.GetName();
+      if (op.left && (bnow.cols !== op.left.cols || bnow.rows !== op.left.rows)) return { result: { kept: { what: "frozen panes", sheet: bname, cells: [] } } };
+      if (!bws.GetVisible() || (bnow.cols === op.cols && bnow.rows === op.rows)) return { result: {} };
+      if (op.cols && op.rows && bnow.cols && bnow.rows) {
+        freeze(bws, 0, 0);
+        return { result: { settle: { frozen: { cols: 0, rows: 0 } }, then: { refreeze: bname, cols: op.cols, rows: op.rows, left: { cols: 0, rows: 0 }, real: true } } };
+      }
+      freeze(bws, op.cols, op.rows);
+      return { result: { settle: { frozen: { cols: op.cols, rows: op.rows } } } };
     }
     if (op.insertRows !== undefined || op.insertColumns !== undefined) {
       var iws = sheetOf(op), ikind = op.insertRows !== undefined ? "rows" : "columns", iu = usedOf(iws);
@@ -1993,9 +2014,6 @@ const CELL_STEP = `function () {
 /** The commands of a spreadsheet edit, which the plugin runs in turn (cellEdit). */
 export const CELL_EDIT_COMMANDS = { check: CELL_CHECK, step: CELL_STEP, sheets: CELL_SHEETS, save: CELL_SAVE };
 
-/** How often, and how far apart in ms, the plugin reads what an autofit or a freeze at a cell left until it shows: up
- * to 2 s (cellEdit's `settle`). */
-export const SETTLE = { tries: 10, ms: 200 };
 /** How often, and how far apart in ms, the plugin looks whether a change to the sheets is made: up to 10 s per change. */
 export const SHEET_WAIT = { tries: 100, ms: 100 };
 
@@ -2352,7 +2370,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
   // cells, so it is not run (\`moved\`, by sheet), and the answer names those ops as not taken back.
   function cellEdit(job) {
     var ops = job.args.ops, undo = [], undoOps = [], pending = [], deleted = {}, cells = 0, asked = false, broken = "";
-    var unreadable = [], irreversible = [], kept = [], shifted = [], budget = ${MAX_FORMAT_CELLS}, moved = {}, notBack = [], dropped = {};
+    var unreadable = [], irreversible = [], kept = [], shifted = [], budget = ${MAX_FORMAT_CELLS}, moved = {}, notBack = [], dropped = {}, unsettled = [];
     function move(sheet, rows, at) { (moved[sheet] = moved[sheet] || []).push({ rows: rows, at: at }); }
     // A range's bounds from 0 ("A1:B2", "C:D", "5:6"); whole columns reach every row, whole rows every column.
     function areaOf(address) {
@@ -2370,7 +2388,10 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       next(0);
     });
     function next(i) {
-      if (i >= ops.length) return drop(0);
+      // Autofits whose sizes had not changed in their command are read at the end of their run (a call that fits
+      // columns one by one waits once), before the next op and before the save, which would miss them.
+      if (i >= ops.length) return settleAll(function () { drop(0); });
+      if (unsettled.length && !ops[i].autofit) return settleAll(function () { next(i); });
       if (typeof ops[i].range !== "string") return step(ops[i], i, function () { next(i + 1); });
       var writes = [], j = i;
       for (; j < ops.length && typeof ops[j].range === "string"; j++) writes.push({ sheet: ops[j].sheet, range: ops[j].range, values: ops[j].values, index: j });
@@ -2417,19 +2438,20 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
           undo.push(r.inverse);
           undoOps.push(op.writes ? op.writes.map(function (w) { return w.index; }) : [i]);
         }
-        if (r.settle && r.inverse) return settle(r, 0);
+        // An autofit's sizes are read at the end of its run of autofits (settleAll); a freeze's panes now, as the next
+        // op may freeze that sheet again.
+        if (r.settle && r.settle.sizes && r.inverse) unsettled.push(r);
+        else if (r.settle && r.inverse) return settle(r, 0);
         made(r);
       });
-      // What an autofit or a freeze at a cell left lands a moment after its command: read until it shows (sizes other
-      // than right after it, the frozen panes asked for), for the inverse to compare with. A freeze that does not show
-      // in time is not compared; sizes that stay are what the autofit left.
+      // What a freeze left lands a moment after its command: read until the panes asked for show, for the inverse to
+      // compare with. Panes that do not show in time are not compared.
       function settle(r, tries) {
         call(cell.step, { op: { settle: r.inverse, real: true }, index: i, pending: pending }, false, function (s) {
           var left = s.result || {}, z = r.settle;
-          var shown = z.sizes ? Boolean(left.size) && left.size.some(function (v, k) { return v !== z.sizes[k]; }) : Boolean(left.frozen) && left.frozen.cols === z.frozen.cols && left.frozen.rows === z.frozen.rows;
+          var shown = Boolean(left.frozen) && left.frozen.cols === z.frozen.cols && left.frozen.rows === z.frozen.rows;
           if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
-          if (r.inverse.restoreLines && left.size) r.inverse.restoreLines.left.size = left.size;
-          if (r.inverse.refreeze !== undefined && shown) r.inverse.left = left.frozen;
+          r.inverse.left = shown ? left.frozen : null;
           made(r);
         });
       }
@@ -2449,6 +2471,24 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
         });
       }
     }
+    // The sizes of the autofits whose sizes had not changed in their command, read until each differs from that or the
+    // tries are out: then what reads is what the autofit left (it changed nothing, or lands later still), for its
+    // inverse to compare with. All of them in one command a try, so a call of many autofits waits once.
+    function settleAll(then, tries) {
+      if (!unsettled.length) return then();
+      tries = tries || 0;
+      call(cell.step, { op: { settle: { lines: unsettled.map(function (r) { return r.inverse.restoreLines; }) }, real: true }, index: -1, pending: pending }, false, function (s) {
+        var sizes = s.result && s.result.sizes || [];
+        unsettled = unsettled.filter(function (r, k) {
+          var now = sizes[k], shown = Boolean(now) && now.some(function (v, x) { return v !== r.settle.sizes[x]; });
+          if (!shown && now !== null && tries < ${SETTLE.tries}) return true;
+          if (now) r.inverse.restoreLines.left.size = now;
+          return false;
+        });
+        if (!unsettled.length) return then();
+        setTimeout(function () { settleAll(then, tries + 1); }, ${SETTLE.ms});
+      });
+    }
     function wait(expect, then, tries) {
       call(cell.sheets, {}, false, function (out) {
         var names = (out.result || []).map(function (s) { return s.name; });
@@ -2458,7 +2498,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       });
     }
     function back(error) {
-      (function one() {
+      settleAll(function one() {
         var inverse = undo.pop(), at = undoOps.pop();
         if (!inverse) return call(cell.save, {}, true, function () {
           if (!broken && !asked && !unreadable.length && !irreversible.length && !kept.length && !notBack.length) return done(job, error.op !== undefined ? { error: error, undone: true } : { error: error });
@@ -2495,6 +2535,18 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
             return one();
           }
           var r = out.result || {};
+          // Panes put back show a moment after: waited for before the next inverse reads them.
+          if (r.settle) return (function look(tries) {
+            call(cell.step, { op: { settle: inverse, real: true }, index: -1, pending: pending }, false, function (s) {
+              var f = s.result && s.result.frozen, shown = Boolean(f) && f.cols === r.settle.frozen.cols && f.rows === r.settle.frozen.rows;
+              if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { look(tries + 1); }, ${SETTLE.ms});
+              if (!shown) {
+                if (r.then) { if (!broken) broken = "the frozen panes of " + JSON.stringify(inverse.refreeze) + " could not be put back"; }
+                else asked = true;
+              } else if (r.then) { undo.push(r.then); undoOps.push(at); }
+              one();
+            });
+          })(0);
           if (r.kept) {
             kept = kept.concat(r.kept);
             // Rows or columns this call made that stay (a person wrote into them) move the cells for the ops before.
@@ -2506,7 +2558,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
             one();
           });
         });
-      })();
+      });
     }
   }
   // A message in the editor's chat, as the agent: the plugin's own method, not a command (it changes no document).

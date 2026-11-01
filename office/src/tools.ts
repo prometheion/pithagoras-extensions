@@ -42,7 +42,7 @@ import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
 import { editJob, formatJob, isSheetOp, OpError, viewJob, type EditJob, type FormatJob, type SheetFormatJob } from "./ops";
 import * as seat from "./seat";
-import { MAX_READ_FORMAT, MAX_SHOWN_TEXT } from "./seat-page";
+import { MAX_READ_FORMAT, MAX_SHOWN_TEXT, SETTLE } from "./seat-page";
 import * as docchat from "./docchat";
 
 /** Marks a text to be translated where it is shown: a label kept in a table (de.ts has its German). */
@@ -293,6 +293,14 @@ function failed(e: unknown): unknown {
  * most: the editor answers a sheet change in about half a second, and one that answers none in 10 s fails the call. */
 const SHEET_OP_MS = 20_000;
 const MAX_EDIT_MS = 120_000;
+/** What one wait of the plugin for a freeze's panes or a run of autofits' sizes may add (SETTLE, about 2 s, and the
+ * commands that read them). A freeze waits up to twice (a cell freeze over one is unfrozen first) and as often again
+ * where the call is taken back; a run of autofits once, and once more where the call is taken back. */
+const SETTLE_MS = SETTLE.tries * SETTLE.ms + 1_000;
+function settlesOf(ops: readonly object[]) {
+  const freezes = ops.filter((op) => "freeze" in op).length, autofits = ops.filter((op) => (op as { autofit?: unknown }).autofit === true).length;
+  return 4 * freezes + (autofits ? autofits + 1 : 0);
+}
 
 /** Of what pi hands a tool's execute last (its ExtensionContext), what office_screenshot reads: the chat's model, and
  * whether it takes pictures (`input`). */
@@ -846,10 +854,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const n = job.args.ops.length;
       // An op that makes, moves or deletes a sheet waits for the Document Server's answer (seat-page.ts, cellEdit).
       const sheetOps = job.kind === "cell.edit" ? job.args.ops.filter(isSheetOp).length : 0;
+      const settles = job.kind === "cell.format" ? settlesOf(job.args.ops) : 0;
       const what = `${tool}: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
       let made: unknown;
       try {
-        made = await seats().run(home, doc.docId, "edit", job, { signal, ...(sheetOps ? { timeoutMs: Math.min(seat.LIMITS.jobMs + SHEET_OP_MS * sheetOps, MAX_EDIT_MS) } : {}) });
+        made = await seats().run(home, doc.docId, "edit", job, { signal, ...(sheetOps || settles ? { timeoutMs: Math.min(seat.LIMITS.jobMs + SHEET_OP_MS * sheetOps + SETTLE_MS * settles, MAX_EDIT_MS) } : {}) });
       } catch (e) {
         // Cut off: a sheet the call deletes waits hidden under another name until the end (seat-page.ts, cellEdit).
         if (e instanceof seat.SeatError && (e.code === "timeout" || e.code === "editor_closed") && job.kind === "cell.edit" && job.args.ops.some((op) => "deleteSheet" in op)) {

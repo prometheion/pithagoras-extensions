@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { setImmediate as tick } from "node:timers/promises";
-import { BRIDGE_JS, CELL_EDIT_COMMANDS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, MAX_SHOWN_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS, SHEET_MOST, VIEW_SETTLE } from "../src/seat-page";
+import { BRIDGE_JS, CELL_EDIT_COMMANDS, COMMANDS, EDITOR_SIZE, MAX_READ_TEXT, MAX_SHOWN_TEXT, SEAT_PAGE_HTML, SEAT_PAGE_JS, SETTLE, SHEET_MOST, VIEW_SETTLE } from "../src/seat-page";
 import { editJob, formatJob } from "../src/ops";
 
 /** The seat page running: its polls answered by `order`, what it posts as events, the editors it made, and the
@@ -315,9 +315,11 @@ const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = 
  * (or false for bold, null for italic and the like) where they do; a setter on the whole text makes them alike.
  * `state.ranges` counts the ranges a command asked for. `poisonLook` makes a look set on that cell throw: an op that
  * fails in its step, which the check cannot foresee.
- * `before` runs before each command (with how many ran before it): a person's change between two steps.
+ * `before` runs before each command (with how many ran before it): a person's change between two steps. A freeze, an
+ * unfreeze and an autofit show from the next command on, as in an editor people have co-edited (the Document Server's
+ * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does.
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void } = {}) {
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
   const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0 };
@@ -490,16 +492,16 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         }
         list.sort((x, y) => x - y);
       },
-      // The editor lays the sizes out after the command (DS 10.0): they show from the next one on.
+      // An editor people have co-edited lays the sizes out after the command (DS 10.0): they show from the next one on;
+      // one nobody else has been in (`autofitAtOnce`) in the command.
       AutoFit: (rows: boolean, cols: boolean) => {
         state.calls.push(`AutoFit ${address} ${rows} ${cols}`);
-        later.push({
-          due: state.commands + 1,
-          fn: () => {
-            if (cols) for (let c = b.c1; c <= b.c2; c++) sh.widths[c] = 12.5;
-            if (rows) for (let r = b.r1; r <= b.r2; r++) sh.heights[r] = 20;
-          },
-        });
+        const fit = () => {
+          if (cols) for (let c = b.c1; c <= b.c2; c++) sh.widths[c] = 12.5;
+          if (rows) for (let r = b.r1; r <= b.r2; r++) sh.heights[r] = 20;
+        };
+        if (options.autofitAtOnce) fit();
+        else later.push({ due: state.commands + 1, fn: fit });
       },
       GetCharacters: (start: number, count: number) => ({ GetFont: () => font(start, count), GetCount: () => String(sh.cells[first] ?? "").length }),
       GetFillColor: () => (lookAt(sh, first).fill === "none" ? "No Fill" : colourOf(lookAt(sh, first).fill)),
@@ -574,10 +576,11 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
           // As DS 10.0 names them: "A:A" and "1:1" for one column or row alone.
           return { GetAddress: () => (!f.rows ? (f.cols === 1 ? "A:A" : `A1:${nameOf(f.cols - 1)}1048576`) : !f.cols ? (f.rows === 1 ? "1:1" : `A1:XFD${f.rows}`) : `A1:${nameOf(f.cols - 1)}${f.rows}`) };
         },
-        FreezeRows: (n: number) => void (sh.frozen = { cols: 0, rows: n }),
-        FreezeColumns: (n: number) => void (sh.frozen = { cols: n, rows: 0 }),
+        // Every freeze goes through the co-editing lock: it shows in the panes from the next command on (DS 10.0).
+        FreezeRows: (n: number) => void later.push({ due: state.commands + 1, fn: () => void (sh.frozen = { cols: 0, rows: n }) }),
+        FreezeColumns: (n: number) => void later.push({ due: state.commands + 1, fn: () => void (sh.frozen = { cols: n, rows: 0 }) }),
         // An unfreeze of a sheet that is not the active one changes nothing (docbuilder, DS 10.0).
-        Unfreeze: () => void (state.active === sh && (sh.frozen = { cols: 0, rows: 0 })),
+        Unfreeze: () => void (state.active === sh && later.push({ due: state.commands + 1, fn: () => void (sh.frozen = { cols: 0, rows: 0 }) })),
         FreezeAt: () => {
           state.calls.push("FreezeAt");
           throw new Error("H.aH is not a function");
@@ -1138,6 +1141,60 @@ test("frozen panes as DS names them: the first row alone reads \"1:1\", so offic
   assert.equal(kept.error?.code, "partial", JSON.stringify(kept));
   assert.match(kept.error.message, /Kept as a person changed them after this call: the frozen panes of "Sheet1"\.$/);
   assert.deepEqual(person.state.sheets[0].frozen, { cols: 0, rows: 5 });
+});
+
+test("every freeze shows a moment after its command, as the co-editing lock makes it: rows, columns and none are read once they show, and taken back whole; inverses wait for the panes they put back", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = "head";
+  // A freeze of rows taken back: nobody touched the panes, so no person's change is named.
+  const rows = await plugin(book, formatting([{ freeze: "A2" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(rows.undone, true, JSON.stringify(rows));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 0 });
+  // "none" over frozen rows, and columns.
+  s1.frozen = { cols: 0, rows: 2 };
+  const none = await plugin(book, formatting([{ freeze: "none" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(none.undone, true, JSON.stringify(none));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 2 });
+  const cols = await plugin(book, formatting([{ freeze: "C1" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(cols.undone, true, JSON.stringify(cols));
+  assert.deepEqual(s1.frozen, { cols: 0, rows: 2 });
+  // Two freezes of one sheet in a call, a cell over a cell among them: each inverse reads the panes the one after it
+  // put back.
+  s1.frozen = { cols: 1, rows: 1 };
+  const twice = await plugin(book, formatting([{ freeze: "A3" }, { freeze: "C4" }, { freeze: "D5" }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(twice.undone, true, JSON.stringify(twice));
+  assert.deepEqual(s1.frozen, { cols: 1, rows: 1 });
+  // Made: the panes the last freeze asked for.
+  const made = await plugin(book, formatting([{ freeze: "A3" }, { freeze: "C4" }, { freeze: "D5" }]));
+  assert.deepEqual(made.result, { ops: 3, cells: 0 }, JSON.stringify(made));
+  assert.deepEqual(s1.frozen, { cols: 3, rows: 4 });
+  // Frozen so already: nothing asked of the editor, nothing to take back.
+  const commands = book.state.commands;
+  const same = await plugin(book, formatting([{ freeze: "D5" }]));
+  assert.deepEqual(same.result, { ops: 1, cells: 0 }, JSON.stringify(same));
+  assert.equal(book.state.commands, commands + 3, "the check, the step and the save");
+});
+
+test("an autofit whose size lands in its command is not waited for, and the autofits of a call that do not change a size are waited for once, at the end of their run", async () => {
+  // An editor nobody else has been in: the sizes are there in the command.
+  const quick = workbook(["Sheet1"], { autofitAtOnce: true });
+  quick.state.sheets[0].cells.A1 = 1;
+  const out = await plugin(quick, formatting([{ columns: "B", autofit: true }, { columns: "C", autofit: true }, { columns: "D", autofit: true }]));
+  assert.deepEqual(out.result, { ops: 3, cells: 0 }, JSON.stringify(out));
+  assert.equal(quick.state.commands, 5, "the check, three steps and the save");
+  assert.deepEqual([quick.state.sheets[0].widths[1], quick.state.sheets[0].widths[3]], [12.5, 12.5]);
+  // Fitted already: the sizes never change, and are read for at most one settle across the run.
+  const commands = quick.state.commands;
+  const again = await plugin(quick, formatting([{ columns: "B", autofit: true }, { columns: "C", autofit: true }, { columns: "D", autofit: true }, { columns: "E", autofit: true }]));
+  assert.deepEqual(again.result, { ops: 4, cells: 0 }, JSON.stringify(again));
+  assert.ok(quick.state.commands - commands <= 6 + SETTLE.tries + 1, `${quick.state.commands - commands} commands`);
+  // And taken back so: the sizes the autofits left in their command are what the inverses compare.
+  const failed = workbook(["Sheet1"], { autofitAtOnce: true, poisonLook: "Z99" });
+  failed.state.sheets[0].cells.A1 = 1;
+  const back = await plugin(failed, formatting([{ columns: "B:C", autofit: true }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(back.undone, true, JSON.stringify(back));
+  assert.deepEqual(failed.state.sheets[0].widths, { 1: 8.43, 2: 8.43 });
 });
 
 test("clear, superscript and subscript on whole columns and rows reach the used cells among them, and are taken back", async () => {

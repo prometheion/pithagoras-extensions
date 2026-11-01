@@ -5,8 +5,9 @@
  * refused is. Which of the instances a tool call goes to is what its panel holds (InstanceContext): each open
  * panel keeps its own choice, and every tool call is sent with it.
  */
-import { createContext, useContext } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef } from "react";
 import { portal } from "../portal";
+import { familyOn } from "../capabilities";
 
 /** What GET /status says of where things stand: every instance -- its container, its entry in pi's config, and
  * whether its server answers at all -- beside what a save is doing on the person's behalf right now. */
@@ -28,6 +29,8 @@ export interface InstanceStatus {
   url?: string;
   mcp: { registered: boolean; on: boolean; url?: string };
   health: { ok: boolean; server?: { name: string; version: string }; error?: string };
+  /** What the Nextcloud itself says of the login (the server's own answer never reaches it); absent while it is not set up. */
+  account?: { state: "ok" | "unauthorized" | "unreachable" | "other" | "checking"; name?: string; error?: string };
   configured: boolean;
   /** What the endpoint's tool list says of each capability family -- where it could be asked. */
   capabilities?: { available: Record<string, boolean>; on: Record<string, boolean> };
@@ -38,6 +41,8 @@ export interface InstanceView {
   name: string;
   url: string;
   username: string;
+  /** The person chose to send the app password over plain http to this host. */
+  allowHttp?: boolean;
   /** The capability families turned off for this instance, by family id; nothing standing is everything on. */
   capabilities?: Record<string, boolean>;
   passwordSet?: boolean;
@@ -65,16 +70,25 @@ const call = async <T>(path: string, init?: RequestInit): Promise<T> => portal.a
 export const InstanceContext = createContext<string | undefined>(undefined);
 export const useNextcloudInstance = (): string | undefined => useContext(InstanceContext);
 
+/** How the capability families stand for the instance the panel holds (the status's `capabilities` of it): a view
+ * reads whether one it calls into besides its own is on -- the Files tab whether Sharing is -- since the server
+ * refuses a family's tools where it is off. Nothing known (no status of it yet, or a view on its own): on. */
+export const FamiliesContext = createContext<{ available?: Record<string, boolean>; on?: Record<string, boolean> } | undefined>(undefined);
+export const useFamilyOn = (id: string): boolean => {
+  const families = useContext(FamiliesContext);
+  return familyOn(id, families?.available, families?.on ?? {});
+};
+
 export const api = {
   status: () => call<NextcloudStatus>("/status"),
   instances: () => call<{ instances: InstanceView[] }>("/instances"),
   saveInstance: (fields: Record<string, unknown>) =>
-    call<{ instances: InstanceView[]; task?: string }>("/instances", {
+    call<{ instances: InstanceView[] }>("/instances", {
       method: "POST",
       body: JSON.stringify(fields),
     }),
   removeInstance: (name: string) =>
-    call<{ instances: InstanceView[]; task?: string }>("/instances/remove", {
+    call<{ instances: InstanceView[] }>("/instances/remove", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
@@ -124,4 +138,26 @@ export function sayError(error: unknown): string {
   if (typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).error === "string")
     return (error as Record<string, unknown>).error as string;
   return String(error);
+}
+
+/**
+ * A guard against answers that come late: a request that is asked while an earlier one of the same `key` is still on
+ * its way makes the earlier one stale, and so does the view being left. Ask for the check before the request, and
+ * look at it in the answer: `const current = guard("rows"); api.tool(...).then((r) => { if (!current()) return; ... })`.
+ * Without it a slow answer for the board that was pressed first overwrites the board pressed after it.
+ */
+export function useGuard(): (key?: string) => () => boolean {
+  const counters = useRef(new Map<string, number>());
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return useCallback((key = "") => {
+    const n = (counters.current.get(key) ?? 0) + 1;
+    counters.current.set(key, n);
+    return () => mounted.current && counters.current.get(key) === n;
+  }, []);
 }

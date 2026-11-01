@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, sayError, NextcloudStatus, InstanceView } from "./api";
-import { Ask, AskState } from "./widgets";
+import { api, sayError, NextcloudStatus, InstanceStatus, InstanceView } from "./api";
 import { isValidInstanceName } from "../instance-name";
 import { CAPABILITIES } from "../capabilities";
 
@@ -13,9 +12,27 @@ import { CAPABILITIES } from "../capabilities";
  * instance went. */
 
 /** A field of one card: what the server says of the instance beside what the person has not saved yet. */
-type Draft = InstanceView & { password: string; exists: boolean };
+type Draft = InstanceView & { password: string; exists: boolean; saved: SavedFields };
 
-const blankDraft = (): Draft => ({ name: "", url: "", username: "", capabilities: {}, passwordSet: false, configured: false, password: "", exists: false });
+/** The fields of a card as the server holds them: what "changed" is measured against. */
+interface SavedFields {
+  url: string;
+  username: string;
+  allowHttp: boolean;
+  capabilities: string;
+}
+const savedFields = (view: InstanceView): SavedFields => ({ url: view.url, username: view.username, allowHttp: view.allowHttp === true, capabilities: JSON.stringify(view.capabilities ?? {}) });
+
+const blankDraft = (): Draft => ({ name: "", url: "", username: "", capabilities: {}, passwordSet: false, configured: false, password: "", exists: false, saved: { url: "", username: "", allowHttp: false, capabilities: "{}" } });
+
+/** Whether a card holds words that are not saved: a typed password, a changed field, or a new card with something in it. */
+const isDirty = (d: Draft): boolean =>
+  d.password !== "" ||
+  d.url !== d.saved.url ||
+  d.username !== d.saved.username ||
+  (d.allowHttp === true) !== d.saved.allowHttp ||
+  JSON.stringify(d.capabilities ?? {}) !== d.saved.capabilities ||
+  (!d.exists && d.name.trim() !== "");
 
 /** Where one draft stands in the switcher, by key: the saved ones by their name, the one not-saved card under its own. */
 const keyOf = (d: Draft): string => (d.exists ? d.name : "new");
@@ -42,26 +59,26 @@ function healthOf(s: { state: string; mcp: { registered: boolean; on: boolean };
 export default function NextcloudSettings() {
   portal.locale.use();
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string>("");
   const [busy, setBusy] = useState(false);
-
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const loadInstances = useCallback((passwords: Map<string, string>) => {
+    setLoadError(null);
     void api
       .instances()
       .then((r) =>
-        setDrafts(r.instances.map((view) => ({ ...view, password: passwords.get(view.name) ?? "", exists: true }))),
+        setDrafts(r.instances.map((view) => ({ ...view, password: passwords.get(view.name) ?? "", exists: true, saved: savedFields(view) }))),
       )
-      .catch(() => {});
+      .catch((error) => setLoadError(sayError(error)));
   }, []);
 
   const refresh = useCallback(() => {
-    void api.status().then(setStatus).catch(() => {});
+    void api.status().then((s) => { setStatus(s); setStatusError(null); }).catch((error) => setStatusError(sayError(error)));
   }, []);
 
   useEffect(() => {
@@ -75,23 +92,31 @@ export default function NextcloudSettings() {
     if (drafts && drafts.length > 0 && !keys.includes(selected)) setSelected(keys[0]);
   }, [drafts, keys, selected]);
 
-  // While a save is bringing things to where they should stand, the status moves: watch it until it does not.
+  // While a save is bringing things to where they should stand, or a host is still being asked about the login, the
+  // status moves: watch it until it does not.
   const task = status?.task;
+  const asking = (status?.instances ?? []).some((i) => i.account?.state === "checking");
   useEffect(() => {
-    if (!task) return;
-    const timer = window.setInterval(() => void api.status().then(setStatus).catch(() => {}), 2000);
+    if (!task && !asking) return;
+    const timer = window.setInterval(refresh, 2000);
     return () => window.clearInterval(timer);
-  }, [task]);
+  }, [task, asking, refresh]);
+
+  // Words typed and not saved: leaving the page asks first.
+  portal.ui.useUnsavedDraft((drafts ?? []).some(isDirty));
 
   /** What the server answered with for every instance back into the cards: the saved ones as they stand, the not-saved
-   * fields of a card keep what they held (a password that went in clears its field). */
-  const takeAnswered = (instances: InstanceView[], clearedPasswordOf?: string) => {
-    setDrafts((was) =>
-      instances.map((view) => {
+   * fields of the other cards keep what they held (and so does a card that was never saved); the one saved gives
+   * its password field back empty. */
+  const takeAnswered = (instances: InstanceView[], savedName?: string) => {
+    setDrafts((was) => {
+      const answered = instances.map((view) => {
         const before = was?.find((d) => d.exists && d.name === view.name);
-        return { ...view, password: view.name === clearedPasswordOf ? "" : (before?.password ?? ""), exists: true };
-      }),
-    );
+        if (!before || view.name === savedName) return { ...view, password: "", exists: true, saved: savedFields(view) };
+        return { ...before, passwordSet: view.passwordSet, configured: view.configured, saved: savedFields(view) };
+      });
+      return answered.concat((was ?? []).filter((d) => !d.exists && d.name.trim() !== savedName));
+    });
   };
 
   const saveCard = async (card: Draft) => {
@@ -104,6 +129,7 @@ export default function NextcloudSettings() {
         name: card.name.trim(),
         url: card.url.trim(),
         username: card.username.trim(),
+        allowHttp: card.allowHttp === true,
         capabilities: card.capabilities ?? {}, // the choices as they stand in the card; the server keeps only what stands
       };
       if (card.password !== "") fields.password = card.password; // it is only set, never answered back
@@ -111,8 +137,7 @@ export default function NextcloudSettings() {
       takeAnswered(answered.instances, card.name.trim());
       setSelected(card.name.trim());
       refresh();
-      if (answered.task) setProblem(answered.task);
-      else setSaved(true);
+      setSaved(true);
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -120,12 +145,9 @@ export default function NextcloudSettings() {
     }
   };
 
-  const removeCard = async (card: Draft, asked = false) => {
+  const removeCard = async (card: Draft) => {
     if (busy || !card.exists) return;
-    if (!asked) {
-      setAsk({ text: t("Remove the instance {name}? Its container goes with it.", { name: card.name }), run() { void removeCard(card, true); } });
-      return;
-    }
+    if (!(await portal.ui.confirm({ title: t("Remove the instance {name}?", { name: card.name }), message: t("Its container goes with it."), confirmLabel: t("Remove"), danger: true }))) return;
     setBusy(true);
     setProblem(null);
     try {
@@ -144,6 +166,7 @@ export default function NextcloudSettings() {
     if (busy || drafts?.some((d) => !d.exists)) return; // one not-saved card at a time: it would have no name to stand under yet
     setDrafts((was) => (was ?? []).concat(blankDraft()));
     setSelected("new");
+    setSaved(false);
   };
 
   const startAgain = async () => {
@@ -159,12 +182,9 @@ export default function NextcloudSettings() {
     }
   };
 
-  const removeEverything = async (asked = false) => {
+  const removeEverything = async () => {
     if (busy) return;
-    if (!asked) {
-      setAsk({ text: t("Remove the containers this extension made and its entries in pi's config? The settings stay."), run() { void removeEverything(true); } });
-      return;
-    }
+    if (!(await portal.ui.confirm({ title: t("Remove the containers this extension made and its entries in pi's config?"), message: t("The settings stay."), confirmLabel: t("Remove everything"), danger: true }))) return;
     setBusy(true);
     setProblem(null);
     try {
@@ -177,17 +197,23 @@ export default function NextcloudSettings() {
     }
   };
 
+  if (loadError !== null && drafts === null) return <div className="p-4"><portal.ui.LoadFailed error={t("The instances could not be read: {error}", { error: loadError })} onRetry={() => loadInstances(new Map())} /></div>;
   if (drafts === null) return <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />;
   const held = drafts.find((d) => keyOf(d) === selected) ?? drafts[0];
 
   return (
     <div className="space-y-3 p-4">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       {problem && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
-      {saved && !problem && <span className="text-xs text-fg-muted">{t("Saved.")}</span>}
+      {saved && !problem && <span className="text-xs text-fg-muted" role="status">{t("Saved.")}</span>}
+      {statusError !== null && status === null && <portal.ui.LoadFailed error={t("How the instances stand could not be read: {error}", { error: statusError })} onRetry={refresh} />}
 
       {drafts.length === 0 ? (
-        <p className="rounded border border-dashed p-3 text-sm text-fg-muted">{t("No instance yet: add your first Nextcloud below.")}</p>
+        <>
+          <p className="rounded border border-dashed p-3 text-sm text-fg-muted">{t("No instance yet: add your first Nextcloud below.")}</p>
+          <button type="button" className={portal.ui.classes.primary} disabled={busy} onClick={addCard}>
+            {t("Add")}
+          </button>
+        </>
       ) : (
         <>
           {/* The instances by their names, picked one at a time from the portal's own select -- the same switcher
@@ -195,7 +221,7 @@ export default function NextcloudSettings() {
           <div className="flex items-center gap-2">
             <portal.ui.Select
               value={keyOf(held)}
-              onChange={(v) => setSelected(v)}
+              onChange={(v) => { setSelected(v); setSaved(false); }}
               disabled={busy}
               aria-label={t("Which instance is picked")}
               options={drafts.map((d) => ({
@@ -216,7 +242,7 @@ export default function NextcloudSettings() {
               drafts={drafts}
               save={(e) => { e.preventDefault(); void saveCard(held); }}
               remove={() => void removeCard(held)}
-              onChange={(patch) => setDrafts((was) => was?.map((d) => (keyOf(d) === keyOf(held) ? { ...d, ...patch } : d)) ?? [])}
+              onChange={(patch) => { setSaved(false); setDrafts((was) => was?.map((d) => (keyOf(d) === keyOf(held) ? { ...d, ...patch } : d)) ?? []); }}
               status={status?.instances.find((i) => i.name === held.name.trim())}
             />
           )}
@@ -231,7 +257,7 @@ export default function NextcloudSettings() {
               {t("Working: {task}", { task: status.task })}
             </p>
           )}
-          {status.error && <portal.ui.ErrorBanner onClose={() => {}}>{status.error}</portal.ui.ErrorBanner>}
+          {status.error && <portal.ui.ErrorBanner>{status.error}</portal.ui.ErrorBanner>}
         </section>
       )}
 
@@ -250,13 +276,30 @@ export default function NextcloudSettings() {
   );
 }
 
+/** What the Nextcloud says of the login, in a line. */
+function accountLine(account: NonNullable<InstanceStatus["account"]>): { text: string; bad: boolean } {
+  switch (account.state) {
+    case "ok":
+      return { text: account.name ? t("Nextcloud accepts the login ({name})", { name: account.name }) : t("Nextcloud accepts the login"), bad: false };
+    case "unauthorized":
+      return { text: t("Nextcloud refuses the user name or the app password"), bad: true };
+    case "unreachable":
+      return { text: account.error ?? t("Nextcloud could not be reached"), bad: true };
+    case "other":
+      return { text: account.error ?? t("This address does not answer as a Nextcloud"), bad: true };
+    default:
+      return { text: t("Asking the Nextcloud about the login…"), bad: false };
+  }
+}
+
 /** One card of one instance: its fields in a compact grid, what its container and its entry in pi's config say of
  * it in one line, and a save that brings both to where the fields ask for them. */
-function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { card: Draft; busy: boolean; drafts: Draft[]; save(e: React.FormEvent): void; remove(): void; onChange(patch: Partial<Draft>): void; status?: { containerName: string; state: string; mcp: { registered: boolean; on: boolean; url?: string }; health: { ok: boolean; server?: { name: string; version: string }; error?: string }; capabilities?: { available: Record<string, boolean>; on: Record<string, boolean> } } }) {
+function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { card: Draft; busy: boolean; drafts: Draft[]; save(e: React.FormEvent): void; remove(): void; onChange(patch: Partial<Draft>): void; status?: InstanceStatus }) {
   portal.locale.use();
   const name = card.name.trim();
   const nameOk = isValidInstanceName(name); // the same rule the server keeps: one place for it, not two
   const nameTakenByAnother = name !== "" && drafts.some((d) => d !== card && d.name.trim() === name);
+  const plainHttp = /^http:\/\//i.test(card.url.trim());
   /** One family on or off in the card's choices: an on stands nowhere in them, only the offs do. */
   const setCapability = (id: string, on: boolean) => {
     const next = { ...(card.capabilities ?? {}) };
@@ -264,28 +307,32 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
     else next[id] = false;
     onChange({ capabilities: Object.keys(next).length > 0 ? next : {} });
   };
+  const account = status?.account ? accountLine(status.account) : undefined;
   return (
     <form onSubmit={save} className="space-y-3 rounded border p-3">
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="block text-sm">
-          <span className="mb-1 block font-medium">{t("Name")}</span>
+        <portal.ui.Field label={t("Name")} hint={!nameOk && name !== "" ? t("Letters, numbers, dashes and underscores; it must start with a letter.") : nameTakenByAnother ? t("Another instance carries this name already.") : undefined}>
           <input className={portal.ui.classes.input} value={card.name} placeholder={t("e.g. nextcloud_uni")} disabled={busy || card.exists} onChange={(e) => onChange({ name: e.target.value })} />
-          {!nameOk && name !== "" && <span className="mt-1 block text-xs text-fg-muted">{t("Letters, numbers, dashes and underscores; it must start with a letter.")}</span>}
-          {nameTakenByAnother && <span className="mt-1 block text-xs text-fg-muted">{t("Another instance carries this name already.")}</span>}
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block font-medium">{t("Nextcloud host")}</span>
+        </portal.ui.Field>
+        <portal.ui.Field label={t("Nextcloud host")} hint={card.url.trim() !== "" && !/^https?:\/\//i.test(card.url.trim()) ? t("Write the address with its scheme, like https://cloud.example.org") : undefined}>
           <input className={portal.ui.classes.input} value={card.url} placeholder="https://cloud.example.org" disabled={busy} onChange={(e) => onChange({ url: e.target.value })} />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block font-medium">{t("Username")}</span>
+        </portal.ui.Field>
+        <portal.ui.Field label={t("Username")}>
           <input className={portal.ui.classes.input} value={card.username} autoComplete="username" disabled={busy} onChange={(e) => onChange({ username: e.target.value })} />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block font-medium">{t("App password")}</span>
-          <input className={portal.ui.classes.input} type="password" value={card.password} autoComplete="new-password" placeholder={card.passwordSet ? t("(set -- leave empty to keep it)") : t("(not set yet)")} disabled={busy} title={t("Made in Nextcloud under Settings, Security, Devices & sessions. It is only ever set, never shown back.")} onChange={(e) => onChange({ password: e.target.value })} />
-        </label>
+        </portal.ui.Field>
+        <portal.ui.Field label={t("App password")} hint={t("Made in Nextcloud under Settings, Security, Devices & sessions. It is only ever set, never shown back.")}>
+          <input className={portal.ui.classes.input} type="password" value={card.password} autoComplete="new-password" placeholder={card.passwordSet ? t("(set -- leave empty to keep it)") : t("(not set yet)")} disabled={busy} onChange={(e) => onChange({ password: e.target.value })} />
+        </portal.ui.Field>
       </div>
+      {(plainHttp || card.allowHttp === true) && (
+        <portal.ui.SwitchRow
+          title={t("Send the app password over plain http")}
+          detail={t("http does not encrypt: whoever is on the way to this host can read the password. Only for a Nextcloud on a network you trust.")}
+          on={card.allowHttp === true}
+          disabled={busy}
+          onChange={(on) => onChange({ allowHttp: on })}
+        />
+      )}
 
       <div className="block text-sm">
         <span className="mb-1 block font-medium" title={t("A family off keeps its tools out of the chats and takes what shows it with. Where the server does not provide a family at all, it stands grey -- offered nowhere.")}>
@@ -295,23 +342,31 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
           {CAPABILITIES.map((cap) => {
             const provided = status?.capabilities?.available[cap.id]; // grey where the endpoint says it does not have it
             return (
-              <label key={cap.id} className={`flex items-center gap-2 ${provided === false ? "opacity-40" : ""}`}>
-                <input type="checkbox" checked={(card.capabilities?.[cap.id] ?? true)} disabled={busy || provided === false} onChange={(e) => setCapability(cap.id, e.target.checked)} />
+              <div key={cap.id} className={`flex items-center gap-2 ${provided === false ? "opacity-40" : ""}`}>
+                <portal.ui.Switch on={card.capabilities?.[cap.id] ?? true} label={t(cap.label)} disabled={busy || provided === false} onChange={(on) => setCapability(cap.id, on)} />
                 <span>{t(cap.label)}</span>
-              </label>
+              </div>
             );
           })}
         </div>
       </div>
 
       {status && (
-        <div className="flex items-center gap-1.5 text-xs text-fg-muted">
-          <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT[healthOf(status)]}`} />
-          <span>
-            <span className={WORD[healthOf(status)] || undefined}>{status.state}</span> ·{" "}
-            {status.mcp.registered ? t("entry present") : t("entry absent")} ·{" "}
-            {status.health.ok ? (t("answering") + (status.health.server ? ` ${status.health.server.name}` : "")) : status.health.error}
-          </span>
+        <div className="space-y-0.5 text-xs text-fg-muted">
+          <div className="flex items-center gap-1.5">
+            <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT[healthOf(status)]}`} />
+            <span>
+              <span className={WORD[healthOf(status)] || undefined}>{status.state}</span> ·{" "}
+              {status.mcp.registered ? t("entry present") : t("entry absent")} ·{" "}
+              {status.health.ok ? (t("answering") + (status.health.server ? ` ${status.health.server.name}` : "")) : status.health.error}
+            </span>
+          </div>
+          {account && (
+            <div className="flex items-center gap-1.5">
+              <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${account.bad ? "bg-danger" : status.account?.state === "ok" ? "bg-ok" : "bg-fg-subtle"}`} />
+              <span className={account.bad ? "text-danger" : undefined}>{account.text}</span>
+            </div>
+          )}
         </div>
       )}
 

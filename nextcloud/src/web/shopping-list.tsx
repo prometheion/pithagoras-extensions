@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState } from "./widgets";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete } from "./widgets";
 
 /** The Shopping List tab: the lists -- made, renamed and taken away by name; its items checked (tick), added
  * with their name and measure, edited one by one, and taken away singly, in the checked ones at once, or all
@@ -23,13 +23,12 @@ interface ItemRow {
 export default function ShoppingList() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the list calls go
+  const guard = useGuard();
   const [lists, setLists] = useState<ListRow[] | null>(null);
   const [listId, setListId] = useState<number | null>(null);
   const [items, setItems] = useState<ItemRow[] | null>(null);
   const [busy, setBusy] = useState(false);
-
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   // the add-item form and the one item open to editing: their words as they stand
@@ -45,57 +44,72 @@ export default function ShoppingList() {
   const [manage, setManage] = useState<null | "new" | "rename">(null);
   const [listTitle, setListTitle] = useState("");
 
-  const loadLists = () => {
-    setLists(null);
-    void api
-      .tool("nc_shopping_list_get_lists", {}, instance)
-      .then((result) => {
-        const rows = (arrayOf(partText(result).data, "lists") ?? []).map((l) => ({ id: Number(l.id), title: String(l.title ?? "") }));
-        setLists(rows);
-        setListId(rows.length > 0 ? rows[0].id : null);
-      })
-      .catch((error) => setProblem(sayError(error)));
+  const toLists = (result: Awaited<ReturnType<typeof api.tool>>): ListRow[] =>
+    (arrayOf(partText(result).data, "lists") ?? []).map((l) => ({ id: Number(l.id), title: String(l.title ?? "") }));
+
+  /** The lists, read again; `pick` says which stands chosen after (the one that stood, where it still does). */
+  const loadLists = async (pick?: (rows: ListRow[]) => number | null) => {
+    const current = guard("lists");
+    setLoadError(null);
+    try {
+      const rows = toLists(await api.tool("nc_shopping_list_get_lists", {}, instance));
+      if (!current()) return;
+      setLists(rows);
+      setListId((now) => (pick ? pick(rows) : rows.some((r) => r.id === now) ? now : (rows[0]?.id ?? null)));
+    } catch (error) {
+      if (current()) setLoadError(sayError(error));
+    }
   };
 
   useEffect(() => {
-    loadLists();
+    void loadLists();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadItems = (id: number) => {
-    setItems(null);
-    void api
-      .tool("nc_shopping_list_get_items", { list_id: id }, instance)
-      .then((result) => {
-        const rows = (arrayOf(partText(result).data, "items") ?? []).map((i) => ({
+  /** The items of the chosen list, whenever the choice changes -- the first list that opens included. The ones on
+   * screen stay while the new ones come, so a tick or an add does not blank the list. */
+  const loadItems = async (id: number, keep = false) => {
+    const current = guard("items");
+    if (!keep) setItems(null);
+    try {
+      const result = await api.tool("nc_shopping_list_get_items", { list_id: id }, instance);
+      if (!current()) return;
+      setItems(
+        (arrayOf(partText(result).data, "items") ?? []).map((i) => ({
           id: Number(i.id),
           listId: Number(i.listId ?? i.list_id),
           name: String(i.name ?? ""),
           quantity: typeof i.quantity === "string" ? i.quantity : null,
           unit: typeof i.unit === "string" ? i.unit : null,
           checked: Boolean(i.checked),
-        }));
-        setItems(rows);
-      })
-      .catch((error) => setProblem(sayError(error)));
+        })),
+      );
+    } catch (error) {
+      if (current()) {
+        setItems([]);
+        setProblem(t("The items could not be read: {error}", { error: sayError(error) }));
+      }
+    }
   };
 
-  const choose = (id: number) => {
-    setListId(id);
-    setManage(null);
+  useEffect(() => {
     setEditingId(null);
-    loadItems(id);
-  };
+    if (listId !== null) void loadItems(listId);
+    else setItems([]);
+  }, [listId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const act = async (fn: () => Promise<unknown>, then?: () => void) => {
-    if (busy || listId === null) return;
+  /** One change, then the items again (on screen meanwhile); the typed words are cleared only once it worked. */
+  const act = async (fn: () => Promise<unknown>, then?: () => void): Promise<boolean> => {
+    if (busy || listId === null) return false;
     setBusy(true);
     setProblem(null);
     try {
       await fn();
-      loadItems(listId);
       then?.();
+      await loadItems(listId, true);
+      return true;
     } catch (error) {
       setProblem(sayError(error));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -107,14 +121,14 @@ export default function ShoppingList() {
   const add = () => {
     const name = newItem.trim();
     if (name === "") return;
-    const args: Record<string, unknown> = { list_id: listId, items: [{ name }] };
-    const item = args.items as Record<string, unknown>[];
-    if (newQty.trim() !== "") item[0].quantity = newQty.trim();
-    if (newUnit.trim() !== "") item[0].unit = newUnit.trim();
-    setNewItem("");
-    setNewQty("");
-    setNewUnit("");
-    void act(() => api.tool("nc_shopping_list_add_items", args, instance));
+    const item: Record<string, unknown> = { name };
+    if (newQty.trim() !== "") item.quantity = newQty.trim();
+    if (newUnit.trim() !== "") item.unit = newUnit.trim();
+    void act(() => api.tool("nc_shopping_list_add_items", { list_id: listId, items: [item] }, instance), () => {
+      setNewItem("");
+      setNewQty("");
+      setNewUnit("");
+    });
   };
 
   const openEdit = (item: ItemRow) => {
@@ -145,17 +159,7 @@ export default function ShoppingList() {
       setManage(null);
       setListTitle("");
       // the made list's id: the server's answer apart, it is the newest of what is listed now
-      const result = await api.tool("nc_shopping_list_get_lists", {}, instance);
-      const rows = (arrayOf(partText(result).data, "lists") ?? []).map((l) => ({ id: Number(l.id), title: String(l.title ?? "") }));
-      setLists(rows);
-      const made = rows.filter((r) => r.title === title).sort((a, b) => b.id - a.id)[0];
-      if (made !== undefined) {
-        setListId(made.id);
-        loadItems(made.id);
-      } else if (listId === null && rows.length > 0) {
-        setListId(rows[0].id);
-        loadItems(rows[0].id);
-      }
+      await loadLists((rows) => rows.filter((r) => r.title === title).sort((a, b) => b.id - a.id)[0]?.id ?? rows[0]?.id ?? null);
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -171,8 +175,7 @@ export default function ShoppingList() {
     try {
       await api.tool("nc_shopping_list_update_list", { list_id: listId, title }, instance);
       setManage(null);
-      const result = await api.tool("nc_shopping_list_get_lists", {}, instance);
-      setLists((arrayOf(partText(result).data, "lists") ?? []).map((l) => ({ id: Number(l.id), title: String(l.title ?? "") })));
+      await loadLists((rows) => (rows.some((r) => r.id === listId) ? listId : (rows[0]?.id ?? null)));
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -180,28 +183,16 @@ export default function ShoppingList() {
     }
   };
 
-  const deleteList = async (asked = false) => {
+  const deleteList = async () => {
     if (busy || listId === null) return;
     const chosen = lists?.find((l) => l.id === listId);
-    if (!asked) {
-      setAsk({ text: t("Take the list “{title}” away for good?", { title: chosen?.title ?? "" }), run() { deleteList(true); } });
-      return;
-    }
+    if (!(await confirmDelete(t("Take the list “{title}” away for good?", { title: chosen?.title ?? "" }), undefined, t("Delete this list")))) return;
     setBusy(true);
     setProblem(null);
     try {
       await api.tool("nc_shopping_list_delete_list", { list_id: listId }, instance);
-      const result = await api.tool("nc_shopping_list_get_lists", {}, instance);
-      const rows = (arrayOf(partText(result).data, "lists") ?? []).map((l) => ({ id: Number(l.id), title: String(l.title ?? "") }));
-      setLists(rows);
       setManage(null);
-      if (rows.length > 0) {
-        setListId(rows[0].id);
-        loadItems(rows[0].id);
-      } else {
-        setListId(null);
-        setItems([]);
-      }
+      await loadLists((rows) => rows[0]?.id ?? null);
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -210,13 +201,13 @@ export default function ShoppingList() {
   };
 
   if (lists === null)
-    return problem ? (
-      <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The lists could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
-    ) : (
-      <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
-    );
+    return loadError ? <portal.ui.LoadFailed error={t("The lists could not be read: {error}", { error: loadError })} onRetry={() => void loadLists()} /> : <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />;
 
   const checkedCount = (items ?? []).filter((i) => i.checked).length;
+  const newList = () => {
+    setManage("new");
+    setListTitle("");
+  };
 
   const newListForm = (
     <form
@@ -238,25 +229,31 @@ export default function ShoppingList() {
 
   return (
     <div className="space-y-2">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
+      {problem && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
+      {loadError && <portal.ui.LoadFailed error={t("The lists could not be read: {error}", { error: loadError })} onRetry={() => void loadLists()} />}
       {manage === "new" ? (
         newListForm
       ) : lists.length === 0 ? (
         <div className="space-y-1">
           <portal.ui.Empty>{t("No shopping lists on that Nextcloud.")}</portal.ui.Empty>
-          <button type="button" className={portal.ui.classes.ghost} disabled={busy} aria-label={t("A new list")} onClick={() => { setManage("new"); setListTitle(""); }}>
+          <button type="button" className={portal.ui.classes.ghost} disabled={busy} aria-label={t("A new list")} onClick={newList}>
             + {t("New list")}
           </button>
         </div>
       ) : (
         <>
-          <div className="flex gap-1" role="group">
-            {lists.map((l) => (
-              <button key={l.id} type="button" aria-pressed={l.id === listId} className={`nc-tab${l.id === listId ? " nc-tab-on" : ""}`} onClick={() => choose(l.id)}>
-                <span>{l.title}</span>
-              </button>
-            ))}
-            <button type="button" className={portal.ui.classes.ghost} disabled={busy} aria-label={t("A new list")} onClick={() => { setManage("new"); setListTitle(""); }}>
+          <div className="flex flex-wrap items-center gap-1">
+            <portal.ui.Segments
+              label={t("Shopping lists")}
+              value={String(listId ?? "")}
+              options={lists.map((l) => ({ id: String(l.id), label: l.title }))}
+              onChange={(id) => {
+                if (busy) return;
+                setManage(null);
+                setListId(Number(id));
+              }}
+            />
+            <button type="button" className={portal.ui.classes.ghost} disabled={busy} aria-label={t("A new list")} onClick={newList}>
               + {t("New list")}
             </button>
           </div>
@@ -288,7 +285,7 @@ export default function ShoppingList() {
                         <li key={item.id} className={`nc-item${item.checked ? " nc-item-done" : ""}`}>
                           <label className="nc-item-check">
                             <input type="checkbox" checked={item.checked} disabled={busy} onChange={() => tick(item, !item.checked)} />
-                            <span>{item.quantity && item.quantity !== "1" ? `${item.quantity} ` : ""}{item.name}</span>
+                            <span className="nc-item-name">{item.quantity && item.quantity !== "1" ? `${item.quantity} ` : ""}{item.name}</span>
                             {item.unit && <span className="nc-item-unit"> {item.unit}</span>}
                           </label>
                           <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => openEdit(item)} aria-label={t("Change this item")}>
@@ -372,7 +369,6 @@ export default function ShoppingList() {
           )}
         </>
       )}
-      {problem && (lists.length > 0 || manage === "new") && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("An error happened: {error}", { error: problem })}</portal.ui.ErrorBanner>}
     </div>
   );
 }

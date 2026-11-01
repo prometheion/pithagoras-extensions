@@ -6,7 +6,7 @@
   "workspaces": ["blender", "godot", "inline-ui", "nextcloud", "office"],
   "scripts": {
     "build": "npm run build --workspaces",
-    "test": "npm test --workspaces",
+    "test": "npm test --workspaces && node --import tsx --test tests/*.test.mts",
     "test:portal": "npm run test:portal --workspaces"
   },
   "devDependencies": {

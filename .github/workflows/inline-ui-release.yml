@@ -11,7 +11,8 @@
 #    the gate pushed the tag, "Re-run failed jobs" runs it again for that tag.
 # 1. The package is built, type-checked and its unit tests run (with the browsers its card's tests drive), from the
 #    tagged commit.
-# 2. The GitHub release is made for the tag.
+# 2. The GitHub release is made for the tag (where it is there already, as on a re-run after npm failed, it is left as it is
+#    and the run goes on to npm).
 # 3. The package, @pithagoras/inline-ui, goes to npm. npm's trusted publishing signs in with this workflow's identity
 #    (`id-token: write`), with no token, and adds provenance. Only a package that is there can be given a trusted
 #    publisher, so its first version is published by hand (`npm publish -w inline-ui --auth-type=web`, from a clean
@@ -105,7 +106,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$TAG" --verify-tag --title "Inline UI $VERSION" --notes "@pithagoras/inline-ui $VERSION: the extension, on npm as npm:@pithagoras/inline-ui@$VERSION. It has no image."
+          # A re-run after a failure further down (npm) finds the release made already: it goes on to the next step.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "The release $TAG exists already: nothing to make"
+          else
+            gh release create "$TAG" --verify-tag --title "Inline UI $VERSION" --notes "@pithagoras/inline-ui $VERSION: the extension, on npm as npm:@pithagoras/inline-ui@$VERSION. It has no image."
+          fi
       - name: Publish to npm
         run: |
           NAME=$(node -p "require('./inline-ui/package.json').name")

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { LuPlus } from "react-icons/lu";
-import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState } from "./widgets";
+import { msg, portal, t } from "../portal";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete, parseWhen } from "./widgets";
 
 /** The Deck tab: one board chosen of the boards; its stacks with their cards; and one card open to its detail --
  * read, renamed or reworded, due-dated, marked done, moved to another stack or taken away. What the deck tools
@@ -53,7 +53,7 @@ interface CardFull extends CardMini {
  * same wall-clock word, which Nextcloud reads in its own time). */
 const toInput = (iso?: string): string => {
   if (!iso) return "";
-  const d = new Date(iso);
+  const d = parseWhen(iso);
   if (Number.isNaN(d.getTime())) return "";
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -61,12 +61,21 @@ const toInput = (iso?: string): string => {
 
 const showDate = (iso?: string): string => {
   if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
+  const d = parseWhen(iso);
+  return Number.isNaN(d.getTime()) ? iso : portal.format.date(d, { day: "2-digit", month: "short" });
 };
 
 /** The colours a new board may stand in. */
-const BOARD_COLORS = ["#0f6bb5", "#4ca34c", "#e0a126", "#d94f4f", "#8b5cf6", "#ef5c86", "#23587e", "#5f6b7a"];
+const BOARD_COLORS = [
+  { value: "#0f6bb5", name: msg("Blue") },
+  { value: "#4ca34c", name: msg("Green") },
+  { value: "#e0a126", name: msg("Amber") },
+  { value: "#d94f4f", name: msg("Red") },
+  { value: "#8b5cf6", name: msg("Violet") },
+  { value: "#ef5c86", name: msg("Pink") },
+  { value: "#23587e", name: msg("Navy") },
+  { value: "#5f6b7a", name: msg("Grey") },
+];
 
 const mapCard = (c: Rec): CardMini => ({
   id: Number(c.id ?? 0),
@@ -83,6 +92,7 @@ export default function Deck() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the deck calls go
   const [boards, setBoards] = useState<BoardRow[] | null>(null);
+  const guard = useGuard();
   const [boardProblem, setBoardProblem] = useState<string | null>(null);
   const [boardId, setBoardId] = useState<number | null>(null);
   const [stacks, setStacks] = useState<StackRow[] | null>(null);
@@ -91,7 +101,7 @@ export default function Deck() {
   // the one card open, and its edit words as they stand
   const [card, setCard] = useState<CardFull | null>(null);
   const [cardInStack, setCardInStack] = useState<number | null>(null);
-  const [cardProblem, setCardProblem] = useState<string | null>(null);
+  const [cardProblem, setCardProblem] = useState<string | null>(null); // a card's own save that failed, drawn in its detail
   const [editTitle, setEditTitle] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editDue, setEditDue] = useState("");
@@ -106,9 +116,6 @@ export default function Deck() {
   const [actionProblem, setActionProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
-
   // a new board's words: its name and the colour it stands in
   const [boardFormOpen, setBoardFormOpen] = useState(false);
   const [boardTitle, setBoardTitle] = useState("");
@@ -122,28 +129,34 @@ export default function Deck() {
   const [stackEditTitle, setStackEditTitle] = useState("");
 
   const loadBoards = () => {
+    const current = guard("boards");
     setBoards(null);
     setBoardProblem(null);
     void api
       .tool("deck_get_boards", {}, instance)
       .then((result) => {
+        if (!current()) return;
         const rows = boardRows(partText(result).data);
         setBoards(rows);
         if (rows.length > 0 && boardId === null) chooseBoard(rows[0].id);
       })
-      .catch((error) => setBoardProblem(sayError(error)));
+      .catch((error) => current() && setBoardProblem(sayError(error)));
   };
 
   useEffect(() => {
     loadBoards();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadStacks = (id: number) => {
-    setStacks(null);
+  /** The stacks of a board with their cards, read again; those on screen stay while they come where `keep` says so,
+   * and only the answer for the board asked last is taken. */
+  const loadStacks = (id: number, keep = false) => {
+    const current = guard("stacks");
+    if (!keep) setStacks(null);
     setStackProblem(null);
     void api
       .tool("deck_get_stacks", { board_id: id, include_cards: true }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).stacks : undefined;
         setStacks(
@@ -155,10 +168,11 @@ export default function Deck() {
             : []
         );
       })
-      .catch((error) => setStackProblem(sayError(error)));
+      .catch((error) => current() && setStackProblem(sayError(error)));
   };
 
   const chooseBoard = (id: number) => {
+    if (busy) return;
     setBoardId(id);
     setCard(null);
     setNewStackId(null);
@@ -167,12 +181,15 @@ export default function Deck() {
 
   const openCard = (stackId: number, mini: CardMini) => {
     if (boardId === null || busy) return;
+    const current = guard("card");
     setCard(null);
     setCardProblem(null);
+    setActionProblem(null);
     setMoveTo(null);
     void api
       .tool("deck_get_card", { board_id: boardId, stack_id: stackId, card_id: mini.id }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         if (typeof data !== "object" || data === null) throw new Error(t("The card did not answer in a way this panel reads."));
         const r = data as Rec;
@@ -192,7 +209,7 @@ export default function Deck() {
         setEditDescription(full.description ?? "");
         setEditDue(toInput(full.duedate));
       })
-      .catch((error) => setCardProblem(sayError(error)));
+      .catch((error) => current() && setActionProblem(sayError(error))); // the board stays on screen, with the reason above it
   };
 
   const act = async (fn: () => Promise<unknown>, then?: () => void) => {
@@ -209,10 +226,11 @@ export default function Deck() {
     }
   };
 
-  const saveCard = () => {
-    if (card === null || cardInStack === null || boardId === null) return;
-    const args: Rec = { board_id: boardId, stack_id: cardInStack, card_id: card.id };
+  /** What the open card's words change against the card, as the update tool takes them. */
+  const cardChanges = (): { args: Rec; changed: boolean } => {
+    const args: Rec = {};
     let changed = false;
+    if (card === null) return { args, changed };
     if (editTitle.trim() !== "" && editTitle !== card.title) {
       args.title = editTitle.trim();
       changed = true;
@@ -227,8 +245,20 @@ export default function Deck() {
       args.duedate = editDue === "" ? "" : `${editDue}:00`;
       changed = true;
     }
+    return { args, changed };
+  };
+  const cardDirty = cardChanges().changed;
+  portal.ui.useUnsavedDraft(cardDirty || (newStackId !== null && newTitle.trim() !== ""));
+
+  const saveCard = () => {
+    if (card === null || cardInStack === null || boardId === null) return;
+    const { args, changed } = cardChanges();
     if (!changed) return;
-    void act(() => api.tool("deck_update_card", args, instance), () => openCard(cardInStack, card));
+    // the board behind it is read again too: the card's new name, due date and mark stand there as well
+    void act(() => api.tool("deck_update_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, ...args }, instance), () => {
+      loadStacks(boardId, true);
+      openCard(cardInStack, card);
+    });
   };
 
   // the tools stamp a completion date on; they give no word to take it off again
@@ -236,8 +266,16 @@ export default function Deck() {
     if (card === null || cardInStack === null || boardId === null) return;
     void act(
       () => api.tool("deck_update_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, done: new Date().toISOString() }, instance),
-      () => openCard(cardInStack, card)
+      () => {
+        loadStacks(boardId, true);
+        openCard(cardInStack, card);
+      }
     );
+  };
+
+  const backToBoard = async () => {
+    if (cardDirty && !(await portal.ui.confirm({ title: t("Leave this card without saving?"), message: t("What you changed in it is lost."), confirmLabel: t("Leave"), danger: true }))) return;
+    setCard(null);
   };
 
   const moveCard = (targetStackId: number) => {
@@ -246,22 +284,19 @@ export default function Deck() {
       () => api.tool("deck_reorder_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id, order: 999, target_stack_id: targetStackId }, instance),
       () => {
         setCard(null);
-        loadStacks(boardId);
+        loadStacks(boardId, true);
       }
     );
   };
 
-  const deleteCard = (asked = false) => {
+  const deleteCard = async () => {
     if (card === null || cardInStack === null || boardId === null) return;
-    if (!asked) {
-      setAsk({ text: t("Take this card away for good?"), run() { deleteCard(true); } });
-      return;
-    }
+    if (!(await confirmDelete(t("Take this card away for good?"), card.title, t("Delete this card")))) return;
     void act(
       () => api.tool("deck_delete_card", { board_id: boardId, stack_id: cardInStack, card_id: card.id }, instance),
       () => {
         setCard(null);
-        loadStacks(boardId);
+        loadStacks(boardId, true);
       }
     );
   };
@@ -277,7 +312,7 @@ export default function Deck() {
         setNewTitle("");
         setNewDescription("");
         setNewDue("");
-        loadStacks(boardId);
+        loadStacks(boardId, true);
       }
     );
   };
@@ -295,7 +330,8 @@ export default function Deck() {
       const result = await api.tool("deck_get_boards", {}, instance);
       const rows = boardRows(partText(result).data);
       setBoards(rows);
-      const created = rows.find((b) => b.title === title);
+      // the newest board of that name: an older one with the same title is not the one just made
+      const created = rows.filter((b) => b.title === title).sort((a, b) => b.id - a.id)[0];
       if (created !== undefined) {
         setBoardId(created.id);
         setCard(null);
@@ -320,7 +356,7 @@ export default function Deck() {
       () => {
         setStackFormOpen(false);
         setStackName("");
-        loadStacks(boardId);
+        loadStacks(boardId, true);
       }
     );
   };
@@ -333,19 +369,16 @@ export default function Deck() {
       () => {
         setStackEditId(null);
         setStackEditTitle("");
-        loadStacks(boardId);
+        loadStacks(boardId, true);
       }
     );
   };
 
   /** A stack goes away together with all of its cards -- which is why the question is phrased that way. */
-  const deleteStack = (stack: { id: number; title: string }, asked = false) => {
+  const deleteStack = async (stack: { id: number; title: string }) => {
     if (boardId === null || busy) return;
-    if (!asked) {
-      setAsk({ text: t("Take the stack “{title}” and all its cards away for good?", { title: stack.title }), run() { deleteStack(stack, true); } });
-      return;
-    }
-    void act(() => api.tool("deck_delete_stack", { board_id: boardId, stack_id: stack.id }, instance), () => loadStacks(boardId));
+    if (!(await confirmDelete(t("Take the stack “{title}” and all its cards away for good?", { title: stack.title }), undefined, t("Delete this stack")))) return;
+    void act(() => api.tool("deck_delete_stack", { board_id: boardId, stack_id: stack.id }, instance), () => loadStacks(boardId, true));
   };
 
   // ---- what is drawn -------------------------------------------------------
@@ -354,9 +387,8 @@ export default function Deck() {
     const otherStacks = (stacks ?? []).filter((s) => s.id !== cardInStack);
     return (
       <div className="space-y-2">
-        {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
         <div className="flex items-center gap-1">
-          <button type="button" className={portal.ui.classes.ghost} onClick={() => setCard(null)}>
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => void backToBoard()}>
             ← {t("Back to the board")}
           </button>
           <span className="flex-1" />
@@ -394,7 +426,7 @@ export default function Deck() {
               <span className="text-xs text-fg-subtle">{t("Due date")}</span>
               <input type="datetime-local" className={portal.ui.classes.inputSmall} value={editDue} aria-label={t("Due date")} onChange={(e) => setEditDue(e.target.value)} />
             </div>
-            <button type="button" className={portal.ui.classes.primarySmall} disabled={busy} onClick={() => void saveCard()}>
+            <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || !cardDirty} onClick={() => void saveCard()}>
               {t("Save")}
             </button>
 
@@ -426,10 +458,11 @@ export default function Deck() {
 
   return (
     <div className="space-y-2">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
+      {actionProblem !== null && <portal.ui.ErrorBanner onClose={() => setActionProblem(null)}>{actionProblem}</portal.ui.ErrorBanner>}
+      {stackProblem !== null && stacks !== null && <portal.ui.ErrorBanner onClose={() => setStackProblem(null)}>{t("The stacks could not be read: {error}", { error: stackProblem })}</portal.ui.ErrorBanner>}
       {boards === null ? (
         boardProblem !== null ? (
-          <portal.ui.ErrorBanner onClose={() => setBoardProblem(null)}>{t("The boards could not be read: {error}", { error: boardProblem })}</portal.ui.ErrorBanner>
+          <portal.ui.LoadFailed error={t("The boards could not be read: {error}", { error: boardProblem })} onRetry={loadBoards} />
         ) : (
           <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
         )
@@ -437,14 +470,14 @@ export default function Deck() {
         <>
           {/* With zero boards the way in still stands open -- or nothing could be added from here at all. */}
           {boards.length === 0 && <portal.ui.Empty>{t("No boards yet.")}</portal.ui.Empty>}
-          <div className="flex gap-1" role="group">
-            {boards.map((board) => (
-              <button key={board.id} type="button" aria-pressed={board.id === boardId} className={`nc-tab${board.id === boardId ? " nc-tab-on" : ""}`} onClick={() => chooseBoard(board.id)}>
-                {board.color !== undefined && <span className="nc-dot" style={{ background: cssColor(board.color) }} />}
-                <span>{board.title}</span>
-              </button>
-            ))}
-            <button type="button" aria-pressed={boardFormOpen} className={`nc-tab${boardFormOpen ? " nc-tab-on" : ""}`} onClick={() => setBoardFormOpen((o) => !o)}>
+          <div className="flex flex-wrap items-center gap-1">
+            <portal.ui.Segments
+              label={t("Boards")}
+              value={String(boardId ?? "")}
+              options={boards.map((board) => ({ id: String(board.id), label: board.title }))}
+              onChange={(id) => chooseBoard(Number(id))}
+            />
+            <button type="button" className={portal.ui.classes.ghost} aria-expanded={boardFormOpen} onClick={() => setBoardFormOpen((o) => !o)}>
               + {t("New board")}
             </button>
           </div>
@@ -461,12 +494,13 @@ export default function Deck() {
               <div className="flex items-center gap-1">
                 {BOARD_COLORS.map((color) => (
                   <button
-                    key={color}
+                    key={color.value}
                     type="button"
-                    aria-label={color}
+                    aria-label={t(color.name)}
+                    aria-pressed={boardColor === color.value}
                     className="h-5 w-5 shrink-0 rounded-full border"
-                    style={{ background: color, borderColor: boardColor === color ? "rgb(var(--fg))" : "transparent", borderWidth: boardColor === color ? 2 : 1 }}
-                    onClick={() => setBoardColor(color)}
+                    style={{ background: color.value, borderColor: boardColor === color.value ? "rgb(var(--fg))" : "transparent", borderWidth: boardColor === color.value ? 2 : 1 }}
+                    onClick={() => setBoardColor(color.value)}
                   />
                 ))}
                 <span className="flex-1" />
@@ -477,7 +511,7 @@ export default function Deck() {
 
           {boardId !== null && (stacks === null ? (
             stackProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setStackProblem(null)}>{t("The stacks could not be read: {error}", { error: stackProblem })}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={t("The stacks could not be read: {error}", { error: stackProblem })} onRetry={() => loadStacks(boardId)} />
             ) : (
               <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
             )
@@ -512,7 +546,7 @@ export default function Deck() {
                     >
                       ✎
                     </button>
-                    <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => deleteStack(stack)} aria-label={t("Delete this stack")}>
+                    <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void deleteStack(stack)} aria-label={t("Delete this stack")}>
                       ×
                     </button>
                   </header>
@@ -595,7 +629,6 @@ export default function Deck() {
           ))}
         </>
       )}
-      {actionProblem !== null && <portal.ui.ErrorBanner onClose={() => setActionProblem(null)}>{actionProblem}</portal.ui.ErrorBanner>}
     </div>
   );
 }

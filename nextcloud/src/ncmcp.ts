@@ -7,8 +7,9 @@
  * is what its own servers give.) This one keeps that same thin shape: an id per request, and what a tool call
  * answered as content parts, raw -- nothing of them parsed here.
  *
- * A client of this module is for ONE endpoint at a time and holds its session in process memory; where the
- * server says there is no such session (404), it makes one anew and tries the request once more.
+ * A client of this module is for ONE endpoint at a time and holds its session in process memory (the server half keeps
+ * one per endpoint and reuses it, see server.ts); where the server says there is no such session (404 on a request
+ * that carried one), it makes one anew and tries the request once more.
  */
 
 export interface McpTool {
@@ -46,17 +47,20 @@ const TOOL_TIMEOUT_MS = 120_000;
 export function mcpClient(url: string) {
   let sessionId: string | undefined;
   let initialized = false;
+  let initializing: Promise<void> | undefined; // two first calls at once make one session, not two
+  let info: { name: string; version: string } = { name: "", version: "" };
   let nextId = 1;
 
   /** One JSON-RPC message to the server, answered as JSON or event stream, its one result read back -- given no
-   * longer than `timeoutMs`, over the whole answer including its body. */
+   * longer than `timeoutMs`, over the whole answer including its body. A notification (no id) has no result to read. */
   async function post(message: JsonRpcMessage, timeoutMs = 30_000): Promise<unknown> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       // The server takes nothing else: without both of them it answers 406.
       accept: "application/json, text/event-stream",
     };
-    if (sessionId) headers["mcp-session-id"] = sessionId;
+    const sent = sessionId;
+    if (sent) headers["mcp-session-id"] = sent;
     let answer: Response;
     try {
       answer = await fetch(url, { method: "POST", headers, body: JSON.stringify(message), signal: AbortSignal.timeout(timeoutMs) });
@@ -67,12 +71,19 @@ export function mcpClient(url: string) {
     const givenSession = answer.headers.get("mcp-session-id");
     if (givenSession) sessionId = givenSession;
     if (answer.status === 404) {
-      // No such session anymore: the caller re-initializes and retries.
+      await answer.body?.cancel().catch(() => {});
+      // Only a request that carried a session can be told its session is gone; a 404 on the first one means that
+      // whatever answers at this address is not an MCP server (or not the one on this path).
+      if (!sent) throw new Error(`Nothing serves /mcp at ${url}: it answered 404.`);
       const error = new Error("The server knows no session of this client anymore") as NodeJS.ErrnoException & { code?: string };
       error.code = "E_SESSION_GONE";
       throw error;
     }
     if (!answer.ok) throw await answerError(answer);
+    if (message.id === undefined) {
+      await answer.body?.cancel().catch(() => {}); // a notification: the server says 202 and nothing more
+      return undefined;
+    }
     const text = await answer.text();
     const contentType = (answer.headers.get("content-type") ?? "").toLowerCase();
     let body: JsonRpcMessage | undefined;
@@ -83,7 +94,7 @@ export function mcpClient(url: string) {
         if (!data) continue;
         try {
           const parsed = JSON.parse(data) as JsonRpcMessage;
-          if (parsed.id === message.id || (message.id === undefined && parsed.result)) body = parsed;
+          if (parsed.id === message.id) body = parsed;
         } catch {
           // not the one
         }
@@ -100,12 +111,24 @@ export function mcpClient(url: string) {
     return body.result;
   }
 
-  async function initialize(): Promise<void> {
-    await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "@pithagoras/nextcloud", version: "0.1.0" } } });
+  /** The handshake: initialize, what the server says of itself kept, and the notification that the client is ready. */
+  async function handshake(timeoutMs: number): Promise<void> {
+    sessionId = undefined;
+    const result = (await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "@pithagoras/nextcloud", version: "0.1.0" } } }, timeoutMs)) as Record<string, unknown>;
+    const server = (result?.serverInfo ?? {}) as Record<string, unknown>;
+    info = { name: String(server.name ?? ""), version: String(server.version ?? "") };
+    await post({ jsonrpc: "2.0", method: "notifications/initialized" }, timeoutMs);
     initialized = true;
   }
 
-  /** One request of the client proper: an initialize round trip first where needed, one retry over a gone session. */
+  function initialize(timeoutMs = 30_000): Promise<void> {
+    initializing ??= handshake(timeoutMs).finally(() => {
+      initializing = undefined;
+    });
+    return initializing;
+  }
+
+  /** One request of the client proper: a handshake first where needed, one retry over a gone session. */
   async function rpc(method: string, params?: unknown, timeoutMs = 30_000): Promise<unknown> {
     if (!initialized) await initialize();
     for (let attempt = 0; ; attempt++) {
@@ -114,7 +137,6 @@ export function mcpClient(url: string) {
       } catch (error) {
         if (attempt === 0 && (error as NodeJS.ErrnoException).code === "E_SESSION_GONE") {
           initialized = false;
-          sessionId = undefined;
           await initialize();
           continue;
         }
@@ -124,13 +146,12 @@ export function mcpClient(url: string) {
   }
 
   return {
-    /** Whether the server answers at all: an initialize round trip, with what it says of itself. */
+    /** Whether the server answers at all: a `ping` over the session this client holds (a handshake first where there
+     * is none), with what the server said of itself in that handshake. */
     async ping(): Promise<{ name: string; version: string }> {
-      initialized = false;
-      const result = (await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "@pithagoras/nextcloud", version: "0.1.0" } } }, PING_TIMEOUT_MS)) as Record<string, unknown>;
-      initialized = true;
-      const info = (result?.serverInfo ?? {}) as Record<string, unknown>;
-      return { name: String(info.name ?? ""), version: String(info.version ?? "") };
+      if (!initialized) await initialize(PING_TIMEOUT_MS);
+      await rpc("ping", undefined, PING_TIMEOUT_MS);
+      return { ...info };
     },
     /** The server's tools, by name and argument schema. */
     async listTools(): Promise<McpTool[]> {
@@ -141,6 +162,18 @@ export function mcpClient(url: string) {
     async callTool(name: string, args: Record<string, unknown>): Promise<McpResult> {
       const result = (await rpc("tools/call", { name, arguments: args }, TOOL_TIMEOUT_MS)) as McpResult;
       return result ?? { content: [] };
+    },
+    /** Ends the session on the server (best effort), for a client that is not used again. */
+    async close(): Promise<void> {
+      const id = sessionId;
+      initialized = false;
+      sessionId = undefined;
+      if (!id) return;
+      try {
+        await fetch(url, { method: "DELETE", headers: { "mcp-session-id": id }, signal: AbortSignal.timeout(3_000) });
+      } catch {
+        // the server is gone or does not know the verb: its sessions end by themselves
+      }
     },
   };
 }

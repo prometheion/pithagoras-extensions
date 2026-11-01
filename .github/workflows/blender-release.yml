@@ -25,7 +25,8 @@
 #    blender.org's published sum; the sources of the copyleft libraries the official Linux build links in (FFmpeg,
 #    built with x264 and x265, and the others under the GPL, the LGPL or the MPL: scripts/blender-sources.sh), each
 #    checked against the hash Blender's source pins; and the list of the image's Ubuntu packages (their sources are in
-#    Ubuntu's archive).
+#    Ubuntu's archive). Where the release is there already, as on a re-run after npm failed, it is left as it is, but
+#    its assets are uploaded again (--clobber), so that it never lacks them; then the run goes on to npm.
 # 5. The package, @pithagoras/blender, goes to npm last, so that a version on npm never names an image that is not
 #    there. npm's trusted publishing signs in with this workflow's identity (`id-token: write`), with no token, and adds
 #    provenance. Only a package that is there can be given a trusted publisher, so its first version is published by
@@ -136,7 +137,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$TAG" --verify-tag --title "Blender $VERSION" --notes "@pithagoras/blender $VERSION: the extension (npm:@pithagoras/blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
+          # A re-run after a failure further down (npm) finds the release made already: it makes sure the sources are
+          # attached, and goes on to the next step.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "The release $TAG exists already: nothing to make, the sources are uploaded again"
+            gh release upload "$TAG" sources/* --clobber
+          else
+            gh release create "$TAG" --verify-tag --title "Blender $VERSION" --notes "@pithagoras/blender $VERSION: the extension (npm:@pithagoras/blender@$VERSION) and its image ($IMAGE:$VERSION). Attached: Blender's source, the sources of the copyleft libraries its official Linux build links in (listed in blender-$BLENDER_VERSION-libraries.txt), and the image's package list, as its NOTICE says." sources/*
+          fi
       - run: npm ci
       - name: Publish to npm
         run: |

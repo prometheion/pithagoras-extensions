@@ -30,7 +30,8 @@ nobody signs in to anything else.
 
 Blender, Godot and Nextcloud (Inline UI's and Office's READMEs say what they need):
 
-- Pithagoras 0.3.0 or later.
+- Pithagoras 0.3.0 or later. (Nextcloud also needs a Nextcloud of your own and an app password for it; its README says
+  what else.)
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
   It ships with the portal but is not on by default; installing one of these extensions from npm brings it along.
 - A Linux host with Docker Engine 28.0 or later that the portal can reach. For the GPU, an NVIDIA card and the NVIDIA
@@ -41,7 +42,7 @@ Blender, Godot and Nextcloud (Inline UI's and Office's READMEs say what they nee
   [HTTPS section](https://thecodacus.github.io/pithagoras/guide/deploying#https) shows how to turn it on
   (`PORTAL_TLS_CERT` and `PORTAL_TLS_KEY`).
 
-Each server runs on a network of its own that has no way out: code the agent runs in Blender or Godot reaches neither
+Blender's and Godot's servers each run on a network of its own that has no way out: code the agent runs in Blender or Godot reaches neither
 the host, its loopback, the local network nor the internet. The portal reaches the server through Docker for
 extensions: for a portal on the host's network (both of Pithagoras' Compose files), through a small forwarder
 container that publishes the server's port on 127.0.0.1; for a portal in a container on a network of its own, by
@@ -56,8 +57,10 @@ more under Security.
 
 Nextcloud's containers run the other way: they must reach the person's own Nextcloud across the machine's usual
 networking, which an isolated network cannot do. So each stands on the portal's own loopback (Docker for extensions'
-shared network) and serves its /mcp endpoint to the portal alone, bound to 127.0.0.1 of that loopback, one port per
-instance. Nextcloud's README says more under Security.
+shared network) and serves its /mcp endpoint on 127.0.0.1 of that loopback, one port per instance (8000 and up). For a
+portal in a container on a network of its own that loopback is the container's; for a portal on the host's network (both
+of Pithagoras' Compose files) it is the machine's, and every local process can reach the endpoint, which checks nobody.
+Nextcloud's README says what the extension does about it, under Security.
 
 ## Installing
 

@@ -33,6 +33,10 @@ export const CAPABILITIES: Capability[] = [
   { id: "mail", label: "Mail", prefixes: ["nc_mail_"] },
   { id: "news", label: "News", prefixes: ["nc_news_"] },
   { id: "collectives", label: "Collectives", prefixes: ["collectives_"] },
+  // No tab of the panel stands for these two, but the server offers their tools to every user whose Nextcloud has
+  // the app: Talk posts as the person and invites by mail, so it has to be something an instance can turn off.
+  { id: "talk", label: "Talk", prefixes: ["talk_"] },
+  { id: "tables", label: "Tables", prefixes: ["nc_tables_"] },
 ];
 
 /** The one family a raw tool name stands with -- none where no family names it. */
@@ -60,15 +64,37 @@ export function excludeGlobs(inst: { name: string; capabilities?: Record<string,
   return out;
 }
 
-/** A choice map from the free keep-out lists an earlier version kept: every family whose glob stands in the list is
- * read off there, nothing else -- a glob no family names (the person's own hand work) does not come over, as this
- * module offers no place for it to stand. */
-export function capabilitiesFromExcludeText(instanceName: string, text: string): Record<string, boolean> {
-  const named = text.split(",").map((part) => part.trim()).filter(Boolean);
-  const out: Record<string, boolean> = {};
-  for (const cap of CAPABILITIES) if (globsFor(cap, instanceName).some((glob) => named.includes(glob))) out[cap.id] = false;
-  return out;
-}
+/** The tools the agent may not call without the person's yes, by their raw names, which pi-mcp-adapter matches
+ * whatever the instance is called (`approveTools` of the instance's entry): what goes out to other people (mail, a
+ * Talk message, a conversation or a participant added, an event or a meeting with attendees, whom Nextcloud mails an
+ * invitation), a public link or a share, and everything that deletes, clears or takes to the trash -- the calendar's
+ * bulk operations and its calendar management among them, which delete by an argument the gate cannot look at. Whole
+ * tools: an event without attendees is asked about too. Overwrites and moves of files and mail are not asked about
+ * (the README says so). A person's own list in the entry takes this one's place. */
+export const APPROVE_TOOLS = [
+  "nc_mail_send_message",
+  "nc_share_create*",
+  "nc_share_update*",
+  "nc_share_delete*",
+  "talk_send_message",
+  "talk_create_conversation",
+  "talk_add_participant",
+  "nc_calendar_create_event",
+  "nc_calendar_update_event",
+  "nc_calendar_create_meeting",
+  "nc_calendar_bulk_operations",
+  "nc_calendar_manage_calendar",
+  "*_delete_*",
+  "*_clear_*",
+  "*_trash_*",
+];
+
+/** Every list an earlier version of this extension wrote as the entry's `approveTools`: an entry that holds one of
+ * them holds this extension's default, not a choice of the person's, and gets the list of this version. A version
+ * that changes APPROVE_TOOLS adds the one it replaces here. */
+export const EARLIER_APPROVE_TOOLS: string[][] = [
+  ["nc_mail_send_message", "nc_share_create*", "nc_share_update*", "nc_share_delete*", "*_delete_*", "*_clear_*"],
+];
 
 /** One tab of the panel and what its showing stands on: at least one of its capabilities turned on. */
 export interface PanelTab {
@@ -77,12 +103,10 @@ export interface PanelTab {
   capabilityIds: string[];
 }
 
-/** The tabs, in their order: what the families of today stand under -- with the ones an earlier version of this
- * extension never showed (mail, news and collectives among them) beside them. */
-/** The standing order of the tabs (Simeon, 2026-10-30): Files stands first and is the default view,
-    then Calendar, Contacts, Notes, Deck, Collectives, Cookbook, Shopping List, Mail, News. */
+/** The tabs, in their order: Files stands first and is the default view, then Calendar, Contacts, Notes, Deck,
+ * Collectives, Cookbook, Shopping List, Mail, News. */
 export const TABS: PanelTab[] = [
-  { id: "files", label: "Files", capabilityIds: ["files", "sharing"] },
+  { id: "files", label: "Files", capabilityIds: ["files"] }, // the shares stand on the files' rows: no rows, no shares
   { id: "calendar", label: "Calendar", capabilityIds: ["calendar"] },
   { id: "contacts", label: "Contacts", capabilityIds: ["contacts"] },
   { id: "notes", label: "Notes", capabilityIds: ["notes"] },
@@ -94,8 +118,14 @@ export const TABS: PanelTab[] = [
   { id: "news", label: "News", capabilityIds: ["news"] },
 ];
 
+/** Whether one family stands on for the panel: not turned off, and not found missing from the endpoint (where that
+ * is not known yet, the choice alone decides). */
+export function familyOn(id: string, available?: Record<string, boolean>, on: Record<string, boolean> = {}): boolean {
+  return on[id] !== false && available?.[id] !== false;
+}
+
 /** Whether one tab is offered for an instance's standing: where what the endpoint provides is known, at least one
  * of the tab's capabilities provided and not turned off; where it is not known yet, the choices alone decide. */
 export function tabOffered(tab: PanelTab, available?: Record<string, boolean>, on: Record<string, boolean> = {}): boolean {
-  return tab.capabilityIds.some((id) => on[id] !== false && available?.[id] !== false);
+  return tab.capabilityIds.some((id) => familyOn(id, available, on));
 }

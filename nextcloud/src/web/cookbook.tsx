@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState } from "./widgets";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete } from "./widgets";
 
 /** The Cookbook tab: the recipes by name and date, one chosen open to its ingredients and steps -- made new in
  * a form, reworded in it, taken away with a word; a line to take a recipe in from a page that carries schema.org,
@@ -17,6 +17,7 @@ interface RecipeRow {
 export default function Cookbook() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the recipe calls go
+  const guard = useGuard();
   const [recipes, setRecipes] = useState<RecipeRow[] | null>(null);
   const [query, setQuery] = useState("");
   const [searchResults, setSearchResults] = useState<RecipeRow[] | null>(null); // what a searched word hit
@@ -24,10 +25,8 @@ export default function Cookbook() {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
-
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null); // a change or an opening that failed: drawn in whatever view stands
+  const [loadError, setLoadError] = useState<string | null>(null); // the list that could not be read
 
   // the one form the recipes go through: a made recipe fills it empty, an edited one with what stands there now
   const [formOpen, setFormOpen] = useState<null | "create" | "edit">(null);
@@ -36,6 +35,10 @@ export default function Cookbook() {
   const [formYield, setFormYield] = useState("");
   const [formIng, setFormIng] = useState<string[]>([]); // every ingredient stands on its own entry
   const [formSteps, setFormSteps] = useState<string[]>([]); // every step stands on its own entry
+  const [formStart, setFormStart] = useState(""); // the form's words as they were when it opened: what "changed" is measured against
+  const formNow = JSON.stringify([formName, formDesc, formYield, formIng, formSteps]);
+  const formDirty = formOpen !== null && formNow !== formStart;
+  portal.ui.useUnsavedDraft(formDirty);
 
   const rowOf = (r: Record<string, unknown>): RecipeRow => ({
     id: String(r.id),
@@ -44,45 +47,66 @@ export default function Cookbook() {
     dateCreated: typeof r.dateCreated === "string" ? r.dateCreated : undefined,
   });
 
-  const load = () => {
-    setRecipes(null);
+  const load = (keep = false) => {
+    const current = guard("list");
+    if (!keep) setRecipes(null);
+    setLoadError(null);
     void api
       .tool("nc_cookbook_list_recipes", {}, instance)
       .then((result) => {
+        if (!current()) return;
         const rows = (arrayOf(partText(result).data, "recipes") ?? []).map(rowOf);
         setRecipes(rows);
       })
-      .catch((error) => setProblem(sayError(error)));
+      .catch((error) => current() && setLoadError(sayError(error)));
   };
 
-  useEffect(load, []);
+  useEffect(() => load(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const runSearch = () => {
-    const word = query.trim();
+  const runSearch = (word = query.trim()) => {
     if (word === "") return;
+    const current = guard("search");
     setSearchResults(null);
     void api
       .tool("nc_cookbook_search_recipes", { query: word }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? ((data as Record<string, unknown>).recipes ?? (data as Record<string, unknown>).results) : undefined;
         setSearchResults(Array.isArray(list) ? (list as Record<string, unknown>[]).map(rowOf) : []);
       })
-      .catch((error) => setProblem(sayError(error)));
+      .catch((error) => {
+        if (!current()) return;
+        setSearchResults([]);
+        setProblem(sayError(error));
+      });
+  };
+
+  /** After a recipe was made, changed or taken away: the list is read again, and a search that stands is run again. */
+  const refreshLists = () => {
+    load(true);
+    if (searchResults !== null && query.trim() !== "") runSearch();
   };
 
   const open = (id: string) => {
+    const current = guard("recipe");
     setChosen(id);
     setDetail(null);
     setFormOpen(null);
+    setProblem(null);
     void api
       .tool("nc_cookbook_get_recipe", { recipe_id: Number(id) }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         if (typeof data === "object" && data !== null) setDetail(data as Record<string, unknown>);
         else setDetail({ name: id });
       })
-      .catch((error) => setProblem(sayError(error)));
+      .catch((error) => {
+        if (!current()) return;
+        setChosen(null); // back to the list, with the reason above it
+        setProblem(sayError(error));
+      });
   };
 
   const importUrl = async () => {
@@ -93,7 +117,7 @@ export default function Cookbook() {
     try {
       await api.tool("nc_cookbook_import_recipe", { url: target }, instance);
       setUrl("");
-      load();
+      refreshLists();
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -101,26 +125,33 @@ export default function Cookbook() {
     }
   };
 
-  const openCreate = () => {
-    setFormOpen("create");
-    setFormName("");
-    setFormDesc("");
-    setFormYield("");
-    setFormIng([""]); // one made row each, so the lists never start bare
-    setFormSteps([""]);
+  /** The form opened with these words in it; what it holds then is what a change is measured against. */
+  const openForm = (kind: "create" | "edit", name: string, desc: string, yieldWord: string, ings: string[], steps: string[]) => {
+    setFormOpen(kind);
+    setFormName(name);
+    setFormDesc(desc);
+    setFormYield(yieldWord);
+    setFormIng(ings);
+    setFormSteps(steps);
+    setFormStart(JSON.stringify([name, desc, yieldWord, ings, steps]));
   };
+
+  const openCreate = () => openForm("create", "", "", "", [""], [""]); // one made row each, so the lists never start bare
 
   /** The opened recipe's words into the form, lines by line where the server answers them joined. */
   const openEdit = () => {
     if (detail === null) return;
-    setFormOpen("edit");
-    setFormName(String(detail.name ?? ""));
-    setFormDesc(typeof detail.description === "string" ? detail.description : "");
-    setFormYield(typeof detail.recipe_yield === "string" ? detail.recipe_yield : typeof detail.recipeYield === "string" ? (detail.recipeYield as string) : "");
     const ings = arrayOf(detail, "recipeIngredient");
-    setFormIng(ings ? ings.map((i) => String(typeof i === "object" && i !== null ? (i as Record<string, unknown>).value ?? "" : i)).filter((l) => l !== "") : []);
-    const steps = arrayOf(detail, "recipeInstructions") ?? (typeof detail.recipeInstructions === "string" ? [{ value: detail.recipeInstructions }] : undefined);
-    setFormSteps(steps ? steps.map(textOf).filter((l) => l !== "") : []);
+    // instructions the server answers as one string are its lines: a step each
+    const steps = arrayOf(detail, "recipeInstructions") ?? (typeof detail.recipeInstructions === "string" ? detail.recipeInstructions.split(/\r?\n+/).map((value) => ({ value })) : undefined);
+    openForm(
+      "edit",
+      String(detail.name ?? ""),
+      typeof detail.description === "string" ? detail.description : "",
+      typeof detail.recipe_yield === "string" ? detail.recipe_yield : typeof detail.recipeYield === "string" ? (detail.recipeYield as string) : "",
+      ings ? ings.map((i) => String(typeof i === "object" && i !== null ? (i as Record<string, unknown>).value ?? "" : i)).filter((l) => l !== "") : [],
+      steps ? steps.map(textOf).filter((l) => l !== "") : [],
+    );
   };
 
   const submitForm = async () => {
@@ -131,20 +162,24 @@ export default function Cookbook() {
       // every entry is one of the server's own words for what a recipe is made of and done by
       const words = (list: string[]): string[] => list.map((l) => l.trim()).filter((l) => l !== "");
       const args: Record<string, unknown> = { name: formName.trim() };
-      if (formDesc.trim() !== "") args.description = formDesc.trim();
-      if (formYield.trim() !== "") args.recipe_yield = formYield.trim();
       const ings = words(formIng);
-      if (ings.length > 0) args.ingredients = ings;
       const steps = words(formSteps);
-      if (steps.length > 0) args.instructions = steps;
+      // A new recipe sends what it has. A changed one sends the fields too that it had and now has emptied: left
+      // out, the server keeps the old words, and a description or a list could never be taken out again.
+      const had = (key: string) => detail !== null && detail[key] !== undefined && detail[key] !== "" && !(Array.isArray(detail[key]) && (detail[key] as unknown[]).length === 0);
+      if (formDesc.trim() !== "" || (formOpen === "edit" && had("description"))) args.description = formDesc.trim();
+      if (formYield.trim() !== "" || (formOpen === "edit" && (had("recipe_yield") || had("recipeYield")))) args.recipe_yield = formYield.trim();
+      if (ings.length > 0 || (formOpen === "edit" && had("recipeIngredient"))) args.ingredients = ings;
+      if (steps.length > 0 || (formOpen === "edit" && had("recipeInstructions"))) args.instructions = steps;
       if (formOpen === "create") {
         await api.tool("nc_cookbook_create_recipe", args, instance);
         setFormOpen(null);
-        load();
+        refreshLists();
       } else if (chosen !== null) {
         await api.tool("nc_cookbook_update_recipe", { ...args, recipe_id: Number(chosen) }, instance);
         setFormOpen(null);
         open(chosen); // its words as they stand now
+        refreshLists();
       }
     } catch (error) {
       setProblem(sayError(error));
@@ -153,19 +188,16 @@ export default function Cookbook() {
     }
   };
 
-  const remove = async (asked = false) => {
+  const remove = async () => {
     if (busy || chosen === null || detail === null) return;
-    if (!asked) {
-      setAsk({ text: t("Take the recipe “{name}” away for good?", { name: String(detail.name ?? "") }), run() { remove(true); } });
-      return;
-    }
+    if (!(await confirmDelete(t("Take the recipe “{name}” away for good?", { name: String(detail.name ?? "") }), undefined, t("Delete this recipe")))) return;
     setBusy(true);
     setProblem(null);
     try {
       await api.tool("nc_cookbook_delete_recipe", { recipe_id: Number(chosen) }, instance);
       setChosen(null);
       setDetail(null);
-      load();
+      refreshLists();
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -176,12 +208,16 @@ export default function Cookbook() {
   const ingredients = arrayOf(detail, "recipeIngredient");
   const steps = arrayOf(detail, "recipeInstructions") ?? (typeof detail?.recipeInstructions === "string" ? [{ value: detail.recipeInstructions }] : undefined);
 
+  /** Leaving the form with words in it asks first; true where it may go on. */
+  const mayDropForm = async (): Promise<boolean> =>
+    !formDirty || (await portal.ui.confirm({ title: t("Leave this recipe without saving?"), message: t("What you changed in it is lost."), confirmLabel: t("Leave"), danger: true }));
+
   return (
     <div className="space-y-2">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
+      {problem !== null && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
       {recipes === null ? (
-        problem ? (
-          <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The recipes could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
+        loadError ? (
+          <portal.ui.LoadFailed error={t("The recipes could not be read: {error}", { error: loadError })} onRetry={() => load()} />
         ) : (
           <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
         )
@@ -206,7 +242,7 @@ export default function Cookbook() {
             )}
           </div>
 
-          <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => (formOpen === "create" ? setFormOpen(null) : openCreate())}>
+          <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => (formOpen === "create" ? void mayDropForm().then((ok) => ok && setFormOpen(null)) : openCreate())}>
             {formOpen === "create" ? "−" : "+"} {t("A new recipe")}
           </button>
 
@@ -251,7 +287,7 @@ export default function Cookbook() {
               steps={formSteps} setSteps={setFormSteps}
               submitLabel={t("Add")}
               onSubmit={() => void submitForm()}
-              onCancel={() => setFormOpen(null)}
+              onCancel={() => void mayDropForm().then((ok) => ok && setFormOpen(null))}
               busy={busy}
             />
           )}
@@ -259,7 +295,7 @@ export default function Cookbook() {
       ) : (
         <>
           <div className="flex items-center gap-1">
-            <button type="button" className={portal.ui.classes.ghost} onClick={() => { setChosen(null); setFormOpen(null); }}>
+            <button type="button" className={portal.ui.classes.ghost} onClick={() => void mayDropForm().then((ok) => { if (ok) { setChosen(null); setFormOpen(null); setProblem(null); } })}>
               ← {t("All recipes")}
             </button>
             <span className="flex-1" />
@@ -284,7 +320,7 @@ export default function Cookbook() {
               steps={formSteps} setSteps={setFormSteps}
               submitLabel={t("Save")}
               onSubmit={() => void submitForm()}
-              onCancel={() => setFormOpen(null)}
+              onCancel={() => void mayDropForm().then((ok) => ok && setFormOpen(null))}
               busy={busy}
             />
           ) : detail === null ? (
@@ -337,10 +373,6 @@ export default function Cookbook() {
           {t("Import")}
         </button>
       </form>
-
-      {problem && chosen !== null && recipes !== null && recipes.length > 0 && (
-        <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("An error happened: {error}", { error: problem })}</portal.ui.ErrorBanner>
-      )}
     </div>
   );
 }
@@ -358,7 +390,6 @@ function RecipeForm(props: {
   onCancel(): void;
   busy: boolean;
 }) {
-  const t2 = t;
   /** One list of the form: a spoken name above, an entry per row with its way out, and the door for one more. */
   const listOf = (label: string, words: string[], setWords: (w: string[]) => void, addWord: string) => (
     <div className="space-y-1">
@@ -375,7 +406,7 @@ function RecipeForm(props: {
               setWords(next);
             }}
           />
-          <button type="button" className={portal.ui.classes.ghost} onClick={() => setWords(words.filter((_, j) => j !== i))} aria-label={t2("Take this one away")}>
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => setWords(words.filter((_, j) => j !== i))} aria-label={t("Take this one away")}>
             ×
           </button>
         </div>
@@ -395,25 +426,25 @@ function RecipeForm(props: {
       }}
     >
       <div className="space-y-1">
-        <span className="block text-xs font-medium text-fg-muted">{t2("The recipe's name")}</span>
-        <input className={portal.ui.classes.input} value={props.name} aria-label={t2("The recipe's name")} onChange={(e) => props.setName(e.target.value)} />
+        <span className="block text-xs font-medium text-fg-muted">{t("The recipe's name")}</span>
+        <input className={portal.ui.classes.input} value={props.name} aria-label={t("The recipe's name")} onChange={(e) => props.setName(e.target.value)} />
       </div>
       <div className="space-y-1">
-        <span className="block text-xs font-medium text-fg-muted">{t2("What it is")}</span>
-        <textarea className="nc-note-text" rows={2} value={props.desc} aria-label={t2("What it is")} style={{ minHeight: "0" }} onChange={(e) => props.setDesc(e.target.value)} />
+        <span className="block text-xs font-medium text-fg-muted">{t("What it is")}</span>
+        <textarea className="nc-note-text" rows={2} value={props.desc} aria-label={t("What it is")} style={{ minHeight: "0" }} onChange={(e) => props.setDesc(e.target.value)} />
       </div>
       <div className="space-y-1">
-        <span className="block text-xs font-medium text-fg-muted">{t2("For how many")}</span>
-        <input className={portal.ui.classes.inputSmall} value={props.yieldWord} aria-label={t2("For how many")} onChange={(e) => props.setYieldWord(e.target.value)} />
+        <span className="block text-xs font-medium text-fg-muted">{t("For how many")}</span>
+        <input className={portal.ui.classes.inputSmall} value={props.yieldWord} aria-label={t("For how many")} onChange={(e) => props.setYieldWord(e.target.value)} />
       </div>
-      {listOf(t2("Ingredients"), props.ings, props.setIngs, t2("one more ingredient"))}
-      {listOf(t2("Steps"), props.steps, props.setSteps, t2("one more step"))}
+      {listOf(t("Ingredients"), props.ings, props.setIngs, t("one more ingredient"))}
+      {listOf(t("Steps"), props.steps, props.setSteps, t("one more step"))}
       <div className="flex gap-1">
         <button type="submit" className={portal.ui.classes.primarySmall} disabled={props.busy || props.name.trim() === ""}>
           {props.submitLabel}
         </button>
         <button type="button" className={portal.ui.classes.ghost} onClick={props.onCancel}>
-          {t2("Cancel")}
+          {t("Cancel")}
         </button>
       </div>
     </form>

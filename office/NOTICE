@@ -1,5 +1,5 @@
 @pithagoras/office
-Copyright 2026 Anirban Kar and Contributors
+Copyright 2026 piggidragon and Contributors
 
 The extension (its TypeScript, its stylesheet and its build) is licensed under the Apache License, Version 2.0
 (LICENSE). shared/docker-api.ts in https://github.com/prometheion/pithagoras-extensions, which its types of Docker for

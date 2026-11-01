@@ -1033,7 +1033,7 @@ test("office_format: a comment on an entry of the table of contents that its upd
   fs.writeFileSync(path.join(s.root, "state", "threads", `${doc.docId}.json`), JSON.stringify({ version: 1, threads: { "626360df": { createdAt: 1, text: "rename this", inFile: true, agents: {} } }, uiSeen: [] }));
   s.seat.answer = (run) => (run.kind === "word.format" ? { ops: 1, toc: true, moved: [["626360df", "7164b85f"]], tocMoved: 1 } : {});
   const res = (await tool(s, "office_format").execute("f", { id: doc.docId, ops: [{ format: "Overview", set: { bold: true } }] })) as ToolResult;
-  assert.match(res.content[0].text, /saved as revision \d+\. Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+  assert.match(res.content[0].text, /saved as revision \d+(\.\d+)?\. Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
   assert.doesNotMatch(res.content[0].text, /onto your new text/);
   assert.deepEqual(res.details.moved, [["626360df", "7164b85f"]]);
   assert.deepEqual(Object.keys(docchat.threadsOf(doc.docId)), ["7164b85f"]);

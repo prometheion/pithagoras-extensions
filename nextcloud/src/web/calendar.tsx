@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState, SubTabs } from "./widgets";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete, parseWhen } from "./widgets";
 
 /** The Calendar tab: one month grid over all of the instance's calendars at once, every calendar a pill that
  * stands or steps away -- what Nextcloud's own sidebar means with its boxes. The events are held for a wide
@@ -44,6 +44,8 @@ interface TodoRow {
   calendarName: string; // whose it is: ticking and taking it away go back to that one
 }
 
+/** How many events one read asks for: a window that comes back full is said to be cut short. */
+const EVENT_LIMIT = 500;
 const pad = (n: number): string => String(n).padStart(2, "0");
 /** A day in the tool's words from a Date. */
 const dayWord = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -71,20 +73,20 @@ function monthGrid(month: string): string[] {
     return dayWord(d);
   });
 }
-/** The weekday row, Monday-first, in the words this locale says. */
-const WEEKDAYS: string[] = (() => {
+/** The weekday row, Monday-first, in the words the portal's language says (asked each time: the language may change). */
+const weekdays = (): string[] => {
   const monday = new Date(2024, 0, 8); // a known Monday
   return [0, 1, 2, 3, 4, 5, 6].map((i) => {
     const d = new Date(monday);
     d.setDate(monday.getDate() + i);
-    return d.toLocaleDateString(undefined, { weekday: "narrow" });
+    return portal.format.date(d, { weekday: "narrow" });
   });
-})();
+};
 
 /** An ISO word back to what a datetime-local input speaks -- or its date half alone for an all-day field. */
 const localInput = (iso: string | undefined, dateOnly = false): string => {
   if (!iso) return "";
-  const d = new Date(iso);
+  const d = parseWhen(iso);
   if (Number.isNaN(d.getTime())) return "";
   const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   return dateOnly ? day : `${day}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -116,7 +118,8 @@ export default function Calendar() {
   const [events, setEvents] = useState<EventSummary[] | null>(null);
   const [loadedRange, setLoadedRange] = useState<{ from: string; to: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [eventProblem, setEventProblem] = useState<string | null>(null);
+  const [eventProblem, setEventProblem] = useState<string | null>(null); // the events could not be read
+  const [problem, setProblem] = useState<string | null>(null); // a change or an opening that failed, drawn whatever stands on screen
   const [showNew, setShowNew] = useState(false);
 
   // the one event open and its edit words as they stand (wall-clock words, what the input speaks)
@@ -142,22 +145,23 @@ export default function Calendar() {
   const [newRecur, setNewRecur] = useState<"none" | "weekly" | "monthly">("none");
   const [newStartAt, setNewStartAt] = useState("09:00");
   const [newEndAt, setNewEndAt] = useState("10:00");
+  const [todoPartial, setTodoPartial] = useState(0); // how many of the shown calendars did not answer their todos
   const [newCal, setNewCal] = useState<string>("");
   const [newTodoTitle, setNewTodoTitle] = useState("");
   const [newTodoDue, setNewTodoDue] = useState("");
 
   const [busy, setBusy] = useState(false);
-
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
+  const guard = useGuard();
 
   /** What the calendar list says: the pills, and a first guess where new things go. */
   const loadCalendars = () => {
+    const current = guard("calendars");
     setCalendars(null);
     setCalendarProblem(null);
     void api
       .tool("nc_calendar_list_calendars", {}, instance)
       .then((result) => {
+        if (!current()) return;
         const rows = (arrayOf(partText(result).data, "calendars") ?? []).map((c) => ({
           name: String(c.name),
           displayName: String(c.display_name ?? c.name),
@@ -173,7 +177,7 @@ export default function Calendar() {
           setNewTodoCal(first.name);
         }
       })
-      .catch((error) => setCalendarProblem(sayError(error)));
+      .catch((error) => current() && setCalendarProblem(sayError(error)));
   };
 
   useEffect(() => {
@@ -182,6 +186,7 @@ export default function Calendar() {
 
   /** The events of one wide window at once, across every calendar: the grid and the agenda share it. */
   const fetchWindow = (m: string) => {
+    const current = guard("events");
     const first = monthStart(m);
     const from = dayWord(shiftMonth(first, -4)); // back four months...
     const to = dayWord(monthEnd(shiftMonth(first, 8))); // ...and on eight: most of the turning stays inside
@@ -190,10 +195,11 @@ export default function Calendar() {
     void api
       .tool(
         "nc_calendar_list_events",
-        { calendar_name: "", search_all_calendars: true, start_date: from, end_date: to, limit: 500 },
+        { calendar_name: "", search_all_calendars: true, start_date: from, end_date: to, limit: EVENT_LIMIT },
         instance
       )
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).events : undefined;
         setEvents(
@@ -215,8 +221,8 @@ export default function Calendar() {
         );
         setLoadedRange({ from, to });
       })
-      .catch((error) => setEventProblem(sayError(error)))
-      .finally(() => setLoading(false));
+      .catch((error) => current() && setEventProblem(sayError(error)))
+      .finally(() => current() && setLoading(false));
   };
 
   /** Whether the window already covers the shown month: where it does, no call goes out at all. */
@@ -229,9 +235,11 @@ export default function Calendar() {
     if (!covered(month)) fetchWindow(month);
   }, [month]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** After a change: the window asks again for what it holds, so the grid stands true. */
+  /** After a change: the window asks again for what it holds, so the grid stands true. The events on screen stay
+   * while it comes. */
   const refresh = () => {
-    setLoadedRange(null); // forces the effect's own check to ask once more
+    setLoadedRange(null);
+    fetchWindow(month);
   };
 
   /** The shown events: only what a standing calendar says is on them; an event without a name keeps its place. */
@@ -240,14 +248,28 @@ export default function Calendar() {
     [events, visible]
   );
 
-  /** The window's events under the day of their local shadow -- all-day first in each day, then by start. */
+  /** The window's events under every day they stand on -- from the day they start to the day they end (an all-day
+   * event's end is the day after its last, an event that ends at midnight ends the day before) -- all-day first in
+   * each day, then by start. */
   const byDay = useMemo(() => {
     const map: Record<string, EventSummary[]> = {};
     for (const e of shownEvents) {
       if (e.start === undefined) continue;
-      const d = new Date(e.start);
-      if (Number.isNaN(d.getTime())) continue;
-      (map[dayWord(d)] ??= []).push(e);
+      const first = parseWhen(e.start);
+      if (Number.isNaN(first.getTime())) continue;
+      const end = e.end !== undefined ? parseWhen(e.end) : undefined;
+      const last = new Date(first.getFullYear(), first.getMonth(), first.getDate());
+      if (end !== undefined && !Number.isNaN(end.getTime()) && end > first) {
+        const stop = new Date(end);
+        const midnight = stop.getHours() === 0 && stop.getMinutes() === 0 && stop.getSeconds() === 0;
+        if (e.allDay || midnight) stop.setDate(stop.getDate() - 1);
+        if (stop >= last) last.setTime(new Date(stop.getFullYear(), stop.getMonth(), stop.getDate()).getTime());
+      }
+      const day = new Date(first.getFullYear(), first.getMonth(), first.getDate());
+      for (let n = 0; day <= last && n < 62; n++) {
+        (map[dayWord(day)] ??= []).push(e);
+        day.setDate(day.getDate() + 1);
+      }
     }
     for (const key of Object.keys(map)) {
       map[key].sort((a, b) => Number(b.allDay) - Number(a.allDay) || String(a.start ?? "").localeCompare(String(b.start ?? "")));
@@ -257,7 +279,7 @@ export default function Calendar() {
 
   /** What a calendar stands out in its chip: its own colour, or the wheel's where it has none. */
   const colorOf = (name?: string): string => {
-    if (name === undefined) return "var(--fg-muted)";
+    if (name === undefined) return "rgb(var(--fg-muted))";
     return calendars?.find((c) => c.name === name)?.color ?? fallbackColor(name);
   };
 
@@ -280,11 +302,14 @@ export default function Calendar() {
   const openEvent = (summary: EventSummary) => {
     const home = homeOf(summary);
     if (home === null || busy) return;
+    const current = guard("event");
     setEvent(null);
     setEventProblem2(null);
+    setProblem(null);
     void api
       .tool("nc_calendar_get_event", { calendar_name: home, event_uid: summary.uid }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         if (typeof data !== "object" || data === null) throw new Error(t("The event did not answer in a way this panel reads."));
         const r = data as Rec;
@@ -307,15 +332,16 @@ export default function Calendar() {
         setEditDescription(strOf(r.description) ?? "");
         setEditLocation(strOf(r.location) ?? "");
       })
-      .catch((error) => setEventProblem2(sayError(error)));
+      .catch((error) => current() && setProblem(sayError(error)));
   };
 
-  const saveEvent = () => {
-    if (event === null) return;
-    const home = homeOf(event);
-    if (home === null) return;
+  /** What the open event's words change against the event, as the update tool takes them -- or why they cannot be sent. */
+  const eventChanges = (): { args: Rec; changed: boolean; error?: string } => {
+    const home = event === null ? null : homeOf(event);
+    if (event === null || home === null) return { args: {}, changed: false };
     const args: Rec = { calendar_name: home, event_uid: event.uid };
     let changed = false;
+    let error: string | undefined;
     if (editTitle.trim() !== "" && editTitle !== event.summary) {
       args.title = editTitle.trim();
       changed = true;
@@ -331,12 +357,16 @@ export default function Calendar() {
       // the wall-clock words back to what the tools take: a day-only word is an all-day word with midnight on
       // the tools take an all-day event's word as a day alone ("2025-01-15"), a timed one with its clock on
       const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(startWord);
+      if (startWord === "") error = t("Give the event a start.");
       const startIso = startWord === "" ? undefined : dateOnly ? (editAllDay ? startWord : `${startWord}T00:00`) : `${startWord}:00`;
       if (startIso !== undefined) args.start_datetime = startIso;
       if (!editAllDay && endWord !== "" && !/\d{4}-\d{2}-\d{2}$/.test(endWord)) {
         const endD = new Date(`${endWord}:00`);
         const startD = new Date(startIso ?? "");
-        if (!Number.isNaN(endD.getTime()) && !Number.isNaN(startD.getTime()) && endD > startD) args.end_datetime = `${endWord}:00`;
+        if (!Number.isNaN(endD.getTime()) && !Number.isNaN(startD.getTime())) {
+          if (endD > startD) args.end_datetime = `${endWord}:00`;
+          else error = t("The event ends before it starts.");
+        }
       }
       changed = true;
     }
@@ -348,9 +378,21 @@ export default function Calendar() {
       args.location = editLocation;
       changed = true;
     }
-    if (!changed) return;
+    return { args, changed, error };
+  };
+  const eventDirty = event !== null && !event.recurring && eventChanges().changed;
+  portal.ui.useUnsavedDraft(eventDirty || (showNew && newTitle.trim() !== ""));
+
+  const saveEvent = () => {
+    const { args, changed, error } = eventChanges();
+    if (event === null || !changed) return;
+    if (error !== undefined) {
+      setEventProblem2(error); // said, and the form stays: nothing is dropped without a word
+      return;
+    }
     void (async () => {
       setBusy(true);
+      setEventProblem2(null);
       try {
         await api.tool("nc_calendar_update_event", args, instance);
         setEvent(null);
@@ -363,32 +405,34 @@ export default function Calendar() {
     })();
   };
 
-  const deleteEvent = (asked = false) => {
+  const backToAgenda = async () => {
+    if (eventDirty && !(await portal.ui.confirm({ title: t("Leave this event without saving?"), message: t("What you changed in it is lost."), confirmLabel: t("Leave"), danger: true }))) return;
+    setEvent(null);
+  };
+
+  const deleteEvent = async () => {
     if (event === null) return;
     const home = homeOf(event);
     if (home === null) return;
-    if (!asked) {
-      setAsk({ text: t("Take this event away for good?"), run() { deleteEvent(true); } });
-      return;
+    if (!(await confirmDelete(t("Take this event away for good?"), event.summary, t("Delete this event")))) return;
+    setBusy(true);
+    setEventProblem2(null);
+    try {
+      await api.tool("nc_calendar_delete_event", { calendar_name: home, event_uid: event.uid }, instance);
+      setEvent(null);
+      refresh();
+    } catch (error) {
+      setEventProblem2(sayError(error));
+    } finally {
+      setBusy(false);
     }
-    void (async () => {
-      setBusy(true);
-      try {
-        await api.tool("nc_calendar_delete_event", { calendar_name: home, event_uid: event.uid }, instance);
-        setEvent(null);
-        refresh();
-      } catch (error) {
-        setEventProblem2(sayError(error));
-      } finally {
-        setBusy(false);
-      }
-    })();
   };
 
   const createEvent = () => {
     if (newCal === "" || newTitle.trim() === "") return;
     void (async () => {
       setBusy(true);
+      setProblem(null);
       try {
         const allDay = newMode === "day";
         const start = new Date(`${selectedDay}T${allDay ? "00:00" : newStartAt}`);
@@ -401,7 +445,8 @@ export default function Calendar() {
         };
         if (!allDay) {
           const end = new Date(`${selectedDay}T${newEndAt}:00`);
-          args.end_datetime = !Number.isNaN(end.getTime()) && end > start ? `${selectedDay}T${newEndAt}:00` : undefined;
+          if (Number.isNaN(end.getTime()) || end <= start) throw new Error(t("The event ends before it starts."));
+          args.end_datetime = `${selectedDay}T${newEndAt}:00`;
         }
         if (newRecur !== "none") {
           // The series stands in its rule: weekly without a weekday letter repeats every seven days from the
@@ -416,7 +461,7 @@ export default function Calendar() {
         setShowNew(false);
         refresh();
       } catch (error) {
-        setEventProblem(sayError(error));
+        setProblem(sayError(error));
       } finally {
         setBusy(false);
       }
@@ -424,16 +469,19 @@ export default function Calendar() {
   };
 
   /** The todos of every shown calendar at once: one call per calendar, what a single one could not. */
-  const loadTodos = (names: string[]) => {
+  const loadTodos = (names: string[], keep = false) => {
+    const current = guard("todos");
     if (names.length === 0) {
       setTodos([]);
       return;
     }
-    setTodos(null);
+    if (!keep) setTodos(null);
     setTodoProblem(null);
+    setTodoPartial(0);
     void Promise.allSettled(
       names.map((name) => api.tool("nc_calendar_list_todos", { calendar_name: name }, instance))
     ).then((results) => {
+      if (!current()) return;
       const rows: TodoRow[] = [];
       let answered = 0;
       results.forEach((r, i) => {
@@ -454,6 +502,7 @@ export default function Calendar() {
         setTodoProblem(t("The todos could not be read."));
         return;
       }
+      setTodoPartial(names.length - answered);
       setTodos(rows);
     });
   };
@@ -469,7 +518,7 @@ export default function Calendar() {
       setBusy(true);
       try {
         await api.tool("nc_calendar_complete_todo", { calendar_name: todo.calendarName, todo_uid: todo.uid }, instance); // its own now is the timestamp
-        loadTodos(todoKey === "" ? [] : todoKey.split("|"));
+        loadTodos(todoKey === "" ? [] : todoKey.split("|"), true);
       } catch (error) {
         setTodoProblem(sayError(error));
       } finally {
@@ -478,23 +527,18 @@ export default function Calendar() {
     })();
   };
 
-  const deleteTodo = (todo: TodoRow, asked = false) => {
+  const deleteTodo = async (todo: TodoRow) => {
     if (busy) return;
-    if (!asked) {
-      setAsk({ text: t("Take this todo away for good?"), run() { deleteTodo(todo, true); } });
-      return;
+    if (!(await confirmDelete(t("Take this todo away for good?"), todo.summary, t("Delete")))) return;
+    setBusy(true);
+    try {
+      await api.tool("nc_calendar_delete_todo", { calendar_name: todo.calendarName, todo_uid: todo.uid }, instance);
+      loadTodos(todoKey === "" ? [] : todoKey.split("|"), true);
+    } catch (error) {
+      setTodoProblem(sayError(error));
+    } finally {
+      setBusy(false);
     }
-    void (async () => {
-      setBusy(true);
-      try {
-        await api.tool("nc_calendar_delete_todo", { calendar_name: todo.calendarName, todo_uid: todo.uid }, instance);
-        loadTodos(todoKey === "" ? [] : todoKey.split("|"));
-      } catch (error) {
-        setTodoProblem(sayError(error));
-      } finally {
-        setBusy(false);
-      }
-    })();
   };
 
   const createTodo = () => {
@@ -507,7 +551,7 @@ export default function Calendar() {
         await api.tool("nc_calendar_create_todo", args, instance);
         setNewTodoTitle("");
         setNewTodoDue("");
-        loadTodos(todoKey === "" ? [] : todoKey.split("|"));
+        loadTodos(todoKey === "" ? [] : todoKey.split("|"), true);
       } catch (error) {
         setTodoProblem(sayError(error));
       } finally {
@@ -562,16 +606,15 @@ export default function Calendar() {
       ro.disconnect();
       grid.style.height = "";
     };
-  }, [view, events, month, showNew, selectedDay, calendars, weekCount, ask]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, events, month, showNew, selectedDay, calendars, weekCount, problem]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- what is drawn -------------------------------------------------------
 
   if (event !== null) {
     return (
       <div className="space-y-2">
-        {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
         <div className="flex items-center gap-1">
-          <button type="button" className={portal.ui.classes.ghost} onClick={() => setEvent(null)}>
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => void backToAgenda()}>
             ← {t("Back to the agenda")}
           </button>
           <span className="flex-1" />
@@ -589,36 +632,30 @@ export default function Calendar() {
         <input className={portal.ui.classes.input} value={editTitle} aria-label={t("Event title")} disabled={event.recurring} onChange={(e) => setEditTitle(e.target.value)} />
         <div className="flex flex-wrap items-center gap-1">
           {/* The span of the event as an either-or, like the new one stands chosen: whole day or a time span. */}
-          <div className="nc-seg" role="group" aria-label={t("How long it stands")}>
-            <button
-              type="button"
-              aria-pressed={editAllDay}
-              disabled={event.recurring}
-              className={editAllDay ? "nc-seg-on" : ""}
-              onClick={() => {
-                if (event.recurring) return;
+          <portal.ui.Segments
+            label={t("How long it stands")}
+            size="sm"
+            value={editAllDay ? "day" : "time"}
+            options={[
+              { id: "day", label: t("All day") },
+              { id: "time", label: t("A time span") },
+            ]}
+            onChange={(id) => {
+              if (event.recurring) return;
+              if (id === "day") {
                 setEditAllDay(true);
                 // the start field keeps one consistent word: a day alone where it turns all-day
                 if (/^\d{4}-\d{2}-\d{2}T/.test(startWord)) setStartWord(startWord.slice(0, 10));
-              }}
-            >
-              {t("All day")}
-            </button>
-            <button
-              type="button"
-              aria-pressed={!editAllDay}
-              disabled={event.recurring}
-              className={editAllDay ? "" : "nc-seg-on"}
-              onClick={() => {
-                if (event.recurring) return;
+              } else {
                 setEditAllDay(false);
-                // ...and back to a wall clock from nine where the word only knew its day
-                if (/^\d{4}-\d{2}-\d{2}$/.test(startWord)) setStartWord(`${startWord}T09:00`);
-              }}
-            >
-              {t("A time span")}
-            </button>
-          </div>
+                // ...and back to a wall clock from nine to ten where the words only knew their day: the end of an
+                // all-day event is the day after its last, which is no end for a time span
+                const day = startWord.slice(0, 10);
+                if (/^\d{4}-\d{2}-\d{2}$/.test(startWord)) setStartWord(`${day}T09:00`);
+                if (day !== "") setEndWord(`${day}T10:00`);
+              }
+            }}
+          />
           {editAllDay ? (
             <input type="date" className={portal.ui.classes.inputSmall} value={startWord} aria-label={t("On which day")} disabled={event.recurring} onChange={(e) => setStartWord(e.target.value)} />
           ) : (
@@ -644,15 +681,17 @@ export default function Calendar() {
 
   return (
     <div className="calendar-pane space-y-2">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
-      <SubTabs
-        tabs={[
+      <portal.ui.Segments
+        label={t("What the calendar shows")}
+        size="sm"
+        value={view}
+        options={[
           { id: "events", label: t("Events") },
           { id: "todos", label: t("Todos") },
         ]}
-        active={view}
-        onChange={(id) => setView(id as "events" | "todos")}
+        onChange={setView}
       />
+      {problem !== null && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
 
       {/* The calendars as pills: what is on stands out, what is off steps back; together they are the view. */}
       {calendars !== null && calendars.length > 0 && (
@@ -690,7 +729,7 @@ export default function Calendar() {
             <button type="button" className={portal.ui.classes.ghost} aria-label={t("Previous month")} onClick={() => stepMonth(-1)}>
               ‹
             </button>
-            <span className="min-w-0 flex-1 truncate text-center text-sm font-semibold">{monthLabel(month)}</span>
+            <span className="min-w-0 flex-1 truncate text-center text-sm font-semibold" aria-live="polite">{monthLabel(month)}</span>
             <button type="button" className={portal.ui.classes.ghost} aria-label={t("Next month")} onClick={() => stepMonth(1)}>
               ›
             </button>
@@ -701,15 +740,17 @@ export default function Calendar() {
 
           {events === null ? (
             eventProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setEventProblem(null)}>{t("The events could not be read: {error}", { error: eventProblem })}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={t("The events could not be read: {error}", { error: eventProblem })} onRetry={() => fetchWindow(month)} />
             ) : (
               <portal.ui.RowsSkeleton rows={6} label={t("Loading…")} />
             )
           ) : (
             <>
               {loading && <p className="text-xs text-fg-subtle">{t("The days are being asked for again…")}</p>}
+              {eventProblem !== null && <portal.ui.ErrorBanner onClose={() => setEventProblem(null)}>{t("The events could not be read: {error}", { error: eventProblem })}</portal.ui.ErrorBanner>}
+              {events.length >= EVENT_LIMIT && <p className="text-xs text-fg-subtle">{t("Showing the first {n} events of the months around this one: there are more.", { n: EVENT_LIMIT })}</p>}
               <div ref={gridRef} className="nc-monthgrid" style={{ gridTemplateRows: `auto repeat(${weekCount}, minmax(3.4rem, 1fr))` }}>
-                {WEEKDAYS.map((w, i) => (
+                {weekdays().map((w, i) => (
                   <span key={i} className="nc-monthhead">{w}</span>
                 ))}
                 {cells.map((key) => {
@@ -719,7 +760,7 @@ export default function Calendar() {
                       key={key}
                       type="button"
                       onClick={() => pickDay(key)}
-                      aria-label={t("Open the day {day}", { day: dayLabel(key) })}
+                      aria-label={dayEvents.length > 0 ? t("Open the day {day}, with {n} events: {titles}", { day: dayLabel(key), n: dayEvents.length, titles: dayEvents.map((e) => e.summary).join(", ") }) : t("Open the day {day}", { day: dayLabel(key) })}
                       className={`nc-monthcell${key.slice(0, 7) !== month ? " nc-monthcell-out" : ""}${key === selectedDay ? " nc-monthcell-on" : ""}${key === todayKey ? " nc-monthcell-today" : ""}`}
                     >
                       <span className="nc-monthnum">{Number(key.slice(8))}</span>
@@ -794,16 +835,18 @@ export default function Calendar() {
                       }))}
                     />
                   )}
-                  {/* All day or a time span: one of the two, chosen as an either-or -- no box to tick, no menu to open.
-                      Where the choice turns to hours, they stand in a row below with their own words above. */}
-                  <div className="nc-seg" role="group" aria-label={t("How long it stands")}>
-                    <button type="button" aria-pressed={newMode === "day"} className={newMode === "day" ? "nc-seg-on" : ""} onClick={() => setNewMode("day")}>
-                      {t("All day")}
-                    </button>
-                    <button type="button" aria-pressed={newMode === "time"} className={newMode === "time" ? "nc-seg-on" : ""} onClick={() => setNewMode("time")}>
-                      {t("A time span")}
-                    </button>
-                  </div>
+                  {/* All day or a time span: one of the two, chosen as an either-or. Where the choice turns to hours, they
+                      stand in a row below with their own words above. */}
+                  <portal.ui.Segments
+                    label={t("How long it stands")}
+                    size="sm"
+                    value={newMode}
+                    options={[
+                      { id: "day", label: t("All day") },
+                      { id: "time", label: t("A time span") },
+                    ]}
+                    onChange={setNewMode}
+                  />
                   {/* The hours get a row of their own under the choice, so they can never crowd it: two labeled
                       fields that stretch to the room there is, which keeps their numbers whole at any width. */}
                   {newMode === "time" && (
@@ -818,19 +861,19 @@ export default function Calendar() {
                       </label>
                     </div>
                   )}
-                  {/* How often it comes back: the same self-made either-or, here with three words -- once is what
-                      most days are, week and month make of the one a series. */}
-                  <div className="nc-seg" role="group" aria-label={t("How often it comes back")}>
-                    <button type="button" aria-pressed={newRecur === "none"} className={newRecur === "none" ? "nc-seg-on" : ""} onClick={() => setNewRecur("none")}>
-                      {t("Once")}
-                    </button>
-                    <button type="button" aria-pressed={newRecur === "weekly"} className={newRecur === "weekly" ? "nc-seg-on" : ""} onClick={() => setNewRecur("weekly")}>
-                      {t("Weekly")}
-                    </button>
-                    <button type="button" aria-pressed={newRecur === "monthly"} className={newRecur === "monthly" ? "nc-seg-on" : ""} onClick={() => setNewRecur("monthly")}>
-                      {t("Monthly")}
-                    </button>
-                  </div>
+                  {/* How often it comes back: the same either-or, here with three words -- once is what most days are,
+                      week and month make of the one a series. */}
+                  <portal.ui.Segments
+                    label={t("How often it comes back")}
+                    size="sm"
+                    value={newRecur}
+                    options={[
+                      { id: "none", label: t("Once") },
+                      { id: "weekly", label: t("Weekly") },
+                      { id: "monthly", label: t("Monthly") },
+                    ]}
+                    onChange={setNewRecur}
+                  />
                   {newRecur !== "none" && (
                     <p className="text-xs text-fg-subtle">
                       {newRecur === "weekly" ? t("Every seven days from its first day.") : t("On this day of each month, starting at its first day.")}
@@ -850,14 +893,18 @@ export default function Calendar() {
         <div className="space-y-2">
           {todos === null ? (
             todoProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setTodoProblem(null)}>{todoProblem}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={todoProblem} onRetry={() => loadTodos(todoKey === "" ? [] : todoKey.split("|"))} />
             ) : (
               <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />
             )
           ) : todos.length === 0 ? (
-            <portal.ui.Empty>{t("Nothing is open here.")}</portal.ui.Empty>
+            <>
+              {todoPartial > 0 && <p className="text-xs text-fg-subtle">{t("{n} of the calendars did not answer: their todos are missing.", { n: todoPartial })}</p>}
+              <portal.ui.Empty>{t("Nothing is open here.")}</portal.ui.Empty>
+            </>
           ) : (
             <ul className="space-y-0.5">
+              {todoPartial > 0 && <li className="text-xs text-fg-subtle">{t("{n} of the calendars did not answer: their todos are missing.", { n: todoPartial })}</li>}
               {todos.map((td) => (
                 <li key={td.calendarName + td.uid}>
                   <div className="nc-item">
@@ -868,7 +915,7 @@ export default function Calendar() {
                     <span className="nc-item-name min-w-0 flex-1 truncate">{td.summary}</span>
                     {td.due !== undefined && (
                       <span className="shrink-0 text-xs text-fg-subtle">
-                        {(() => { const d = new Date(td.due); return Number.isNaN(d.getTime()) ? td.due : dayWord(d); })()}
+                        {(() => { const d = parseWhen(td.due); return Number.isNaN(d.getTime()) ? td.due : portal.format.date(d, { day: "2-digit", month: "short" }); })()}
                       </span>
                     )}
                     <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => deleteTodo(td)} aria-label={t("Take this todo away")}>
@@ -913,27 +960,27 @@ export default function Calendar() {
         </div>
       )}
 
-      {calendarProblem !== null && <portal.ui.ErrorBanner onClose={() => setCalendarProblem(null)}>{t("The calendars could not be read: {error}", { error: calendarProblem })}</portal.ui.ErrorBanner>}
+      {calendarProblem !== null && <portal.ui.LoadFailed error={t("The calendars could not be read: {error}", { error: calendarProblem })} onRetry={loadCalendars} />}
     </div>
   );
 }
 
-/** A month key as its row's words: the month long and its year. */
+/** A month key as its row's words: the month long and its year, in the portal's language. */
 function monthLabel(key: string): string {
-  return monthStart(key).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return portal.format.date(monthStart(key), { month: "long", year: "numeric" });
 }
 
 /** A day key as a row's words: the weekday short and its date. */
 function dayLabel(key: string): string {
   const d = new Date(`${key}T12:00`);
   if (Number.isNaN(d.getTime())) return key;
-  return d.toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short" });
+  return portal.format.date(d, { weekday: "short", day: "2-digit", month: "short" });
 }
 
 /** The time one listed event starts at, in words for a row. */
 function timeOfEvent(e: EventSummary): string {
   if (e.start === undefined) return "";
-  const d = new Date(e.start);
+  const d = parseWhen(e.start);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return portal.format.time(d, { hour: "2-digit", minute: "2-digit" });
 }

@@ -1428,6 +1428,10 @@ test("office_edit (spreadsheet): rows and columns made and taken away go in the 
   // A delete before an op that can be taken back is refused before anything is sent.
   assert.match(await refused(t.execute("e3", { id: sheet.docId, ops: [{ deleteColumns: "B" }, { range: "A1", values: [[1]] }] })), /^error:bad_op op 1 cannot be taken back once made \(deleted columns\)/);
   assert.equal(s.seat.runs.length, 2);
+  // A sort changes places of the rows of its range: the people in the workbook are named for it too.
+  s.seat.answer = () => ({ ops: 1, cells: 0, shifted: [{ sheet: "Sheet1", kind: "sort", range: "A2:D9", at: 0, count: 0, made: true }] });
+  const sorted = (await t.execute("e2s", { id: sheet.docId, ops: [{ sort: "A2:D9", by: ["B desc"] }] })) as ToolResult;
+  assert.match(sorted.content[0].text, / Ann and Bob are in this workbook, and its cells moved: A2:D9 of "Sheet1" sorted \(its rows changed places\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\.$/);
   // A call that failed after its delete was made leaves the rows moved: the people in the workbook are named there too.
   s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: the editor did not delete the sheet "Old" within 10 s. The ops before it are taken back, but the change the editor was asked for may still be made. Not taken back: the rows 9:9 of "Sheet1" that op 3 deleted.', 1, true, [{ sheet: "Sheet1", kind: "rows", at: 8, count: 1, made: false }]));
   assert.match(await refused(t.execute("e4", { id: sheet.docId, ops: [{ range: "A1", values: [[1]] }, { deleteSheet: "Old" }, { deleteRows: "9" }] })), /^error:partial op 2: .* that op 3 deleted\. Ann and Bob are in this workbook, and its cells moved: row 9 of "Sheet1" deleted \(the rows below it moved up\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\. Part of this call may be in the document/);
@@ -1466,7 +1470,7 @@ test("office_read with formatting (spreadsheet): each sheet's cells, then how th
   assert.equal(read.split("\n\n").slice(2).join("\n\n"), [
     'Sheet "Data" (A1:D11):',
     'A1: "Region"',
-    "Formatting: font Calibri 11 where no other is said; alignment and borders are not read (office_screenshot shows them).",
+    "Formatting: font Calibri 11 where no other is said; alignment, borders and tables are not read (office_screenshot shows them).",
     'Formats: A5:D5 Arial 12, bold, #FFFFFF, fill #1F4E79; B6:C9, B11 "#,##0.00 \\"€\\""; A10 italic, strike, underline double, superscript, wrap, rotated 90°; A11 vertical.',
     "Merged: A3:D3.",
     "Columns: A 18, B 14, D-E hidden (others 8.43).",
@@ -1477,4 +1481,95 @@ test("office_read with formatting (spreadsheet): each sheet's cells, then how th
   // Without formatting nothing of it is asked for.
   s.seat.answer = (run) => (assert.deepEqual(run.args, {}), { book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [], truncated: false }] });
   assert.doesNotMatch(((await tool(s, "office_read").execute("r2", { id: sheet.docId })) as ToolResult).content[0].text, /Formatting/);
+});
+
+/* ------------------------------------------------------------------ */
+/* spreadsheets: rules, validation, links, charts, filters, tables, sort, names (#13 PR 4) */
+/* ------------------------------------------------------------------ */
+
+test("office_format and office_edit (spreadsheet): the new ops reach the editor as they are checked, and the audit names their kinds", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  const fmt = tool(s, "office_format");
+  await fmt.execute("f1", { id: sheet.docId, ops: [{ conditional: "B2:B9", set: { rule: "dataBar" } }, { validate: "E2:E9", set: { list: ["a", "b"] } }, { link: "A1", set: { url: "https://example.com" } }, { chart: "A1:B5", set: { type: "pie" } }, { filter: "A1:D9" }, { asTable: "A1:B5" }] });
+  assert.equal(s.seat.runs[0].kind, "cell.format");
+  assert.match(s.seen.records.at(-1)!.reason, /^office_format: 6 op\(s\) \(conditional formats, validation, links, charts, filter, tables\) on /);
+  const edit = tool(s, "office_edit");
+  await edit.execute("e1", { id: sheet.docId, ops: [{ sort: "A2:D9", by: ["B desc"] }, { name: "Sales", refersTo: "Data!B6:C9" }, { name: "Old", delete: true }] });
+  assert.equal(s.seat.runs[1].kind, "cell.edit");
+  assert.deepEqual(s.seat.runs[1].args, { ops: [
+    { sort: "A2:D9", area: { col: 0, row: 1, cols: 4, rows: 8 }, by: [{ col: 1, desc: true }] },
+    { name: "Sales", refersTo: { sheet: "Data", address: "$B$6:$C$9" } },
+    { name: "Old", delete: true },
+  ] });
+  assert.match(s.seen.records.at(-1)!.reason, /^office_edit: 3 op\(s\) \(sort, names\) on /);
+  // Each tool refuses the other's: before anything is sent.
+  const sent = s.seat.runs.length;
+  assert.match(await refused(edit.execute("e2", { id: sheet.docId, ops: [{ chart: "A1:B5" }] })), /^error:bad_op op 1: `chart` is an office_format op/);
+  assert.match(await refused(fmt.execute("f2", { id: sheet.docId, ops: [{ sort: "A2:D9", by: ["A"] }] })), /^error:bad_op op 1: `sort` is an office_edit op/);
+  assert.match(await refused(fmt.execute("f3", { id: sheet.docId, ops: [{ chart: "A1:B5" }, { filter: "A1:D9" }, { format: "A1", set: { bold: true } }] })), /^error:bad_op op 1 cannot be taken back once made \(a chart/);
+  assert.equal(s.seat.runs.length, sent);
+  // A call made in part: the charts, filters and tables it made are named by the editor, and the call is in the audit.
+  s.seat.answer = () => Promise.reject(new SeatError("partial", 'op 2: x. The ops before it are taken back, but not all of them whole. Not taken back: the chart of A1:B5 of "Sheet1" that op 1 made.', 1, true));
+  assert.match(await refused(fmt.execute("f4", { id: sheet.docId, ops: [{ chart: "A1:B5" }, { asTable: "A1:B5" }] })), /^error:partial op 2: x\. .*Not taken back: the chart of A1:B5/);
+  assert.match(s.seen.records.at(-1)!.reason, /failed, and not taken back whole \(partial\)$/);
+});
+
+test("the tools' schemas declare the new ops' keys, untyped, so that no provider drops one", () => {
+  const s = setup();
+  const props = (name: string) => Object.keys(tool(s, name).parameters.properties.ops.items.properties);
+  for (const key of ["conditional", "validate", "link", "chart", "filter", "asTable", "set"]) assert.ok(props("office_format").includes(key), key);
+  for (const key of ["sort", "by", "name", "refersTo", "delete"]) assert.ok(props("office_edit").includes(key), key);
+  assert.deepEqual(tool(s, "office_format").parameters.properties.ops.items.properties.conditional, {});
+});
+
+test("office_read with formatting (spreadsheet): conditional formats, validation, links, the filter and the charts of the sheet, in words", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  const rule = (type: string, at: string, over: Record<number, unknown> = {}) => Object.assign([type, at, null, null, null, null, null, null, null, null, null, null], over);
+  s.seat.answer = () => ({
+    book: [{ name: "Data", hidden: false }],
+    sheets: [{
+      name: "Data", range: "A1:D9", cells: [], truncated: false,
+      look: {
+        font: { name: "Calibri", size: 11 }, formats: [], merged: [], cols: { usual: 8.43, own: [] }, rows: { usual: 15, own: [] }, frozen: { cols: 0, rows: 0 },
+        rules: [
+          rule("xlCellValue", "B2:B9", { 2: "xlGreater", 3: "1000", 4: "", 9: "#C6EFCE", 10: "#006100", 11: true }),
+          rule("xlCellValue", "C2:C9", { 2: "xlBetween", 3: "1", 4: "9", 9: "#FFFF00" }),
+          rule("xlExpression", "A:A", { 3: "$B1>8", 10: "#FF0000" }),
+          rule("xlColorScale", "D2:D9"),
+          rule("xlDataBar", "E2:E9"),
+          rule("xlTop10", "F2:F9", { 5: 3, 6: "xlTop10Bottom", 7: true, 9: "#FFFF00" }),
+          rule("xlTop10", "F2:F9", { 5: 10, 6: "xlTop10Top", 7: false, 9: "#FFFF00" }),
+          rule("xlUniqueValues", "G2:G9", { 8: "xlDuplicate", 9: "#FFEB9C" }),
+          rule("xlUniqueValues", "G2:G9", { 8: "xlUnique", 9: "#FFEB9C" }),
+          rule("xlAboveAverage", "H2:H9", { 9: "#FFEB9C" }),
+        ],
+        validation: [
+          { a: "E2:E9", v: ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", "", true, true, "Pick one", "", "", "", true, true] },
+          { a: "B2:B9", v: ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "10", true, true, "", "", "", "", true, true] },
+          { a: "C2", v: ["xlValidateDate", "xlValidAlertStop", "xlGreaterEqual", "1/31/2026", "", true, true, "", "", "", "", true, true] },
+        ],
+        links: [["A2", "https://example.com/x", "", "Example"], ["A3", "", "Data!A1", "Top"]],
+        filter: "A1:D9",
+        charts: [["bar", "Revenue", "H2"], ["horizontalBar", null, "H20"], ["pie", "Share", "H40"]],
+      },
+    }],
+  });
+  const read = ((await tool(s, "office_read").execute("r1", { id: sheet.docId, sheet: "Data", formatting: true })) as ToolResult).content[0].text.split("\n\n").slice(2).join("\n\n");
+  assert.equal(read.split("\n").slice(3).join("\n"), [
+    'Conditional: B2:B9 cell > 1000 → fill #C6EFCE, #006100, bold; C2:C9 cell between 1 and 9 → fill #FFFF00; A:A formula =$B1>8 → #FF0000; D2:D9 colour scale; E2:E9 data bar; F2:F9 bottom 3% → fill #FFFF00; F2:F9 top 10 → fill #FFFF00; G2:G9 duplicate values → fill #FFEB9C; G2:G9 unique values → fill #FFEB9C; H2:H9 above average → fill #FFEB9C. (Cells under a rule show what it draws: their fills and fonts are not listed under Formats.)',
+    'Validation: E2:E9 list "Open,Done" (message "Pick one"); B2:B9 whole between 1 and 10; C2 date >= 1/31/2026.',
+    'Links: A2 https://example.com/x ("Example"); A3 #Data!A1 ("Top").',
+    "Filter: A1:D9.",
+    'Charts: column "Revenue" at H2; bar at H20; pie "Share" at H40.',
+  ].join("\n"));
+});
+
+test("office_read with formatting (spreadsheet): what the editor failed to give of a sheet's extras is said, the rest is read", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Book", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ book: [{ name: "Data", hidden: false }], sheets: [{ name: "Data", range: "A1", cells: [], truncated: false, look: { font: { name: "Calibri", size: 11 }, formats: [], merged: [], cols: { usual: 8.43, own: [] }, rows: { usual: 15, own: [] }, frozen: { cols: 0, rows: 0 }, filter: "A1:D9", unread: ["charts (boom)"] } }] });
+  const read = ((await tool(s, "office_read").execute("r1", { id: sheet.docId, formatting: true })) as ToolResult).content[0].text;
+  assert.match(read, /\nFilter: A1:D9\.\n\(not read, the editor failed at them: charts \(boom\)\)$/);
 });

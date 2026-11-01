@@ -167,7 +167,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   take a number format (`"#,##0.00"`, `"0%"`, `"dd.mm.yyyy"`), font, size, bold, italic, underline, strike,
   superscript and subscript (in cells that hold text: OnlyOffice sets them on a text's characters), colour, fill,
   alignment, wrap, text rotation, borders (single, double, dashed or dotted lines), merging and splitting, and taking
-  all of a cell's formatting off (`clear`, merges too; the values stay). Columns take a width (in characters, as the
+  all of a cell's formatting off (`clear`, merges too, and the conditional formats of those cells: OnlyOffice takes them off with it, and a call taken back cannot make them again, so the answer names them; the values stay). Columns take a width (in characters, as the
   sheet shows it), rows a height (in points), and both can be hidden, shown and fitted to their contents; frozen
   panes keep the rows above and the columns left of a cell in view. A call is made whole or not at all: it is checked
   against the workbook first (superscript on a number, a freeze of a hidden sheet, more than 20,000 cells, whole
@@ -178,11 +178,40 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   call set them, and the answer (`error:partial`) names them. OnlyOffice's API takes no border off and sets no
   "general" alignment back: only `clear` takes them off, with everything else. A merge keeps the top-left cell's
   value (as in Excel); taking a merge back puts the others' values back. A column width or row height put back is the
-  column's or row's own from then on (the API sets none back to the sheet's default), which looks the same. `office_read` with `formatting: true` says how
+  column's or row's own from then on (the API sets none back to the sheet's default), which looks the same.
+  Besides the cells' looks, `office_format` makes **conditional formats** (a rule on cells, or a whole column: a
+  comparison with a value, a formula, a colour scale, data bars, the top or bottom n, duplicate or unique values;
+  with a fill, a font colour, bold, italic, underline or strike where the kind has a look), **data validation** (a
+  list of entries or the cells that hold them, whole numbers, decimals, dates and text lengths with a condition such
+  as `">= 0"` or `"between 1 and 10"`; or taking it off; not an error message, which OnlyOffice's API sets in the
+  agent's own editor only and sends nowhere), **links** in cells (http,
+  https or mailto; a cell that holds a text keeps it, one that holds a number or a formula needs the text to show,
+  as OnlyOffice would put the address there), **charts** of a range with its header row and label column (column,
+  stacked column, bar, stacked bar, line, pie, doughnut, area and scatter; title, axis titles, legend, place and
+  size), a **filter** on a range with one column's criteria (or taking the sheet's off) and a **formatted table** of
+  a range, in the editor's default style (the API has no other). `office_edit` **sorts** the rows of a range by up to
+  three of its columns (the cells' formats and formulas move with their rows; merged cells are refused) and makes,
+  changes and deletes **named ranges**. The same rule holds for them as for formats: a call is checked first, and
+  where a later op fails what the call made is put back: a rule the call added is deleted (one a person changed since
+  stays, and is named), validation goes back to what the cells had (cell by cell; the messages of a person's
+  validation, and whether it ignores blanks, shows a dropdown in the cell, an error alert and an input message, are lost
+  with the validation the call replaces, and the answer says so; OnlyOffice 10.0's editor takes no validation message
+  from the API, [ONLYOFFICE/DocumentServer#3869](https://github.com/ONLYOFFICE/DocumentServer/issues/3869)), a link to the text, look and
+  link the cell had (the link's look replaces the cell's font, so a bold cell with a link comes back plain, and the
+  answer names its font; a link a person changed meanwhile keeps its cell as they made it), a sort to the values, formulas and readable formats the range had (the alignment and borders it moved
+  cannot be read back, so the answer names them), a name to its old reference or none. OnlyOffice's API takes **no chart,
+  no table away again, and a filter only whole** (`filter: "none"` takes the sheet's off), and a
+  rule cleared cannot be made again: these go last in a call, and the answer names the ones made before the op that
+  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word, and a table over a cell with a link is refused (OnlyOffice 10.0 can no longer read that cell's formats afterwards,
+  [ONLYOFFICE/DocumentServer#3870](https://github.com/ONLYOFFICE/DocumentServer/issues/3870)). A sort moves the links of its cells with them, and where a later op fails the links stay where the sort put them (the answer names them). A sort re-orders the rows of its range: while you are in the workbook the agent's answer names the people in it, as it does after inserted or deleted rows (merging cells moves none, so it does not). A text in a rule or a list of a validation cannot hold a double quote (the file would hold a broken formula), a sheet with more than 2,000 conditional formats takes no new one (each is made by reading all of them).
+  A cell under a conditional format reads the rule's fill as its own in `office_read` (the API gives what is drawn);
+  taking back a format of such a cell can then set that fill on it. `office_read` with `formatting: true` says how
   each sheet looks: the font most cells have, the cells that look otherwise (grouped into ranges), merged cells, the
-  columns' widths and rows' heights that differ from the sheet's, hidden ones and frozen panes, 50,000 characters of it
-  at most. It cannot say the alignment or the borders (OnlyOffice has no getter for them): `office_screenshot` shows
-  them. The agent cannot write comments or tracked
+  columns' widths and rows' heights that differ from the sheet's, hidden ones and frozen panes, its conditional
+  formats, the validation of the cells it lists (of the used range, 20,000 cells at most), its links, its filter and its charts, 50,000 characters of
+  it at most. It cannot say the alignment or the borders (OnlyOffice has no getter for them), a formatted table (its
+  style, its total row), the data a chart shows or the workbook's named ranges (none is listed by the API; the agent
+  deletes the ones it made by name): `office_screenshot` shows the first three. The agent cannot write comments or tracked
   changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
   is in a document its session stays open after the people left it, so it is saved as the last person leaves: what
@@ -436,8 +465,8 @@ agents' editor.
   columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A link lies
   inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out what a table that holds a
   picture looks like and the cells of a table inside a cell (`office_screenshot` shows them). For spreadsheets `office_format` leaves out, for now:
-  conditional formats, data validation, charts, filters, tables, sorting, named ranges, pictures, cell styles, a
-  sheet's tab colour, grouped rows and columns, protection and print setup; `office_read` does not read a sheet's
+  pictures, cell styles, a table's style and total row, a chart's series and axes beyond what it is made with,
+  sparklines, pivot tables, a sheet's tab colour, grouped rows and columns, protection and print setup; `office_read` does not read a sheet's
   alignment and borders (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the

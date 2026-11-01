@@ -1585,6 +1585,234 @@ function pastEnd(i, rows) { return { code: "bad_op", op: i, message: "op " + (i 
 function overflows(u, rows, from, count) { return Boolean(u) && (rows ? u.r2 >= from && u.r2 + count > 1048575 : u.c2 >= from && u.c2 + count > 16383); }
 `;
 
+/** The most conditional formats a sheet may hold for a rule op: each one reads every rule of its sheet (twice), and a
+ * workbook that came from Excel can hold thousands from copying and pasting. */
+export const MAX_SHEET_RULES = 2_000;
+
+/**
+ * The extras of #13's PR 4, for cell.check, cell.step and cell.read alike (CELL_LOOK_SRC's helpers come first; measured
+ * with docbuilder and in the editor, DS 10.0.0.1): a sheet's conditional formats are read through its whole range
+ * (`GetFormatConditions`, each by `GetItem(n)`, from 1) and a rule made is found again by what tells it from the others
+ * (`ruleKey`); data validation is read cell by cell and `Add` refuses a cell that has one, so a range's is deleted
+ * first; a link is `ws.SetHyperlink`, which writes the address into a cell that holds no text, and
+ * `ClearHyperlinks` takes the link off but leaves the cell's blue underline; names are the workbook's
+ * (`Api.AddDefName`, `GetDefName` throws where there is none, `SetRefersTo` takes any text).
+ */
+const CELL_EXTRAS_SRC = `
+// The answer of a getter the object has (not every kind of rule has all of them), or undefined.
+function ask(o, name, a, b) { try { return o && typeof o[name] === "function" ? o[name](a, b) : undefined; } catch (e) { return undefined; } }
+function rgbOf(c) { return Api.CreateColorFromRGB(c.r, c.g, c.b); }
+function rgbHex(c) { var v = c && typeof c.GetRGB === "function" ? c.GetRGB() : null; return v ? hexOf(v) : null; }
+function quoted(name) { return "'" + String(name).split("'").join("''") + "'"; }
+// An area ({col, row, cols, rows}, from 0) as a reference with its sheet: 'Sheet1'!$A$1:$C$5.
+function refOfArea(ws, a) { return quoted(ws.GetName()) + "!$" + colName(a.col) + "$" + (a.row + 1) + ":$" + colName(a.col + a.cols - 1) + "$" + (a.row + a.rows); }
+// The first cell of a range's address as {col, row} (from 0).
+function cornerOf(address) {
+  var m = /^\\$?([A-Z]+)\\$?(\\d+)/.exec(address);
+  return { col: colIndex(m[1]), row: Number(m[2]) - 1 };
+}
+var WHOLE_SHEET = "A1:XFD1048576";
+
+// A conditional format as a text of what tells it from the others (its kind, cells, condition and look); a sheet's own
+// are read through its whole range.
+function ruleKey(item) {
+  var applies = ask(item, "GetAppliesTo"), font = ask(item, "GetFont"), at = applies ? String(applies.GetAddress(false, false)) : null;
+  return JSON.stringify([ask(item, "GetType"), at, ask(item, "GetOperator"), ask(item, "GetFormula1"), ask(item, "GetFormula2"), ask(item, "GetRank"), ask(item, "GetTopBottom"), ask(item, "GetPercent"), ask(item, "GetDupeUnique"), rgbHex(ask(item, "GetFillColor")), font ? rgbHex(ask(font, "GetColor")) : null, font ? ask(font, "GetBold") : null]);
+}
+function rulesOf(ws) {
+  var fc = ws.GetRange(WHOLE_SHEET).GetFormatConditions(), out = [];
+  for (var k = 1; k <= fc.GetCount(); k++) out.push(ruleKey(fc.GetItem(k)));
+  return out;
+}
+// A rule made as ops.ts describes it (CfRule); one that fails after the editor made it is deleted again.
+function addRule(ws, op) {
+  var fc = ws.GetRange(op.conditional).GetFormatConditions(), r = op.rule, cond;
+  if (r.rule === "cell") cond = fc.Add("xlCellValue", r.operator, r.value, r.value2);
+  else if (r.rule === "formula") cond = fc.Add("xlExpression", undefined, r.formula);
+  else if (r.rule === "colorScale") cond = fc.AddColorScale(r.colors ? r.colors.length : 3);
+  else if (r.rule === "dataBar") cond = fc.AddDatabar();
+  else if (r.rule === "top") cond = fc.AddTop10();
+  else cond = fc.AddUniqueValues();
+  if (!cond) throw new Error("the editor did not make the conditional format");
+  try {
+    if (r.rule === "colorScale" && r.colors) { var crit = cond.GetColorScaleCriteria(); r.colors.forEach(function (c, k) { crit[k].SetColor(rgbOf(c)); }); }
+    if (r.rule === "dataBar" && r.color) cond.SetBarColor(rgbOf(r.color));
+    if (r.rule === "top") { cond.SetRank(r.rank); cond.SetTopBottom(r.bottom ? "xlTop10Bottom" : "xlTop10Top"); cond.SetPercent(r.percent); }
+    if (r.rule === "duplicates") cond.SetDupeUnique(r.unique ? "xlUnique" : "xlDuplicate");
+    if (r.rule !== "colorScale" && r.rule !== "dataBar") {
+      if (r.fill) cond.SetFillColor(rgbOf(r.fill));
+      if (r.color || r.bold !== undefined || r.italic !== undefined || r.underline !== undefined || r.strike !== undefined) {
+        var font = cond.GetFont();
+        if (r.color) font.SetColor(rgbOf(r.color));
+        if (r.bold !== undefined) font.SetBold(r.bold);
+        if (r.italic !== undefined) font.SetItalic(r.italic);
+        if (r.underline !== undefined) font.SetUnderline(r.underline ? "xlUnderlineStyleSingle" : "xlUnderlineStyleNone");
+        if (r.strike !== undefined) font.SetStrikethrough(r.strike);
+      }
+    }
+  } catch (e) {
+    try { cond.Delete(); } catch (e2) {}
+    throw e;
+  }
+}
+// The rule a call made, taken away where it is as the call left it: "dropped", "kept" (a person changed it) or "gone".
+function dropRule(ws, key) {
+  var fc = ws.GetRange(WHOLE_SHEET).GetFormatConditions(), want = JSON.parse(key), k;
+  for (k = 1; k <= fc.GetCount(); k++) if (ruleKey(fc.GetItem(k)) === key) { fc.GetItem(k).Delete(); return "dropped"; }
+  // A person changed it since: the same kind on the same cells, or the same condition and look on other cells (they moved it).
+  for (k = 1; k <= fc.GetCount(); k++) { var now = JSON.parse(ruleKey(fc.GetItem(k))); if (now[0] === want[0] && (now[1] === want[1] || JSON.stringify(now.slice(2)) === JSON.stringify(want.slice(2)))) return "kept"; }
+  return "gone";
+}
+// The refusal of a rule for a sheet that holds too many already (each rule op reads every one of them).
+function tooManyRules(ws, i) {
+  var n = ws.GetRange(WHOLE_SHEET).GetFormatConditions().GetCount();
+  return n > ${MAX_SHEET_RULES} ? { code: "bad_op", op: i, message: "op " + (i + 1) + ": " + JSON.stringify(ws.GetName()) + " holds " + n + " conditional formats, and a rule is made by reading every one of them: more than ${MAX_SHEET_RULES} are too many (clear some with set: {clear: true}, or use another sheet)" } : null;
+}
+
+// A cell's data validation as a text (what ApiValidation.Add and its setters take, in turn), "" where it has none.
+var VALIDATION_GETTERS = ["GetType", "GetAlertStyle", "GetOperator", "GetFormula1", "GetFormula2", "GetIgnoreBlank", "GetInCellDropdown", "GetErrorMessage", "GetErrorTitle", "GetInputMessage", "GetInputTitle", "GetShowError", "GetShowInput"];
+function validationOf(ws, address) {
+  var v = ws.GetRange(address).GetValidation(), type = ask(v, "GetType");
+  if (type === "xlValidateInputOnly" && !ask(v, "GetInputMessage") && !ask(v, "GetInputTitle")) return "";
+  var out = [type];
+  for (var k = 1; k < VALIDATION_GETTERS.length; k++) { var x = ask(v, VALIDATION_GETTERS[k]); out.push(x === undefined ? null : x); }
+  return JSON.stringify(out);
+}
+function validationsIn(ws, address) { return addressesOf(address).map(function (row) { return row.map(function (a) { return validationOf(ws, a); }); }); }
+function putValidation(ws, address, text) {
+  ws.GetRange(address).GetValidation().Delete();
+  if (!text) return;
+  var a = JSON.parse(text), v = ws.GetRange(address).GetValidation();
+  v.Add(a[0], a[1], a[2], a[3], a[4] === null || a[4] === "" ? undefined : a[4]);
+  // (The setters of the rest send nothing in the editor, messages among them: what Add makes is all that is put back.)
+}
+// Rectangles ({a: address, v: text}) of the cells of a grid of texts that keep() says yes to and that share their text, from the
+// cell at first ({col, row}): rows of runs, each joined to the run above it where it has the same columns and text.
+function rectsOf(texts, first, keep) {
+  var out = [], open = {};
+  texts.forEach(function (row, y) {
+    var now = {}, x = 0;
+    while (x < row.length) {
+      if (!keep(row[x], y, x)) { x++; continue; }
+      var x2 = x;
+      while (x2 + 1 < row.length && row[x2 + 1] === row[x] && keep(row[x2 + 1], y, x2 + 1)) x2++;
+      var key = x + ":" + x2 + ":" + row[x], rect = open[key];
+      if (rect) rect.y2 = y; else { rect = { x1: x, x2: x2, y1: y, y2: y, v: row[x] }; out.push(rect); }
+      now[key] = rect;
+      x = x2 + 1;
+    }
+    open = now;
+  });
+  return out.map(function (r) {
+    var a = colName(first.col + r.x1) + (first.row + r.y1 + 1);
+    return { a: r.x2 > r.x1 || r.y2 > r.y1 ? a + ":" + colName(first.col + r.x2) + (first.row + r.y2 + 1) : a, v: r.v };
+  });
+}
+// The links in a range: [address, sub-address, screen tip, text, the cells they are on] each.
+function linksIn(ws, address) {
+  var hs = ws.GetRange(address).GetHyperlinks() || [], out = [];
+  for (var k = 0; k < hs.length; k++) {
+    var range = ask(hs[k], "GetRange");
+    out.push([ask(hs[k], "GetAddress"), ask(hs[k], "GetSubAddress"), ask(hs[k], "GetScreenTip"), ask(hs[k], "GetTextToDisplay"), range ? String(range.GetAddress(false, false)) : null]);
+  }
+  return out;
+}
+// A named range's reference as the editor reads it, or null where there is no such name.
+function refOfName(name) {
+  try { return String(Api.GetDefName(name).GetRefersTo()); } catch (e) { return null; }
+}
+function defName(name) { try { return Api.GetDefName(name); } catch (e) { return null; } }
+// The cells of a text that the characters of a mixed key left unread (readLooks' null runs), for the answer.
+function mixedCells(address, before, keys) {
+  var flat = [].concat.apply([], addressesOf(address)), runs = keys.filter(function (k) { return ["numberFormat", "fill", "wrap", "rotation"].indexOf(k) === -1; }).map(function (k) { return expand(before[k]); }), out = [];
+  flat.forEach(function (a, x) { if (runs.some(function (v) { return v[x] === null; })) out.push(a); });
+  return out;
+}
+// What an op would refuse as the workbook stands: the check before the first step foresees it, and the step makes it
+// again (an op before can change what it reads).
+function refuseExtra(ws, op, i) {
+  var name = ws.GetName(), bad = function (message) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": " + message }; };
+  if (op.sort !== undefined) {
+    var merged = mergesIn(ws, op.sort);
+    if (merged.length) return bad("a sort needs cells that are not merged, and " + merged[0] + " of " + JSON.stringify(name) + " is merged (split it first)");
+  }
+  if (op.asTable !== undefined) {
+    var cells = addressesOf(colName(op.area.col) + (op.area.row + 1) + ":" + colName(op.area.col + op.area.cols - 1) + (op.area.row + 1))[0], seen = {};
+    for (var c = 0; c < cells.length; c++) {
+      var head = ws.GetRange(cells[c]), text = isText(head) ? String(head.GetValue()).toLowerCase() : null;
+      if (text === null) return bad("the first row of a table holds its column names as texts, and " + cells[c] + " of " + JSON.stringify(name) + " is " + (filled(head) ? "a number or a formula" : "empty") + " (write the names first)");
+      if (seen[text]) return bad("the column names of a table are all different, and " + JSON.stringify(head.GetValue()) + " is in " + cells[c] + " of " + JSON.stringify(name) + " twice");
+      seen[text] = true;
+    }
+    // OnlyOffice 10.0 breaks the format of a linked cell a table covers: its number format, font and the rest then throw.
+    var tlinked = linksIn(ws, op.asTable).map(function (l) { return l[4]; }).filter(Boolean);
+    if (tlinked.length) return bad("a table over a cell with a link breaks that cell in the editor (its formats can no longer be read), and " + tlinked[0] + " of " + JSON.stringify(name) + " has one (put the table where no cell has a link)");
+    var tmerged = mergesIn(ws, op.asTable);
+    if (tmerged.length) return bad("a table needs cells that are not merged, and " + tmerged[0] + " of " + JSON.stringify(name) + " is merged (split it first)");
+  }
+  if (op.chart !== undefined) {
+    var all = grid(ws.GetRange(op.chart).GetValue()), numbers = false;
+    all.forEach(function (row) { row.forEach(function (v) { if (typeof v === "number") numbers = true; }); });
+    if (!numbers) return bad("the data of a chart holds numbers, and " + op.chart + " of " + JSON.stringify(name) + " holds none (write them first)");
+  }
+  if (op.link !== undefined) {
+    var cell = ws.GetRange(op.link);
+    if (op.text === undefined && filled(cell) && !isText(cell)) return bad(op.link + " of " + JSON.stringify(name) + " holds " + (String(cell.GetFormula()).charAt(0) === "=" ? "a formula" : "a number") + ", which a link would replace with its address: give set.text, the text it shows");
+  }
+  return null;
+}
+// The cells of a rule's "applies to" text as bounds ({c1, r1, c2, r2}, from 0; whole columns and rows reach the end).
+function areasOf(text) {
+  var out = [];
+  String(text || "").split(" ").join(",").split(",").forEach(function (part) {
+    var m = /^\\$?([A-Z]+)\\$?(\\d+)(?::\\$?([A-Z]+)\\$?(\\d+))?$/.exec(part), c;
+    if (m) out.push({ c1: colIndex(m[1]), r1: Number(m[2]) - 1, c2: colIndex(m[3] || m[1]), r2: Number(m[4] || m[2]) - 1 });
+    else if ((c = /^\\$?([A-Z]+):\\$?([A-Z]+)$/.exec(part))) out.push({ c1: colIndex(c[1]), r1: 0, c2: colIndex(c[2]), r2: 1048575 });
+    else if ((c = /^\\$?(\\d+):\\$?(\\d+)$/.exec(part))) out.push({ c1: 0, r1: Number(c[1]) - 1, c2: 16383, r2: Number(c[2]) - 1 });
+  });
+  return out;
+}
+// A sheet's conditional formats, validation (over the cells of address), links, filter and charts, for office_read: out
+// of room characters, 50 of each kind at most.
+function extrasLook(ws, address, room) {
+  var out = { rules: [], validation: [], links: [], filter: null, charts: [], size: 0, cut: false, failed: [] };
+  var take = function (list, item, cost) {
+    if (out.size + cost > room || list.length >= 50) { out.cut = true; return false; }
+    out.size += cost;
+    list.push(item);
+    return true;
+  };
+  // Each part on its own: one the editor cannot give is said to be unread, and does not fail the read.
+  var part = function (name, read) { try { read(); } catch (e) { out.failed.push(name + " (" + String(e && e.message || e) + ")"); } };
+  part("conditional formats", function () {
+    var fc = ws.GetRange(WHOLE_SHEET).GetFormatConditions();
+    for (var k = 1; k <= fc.GetCount(); k++) { var key = ruleKey(fc.GetItem(k)); if (!take(out.rules, JSON.parse(key), key.length)) break; }
+  });
+  part("validation", function () {
+    rectsOf(validationsIn(ws, address), cornerOf(address), function (t) { return t !== ""; }).forEach(function (r) { take(out.validation, { a: r.a, v: JSON.parse(r.v) }, r.a.length + r.v.length); });
+  });
+  part("links", function () {
+    var links = ws.GetHyperlinks() || [];
+    for (var h = 0; h < links.length; h++) {
+      var range = ask(links[h], "GetRange");
+      if (!take(out.links, [range ? String(range.GetAddress(false, false)) : null, ask(links[h], "GetAddress"), ask(links[h], "GetSubAddress"), ask(links[h], "GetTextToDisplay")], 60)) break;
+    }
+  });
+  part("filter", function () {
+    var filter = ask(ws, "GetAutoFilter"), filtered = filter ? ask(filter, "GetRange") : null;
+    if (filtered) out.filter = String(filtered.GetAddress(false, false));
+  });
+  part("charts", function () {
+    var charts = ws.GetAllCharts() || [];
+    for (var c = 0; c < charts.length; c++) {
+      var at = ask(charts[c], "GetPosition"), title = ask(charts[c], "GetTitle");
+      if (!take(out.charts, [ask(charts[c], "GetChartType"), title ? String(title).replace(/\\s+$/, "") : null, at ? colName(at.fromCol) + (at.fromRow + 1) : null], 60)) break;
+    }
+  });
+  return out;
+}
+`;
+
 /** The most cells of one sheet cell.read gives. */
 export const MAX_READ_CELLS = 20_000;
 
@@ -1597,24 +1825,32 @@ export const MAX_READ_CELLS = 20_000;
  */
 const CELL_READ_LOOK_SRC = `
 function sheetLook(ws, address, room) {
+  // The conditional formats, links and the rest first: the editor gives the look a rule draws as the cell's own (fill,
+  // font colour, bold, italic, underline, strike), so those keys are not listed for cells a rule covers.
+  var extras = extrasLook(ws, address, Math.max(0, room)), ruled = [].concat.apply([], extras.rules.map(function (r) { return areasOf(r[1]); })), corner = cornerOf(address);
+  room = Math.max(0, room - extras.size);
   var grid = addressesOf(address), h = grid.length, w = grid[0].length, looks = [], fonts = {}, usual = null;
   for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
-    var l = lookOf(ws.GetRange(grid[y][x]), LOOK_KEYS), fk = JSON.stringify([l.font, l.size]);
+    // (A cell the editor cannot read the format of is left out, and said.)
+    var l;
+    try { l = lookOf(ws.GetRange(grid[y][x]), LOOK_KEYS); } catch (e) { l = {}; if (extras.failed.length < 6) extras.failed.push("the format of " + grid[y][x] + " (" + String(e && e.message || e) + ")"); }
+    var fk = JSON.stringify([l.font, l.size]);
     looks.push(l);
     fonts[fk] = (fonts[fk] || 0) + 1;
     if (!usual || fonts[fk] > fonts[usual]) usual = fk;
   }
-  var font = JSON.parse(usual), own = looks.map(function (l) {
-    var o = {};
+  var font = JSON.parse(usual), own = looks.map(function (l, k) {
+    var o = {}, col = corner.col + (k % w), row = corner.row + Math.floor(k / w);
+    var drawn = ruled.some(function (a) { return col >= a.c1 && col <= a.c2 && row >= a.r1 && row <= a.r2; });
     if (l.numberFormat && l.numberFormat !== "General") o.numberFormat = l.numberFormat;
     if (l.font && l.font !== font[0]) o.font = l.font;
     if (typeof l.size === "number" && l.size !== font[1]) o.size = l.size;
-    ["bold", "italic", "strike", "wrap"].forEach(function (k) { if (l[k]) o[k] = true; });
+    ["bold", "italic", "strike", "wrap"].forEach(function (k) { if (l[k] && (k === "wrap" || !drawn)) o[k] = true; });
     // (A key the text's characters mix reads null, and is not said.)
-    if (l.underline && l.underline !== "none") o.underline = l.underline;
+    if (l.underline && l.underline !== "none" && !drawn) o.underline = l.underline;
     if (l.vertAlign && l.vertAlign !== "baseline") o.vertAlign = l.vertAlign;
-    if (l.color && l.color !== "#000000") o.color = l.color;
-    if (l.fill !== "none") o.fill = l.fill;
+    if (l.color && l.color !== "#000000" && !drawn) o.color = l.color;
+    if (l.fill !== "none" && !drawn) o.fill = l.fill;
     if (l.rotation) o.rotation = l.rotation;
     return JSON.stringify(o);
   });
@@ -1663,7 +1899,8 @@ function sheetLook(ws, address, room) {
   var merged = fit(mergesIn(ws, address), function (m) { return m.length + 2; }), cols = lines("columns", c1, c2), rows = lines("rows", r1, r2);
   cols.own = fit(cols.own, function () { return 8; });
   rows.own = fit(rows.own, function () { return 10; });
-  return { font: { name: font[0], size: font[1] }, formats: order.map(function (k) { return { look: JSON.parse(k), ranges: groups[k] }; }), merged: merged, cols: cols, rows: rows, frozen: frozenOf(ws), size: size, cut: cut };
+  if (extras.cut) cut = true;
+  return { font: { name: font[0], size: font[1] }, formats: order.map(function (k) { return { look: JSON.parse(k), ranges: groups[k] }; }), merged: merged, cols: cols, rows: rows, frozen: frozenOf(ws), rules: extras.rules, validation: extras.validation, links: extras.links, filter: extras.filter, charts: extras.charts, unread: extras.failed, size: size + extras.size, cut: cut };
 }
 `;
 
@@ -1675,6 +1912,7 @@ const CELL_READ = `function () {
   ${CELL_ADDRESS_SRC}
   ${SHEET_MODEL_SRC}
   ${CELL_LOOK_SRC}
+  ${CELL_EXTRAS_SRC}
   ${CELL_READ_LOOK_SRC}
   try {
     var all = Api.GetSheets(), book = all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; });
@@ -1734,8 +1972,9 @@ const CELL_CHECK = `function () {
   ${SHEET_MODEL_SRC}
   ${CELL_LOOK_SRC}
   ${CELL_PARTS_SRC}
+  ${CELL_EXTRAS_SRC}
   function foresee(all, ops) {
-    var budget = ${MAX_FORMAT_CELLS}, merged = {}, used = {}, list = all.map(function (s) { return { name: s.GetName() }; });
+    var budget = ${MAX_FORMAT_CELLS}, merged = {}, used = {}, ruled = {}, list = all.map(function (s) { return { name: s.GetName() }; });
     var where = function (ws, a) { return JSON.stringify(ws.GetName()) + "!" + a; };
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i];
@@ -1759,6 +1998,14 @@ const CELL_CHECK = `function () {
         if (op.looks.merge === true) addressesOf(op.format).forEach(function (row, y) { row.forEach(function (a, x) { if (x || y) merged[name + "!" + a] = true; }); });
       } else if (op.freeze !== undefined) {
         if (!ws.GetVisible()) return hiddenFreeze(i, name);
+      } else if (op.conditional !== undefined && !op.clear) {
+        if (!(name in ruled)) ruled[name] = tooManyRules(ws, i);
+        if (ruled[name]) return ruled[name];
+      } else if (op.sort !== undefined || op.asTable !== undefined || op.chart !== undefined || op.link !== undefined || op.validate !== undefined) {
+        budget -= op.area ? op.area.cols * op.area.rows : 0;
+        if (budget < 0) return tooMany(i);
+        var refused = refuseExtra(ws, op, i);
+        if (refused) return refused;
       } else if (typeof op.range === "string" || op.insertRows !== undefined || op.insertColumns !== undefined) {
         // The used range as the ops before leave it: a write reaches further, an insert moves it on.
         if (!(name in used)) used[name] = usedOf(ws);
@@ -1828,6 +2075,7 @@ const CELL_STEP = `function () {
   ${SHEET_MODEL_SRC}
   ${CELL_LOOK_SRC}
   ${CELL_PARTS_SRC}
+  ${CELL_EXTRAS_SRC}
   var args = Asc.scope.args, op = args.op, i = args.index, pending = args.pending || [];
   try {
     var all = Api.GetSheets(), realNames = all.map(function (s) { return s.GetName(); });
@@ -2070,13 +2318,16 @@ const CELL_STEP = `function () {
         var flat = [].concat.apply([], addressesOf(parts.cells)), fontRuns = keys.filter(function (k) { return ["numberFormat", "fill", "wrap", "rotation"].indexOf(k) === -1; }).map(function (k) { return expand(state.before[k]); });
         flat.forEach(function (a, x) { if (fontRuns.some(function (v) { return v[x] === null; })) mixed.push(a); });
       }
+      // ClearFormats takes the conditional formats that meet the cells off too (DS 10.0, docbuilder), and they cannot be made again.
+      var cleared = op.looks.clear ? { op: i, what: "conditional formats of " + op.format, sheet: fname, did: "cleared" } : null;
+      if (cleared) { try { if (!(fws.GetRange(op.format).GetFormatConditions().GetCount() > 0)) cleared = null; } catch (e) { cleared = null; } }
       try {
         applyLooks(fws, op.format, op.looks, parts.cells);
       } catch (e) {
         // Made in part: put back what can be, here, as this step's own.
         var lost = unreadableOf(op.looks);
         try { lookBack(fws, state, false); } catch (e2) { lost.push("the rest of what it set"); }
-        return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": " + String(e && e.message || e) }, unreadable: lost.length ? { op: i, what: lost, where: where(fws, op.format) } : undefined };
+        return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": " + String(e && e.message || e) }, unreadable: lost.length ? { op: i, what: lost, where: where(fws, op.format) } : undefined, irreversible: cleared || undefined };
       }
       if (parts.cells && keys.length) state.left = readLooks(fws, parts.cells, keys);
       state.lines.forEach(function (l) { l.left = lookOf(fws.GetRange(l.at), keys); });
@@ -2085,7 +2336,7 @@ const CELL_STEP = `function () {
       var lostKeys = unreadableOf(op.looks), lostList = [];
       if (lostKeys.length) lostList.push({ op: i, what: lostKeys, where: where(fws, op.format) });
       if (mixed.length) lostList.push({ op: i, what: [deep.blind ? "mixed text formatting (or of a text too long to read character by character)" : "mixed text formatting"], where: where(fws, mixed.length > 8 ? mixed.slice(0, 8).join(", ") + " and " + (mixed.length - 8) + " more" : mixed.join(", ")) });
-      return { result: { inverse: { restoreFormat: state, real: true }, read: many, unreadable: lostList.length ? lostList : undefined } };
+      return { result: { inverse: { restoreFormat: state, real: true }, read: many, unreadable: lostList.length ? lostList : undefined, irreversible: cleared || undefined } };
     }
     if (op.restoreFormat !== undefined) {
       var rs = op.restoreFormat, rws = named(rs.sheet);
@@ -2123,6 +2374,14 @@ const CELL_STEP = `function () {
           return sizes;
         } catch (e) { return null; }
       }) } };
+      if (st.restoreName !== undefined) return { result: { name: refOfName(st.restoreName) } };
+      if (st.restoreLink) {
+        var sl = st.restoreLink, slws = named(sl.sheet);
+        // (The link, its text and its look land together: a link to this address that was there before shows at once, so the text
+        // has to read as the call wrote it, or otherwise than before it.)
+        var slText = String(slws.GetRange(sl.cells).GetText());
+        return { result: { link: { shown: linksIn(slws, sl.cells).some(function (l) { return l[0] === sl.url; }) && (slText === sl.text || slText !== sl.was), looks: readLooks(slws, sl.cells, sl.keys), values: capture(slws, sl.cells) } } };
+      }
       return { result: { frozen: frozenOf(named(st.refreeze)) } };
     }
     if (op.restoreLines !== undefined) {
@@ -2169,6 +2428,189 @@ const CELL_STEP = `function () {
       }
       freeze(bws, op.cols, op.rows);
       return { result: { settle: { frozen: { cols: op.cols, rows: op.rows } } } };
+    }
+    // The extras (ops.ts, SheetFormatOp and SortOp/NameOp): rules, validation, links, sorting, names, and what the
+    // builder cannot take back (charts, filters, tables, cleared rules), which come last.
+    if (op.conditional !== undefined) {
+      var cfws = sheetOf(op);
+      if (op.clear) {
+        cfws.GetRange(op.conditional).GetFormatConditions().Delete();
+        return { result: { irreversible: { op: i, what: "conditional formats of " + op.conditional, sheet: cfws.GetName(), did: "cleared" } } };
+      }
+      var cfMany = tooManyRules(cfws, i);
+      if (cfMany) return { error: cfMany };
+      var cfBefore = rulesOf(cfws), cfOurs = null;
+      addRule(cfws, op);
+      rulesOf(cfws).forEach(function (key) { var at = cfBefore.indexOf(key); if (at === -1) { if (cfOurs === null) cfOurs = key; } else cfBefore.splice(at, 1); });
+      if (cfOurs === null) return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not show the conditional format it made" } };
+      return { result: { inverse: { dropRule: cfws.GetName(), key: cfOurs, cells: op.conditional, real: true } } };
+    }
+    if (op.dropRule !== undefined) {
+      var drws = named(op.dropRule);
+      return { result: dropRule(drws, op.key) === "kept" ? { kept: { what: "conditional format", sheet: drws.GetName(), cells: [op.cells] } } : {} };
+    }
+    if (op.validate !== undefined) {
+      var vws = sheetOf(op), vMany = op.area.cols * op.area.rows;
+      if (vMany > (args.budget === undefined ? ${MAX_FORMAT_CELLS} : args.budget)) return { error: tooMany(i) };
+      var vBefore = validationsIn(vws, op.validate), vFirst = cornerOf(op.validate);
+      try {
+        // (Add refuses cells that have a validation.)
+        vws.GetRange(op.validate).GetValidation().Delete();
+        if (op.check) {
+          var vAdd = vws.GetRange(op.validate).GetValidation();
+          vAdd.Add(op.check.type, "xlValidAlertStop", op.check.operator, op.check.f1, op.check.f2);
+        }
+      } catch (e) {
+        // Made in part: the validation the cells had comes back, here.
+        try { rectsOf(vBefore, vFirst, function () { return true; }).forEach(function (r) { putValidation(vws, r.a, r.v); }); } catch (e2) {}
+        throw e;
+      }
+      // The messages of a validation the call replaces cannot be put back: the editor's setters for them send nothing.
+      var vMessages = [];
+      vBefore.forEach(function (row, y) { row.forEach(function (text, x) { if (text && JSON.parse(text).slice(7, 11).some(function (m) { return m; })) vMessages.push(colName(vFirst.col + x) + (vFirst.row + y + 1)); }); });
+      return { result: { inverse: { restoreValidation: { sheet: vws.GetName(), range: op.validate, format: op.validate, before: vBefore, left: validationsIn(vws, op.validate), op: i }, real: true }, read: vMany, unreadable: vMessages.length ? [{ op: i, what: ["validation messages"], where: where(vws, vMessages.length > 8 ? vMessages.slice(0, 8).join(", ") + " and " + (vMessages.length - 8) + " more" : vMessages.join(", ")) }] : undefined } };
+    }
+    if (op.restoreValidation !== undefined) {
+      var rv = op.restoreValidation, rvws = named(rv.sheet), rvNow = validationsIn(rvws, rv.range), rvKept = [], rvCells = addressesOf(rv.range);
+      // A cell whose validation reads otherwise than the step left it (a person changed it since) stays as it is.
+      var rvTarget = rv.before.map(function (row, y) { return row.map(function (v, x) { if (rvNow[y][x] === rv.left[y][x]) return v; rvKept.push(rvCells[y][x]); return null; }); });
+      // Add takes its five arguments only: what the old validation had besides (ignore blank, the in-cell dropdown, show
+      // error and show input) is read back from the cells, and named where it differs.
+      var rvLost = [];
+      rectsOf(rvTarget, cornerOf(rv.range), function (v) { return v !== null; }).forEach(function (r) {
+        putValidation(rvws, r.a, r.v);
+        if (!r.v) return;
+        var want = JSON.parse(r.v), got = validationsIn(rvws, r.a);
+        addressesOf(r.a).forEach(function (row, y) { row.forEach(function (a, x) {
+          var have = got[y][x] ? JSON.parse(got[y][x]) : [];
+          if ([5, 6, 11, 12].some(function (n) { return have[n] !== want[n]; })) rvLost.push(a);
+        }); });
+      });
+      return { result: { kept: rvKept.length ? { what: "cells", sheet: rv.sheet, cells: rvKept } : undefined, unreadable: rvLost.length ? [{ op: rv.op, what: ["validation settings"], where: where(rvws, rvLost.length > 8 ? rvLost.slice(0, 8).join(", ") + " and " + (rvLost.length - 8) + " more" : rvLost.join(", ")) }] : undefined } };
+    }
+    if (op.link !== undefined) {
+      var lkws = sheetOf(op), lkRefused = refuseExtra(lkws, op, i);
+      if (lkRefused) return { error: lkRefused };
+      // (The link's look replaces the cell's font: its colour, underline, and its bold, which a bold cell loses.)
+      var lkCell = lkws.GetRange(op.link), lkKeys = LOOK_KEYS.slice();
+      var lk = { sheet: lkws.GetName(), format: op.link, cells: op.link, keys: lkKeys, lines: [], before: readLooks(lkws, op.link, lkKeys), values: capture(lkws, op.link), links: linksIn(lkws, op.link), url: op.url, op: i, was: isText(lkCell) ? String(lkCell.GetText()) : "" };
+      // The text a cell holds stays (the editor would put the address there); a number or a formula needs set.text.
+      var lkText = op.text !== undefined ? op.text : isText(lkCell) ? String(lkCell.GetText()) : undefined;
+      lk.text = lkText !== undefined ? lkText : op.url;
+      var lkMade = lkText === undefined ? lkws.SetHyperlink(op.link, op.url) : lkws.SetHyperlink(op.link, op.url, "", "", lkText);
+      if (lkMade === false) return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not take the link" } };
+      // The link, its text and its look show a moment after the command (the Document Server's lock, as a freeze does):
+      // what they left is read by the plugin in commands of its own after this one, until the link shows (settle).
+      lk.left = readLooks(lkws, op.link, lkKeys);
+      lk.values.left = capture(lkws, op.link);
+      return { result: { inverse: { restoreLink: lk, real: true }, settle: { link: true } } };
+    }
+    if (op.restoreLink !== undefined) {
+      var rl = op.restoreLink, rlws = named(rl.sheet), rlLinks = linksIn(rlws, rl.cells), rlMine = rlLinks.some(function (l) { return l[0] === rl.url; });
+      var linkTargets = function (list) { return JSON.stringify(list.map(function (l) { return [l[0], l[1], l[2]]; })); };
+      // A link that is neither the call's nor the one the cell had is a person's: the cell stays as they made it, text and look too.
+      if (!rlMine && rlLinks.length && linkTargets(rlLinks) !== linkTargets(rl.links)) return { result: { kept: [{ what: "link", sheet: rl.sheet, cells: [rl.cells] }] } };
+      if (rlMine) rlws.GetRange(rl.cells).ClearHyperlinks();
+      var rlLooks = lookBack(rlws, rl, !rl.unsettled), rlLost = false;
+      // The link the cell had before comes back, with the text it holds again.
+      if (rlMine) rl.links.forEach(function (l) { rlws.SetHyperlink(rl.cells, l[0] || "", l[1] || "", l[2] || "", String(rlws.GetRange(rl.cells).GetText())); });
+      // A link's look replaces the cell's font (a bold link comes back plain): where the cell's was another than the link's, it stays so.
+      if (rlMine && rl.links.length && rl.left && !rl.unsettled) rlLost = ["font", "size", "bold", "italic", "underline", "strike", "color"].some(function (k) { return rl.before[k] !== undefined && expand(rl.before[k])[0] !== expand(rl.left[k])[0]; });
+      return { result: { kept: rlLooks ? [rlLooks] : undefined, unreadable: rlLost ? [{ op: rl.op, what: ["font"], where: where(rlws, rl.cells) }] : undefined } };
+    }
+    if (op.sort !== undefined) {
+      var sws = sheetOf(op), sRefused = refuseExtra(sws, op, i), sMany = op.area.cols * op.area.rows;
+      if (sRefused) return { error: sRefused };
+      if (sMany > (args.budget === undefined ? ${MAX_FORMAT_CELLS} : args.budget)) return { error: tooMany(i) };
+      // The rows move with their formats: every readable look and the values are read first, as a merge's are.
+      var sKeys = LOOK_KEYS.slice(), sDeep = { room: ${MIXED_CHARS}, blind: 0 };
+      var ss = { sheet: sws.GetName(), format: op.sort, keys: sKeys, cells: op.sort, lines: [], before: readLooks(sws, op.sort, sKeys, sDeep), values: capture(sws, op.sort) };
+      var sMixed = mixedCells(op.sort, ss.before, sKeys), sArgs = [];
+      for (var sk = 0; sk < 3; sk++) sArgs.push(op.by[sk] ? colName(op.by[sk].col) + (op.area.row + 1) : undefined, op.by[sk] ? (op.by[sk].desc ? "xlDescending" : "xlAscending") : undefined);
+      sArgs.push("xlNo");
+      var sRange = sws.GetRange(op.sort);
+      sRange.SetSort.apply(sRange, sArgs);
+      ss.left = readLooks(sws, op.sort, sKeys);
+      ss.values.left = capture(sws, op.sort);
+      var sLost = [{ op: i, what: ["alignment", "borders"], where: where(sws, op.sort) }];
+      // The links move with their cells, and a link set again would take the cell's font over: they stay where it put them.
+      var sLinks = linksIn(sws, op.sort).map(function (l) { return l[4]; }).filter(Boolean);
+      if (sLinks.length) sLost.push({ op: i, what: ["links"], where: where(sws, sLinks.length > 8 ? sLinks.slice(0, 8).join(", ") + " and " + (sLinks.length - 8) + " more" : sLinks.join(", ")) });
+      if (sMixed.length) sLost.push({ op: i, what: [sDeep.blind ? "mixed text formatting (or of a text too long to read character by character)" : "mixed text formatting"], where: where(sws, sMixed.length > 8 ? sMixed.slice(0, 8).join(", ") + " and " + (sMixed.length - 8) + " more" : sMixed.join(", ")) });
+      // (The rows change places: the people in the workbook are named, as after an insert.)
+      return { result: { inverse: { restoreFormat: ss, real: true }, read: sMany, unreadable: sLost, shifted: { sheet: sws.GetName(), kind: "sort", range: op.sort, at: 0, count: 0, made: true } } };
+    }
+    if (op.name !== undefined) {
+      var nWas = refOfName(op.name), nDef;
+      if (op.delete) {
+        nDef = defName(op.name);
+        if (!nDef) return { error: { code: "not_found", op: i, message: "op " + (i + 1) + ": there is no name " + JSON.stringify(op.name) + " (office_read does not list names: delete the ones you made)" } };
+        nDef.Delete();
+      } else {
+        var nws = op.refersTo.sheet !== undefined ? named(op.refersTo.sheet) : shown[0], nRef = quoted(nws.GetName()) + "!" + op.refersTo.address;
+        if (nWas === null) Api.AddDefName(op.name, nRef);
+        else defName(op.name).SetRefersTo(nRef);
+      }
+      // A name made shows a moment after the command (the Document Server's lock): its inverse reads it when it does.
+      return { result: { inverse: { restoreName: op.name, was: nWas, left: refOfName(op.name), real: true }, settle: nWas === null && !op.delete ? { name: true } : undefined } };
+    }
+    if (op.restoreName !== undefined) {
+      var rnNow = refOfName(op.restoreName), rnKept = false, rnMade = false;
+      if (op.was === null) {
+        // (A name that never showed is deleted whatever it refers to now.)
+        if (rnNow !== null) { if (rnNow === op.left || op.unsettled) defName(op.restoreName).Delete(); else rnKept = true; }
+      } else if (op.left !== null) {
+        if (rnNow === op.left) defName(op.restoreName).SetRefersTo(op.was); else rnKept = rnNow !== op.was;
+      } else if (rnNow === null) { Api.AddDefName(op.restoreName, op.was); rnMade = true; } else rnKept = rnNow !== op.was;
+      // A name made shows a moment after its command: the inverses after this one (the call's own make of it) wait for it.
+      return { result: rnKept ? { kept: { what: "name", sheet: "", cells: [op.restoreName] } } : rnMade ? { settle: { name: true } } : {} };
+    }
+    if (op.chart !== undefined) {
+      var chws = sheetOf(op), chRefused = refuseExtra(chws, op, i), chMany = op.area.cols * op.area.rows;
+      if (chRefused) return { error: chRefused };
+      if (chMany > (args.budget === undefined ? ${MAX_FORMAT_CELLS} : args.budget)) return { error: tooMany(i) };
+      var chart = chws.AddChart(refOfArea(chws, op.area), op.inRows, op.chartType, 2, op.width, op.height, op.at.col, 0, op.at.row, 0);
+      var chMade = { op: i, what: "chart of " + op.chart, sheet: chws.GetName(), did: "made" };
+      if (!chart) return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not make the chart" } };
+      try {
+        if (op.title) chart.SetTitle(op.title, 14);
+        if (op.xTitle) chart.SetHorAxisTitle(op.xTitle, 10);
+        if (op.yTitle) chart.SetVerAxisTitle(op.yTitle, 10);
+        if (op.legend) chart.SetLegendPos(op.legend);
+      } catch (e) {
+        return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the chart is made, but " + String(e && e.message || e) }, irreversible: chMade };
+      }
+      return { result: { irreversible: chMade, read: chMany } };
+    }
+    if (op.filter !== undefined) {
+      var ffws = sheetOf(op), ffName = ffws.GetName();
+      // The sheet's filter, as the editor reads it: an object with no range where there is none (docbuilder: null).
+      var ffRead = function () { var f = ffws.GetAutoFilter(), r = f ? ask(f, "GetRange") : null; return r ? String(r.GetAddress(false, false)) : null; };
+      var ffNow = ffRead();
+      // SetAutoFilter without a column is a toggle (measured in the editor): it puts a filter on the cells where there is
+      // none, and takes it off where it is.
+      var ffOff = function () { ffws.GetRange(ffNow).SetAutoFilter(); if (ffRead() !== null) throw new Error("the editor did not take the filter of " + ffNow + " off"); };
+      if (op.filter === "none") {
+        if (ffNow === null) return { error: { code: "bad_op", op: i, message: "op " + (i + 1) + ": " + JSON.stringify(ffName) + " has no filter to take off" } };
+        ffOff();
+        return { result: { irreversible: { op: i, what: "filter " + ffNow, sheet: ffName, did: "took off" } } };
+      }
+      var ffMade = false, ffNote = { op: i, what: "filter " + op.filter, sheet: ffName, did: "set" };
+      try {
+        if (ffNow !== null && ffNow !== op.filter) { ffOff(); ffNow = null; ffMade = true; }
+        if (ffNow === null) { ffws.GetRange(op.filter).SetAutoFilter(); ffMade = true; if (ffRead() === null) throw new Error("the editor did not put a filter on " + op.filter); }
+        if (op.criteria !== undefined) { ffws.GetRange(op.filter).SetAutoFilter(op.column, op.criteria, op.or !== undefined ? "xlOr" : "xlAnd", op.or !== undefined ? op.or : op.and); ffMade = true; }
+      } catch (e) {
+        return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": " + String(e && e.message || e) }, irreversible: ffMade ? ffNote : undefined };
+      }
+      return { result: ffMade ? { irreversible: ffNote } : {} };
+    }
+    if (op.asTable !== undefined) {
+      var tws = sheetOf(op), tRefused = refuseExtra(tws, op, i), tMany = op.area.cols * op.area.rows;
+      if (tRefused) return { error: tRefused };
+      if (tMany > (args.budget === undefined ? ${MAX_FORMAT_CELLS} : args.budget)) return { error: tooMany(i) };
+      tws.FormatAsTable(op.asTable);
+      return { result: { irreversible: { op: i, what: "table " + op.asTable, sheet: tws.GetName(), did: "made" }, read: tMany } };
     }
     if (op.insertRows !== undefined || op.insertColumns !== undefined) {
       var iws = sheetOf(op), ikind = op.insertRows !== undefined ? "rows" : "columns", iu = usedOf(iws);
@@ -2695,6 +3137,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
         if (out.error) {
           if (out.broken) broken = "the cells it had written could not all be put back";
           if (out.unreadable) unreadable = unreadable.concat(out.unreadable);
+          if (out.irreversible) irreversible.push(out.irreversible);
           return back(out.error);
         }
         var r = out.result || {};
@@ -2715,6 +3158,19 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       function settle(r, tries) {
         call(cell.step, { op: { settle: r.inverse, real: true }, index: i, pending: pending }, false, function (s) {
           var left = s.result || {}, z = r.settle;
+          // A link shows when the cell has it; what it left is read then (not shown in time: not compared).
+          if (z.name) {
+            var named = r.inverse, there = left.name !== null && left.name !== undefined;
+            if (!there && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
+            if (there) named.left = left.name; else named.unsettled = true;
+            return made(r);
+          }
+          if (z.link) {
+            var linked = r.inverse.restoreLink, seen = Boolean(left.link) && left.link.shown;
+            if (!seen && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
+            if (seen) { linked.left = left.link.looks; linked.values.left = left.link.values; } else linked.unsettled = true;
+            return made(r);
+          }
           var shown = Boolean(left.frozen) && left.frozen.cols === z.frozen.cols && left.frozen.rows === z.frozen.rows;
           if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { settle(r, tries + 1); }, ${SETTLE.ms});
           r.inverse.left = shown ? left.frozen : null;
@@ -2775,9 +3231,9 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
             unreadable.forEach(function (u) { var w = u.what.join(" and "), g = groups[groups.length - 1], at = u.where + " (op " + (u.op + 1) + ")"; if (g && g.w === w) g.at.push(at); else groups.push({ w: w, at: [at] }); });
             said += " The editor cannot read back " + groups.map(function (g) { return "the " + g.w + " of " + (g.at.length > 1 ? g.at.slice(0, -1).join(", ") + " and " + g.at[g.at.length - 1] : g.at[0]); }).join("; ") + ", which stay as this call set them.";
           }
-          if (irreversible.length) said += " Not taken back: " + irreversible.map(function (x) { return "the " + x.what + " of " + JSON.stringify(x.sheet) + " that op " + (x.op + 1) + " deleted"; }).join(", ") + ".";
+          if (irreversible.length) said += " Not taken back: " + irreversible.map(function (x) { return "the " + x.what + " of " + JSON.stringify(x.sheet) + " that op " + (x.op + 1) + " " + (x.did || "deleted"); }).join(", ") + ".";
           if (notBack.length) said += " Not taken back either, as the rows or columns of their sheet moved after them for good: " + opsSaid(notBack) + ".";
-          if (kept.length) said += " Kept as a person changed them after this call: " + kept.map(function (k) { return k.what === "sheet" ? "the sheet " + JSON.stringify(k.sheet) + " this call made (a person wrote into it)" : (k.what === "frozen panes" ? "the frozen panes" : k.made ? "the " + k.what + " " + k.cells.join(", ") + " this call made (a person wrote into them)" : k.what === "cells" ? cellsSaid(k.cells) : "the " + k.what + (k.cells.length === 1 ? " " : "s ") + k.cells.join(", ")) + " of " + JSON.stringify(k.sheet); }).join("; ") + ".";
+          if (kept.length) said += " Kept as a person changed them after this call: " + kept.map(function (k) { return k.what === "sheet" ? "the sheet " + JSON.stringify(k.sheet) + " this call made (a person wrote into it)" : (k.what === "frozen panes" ? "the frozen panes" : k.made ? "the " + k.what + " " + k.cells.join(", ") + " this call made (a person wrote into them)" : k.what === "cells" ? cellsSaid(k.cells) : "the " + k.what + (k.cells.length === 1 ? " " : "s ") + (k.what === "name" ? k.cells.map(function (n) { return JSON.stringify(n); }) : k.cells).join(", ")) + (k.what === "name" ? "" : " of " + JSON.stringify(k.sheet)); }).join("; ") + ".";
           // The rows and columns that stay moved, for the answer to name the people in the workbook.
           var stays = shifted.filter(function (s) { return !s.made || !dropped[shiftKey(s)]; });
           done(job, { error: { code: "partial", op: error.op, message: String(error.message).replace(/\\.?$/, ".") + said, shifted: stays.length ? stays : undefined }, ran: true });
@@ -2791,7 +3247,7 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
           var still = inverse.restoreCells.filter(function (c) { if (!stale(c.sheet, areaOf(c.range))) return true; notBack.push(c.index !== undefined ? c.index : at[0]); });
           if (!still.length) return one();
           inverse = { restoreCells: still, real: true };
-        } else if (inverse.restoreFormat ? stale(inverse.restoreFormat.sheet, areaOf(inverse.restoreFormat.format)) : inverse.restoreLines ? stale(inverse.restoreLines.sheet, lines(inverse.restoreLines.kind, inverse.restoreLines.from, inverse.restoreLines.count)) : inverse.dropLines !== undefined && stale(inverse.dropLines, lines(inverse.kind, inverse.from, inverse.count))) {
+        } else if (inverse.restoreFormat || inverse.restoreLink || inverse.restoreValidation ? (function (x) { return stale(x.sheet, areaOf(x.format)); })(inverse.restoreFormat || inverse.restoreLink || inverse.restoreValidation) : inverse.restoreLines ? stale(inverse.restoreLines.sheet, lines(inverse.restoreLines.kind, inverse.restoreLines.from, inverse.restoreLines.count)) : inverse.dropLines !== undefined && stale(inverse.dropLines, lines(inverse.kind, inverse.from, inverse.count))) {
           notBack = notBack.concat(at);
           return one();
         }
@@ -2801,6 +3257,16 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
             return one();
           }
           var r = out.result || {};
+          if (r.unreadable) unreadable = unreadable.concat(r.unreadable);
+          // A name put back shows a moment after: waited for before the next inverse reads it.
+          if (r.settle && r.settle.name) return (function look(tries) {
+            call(cell.step, { op: { settle: inverse, real: true }, index: -1, pending: pending }, false, function (s) {
+              var shown = s.result && s.result.name !== null && s.result.name !== undefined;
+              if (!shown && tries < ${SETTLE.tries}) return setTimeout(function () { look(tries + 1); }, ${SETTLE.ms});
+              if (!shown) asked = true;
+              one();
+            });
+          })(0);
           // Panes put back show a moment after: waited for before the next inverse reads them.
           if (r.settle) return (function look(tries) {
             call(cell.step, { op: { settle: inverse, real: true }, index: -1, pending: pending }, false, function (s) {

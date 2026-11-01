@@ -1503,6 +1503,10 @@ async function run(PITHAGORAS: string): Promise<void> {
       { name: "columns", tool: "office_format", ops: [{ columns: "A:B", width: 25 }, { columns: "C", hide: true }, { columns: "D", autofit: true }] },
       { name: "rows", tool: "office_format", ops: [{ rows: "2:3", height: 40 }, { rows: "4", hide: true }, { rows: "1", autofit: true }] },
       { name: "freeze", tool: "office_format", ops: [{ freeze: "B2" }] },
+      // (Every freeze goes through the co-editing lock and shows after its command: review round 2.)
+      { name: "freeze rows", tool: "office_format", ops: [{ freeze: "A2" }] },
+      { name: "freeze columns, then none", tool: "office_format", ops: [{ freeze: "C1" }, { freeze: "none" }] },
+      { name: "freeze at a cell over a cell", tool: "office_format", ops: [{ freeze: "B2" }, { freeze: "C3" }] },
       { name: "rows and columns inserted", tool: "office_edit", ops: [{ insertRows: "2" }, { insertColumns: "B:C" }, { range: "Z9", values: [["=SUM("]] }] },
       { name: "alignment and borders", tool: "office_format", ops: [{ format: "A1:B2", set: { align: "right", valign: "top", borders: "all" } }], partial: /The ops before it are taken back, but not all of them whole\. The editor cannot read back the alignment and borders of "Sheet1"!A1:B2 \(op 1\), which stay as this call set them\.$/ },
       { name: "clear", tool: "office_format", ops: [{ format: "A1:C1", set: { clear: true } }], partial: /The editor cannot read back the alignment and borders of "Sheet1"!A1:C1 \(op 1\), which stay as this call set them\.$/ },
@@ -1620,6 +1624,41 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`27. ${deleted}`);
     assert.match(deleted, /row 9 of "Sheet1" deleted \(the rows below it moved up\); column Z of "Sheet1" deleted \(the columns right of it moved left\)\./);
     assert.match(await readSheet(doc), /\nC1: "#REF!" \(=#REF!\)\n|\nC1: #REF! \(=#REF!\)\n/);
+    await person.page.context().close();
+  });
+
+  test("28. after the second review: autofits that land in their command, or change nothing, keep a call short; a freeze over frozen rows and an autofit with a person in are taken back whole", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Fitting", "cell");
+    const columns = "BCDEFGHIJKL".split("");
+    await tools.office_edit.execute("f0", { id: doc, ops: [{ range: "A1:L1", values: [["head", ...columns.map((c) => `a text long enough to widen column ${c}`)]] }] });
+    // Nobody else in the workbook: eleven autofits one by one, then the same again (fitted already, nothing changes).
+    for (const round of ["fit", "fitted already"]) {
+      const t0 = Date.now();
+      const said = (await tools.office_format.execute(`f-${round}`, { id: doc, ops: columns.map((c) => ({ columns: c, autofit: true })) })).content[0].text;
+      const ms = Date.now() - t0;
+      console.log(`28. eleven autofits, ${round}: ${said} (${ms} ms)`);
+      assert.match(said, round === "fit" ? /^Formatted "Fitting" \(11 ops\), saved as revision/ : /^Formatted "Fitting" \(11 ops\)|changed nothing/);
+      assert.ok(ms < 15_000, `${round}: ${ms} ms`);
+    }
+    const fitted = await readSheet(doc);
+    console.log(`28. ${/\nColumns: .*/.exec(fitted)?.[0].trim()}`);
+    // (The read names the width most of them have as the usual one: "Columns: A 8.43, B-C 32.14, … (others 32.29).")
+    assert.ok(Number(/\nColumns: A 8\.43, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
+    // A person in the workbook: a freeze of no panes over frozen rows, and an autofit, each failed at a last op.
+    await tools.office_format.execute("f-rows", { id: doc, ops: [{ freeze: "A3" }] });
+    const person = await personOpens(doc);
+    await tools.office_edit.execute("f-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
+    await tools.office_edit.execute("f-long", { id: doc, ops: [{ range: "M1", values: [["another text long enough to widen its column"]] }] });
+    for (const [k, ops] of [[[{ freeze: "none" }]], [[{ columns: "M", autofit: true }]], [[{ freeze: "B5" }, { freeze: "A2" }]]].map((x, k) => [k, x[0]] as const)) {
+      const before = await readSheet(doc, "Sheet1");
+      const said = await failing(tools.office_format.execute(`f-back-${k}`, { id: doc, ops: [...ops, ...failOps(k)] }));
+      console.log(`28. ${JSON.stringify(ops)} with a person in, failed at a last op: ${said}`);
+      assert.match(said, failSaid, JSON.stringify(ops));
+      // (A width put back is the column's own: the used range the read names may reach further, as in 25.)
+      const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
+      assert.equal(used(await readSheet(doc, "Sheet1")), used(before), `${JSON.stringify(ops)}: as before`);
+    }
+    assert.match(await readSheet(doc, "Sheet1"), /\nFrozen: rows 1-2\.$/);
     await person.page.context().close();
   });
 

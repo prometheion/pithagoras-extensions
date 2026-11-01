@@ -1,7 +1,9 @@
 # A release of the Godot extension, godot-v<version> where the version is godot/package.json's: the image is built from
 # godot/server (after fetch-assets.sh has fetched and checked what it is built from), tested with no GPU
 # (smoke-test.sh), and pushed to ghcr.io/prometheion/pithagoras-godot:<version>; then a GitHub release carries the sources
-# the image's GPL parts ask for and the list of its Ubuntu packages; then the package, @pithagoras/godot, goes to npm.
+# the image's GPL parts ask for and the list of its Ubuntu packages (where the release is there already, as on a re-run
+# after npm failed, it is left as it is, but its sources are uploaded again with --clobber so that it never lacks them);
+# then the package, @pithagoras/godot, goes to npm.
 # npm comes last, so a version on npm never names an image that is not there.
 #
 # Merging a pull request that changes the version in godot/package.json releases it, and a tag pushed by hand still
@@ -162,8 +164,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" --verify-tag sources/* --title "Godot $VERSION" \
-            --notes "@pithagoras/godot $VERSION: the package on npm (npm:@pithagoras/godot) and the image $IMAGE:$VERSION. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
+          # A re-run after a failure further down (npm) finds the release made already: it makes sure the sources are
+          # attached, and goes on to the next step.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "The release $TAG exists already: nothing to make, the sources are uploaded again"
+            gh release upload "$TAG" sources/* --clobber
+          else
+            gh release create "$TAG" --verify-tag sources/* --title "Godot $VERSION" \
+              --notes "@pithagoras/godot $VERSION: the package on npm (npm:@pithagoras/godot) and the image $IMAGE:$VERSION. Attached: the sources of the image's GPL and LGPL parts that do not come from Ubuntu's archive (pixelflux with the x264, x265 and libde265 it bundles; pcmflux with the AlmaLinux 8 source RPMs of the LGPL libraries it bundles; VirtualGL) and the list of its Ubuntu packages, whose sources are in Ubuntu's archive. See godot/README.md and godot/server/NOTICE."
+          fi
       - run: npm ci
       - name: Publish to npm
         run: |

@@ -28,6 +28,8 @@ export interface InstanceStatus {
   url?: string;
   mcp: { registered: boolean; on: boolean; url?: string };
   health: { ok: boolean; server?: { name: string; version: string }; error?: string };
+  /** What the Nextcloud itself says of the login (the server's own answer never reaches it); absent while it is not set up. */
+  account?: { state: "ok" | "unauthorized" | "unreachable" | "other" | "checking"; name?: string; error?: string };
   configured: boolean;
   /** What the endpoint's tool list says of each capability family -- where it could be asked. */
   capabilities?: { available: Record<string, boolean>; on: Record<string, boolean> };
@@ -38,6 +40,8 @@ export interface InstanceView {
   name: string;
   url: string;
   username: string;
+  /** The person chose to send the app password over plain http to this host. */
+  allowHttp?: boolean;
   /** The capability families turned off for this instance, by family id; nothing standing is everything on. */
   capabilities?: Record<string, boolean>;
   passwordSet?: boolean;
@@ -69,12 +73,12 @@ export const api = {
   status: () => call<NextcloudStatus>("/status"),
   instances: () => call<{ instances: InstanceView[] }>("/instances"),
   saveInstance: (fields: Record<string, unknown>) =>
-    call<{ instances: InstanceView[]; task?: string }>("/instances", {
+    call<{ instances: InstanceView[] }>("/instances", {
       method: "POST",
       body: JSON.stringify(fields),
     }),
   removeInstance: (name: string) =>
-    call<{ instances: InstanceView[]; task?: string }>("/instances/remove", {
+    call<{ instances: InstanceView[] }>("/instances/remove", {
       method: "POST",
       body: JSON.stringify({ name }),
     }),

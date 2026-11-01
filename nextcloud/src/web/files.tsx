@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { LuChevronRight, LuExternalLink, LuFileText, LuFolder, LuEllipsis, LuShare2, LuTrash2, LuUsers } from "react-icons/lu";
-import { portal, t } from "../portal";
-import { api, partText, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState } from "./widgets";
+import { msg, portal, t } from "../portal";
+import { api, partText, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete } from "./widgets";
 
 /** The Files tab: one view that walks the WebDAV tree -- a folder is opened by choosing it, a readable file (text,
  * a common image, a PDF as the server's extracted text) is read into this panel, and everything else is only
@@ -69,28 +69,28 @@ const normPath = (p: string): string => p.replace(/^\/+/, "");
 
 /** The kinds of share, as the list draws them and the form picks them. */
 const knownShareTypes = new Map<number, string>([
-  [0, "User"],
-  [1, "Group"],
-  [3, "Public link"],
-  [4, "E-Mail address"],
-  [6, "Federated (ownCloud)"],
-  [7, "Circle"],
-  [10, "Talk conversation"],
-  [12, "Deck card"],
+  [0, msg("User")],
+  [1, msg("Group")],
+  [3, msg("Public link")],
+  [4, msg("E-Mail address")],
+  [6, msg("Federated (ownCloud)")],
+  [7, msg("Circle")],
+  [10, msg("Talk conversation")],
+  [12, msg("Deck card")],
 ]);
 
 const shareTypes: [number, string][] = [
-  [0, "User"],
-  [1, "Group"],
-  [4, "E-Mail address"],
+  [0, msg("User")],
+  [1, msg("Group")],
+  [4, msg("E-Mail address")],
 ];
 
 const permissionBits: [number, string][] = [
-  [1, "read"],
-  [2, "update"],
-  [4, "create"],
-  [8, "delete"],
-  [16, "share"],
+  [1, msg("read")],
+  [2, msg("update")],
+  [4, msg("create")],
+  [8, msg("delete")],
+  [16, msg("share")],
 ];
 
 const mapShares = (data: unknown): ShareRow[] => {
@@ -114,6 +114,7 @@ const mapShares = (data: unknown): ShareRow[] => {
 export default function Files() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the file and share calls go
+  const guard = useGuard();
 
   // the tree: where it stands, what it shows, and one file read into the panel
   const [path, setPath] = useState("");
@@ -144,12 +145,14 @@ export default function Files() {
 
   // ---- the tree --------------------------------------------------------------
 
-  const loadListing = (at: string) => {
-    setRows(null);
+  const loadListing = (at: string, keep = false) => {
+    const current = guard("rows"); // only the folder asked for last is drawn: a slow earlier one must not put its rows under this path
+    if (!keep) setRows(null);
     setFileProblem(null);
     void api
       .tool("nc_webdav_list_directory", at === "" ? {} : { path: at }, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         const files = typeof data === "object" && data !== null ? (data as Rec).files : undefined;
         const mapped: FileRow[] = Array.isArray(files)
@@ -169,7 +172,7 @@ export default function Files() {
         mapped.sort((a, b) => (a.directory === b.directory ? a.name.localeCompare(b.name) : a.directory ? -1 : 1));
         setRows(mapped);
       })
-      .catch((error) => setFileProblem(sayError(error)));
+      .catch((error) => current() && setFileProblem(sayError(error)));
   };
 
   // Where the view stands drives the listing itself: a folder chosen or a crumb walked back to re-pulls its rows,
@@ -214,6 +217,10 @@ export default function Files() {
     }
     if (previewBusy) return;
     const ct = row.contentType ?? "";
+    if (row.size !== undefined && row.size > MAX_INLINE_BYTES && (ct === "application/pdf" || isTextLike(ct) || isImage(ct))) {
+      setPreviewProblem(t("This file is larger than this panel reads inline."));
+      return;
+    }
     if (ct !== "application/pdf" && !isTextLike(ct) && !isImage(ct)) {
       // the rest has no view this panel can draw: it is only downloaded
       setPreviewProblem(null);
@@ -258,10 +265,11 @@ export default function Files() {
   // ---- sharing -----------------------------------------------------------------
 
   const loadShareIndex = () => {
+    const current = guard("shares");
     void api
       .tool("nc_share_list", {}, instance)
-      .then((result) => setAllShares(mapShares(partText(result).data)))
-      .catch((error) => setShareProblem(sayError(error)));
+      .then((result) => current() && setAllShares(mapShares(partText(result).data)))
+      .catch((error) => current() && setShareProblem(sayError(error)));
   };
 
   useEffect(() => {
@@ -269,26 +277,32 @@ export default function Files() {
   }, []);
 
   const loadWithMe = () => {
+    const current = guard("withMe");
     setWithMeShares(null);
+    setShareProblem(null);
     void api
       .tool("nc_share_list", { shared_with_me: true }, instance)
       .then((result) => {
+        if (!current()) return;
         const mapped = mapShares(partText(result).data);
         mapped.sort((a, b) => a.target.localeCompare(b.target));
         setWithMeShares(mapped);
       })
-      .catch((error) => setShareProblem(sayError(error)));
+      .catch((error) => current() && setShareProblem(sayError(error)));
   };
 
   useEffect(() => {
     if (withMe) loadWithMe();
   }, [withMe]);
 
-  const loadTrash = () => {
-    setTrashRows(null);
+  const loadTrash = (keep = false) => {
+    const current = guard("trash");
+    if (!keep) setTrashRows(null);
+    setTrashProblem(null);
     void api
       .tool("nc_webdav_list_trash", {}, instance)
       .then((result) => {
+        if (!current()) return;
         const data = partText(result).data;
         const list = typeof data === "object" && data !== null ? (data as Rec).items : undefined;
         setTrashRows(
@@ -300,7 +314,7 @@ export default function Files() {
             : [],
         );
       })
-      .catch((error) => setTrashProblem(sayError(error)));
+      .catch((error) => current() && setTrashProblem(sayError(error)));
   };
 
   useEffect(() => {
@@ -319,7 +333,7 @@ export default function Files() {
       else await api.tool("nc_webdav_write_file", { path: at, content: "" }, instance); // fail-closed on the server: no file is quietly overwritten
       setNewKind(null);
       setNewName("");
-      loadListing(path); // the folder as it stands now
+      loadListing(path, true); // the folder as it stands now
     } catch (error) {
       setCreateProblem(sayError(error));
     } finally {
@@ -351,6 +365,17 @@ export default function Files() {
               ← {t("Back to the list")}
             </button>
             <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">{preview.row.name}</span>
+            <button
+              type="button"
+              className={portal.ui.classes.ghost}
+              disabled={previewBusy}
+              onClick={() => {
+                setPreviewProblem(null);
+                void download(preview.row).catch((error) => setPreviewProblem(sayError(error)));
+              }}
+            >
+              {t("Download")}
+            </button>
             {preview.row.url !== undefined && (
               <a href={preview.row.url} target="_blank" rel="noreferrer" className={portal.ui.classes.ghost} title={t("Open in Nextcloud")}>
                 <LuExternalLink />
@@ -369,14 +394,14 @@ export default function Files() {
         </>
       ) : withMe ? (
         <>
-          <div className="nc-crumbs" aria-label={t("Where you are")}>
+          <nav className="nc-crumbs" aria-label={t("Where you are")}>
             <button type="button" onClick={() => { setWithMe(false); }}>{t("Files")}</button>
             <LuChevronRight size={11} className="text-fg-subtle" />
             <span className="truncate">{t("Shared with me")}</span>
-          </div>
+          </nav>
           {withMeShares === null ? (
             shareProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setShareProblem(null)}>{t("The shares could not be read: {error}", { error: shareProblem })}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={t("The shares could not be read: {error}", { error: shareProblem })} onRetry={loadWithMe} />
             ) : (
               <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
             )
@@ -392,7 +417,7 @@ export default function Files() {
                       <span className="block truncate text-sm">{share.withName || t("Unknown share")}</span>
                       <span className="block truncate text-xs text-fg-subtle" title={share.target}>{share.target}</span>
                     </span>
-                    <span className="nc-chip nc-chip-dim shrink-0">{t(knownShareTypes.get(share.shareType) ?? "Public link")}</span>
+                    <span className="nc-chip nc-chip-dim shrink-0">{t(knownShareTypes.get(share.shareType) ?? msg("Other share"))}</span>
                   </button>
                 </li>
               ))}
@@ -401,14 +426,14 @@ export default function Files() {
         </>
       ) : trashOpen ? (
         <>
-          <div className="nc-crumbs" aria-label={t("Where you are")}>
+          <nav className="nc-crumbs" aria-label={t("Where you are")}>
             <button type="button" onClick={() => { setTrashOpen(false); }}>{t("Files")}</button>
             <LuChevronRight size={11} className="text-fg-subtle" />
             <span className="truncate">{t("Trash")}</span>
-          </div>
+          </nav>
           {trashRows === null ? (
             trashProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setTrashProblem(null)}>{t("The trash could not be read: {error}", { error: trashProblem })}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={t("The trash could not be read: {error}", { error: trashProblem })} onRetry={() => loadTrash()} />
             ) : (
               <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
             )
@@ -422,13 +447,17 @@ export default function Files() {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">{entry.name ?? t("(unnamed)")}</span>
                     <span className="block truncate text-xs text-fg-subtle">
-                      {entry.originalLocation !== undefined ? `was ${entry.originalLocation}` : ""}
-                      {entry.deletedAt !== undefined ? ` · ${new Date(entry.deletedAt * 1000).toLocaleDateString()}` : ""}
+                      {entry.originalLocation !== undefined ? t("was {location}", { location: entry.originalLocation }) : ""}
+                      {entry.deletedAt !== undefined ? ` · ${portal.format.date(entry.deletedAt * 1000)}` : ""}
                     </span>
                   </span>
                   <button type="button" className={portal.ui.classes.primarySmall} onClick={() => {
+                    setTrashProblem(null);
                     void api.tool("nc_webdav_restore_from_trash", { entry_id: entry.id }, instance)
-                      .then(() => loadTrash())
+                      .then(() => {
+                        loadTrash(true);
+                        loadListing(path, true); // what came back stands in the folder it was taken from
+                      })
                       .catch((error) => setTrashProblem(sayError(error)));
                   }}>
                     {t("Restore")}
@@ -437,13 +466,14 @@ export default function Files() {
               ))}
             </ul>
           )}
+          {trashProblem !== null && trashRows !== null && <portal.ui.ErrorBanner onClose={() => setTrashProblem(null)}>{trashProblem}</portal.ui.ErrorBanner>}
         </>
       ) : (
         <>
           {/* The path and the Shared-with-me entry stand on their own lines: a long path must not push
               the chip to a second row and leave a gap under it. */}
           <div className="nc-files-head">
-            <div className="nc-crumbs" aria-label={t("Where you are")}>
+            <nav className="nc-crumbs" aria-label={t("Where you are")}>
               <button type="button" onClick={() => { setPath(""); }}>{t("Files")}</button>
               {crumbs.map((segment, i) => (
                 <span key={i} className="inline-flex min-w-0 items-center gap-0.5">
@@ -453,7 +483,7 @@ export default function Files() {
                   </button>
                 </span>
               ))}
-            </div>
+            </nav>
             <div>
               <button type="button" className={`nc-tab${withMe ? " nc-tab-on" : ""}`} onClick={() => { setPreview(null); setTrashOpen(false); setWithMe(true); }} title={t("What others hold on you")}>
                 <LuUsers />
@@ -486,13 +516,14 @@ export default function Files() {
             >
               <input className={portal.ui.classes.input} value={newName} placeholder={newKind === "folder" ? t("The folder's name") : t("The file's name")} aria-label={newKind === "folder" ? t("The folder's name") : t("The file's name")} onChange={(e) => setNewName(e.target.value)} />
               <button type="submit" className={portal.ui.classes.primarySmall} disabled={busyNew || newName.trim() === ""}>{t("Add")}</button>
-              <button type="button" className={portal.ui.classes.ghost} onClick={() => setNewKind(null)}>×</button>
+              <button type="button" className={portal.ui.classes.ghost} onClick={() => setNewKind(null)} aria-label={t("Cancel")}>×</button>
             </form>
           )}
           {createProblem !== null && <portal.ui.ErrorBanner onClose={() => setCreateProblem(null)}>{createProblem}</portal.ui.ErrorBanner>}
+          {shareProblem !== null && <portal.ui.ErrorBanner onClose={() => setShareProblem(null)}>{t("The shares could not be read: {error}", { error: shareProblem })}</portal.ui.ErrorBanner>}
           {rows === null ? (
             fileProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setFileProblem(null)}>{t("The files could not be read: {error}", { error: fileProblem })}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={t("The files could not be read: {error}", { error: fileProblem })} onRetry={() => loadListing(path)} />
             ) : (
               <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
             )
@@ -536,8 +567,7 @@ export default function Files() {
                         entry={row}
                         instance={instance}
                         onChanged={() => {
-                          setActFor(row.path); // a fresh box on the same path, so its inputs start from where it stands now
-                          loadListing(path);
+                          loadListing(path, true);
                           loadShareIndex();
                         }}
                         onClose={() => setActFor(null)}
@@ -548,10 +578,7 @@ export default function Files() {
                         entryPath={row.path}
                         shares={shares}
                         instance={instance}
-                        onChanged={() => {
-                          setBoxFor(row.path); // a fresh box on the same path, so its lists and forms look again
-                          loadShareIndex();
-                        }}
+                        onChanged={loadShareIndex}
                         onClose={() => setBoxFor(null)}
                       />
                     )}
@@ -592,9 +619,6 @@ function SharingBox({
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
-
   const permissionValue = (): number =>
     (form.read ? 1 : 0) | (form.update ? 2 : 0) | (form.create ? 4 : 0) | (form.del ? 8 : 0) | (form.share ? 16 : 0);
 
@@ -614,12 +638,9 @@ function SharingBox({
     }
   };
 
-  const removeShare = async (id: number, asked = false) => {
+  const removeShare = async (id: number) => {
     if (busy) return;
-    if (!asked) {
-      setAsk({ text: t("Take this share away?"), run() { void removeShare(id, true); } });
-      return;
-    }
+    if (!(await confirmDelete(t("Take this share away?"), undefined, t("Take this share away")))) return;
     setBusy(true);
     setProblem(null);
     try {
@@ -642,6 +663,7 @@ function SharingBox({
       const data = partText(result).data;
       if (typeof data === "object" && data !== null && typeof (data as Rec).url === "string") {
         setLinkResult({ url: (data as Rec).url as string, downloadUrl: strOf((data as Rec).download_url) });
+        onChanged(); // the link is a share: the index looks again, so the entry wears its mark
       } else {
         setProblem(t("The link did not answer in a way this panel reads."));
       }
@@ -656,7 +678,6 @@ function SharingBox({
 
   return (
     <div className="nc-sharebox">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       <div className="flex items-center gap-1">
         <LuShare2 className="shrink-0 text-fg-muted" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("Shares")}</span>
@@ -670,7 +691,7 @@ function SharingBox({
           {shares.map((share) => (
             <li key={share.id} className="nc-sharebox-row">
               <span className="min-w-0 flex-1 truncate text-sm" title={share.withName}>{share.withName || t("Unknown share")}</span>
-              <span className="nc-chip nc-chip-dim shrink-0">{t(knownShareTypes.get(share.shareType) ?? "Public link")}</span>
+              <span className="nc-chip nc-chip-dim shrink-0">{t(knownShareTypes.get(share.shareType) ?? msg("Other share"))}</span>
               {share.expires !== undefined && <span className="nc-chip nc-chip-dim shrink-0">{share.expires}</span>}
               <button type="button" className={portal.ui.classes.ghost} disabled={busy} onClick={() => void removeShare(share.id)} aria-label={t("Take this share away")}>
                 ×
@@ -706,6 +727,7 @@ function SharingBox({
             <button
               type="button"
               key={bit}
+              aria-pressed={form[bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share"]}
               className={`nc-chip${form[bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share"] ? " nc-chip-on" : ""}`}
               onClick={() => toggleBit(bit === 1 ? "read" : bit === 2 ? "update" : bit === 4 ? "create" : bit === 8 ? "del" : "share")}
             >
@@ -735,6 +757,9 @@ function SharingBox({
         {linkResult !== null && (
           <p className="nc-form-result">
             <a href={linkResult.url} target="_blank" rel="noreferrer">{linkResult.url}</a>
+            <button type="button" className={portal.ui.classes.ghost} onClick={() => void portal.ui.copyText(linkResult.url)}>
+              {t("Copy the link")}
+            </button>
             {linkResult.downloadUrl !== undefined && <span className="block text-fg-subtle">{linkResult.downloadUrl}</span>}
           </p>
         )}
@@ -764,9 +789,6 @@ function ActionsBox({
   const [copyTarget, setCopyTarget] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  // the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
 
   const move = async () => {
     const to = moveTarget.trim().replace(/^\/+/, "");
@@ -800,18 +822,15 @@ function ActionsBox({
     }
   };
 
-  const deleteEntry = async (asked = false) => {
+  const deleteEntry = async () => {
     if (busy) return;
-    if (!asked) {
-      setAsk({ text: t("Take {name} to the trash?", { name: entry.name }), run() { void deleteEntry(true); } });
-      return;
-    }
+    if (!(await confirmDelete(t("Take {name} to the trash?", { name: entry.name }), undefined, t("Take it to the trash")))) return;
     setBusy(true);
     setProblem(null);
     try {
       await api.tool("nc_webdav_delete_resource", { path: entry.path }, instance);
-      onClose();
       onChanged();
+      onClose(); // the box closes last: the entry is gone, and nothing reopens a box on its path
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -821,7 +840,6 @@ function ActionsBox({
 
   return (
     <div className="nc-sharebox">
-      {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
       <div className="flex items-center gap-1">
         <LuEllipsis className="shrink-0 text-fg-muted" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("What it can be done to")}</span>

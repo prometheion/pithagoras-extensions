@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
-import { confirmDelete } from "./widgets";
+import { confirmDelete, htmlToText } from "./widgets";
 
 /** The Mail tab: the account's mailboxes with their unread counts, one mailbox's messages in it, and the picked
  * message open to its text and its attachments. Opening a message marks it read; one more tap puts it back. All of
@@ -59,14 +59,6 @@ const fmtDate = (value?: number): string => (value ? portal.format.dateTime(valu
 
 const readAddress = (value: unknown): Address[] =>
   Array.isArray(value) ? value.map((a) => ({ label: typeof a?.label === "string" ? a.label : undefined, email: typeof a?.email === "string" ? a.email : undefined })) : [];
-
-/** A message the server gave as HTML, as the text it says: tags gone, line breaks kept. DOMParser makes an inert
- * document -- nothing in it runs or loads -- and its text is all that is taken. */
-export function htmlToText(html: string): string {
-  const doc = new DOMParser().parseFromString(html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n"), "text/html");
-  doc.querySelectorAll("script, style, head").forEach((node) => node.remove());
-  return (doc.body.textContent ?? "").replace(/\n{3,}/g, "\n\n").trim();
-}
 
 const readBody = (message: Record<string, unknown>): OpenMessage => {
   const flags = (typeof message.flags === "object" && message.flags !== null ? message.flags : {}) as Record<string, unknown>;

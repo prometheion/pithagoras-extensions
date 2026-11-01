@@ -127,4 +127,4 @@ createRoot(document.getElementById("root")).render(h(Page));
 `;
 
 /** The page around a view, with Nextcloud's own stylesheet. */
-export const VIEW_HTML = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/client.css"><style>body{margin:0;width:420px;font:14px sans-serif}</style></head><body><div id="root"></div><script src="/view-page.js"></script></body></html>`;
+export const VIEW_HTML = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/client.css"><style>:root{--fg:231 231 235;--fg-muted:185 185 195;--fg-subtle:140 140 150;--accent:90 140 255;--raised:40 40 46;--line:70 70 78;--danger:230 90 90}body{margin:0;width:420px;font:14px sans-serif;color:rgb(255,255,255);background:#111}</style></head><body><div id="root"></div><script src="/view-page.js"></script></body></html>`;

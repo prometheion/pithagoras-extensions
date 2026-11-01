@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { portal, t } from "../portal";
 import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
-import { confirmDelete } from "./widgets";
+import { confirmDelete, parseWhen } from "./widgets";
 
 /** The Calendar tab: one month grid over all of the instance's calendars at once, every calendar a pill that
  * stands or steps away -- what Nextcloud's own sidebar means with its boxes. The events are held for a wide
@@ -47,12 +47,6 @@ interface TodoRow {
 /** How many events one read asks for: a window that comes back full is said to be cut short. */
 const EVENT_LIMIT = 500;
 const pad = (n: number): string => String(n).padStart(2, "0");
-/** A moment the tools gave as a word, as a Date. A bare day ("2025-03-15", what an all-day event carries) is that
- * day in the reader's own zone: `new Date("2025-03-15")` is UTC midnight, which west of Greenwich is still the 14th. */
-export function parseWhen(word: string): Date {
-  const bare = /^(\d{4})-(\d{2})-(\d{2})$/.exec(word);
-  return bare ? new Date(Number(bare[1]), Number(bare[2]) - 1, Number(bare[3])) : new Date(word);
-}
 /** A day in the tool's words from a Date. */
 const dayWord = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 /** The "YYYY-MM" word of a Date's month. */
@@ -285,7 +279,7 @@ export default function Calendar() {
 
   /** What a calendar stands out in its chip: its own colour, or the wheel's where it has none. */
   const colorOf = (name?: string): string => {
-    if (name === undefined) return "var(--fg-muted)";
+    if (name === undefined) return "rgb(var(--fg-muted))";
     return calendars?.find((c) => c.name === name)?.color ?? fallbackColor(name);
   };
 

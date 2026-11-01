@@ -31,6 +31,10 @@ let calls: { name: string; args: any }[] = [];
 /** The status and the instances the routes answer. */
 let statusBody: Record<string, unknown> = {};
 let instancesBody: Record<string, unknown> = {};
+/** Whether /status answers a failure (the server half is not up), and what the page sent to the instance routes. */
+let statusFails = false;
+let instancesFail = false;
+let posts: { route: string; body: any }[] = [];
 const ALL_ON = Object.fromEntries(["shopping", "cookbook", "notes", "files", "sharing", "deck", "calendar", "contacts", "mail", "news", "collectives"].map((id) => [id, true]));
 const instanceRow = (over: Record<string, unknown> = {}) => ({ name: "uni", containerName: "c", state: "running", address: "http://127.0.0.1:8000/mcp", url: "https://cloud.example.org", mcp: { registered: true, on: true }, health: { ok: true }, configured: true, capabilities: { available: ALL_ON, on: {} }, ...over });
 
@@ -47,8 +51,14 @@ before(async () => {
     if (url.pathname === "/view.html") return send(200, "text/html", VIEW_HTML);
     if (url.pathname === "/view-page.js") return send(200, "text/javascript", pageJs);
     if (url.pathname === "/client.css") return send(200, "text/css", CSS);
-    if (url.pathname === `${BASE}/status`) return send(200, "application/json", JSON.stringify(statusBody));
-    if (url.pathname === `${BASE}/instances`) return send(200, "application/json", JSON.stringify(instancesBody));
+    if (url.pathname === `${BASE}/status`) return statusFails ? send(502, "application/json", JSON.stringify({ error: "the server half is not running" })) : send(200, "application/json", JSON.stringify(statusBody));
+    if (url.pathname === `${BASE}/instances` && req.method === "GET") return instancesFail ? send(502, "application/json", JSON.stringify({ error: "the server half is not running" })) : send(200, "application/json", JSON.stringify(instancesBody));
+    if (req.method === "POST" && [`${BASE}/instances`, `${BASE}/instances/remove`, `${BASE}/start`, `${BASE}/reset`].includes(url.pathname)) {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      posts.push({ route: url.pathname.slice(BASE.length), body: raw ? JSON.parse(raw) : {} });
+      return send(200, "application/json", JSON.stringify({ ...instancesBody, ok: true }));
+    }
     if (url.pathname === `${BASE}/tool` && req.method === "POST") {
       let raw = "";
       for await (const chunk of req) raw += chunk;
@@ -79,6 +89,9 @@ after(async () => {
 beforeEach(() => {
   handlers.clear();
   calls = [];
+  posts = [];
+  statusFails = false;
+  instancesFail = false;
   statusBody = { image: "x", instances: [instanceRow()], configured: true };
   instancesBody = { instances: [{ name: "uni", url: "https://cloud.example.org", username: "anna", passwordSet: true, configured: true }] };
 });
@@ -591,5 +604,576 @@ test("Calendar: a todo is deleted only after the portal's dialog says yes", asyn
   await page.getByRole("button", { name: "Take this todo away" }).click();
   await sleep(200);
   assert.equal(calledWith("nc_calendar_delete_todo").length, 1);
+  await close(page);
+});
+
+// ---- Collectives -----------------------------------------------------------------------------------------------
+
+/** A Collectives and WebDAV of a few lines, with the Nextcloud MCP server's rule for writes: an existing file is written
+ * only against the etag it has now (`if_match`), a new one without it; anything else is a ToolError. */
+function collectivesBackend() {
+  const files = new Map<string, { content: string; etag: string }>([["Collectives/Wiki/Readme.md", { content: "old text", etag: "v1" }]]);
+  const pages = [{ id: 5, title: "Home", file_name: "Readme.md", file_path: "", collective_path: "Collectives/Wiki", size: 8 }];
+  const state = { files, pages, writes: [] as any[], nextEtag: 2, failWrite: undefined as string | undefined };
+  on("collectives_get_collectives", () => ({ collectives: [{ id: 1, name: "Wiki", can_edit: true }] }));
+  on("collectives_get_pages", () => ({ pages: state.pages }));
+  on("collectives_search_pages", () => ({ results: state.pages.slice(0, 1) }));
+  on("collectives_get_page", ({ page_id }) => ({ page: { title: "Home" }, content: [...files.entries()].find(([p]) => state.pages.some((x) => x.id === page_id && `${x.collective_path}/${x.file_name}` === p))?.[1].content ?? "" }));
+  on("nc_webdav_read_file", ({ path }) => {
+    const file = files.get(path);
+    if (!file) throw new ToolError(`Not found: ${path}`);
+    return { path, content: file.content, etag: file.etag };
+  });
+  on("nc_webdav_write_file", (args) => {
+    state.writes.push(args);
+    if (state.failWrite) throw new ToolError(state.failWrite);
+    const there = files.get(args.path);
+    if (args.if_match === undefined && there) throw new ToolError(`The file ${args.path} already exists`);
+    if (args.if_match !== undefined && (!there || there.etag !== args.if_match)) throw new ToolError("412 Precondition Failed: the file has changed since it was read");
+    const etag = `v${state.nextEtag++}`;
+    files.set(args.path, { content: args.content, etag });
+    return { path: args.path, created: !there, etag };
+  });
+  on("collectives_create_page", ({ title }) => {
+    state.pages.push({ id: 6, title, file_name: `${title}.md`, file_path: "", collective_path: "Collectives/Wiki", size: 0 });
+    files.set(`Collectives/Wiki/${title}.md`, { content: "", etag: "v0" });
+    return { id: 6 };
+  });
+  return state;
+}
+const openCollectivePage = async (page: Page) => {
+  await page.getByRole("button", { name: /Wiki/ }).click();
+  await page.getByRole("button", { name: /Home/ }).click();
+  await page.getByLabel("The page's text").waitFor();
+};
+
+test("Collectives: saving an existing page writes against the etag it was read with, says Saved, and chains the next save (H3)", async () => {
+  const state = collectivesBackend();
+  const page = await open("collectives");
+  await openCollectivePage(page);
+  await page.getByLabel("The page's text").fill("new text");
+  await page.getByRole("button", { name: "Save the page" }).click();
+  await page.getByRole("status").getByText("Saved.").waitFor();
+  assert.equal(state.files.get("Collectives/Wiki/Readme.md")?.content, "new text");
+  await page.getByLabel("The page's text").fill("newer text");
+  await page.getByRole("button", { name: "Save the page" }).click();
+  await page.getByRole("status").getByText("Saved.").waitFor();
+  assert.deepEqual(state.writes.map((w) => w.if_match), ["v1", "v2"]);
+  await close(page);
+});
+
+test("Collectives: a page that someone changed meanwhile is said to be changed, and the words stay (H3)", async () => {
+  const state = collectivesBackend();
+  const page = await open("collectives");
+  await openCollectivePage(page);
+  state.files.set("Collectives/Wiki/Readme.md", { content: "their text", etag: "v9" });
+  await page.getByLabel("The page's text").fill("my text");
+  await page.getByRole("button", { name: "Save the page" }).click();
+  await page.getByRole("alert").getByText(/changed elsewhere/).waitFor();
+  assert.equal(await page.getByLabel("The page's text").inputValue(), "my text");
+  assert.equal(state.files.get("Collectives/Wiki/Readme.md")?.content, "their text", "nothing was written over it");
+  await close(page);
+});
+
+test("Collectives: a new page with text is made, and its text is written into its file (H3)", async () => {
+  const state = collectivesBackend();
+  const page = await open("collectives");
+  await page.getByRole("button", { name: /Wiki/ }).click();
+  await page.getByRole("button", { name: /A new page/ }).click();
+  await page.getByLabel("The page's title").fill("Plan");
+  await page.getByLabel("The page's text").fill("the plan");
+  await page.getByRole("button", { name: "Make the page" }).click();
+  await page.getByRole("button", { name: /Plan/ }).waitFor();
+  await sleep(150);
+  assert.equal(state.files.get("Collectives/Wiki/Plan.md")?.content, "the plan");
+  assert.equal(state.writes[0].if_match, "v0");
+  await close(page);
+});
+
+test("Collectives: where the text of a new page cannot be written, the page opens with the words in it and the reason above (H3, M9)", async () => {
+  const state = collectivesBackend();
+  const page = await open("collectives");
+  await page.getByRole("button", { name: /Wiki/ }).click();
+  await page.getByRole("button", { name: /A new page/ }).click();
+  await page.getByLabel("The page's title").fill("Plan");
+  await page.getByLabel("The page's text").fill("the plan");
+  state.failWrite = "The disk is full";
+  await page.getByRole("button", { name: "Make the page" }).click();
+  await page.getByRole("alert").getByText(/The disk is full/).waitFor();
+  assert.equal(await page.getByLabel("The page's text").inputValue(), "the plan", "the words are not lost");
+  await close(page);
+});
+
+test("Collectives: a page that cannot be opened says why; a changed page asks before it is left; an empty search is the whole list again (M9, L14, L19)", async () => {
+  const state = collectivesBackend();
+  on("collectives_get_page", () => {
+    throw new ToolError("Page is gone");
+  });
+  const page = await open("collectives");
+  await page.getByRole("button", { name: /Wiki/ }).click();
+  await page.getByRole("button", { name: /Home/ }).click();
+  await page.getByRole("alert").getByText("Page is gone").waitFor();
+  assert.equal(await page.getByLabel("Search the pages").count(), 1, "still on the pages");
+  await page.getByLabel("Search the pages").fill("home");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await sleep(150);
+  assert.equal(calledWith("collectives_search_pages").length, 1);
+  const before = calledWith("collectives_get_pages").length;
+  await page.getByLabel("Search the pages").fill("");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await sleep(150);
+  assert.equal(calledWith("collectives_get_pages").length, before + 1, "the whole list is read again");
+  handlers.delete("collectives_get_page");
+  on("collectives_get_page", () => ({ page: { title: "Home" }, content: [...state.files.values()][0].content }));
+  await page.getByRole("button", { name: /Home/ }).click();
+  await page.getByLabel("The page's text").fill("changed");
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: /← Pages/ }).click();
+  await sleep(100);
+  assert.equal(await page.getByLabel("The page's text").count(), 1, "asked, and said no: still there");
+  await close(page);
+});
+
+// ---- News ------------------------------------------------------------------------------------------------------
+
+test("News: an article's HTML shows as text, a link is only a web address, a failed opening is said, and Back reads the feeds' counts again", async () => {
+  let unread = 2;
+  on("nc_news_list_feeds", () => ({ results: [{ id: 1, title: "Daily", unread_count: unread }] }));
+  on("nc_news_list_items", () => ({ results: [{ id: 7, title: "", unread: true, pub_date: 1_700_000_000 }, { id: 8, title: "Bad", unread: true }] }));
+  on("nc_news_get_item", ({ item_id }) => {
+    if (item_id === 8) throw new ToolError("The item is gone");
+    unread = 1;
+    return { item: { title: "", body: "<div><p>Hello <em>world</em></p><p>Second</p></div>", url: "javascript:alert(1)" } };
+  });
+  const page = await open("news");
+  await page.getByRole("button", { name: /Daily/ }).click();
+  await page.getByRole("button", { name: /Bad/ }).click();
+  await page.getByRole("alert").getByText("The item is gone").waitFor();
+  await page.getByRole("button", { name: /\(no title\)/ }).click();
+  await page.getByText("Hello world").waitFor();
+  assert.equal(await page.locator("pre.nc-file-text").innerText(), "Hello world\nSecond");
+  assert.equal(await page.getByRole("link", { name: "Open the original" }).count(), 0, "a javascript: address is no link");
+  await page.getByRole("button", { name: /← Items/ }).click();
+  await page.getByRole("button", { name: /← Feeds/ }).click();
+  await page.getByRole("button", { name: /Daily/ }).getByText("1 unread").waitFor();
+  await close(page);
+});
+
+// ---- Deck ------------------------------------------------------------------------------------------------------
+
+function deckBackend() {
+  const boards = [{ id: 1, title: "Alpha" }, { id: 2, title: "Beta" }];
+  const cards: Record<number, Record<number, any>> = { 1: { 11: { id: 11, title: "Card 1", done: false } }, 2: { 21: { id: 21, title: "Beta card", done: false } } };
+  on("deck_get_boards", () => ({ boards }));
+  on("deck_get_stacks", ({ board_id }) => ({ stacks: [{ id: board_id * 10, title: board_id === 1 ? "To do" : "Doing", cards: Object.values(cards[board_id]) }] }));
+  on("deck_get_card", ({ board_id, card_id }) => ({ ...cards[board_id][card_id], description: "d" }));
+  on("deck_update_card", ({ board_id, card_id, title, done }) => {
+    if (title) cards[board_id][card_id].title = title;
+    if (done) cards[board_id][card_id].done = true;
+    return {};
+  });
+  return { boards, cards };
+}
+
+test("Deck: after a card is saved or marked done the board behind it shows it too (M12)", async () => {
+  deckBackend();
+  const page = await open("deck");
+  await page.getByRole("button", { name: /Card 1/ }).click();
+  await page.getByLabel("Card title").fill("Renamed");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Mark done" }).waitFor();
+  assert.equal(await page.getByLabel("Card title").inputValue(), "Renamed");
+  await page.getByRole("button", { name: "Mark done" }).click();
+  await page.getByText("done", { exact: true }).waitFor();
+  await page.getByRole("button", { name: /← Back to the board/ }).click();
+  await page.locator(".nc-card-done", { hasText: "Renamed" }).waitFor();
+  await close(page);
+});
+
+test("Deck: a slow board pressed first does not draw its stacks under the board pressed second, and new cards go into the right board (M11)", async () => {
+  const data = deckBackend();
+  let first = true;
+  on("deck_get_stacks", async ({ board_id }) => {
+    if (first) {
+      first = false;
+      await sleep(500);
+    }
+    return { stacks: [{ id: board_id * 10, title: board_id === 1 ? "To do" : "Doing", cards: Object.values(data.cards[board_id]) }] };
+  });
+  on("deck_create_card", () => ({}));
+  const page = await open("deck");
+  await page.getByRole("button", { name: "Beta" }).click();
+  await page.getByRole("button", { name: /Beta card/ }).waitFor();
+  await sleep(700);
+  assert.equal(await page.getByRole("button", { name: /Card 1/ }).count(), 0, "Alpha's late stacks are not drawn");
+  await page.getByRole("button", { name: "A new card in this stack" }).click();
+  await page.getByLabel("Card title").fill("New");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await sleep(150);
+  assert.equal(calledWith("deck_create_card")[0].board_id, 2);
+  assert.equal(calledWith("deck_create_card")[0].stack_id, 20);
+  await close(page);
+});
+
+test("Deck: a card that cannot be opened says why on the board; a stack and a card are deleted only after the portal's dialog says yes (M9, M18)", async () => {
+  deckBackend();
+  on("deck_get_card", () => {
+    throw new ToolError("The card was moved");
+  });
+  on("deck_delete_stack", () => ({}));
+  const page = await open("deck");
+  await page.getByRole("button", { name: /Card 1/ }).click();
+  await page.getByRole("alert").getByText("The card was moved").waitFor();
+  assert.equal(await page.getByRole("button", { name: /Card 1/ }).count(), 1, "the board is still there");
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: "Delete this stack" }).click();
+  await sleep(100);
+  assert.equal(calledWith("deck_delete_stack").length, 0);
+  const asked = (await confirms(page)) as any[];
+  assert.equal(asked.at(-1).danger, true, "a stack with its cards is a danger");
+  await answerConfirms(page, true);
+  await page.getByRole("button", { name: "Delete this stack" }).click();
+  await sleep(150);
+  assert.equal(calledWith("deck_delete_stack").length, 1);
+  await close(page);
+});
+
+test("Deck: the colours of a new board are named, not hex codes, and say which is chosen", async () => {
+  deckBackend();
+  const page = await open("deck");
+  await page.getByRole("button", { name: /New board/ }).click();
+  await page.getByRole("button", { name: "Amber" }).click();
+  assert.equal(await page.getByRole("button", { name: "Amber" }).getAttribute("aria-pressed"), "true");
+  assert.equal(await page.getByRole("button", { name: "#0f6bb5" }).count(), 0);
+  await close(page);
+});
+
+// ---- Notes -----------------------------------------------------------------------------------------------------
+
+function notesBackend() {
+  const state = { etag: "n1", content: "body" };
+  on("nc_notes_search_notes", () => ({ results: [{ id: 3, title: "Ideas" }, { id: 4, title: "Broken" }] }));
+  on("nc_notes_get_note", ({ note_id }) => {
+    if (note_id === 4) throw new ToolError("The note file is unreadable");
+    return { id: 3, title: "Ideas", content: state.content, etag: state.etag };
+  });
+  return state;
+}
+
+test("Notes: a note changed elsewhere is said to be, with the words kept; saving says Saved; going back asks while there is a change (L14)", async () => {
+  const state = notesBackend();
+  on("nc_notes_update_note", ({ etag, content }) => {
+    if (etag !== state.etag) throw new ToolError("412 Precondition Failed: the note has changed");
+    state.content = content;
+    state.etag = "n2";
+    return {};
+  });
+  const page = await open("notes");
+  await page.getByRole("button", { name: /Ideas/ }).click();
+  await page.getByLabel("Note content").fill("my words");
+  state.etag = "n9"; // someone else saved it
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("alert").getByText(/changed elsewhere/).waitFor();
+  assert.equal(await page.getByLabel("Note content").inputValue(), "my words");
+  assert.equal(await page.evaluate(() => (window as any).__unsaved), true);
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: /← All notes/ }).click();
+  await sleep(100);
+  assert.equal(await page.getByLabel("Note content").count(), 1, "asked, and said no: still in the note");
+  await close(page);
+});
+
+test("Notes: a note that cannot be opened is said, in the list it came from; a delete asks through the portal's dialog", async () => {
+  notesBackend();
+  on("nc_notes_delete_note", () => ({}));
+  const page = await open("notes");
+  await page.getByRole("button", { name: /Broken/ }).click();
+  await page.getByRole("alert").getByText("The note file is unreadable").waitFor();
+  assert.equal(await page.getByRole("button", { name: /Ideas/ }).count(), 1, "the list is there");
+  await page.getByRole("button", { name: /Ideas/ }).click();
+  await page.getByLabel("Note content").waitFor();
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: "Delete this note" }).click();
+  await sleep(100);
+  assert.equal(calledWith("nc_notes_delete_note").length, 0);
+  assert.equal(((await confirms(page)) as any[]).at(-1).deletes, true);
+  await answerConfirms(page, true);
+  await page.getByRole("button", { name: "Delete this note" }).click();
+  await sleep(150);
+  assert.equal(calledWith("nc_notes_delete_note").length, 1);
+  await close(page);
+});
+
+// ---- Cookbook --------------------------------------------------------------------------------------------------
+
+function cookbookBackend() {
+  const recipes: any[] = [{ id: 1, name: "Soup", description: "warm", recipeIngredient: ["water"], recipeInstructions: ["boil"] }, { id: 2, name: "Bread", description: "baked", recipeIngredient: ["flour"], recipeInstructions: ["bake"] }];
+  on("nc_cookbook_list_recipes", () => ({ recipes: recipes.map(({ id, name }) => ({ id, name })) }));
+  on("nc_cookbook_get_recipe", ({ recipe_id }) => recipes.find((r) => r.id === recipe_id));
+  on("nc_cookbook_search_recipes", ({ query }) => ({ recipes: recipes.filter((r) => r.name.toLowerCase().includes(query.toLowerCase())).map(({ id, name }) => ({ id, name })) }));
+  return recipes;
+}
+
+test("Cookbook: of two recipes pressed one after the other the late answer of the first does not show under the second, and Save changes the second (M11)", async () => {
+  const recipes = cookbookBackend();
+  on("nc_cookbook_get_recipe", async ({ recipe_id }) => {
+    if (recipe_id === 1) await sleep(500);
+    return recipes.find((r) => r.id === recipe_id);
+  });
+  on("nc_cookbook_update_recipe", () => ({}));
+  const page = await open("cookbook");
+  await page.getByRole("button", { name: /Soup/ }).click();
+  await page.getByRole("button", { name: "← All recipes" }).waitFor({ state: "visible" });
+  await page.getByRole("button", { name: "← All recipes" }).click();
+  await page.getByRole("button", { name: /Bread/ }).click();
+  await page.getByRole("heading", { name: "Bread" }).waitFor();
+  await sleep(700);
+  assert.equal(await page.getByRole("heading", { name: "Bread" }).count(), 1, "still Bread's own text");
+  await page.getByRole("button", { name: /Change this recipe/ }).click();
+  await page.getByLabel("The recipe's name").fill("Sourdough");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await sleep(150);
+  assert.equal(calledWith("nc_cookbook_update_recipe")[0].recipe_id, 2);
+  await close(page);
+});
+
+test("Cookbook: a failed import is said in the list it came from; emptying the description is sent as an empty description (M9, L20)", async () => {
+  cookbookBackend();
+  on("nc_cookbook_import_recipe", () => {
+    throw new ToolError("No recipe markup found at that address");
+  });
+  on("nc_cookbook_update_recipe", () => ({}));
+  const page = await open("cookbook");
+  await page.getByRole("button", { name: /Soup/ }).waitFor();
+  await page.getByLabel("Import a recipe from its URL").fill("https://example.org/r");
+  await page.getByRole("button", { name: "Import" }).click();
+  await page.getByRole("alert").getByText(/No recipe markup/).waitFor();
+  await page.getByRole("button", { name: /Soup/ }).click();
+  await page.getByRole("button", { name: /Change this recipe/ }).click();
+  await page.getByLabel("What it is").fill("");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await sleep(150);
+  assert.equal(calledWith("nc_cookbook_update_recipe")[0].description, "");
+  await close(page);
+});
+
+test("Cookbook: a recipe taken away asks first, and the search that stands is run again so it is not listed any more (L20)", async () => {
+  const recipes = cookbookBackend();
+  on("nc_cookbook_delete_recipe", ({ recipe_id }) => {
+    recipes.splice(recipes.findIndex((r) => r.id === recipe_id), 1);
+    return {};
+  });
+  const page = await open("cookbook");
+  await page.getByLabel("Search the recipes").fill("s");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("button", { name: /Soup/ }).click();
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: "Delete this recipe" }).click();
+  await sleep(100);
+  assert.equal(calledWith("nc_cookbook_delete_recipe").length, 0);
+  await answerConfirms(page, true);
+  await page.getByRole("button", { name: "Delete this recipe" }).click();
+  await page.getByLabel("Search the recipes").waitFor();
+  await sleep(150);
+  assert.equal(calledWith("nc_cookbook_search_recipes").length, 2, "the search ran again");
+  assert.equal(await page.getByRole("button", { name: /Soup/ }).count(), 0);
+  await close(page);
+});
+
+// ---- Files -----------------------------------------------------------------------------------------------------
+
+function filesBackend() {
+  const tree: Record<string, any[]> = {
+    "": [{ name: "A", is_directory: true }, { name: "B", is_directory: true }, { name: "big.txt", is_directory: false, size: 20 * 1024 * 1024, content_type: "text/plain" }],
+    A: [{ name: "a1.txt", is_directory: false, size: 3, content_type: "text/plain" }],
+    B: [{ name: "b1.txt", is_directory: false, size: 3, content_type: "text/plain" }],
+  };
+  on("nc_webdav_list_directory", ({ path }) => ({ files: tree[path ?? ""] ?? [] }));
+  on("nc_share_list", () => ({ shares: [] }));
+  return tree;
+}
+
+test("Files: of two folders opened one after the other, the late rows of the first do not stand under the path of the second (M11)", async () => {
+  const tree = filesBackend();
+  on("nc_webdav_list_directory", async ({ path }) => {
+    if (path === "A") await sleep(500);
+    return { files: tree[path ?? ""] };
+  });
+  const page = await open("files");
+  await page.locator(".nc-file-main", { hasText: "A" }).first().click();
+  await page.getByRole("button", { name: "Files" }).first().click(); // back to the root while A is slow
+  await page.locator(".nc-file-main", { hasText: "B" }).first().click();
+  await page.getByText("b1.txt").waitFor();
+  await sleep(700);
+  assert.equal(await page.getByText("a1.txt").count(), 0);
+  assert.equal(await page.getByText("b1.txt").count(), 1);
+  await close(page);
+});
+
+test("Files: a file over the inline size is not pulled in, and a file's preview can be downloaded", async () => {
+  filesBackend();
+  const page = await open("files");
+  await page.locator(".nc-file-main", { hasText: "big.txt" }).click();
+  await page.getByRole("alert").getByText(/larger than this panel reads inline/).waitFor();
+  assert.equal(calledWith("nc_webdav_read_file").length, 0);
+  on("nc_webdav_read_file", () => ({ content: "hello", etag: "x" }));
+  await page.locator(".nc-file-main", { hasText: "A" }).first().click();
+  await page.locator(".nc-file-main", { hasText: "a1.txt" }).click();
+  await page.locator("pre.nc-file-text").waitFor();
+  assert.equal(await page.getByRole("button", { name: "Download" }).count(), 1);
+  await close(page);
+});
+
+test("Files: a delete asks through the portal's dialog, and the box does not open again on the path that is gone (L10, M18)", async () => {
+  const tree = filesBackend();
+  on("nc_webdav_delete_resource", ({ path }) => {
+    tree[""] = tree[""].filter((f) => f.name !== path);
+    return {};
+  });
+  const page = await open("files");
+  await page.locator(".nc-file").filter({ has: page.locator(".nc-file-name", { hasText: /^B$/ }) }).getByRole("button", { name: "The things this one can be done to" }).click();
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: "Take it to the trash" }).click();
+  await sleep(100);
+  assert.equal(calledWith("nc_webdav_delete_resource").length, 0);
+  await answerConfirms(page, true);
+  await page.getByRole("button", { name: "Take it to the trash" }).click();
+  await sleep(300);
+  assert.equal(calledWith("nc_webdav_delete_resource").length, 1);
+  assert.equal(await page.getByText("What it can be done to").count(), 0, "no box is left open on the deleted entry");
+  assert.equal(await page.locator(".nc-file-name", { hasText: /^B$/ }).count(), 0);
+  await close(page);
+});
+
+test("Files: a link made is copyable and the entry wears its share mark at once; a restore from the trash that fails says so and one that works shows the file (L10, M9)", async () => {
+  filesBackend();
+  let shared = false;
+  on("nc_share_list", () => ({ shares: shared ? [{ id: 1, share_type: 3, path: "/A", share_with: "", permission: 1 }] : [] }));
+  on("nc_share_create_public_link", () => {
+    shared = true;
+    return { url: "https://cloud.example.org/s/abc" };
+  });
+  const page = await open("files");
+  await page.locator(".nc-file", { hasText: "A" }).first().getByRole("button", { name: "Shares of this one" }).click();
+  await page.getByRole("button", { name: "Make the link" }).click();
+  await page.getByRole("link", { name: "https://cloud.example.org/s/abc" }).waitFor();
+  await page.getByRole("button", { name: "Copy the link" }).click();
+  assert.deepEqual(await page.evaluate(() => (window as any).__copied), ["https://cloud.example.org/s/abc"]);
+  await page.locator(".nc-row-share.is-shared").first().waitFor();
+  on("nc_webdav_list_trash", () => ({ items: [{ id: "t1", name: "old.txt", original_location: "/old.txt", deleted_at: 1_700_000_000 }] }));
+  on("nc_webdav_restore_from_trash", () => {
+    throw new ToolError("A file of that name is there already");
+  });
+  await page.getByRole("button", { name: "Trash" }).click();
+  await page.getByRole("button", { name: "Restore" }).click();
+  await page.getByRole("alert").getByText(/already/).waitFor();
+  await close(page);
+});
+
+// ---- The panel itself --------------------------------------------------------------------------------------------
+
+test("Panel: a status that cannot be read is said, with a way to try again; the panel reads it again when it is looked at again (M10)", async () => {
+  statusFails = true;
+  const page = await open("panel");
+  await page.getByRole("alert").getByText(/the server half is not running/).waitFor();
+  statusFails = false;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await page.getByRole("tab", { name: "Files" }).waitFor();
+  // a Save in Settings meanwhile: another instance stands, and the panel finds it when it is looked at again
+  statusBody = { image: "x", instances: [instanceRow(), instanceRow({ name: "home", url: "https://home.example.org" })], configured: true };
+  assert.equal(await page.getByLabel("Which of the Nextclouds the pages talk to").count(), 0);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.getByLabel("Which of the Nextclouds the pages talk to").waitFor();
+  await close(page);
+});
+
+test("Panel: only the tabs the instance offers are in the tab list, which the keys move along; the way out is not a tab; the muted words are muted (L9, L13, M17)", async () => {
+  statusBody = { image: "x", instances: [instanceRow({ capabilities: { available: { ...ALL_ON, mail: false, news: false }, on: {} } })], configured: true };
+  const page = await open("panel");
+  await page.getByRole("tab", { name: "Files" }).waitFor();
+  const names = await page.getByRole("tab").allInnerTexts();
+  assert.deepEqual(names.map((n) => n.trim()), ["Files", "Calendar", "Contacts", "Notes", "Deck", "Collectives", "Cookbook", "Shopping List"]);
+  assert.equal(await page.getByRole("tablist").getByRole("link").count(), 0, "the link out is not inside the tab list");
+  assert.equal(await page.getByRole("tab", { name: "Files" }).getAttribute("aria-selected"), "true");
+  assert.equal(await page.getByRole("tab", { name: "Calendar" }).getAttribute("tabindex"), "-1", "one tab stands in the tab order");
+  assert.equal(await page.getByRole("tabpanel").count(), 1);
+  const color = await page.getByRole("tab", { name: "Calendar" }).evaluate((el) => getComputedStyle(el).color);
+  assert.equal(color, "rgb(185, 185, 195)", "a tab that is not chosen is drawn in the muted colour of the theme");
+  await close(page);
+});
+
+test("Panel: a tab the instance does not offer is never mounted, not even for one render", async () => {
+  statusBody = { image: "x", instances: [instanceRow({ capabilities: { available: { ...ALL_ON, files: false, sharing: false }, on: {} } })], configured: true };
+  on("nc_calendar_list_calendars", () => ({ calendars: [] }));
+  on("nc_webdav_list_directory", () => ({ files: [] }));
+  const page = await open("panel");
+  await page.getByRole("tab", { name: "Calendar" }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: "Calendar" }).getAttribute("aria-selected"), "true", "the first tab offered is the one shown");
+  await sleep(200);
+  assert.equal(calledWith("nc_webdav_list_directory").length, 0, "Files, which this instance does not offer, was never asked for anything");
+  await close(page);
+});
+
+// ---- The page in Settings -----------------------------------------------------------------------------------------
+
+const card = (name: string, over: Record<string, unknown> = {}) => ({ name, url: `https://${name}.example.org`, username: "anna", passwordSet: true, configured: true, ...over });
+
+test("Settings: instances that cannot be read are said, with a way to try again (M10)", async () => {
+  instancesFail = true;
+  const page = await open("settings");
+  await page.getByRole("alert").getByText(/The instances could not be read: the server half is not running/).waitFor();
+  instancesFail = false;
+  instancesBody = { instances: [] };
+  await page.getByRole("button", { name: "Retry" }).click();
+  await page.getByText("No instance yet").waitFor();
+  await close(page);
+});
+
+test("Settings: saving one card keeps what was typed in another and in a card not saved yet; typed words are told to the portal (L17, M18)", async () => {
+  instancesBody = { instances: [card("uni"), card("home")] };
+  statusBody = { image: "x", instances: [instanceRow({ name: "uni" }), instanceRow({ name: "home" })], configured: true };
+  const page = await open("settings");
+  await page.getByLabel("Nextcloud host").waitFor();
+  assert.equal(await page.evaluate(() => (window as any).__unsaved), false);
+  // card uni: change the host; then card home: type a new host there too, then save home only
+  await page.getByLabel("Nextcloud host").fill("https://uni-new.example.org");
+  assert.equal(await page.evaluate(() => (window as any).__unsaved), true, "typed words are a draft for the portal");
+  await page.getByLabel("Which instance is picked").selectOption({ label: "home" });
+  await page.getByLabel("Nextcloud host").fill("https://home-new.example.org");
+  await page.getByRole("button", { name: "Save and apply" }).click();
+  await page.getByRole("status").getByText("Saved.").waitFor();
+  assert.equal(posts[0].body.url, "https://home-new.example.org");
+  await page.getByLabel("Which instance is picked").selectOption({ label: "uni" });
+  assert.equal(await page.getByLabel("Nextcloud host").inputValue(), "https://uni-new.example.org", "the unsaved host of the other card is still there");
+  assert.equal(await page.evaluate(() => (window as any).__unsaved), true);
+  await close(page);
+});
+
+test("Settings: what the Nextcloud says of the login is shown beside the server's own answer; plain http is a switch of its own", async () => {
+  instancesBody = { instances: [card("uni", { url: "http://nas.lan" })] };
+  statusBody = { image: "x", instances: [instanceRow({ name: "uni", account: { state: "unauthorized" } })], configured: true };
+  const page = await open("settings");
+  await page.getByText("Nextcloud refuses the user name or the app password").waitFor();
+  await page.getByText(/answering/).waitFor();
+  await page.getByRole("checkbox", { name: /Send the app password over plain http/ }).check();
+  await page.getByRole("button", { name: "Save and apply" }).click();
+  await page.getByRole("status").getByText("Saved.").waitFor();
+  assert.equal(posts[0].body.allowHttp, true);
+  await close(page);
+});
+
+test("Settings: removing an instance asks through the portal's dialog first", async () => {
+  instancesBody = { instances: [card("uni")] };
+  statusBody = { image: "x", instances: [instanceRow({ name: "uni" })], configured: true };
+  const page = await open("settings");
+  await page.getByRole("button", { name: "Remove", exact: true }).waitFor();
+  await answerConfirms(page, false);
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  await sleep(100);
+  assert.equal(posts.filter((p) => p.route === "/instances/remove").length, 0);
+  await answerConfirms(page, true);
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  await sleep(150);
+  assert.equal(posts.filter((p) => p.route === "/instances/remove").length, 1);
   await close(page);
 });

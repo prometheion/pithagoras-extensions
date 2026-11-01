@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
 
 /** The Collectives tab: the collectives, one collective's pages in it (with a search over them), and the picked
  * page open to its text. */
@@ -46,15 +46,20 @@ const pagePath = (page: { fileName?: string; filePath?: string; collectivePath?:
 export default function Collectives() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // where the calls go: the panel's held instance
+  const guard = useGuard();
   const [collectives, setCollectives] = useState<Collective[] | null>(null);
   const [collectiveId, setCollectiveId] = useState<number | null>(null);
   const [pages, setPages] = useState<PageRow[] | null>(null);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
-  const [open, setOpen] = useState<(PageRow & { content: string }) | null>(null);
+  /** The page open: what the list knew of it, its text as it was read, and the etag of its file at that moment -- the
+   * save is made against it, so what someone else wrote in between is not quietly written over. */
+  const [open, setOpen] = useState<(PageRow & { content: string; etag?: string }) | null>(null);
   const [pageDraft, setPageDraft] = useState("");
+  const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null); // a change or an opening that failed: drawn in whatever view stands
+  const [loadError, setLoadError] = useState<string | null>(null); // a list that could not be read
 
   // what the picked collective may be done to, and the forms that make a collective or a page
   const [canEditHere, setCanEditHere] = useState(false);
@@ -65,11 +70,17 @@ export default function Collectives() {
   const [newPageTitle, setNewPageTitle] = useState("");
   const [newPageContent, setNewPageContent] = useState("");
 
+  const dirty = open !== null && pageDraft !== open.content;
+  portal.ui.useUnsavedDraft(dirty || (pageFormOpen && (newPageTitle.trim() !== "" || newPageContent.trim() !== "")));
+
   const loadCollectives = () => {
+    const current = guard("collectives");
     setCollectives(null);
+    setLoadError(null);
     void api
       .tool("collectives_get_collectives", {}, instance)
       .then((result) =>
+        current() &&
         setCollectives(
           (arrayOf(partText(result).data, "collectives") ?? []).map((c) => ({
             id: Number(c.id),
@@ -79,72 +90,114 @@ export default function Collectives() {
           })),
         ),
       )
-      .catch((error) => setProblem(sayError(error)));
+      .catch((error) => current() && setLoadError(sayError(error)));
   };
 
   // the panel remounts this tab for another instance (client.tsx keys it by one), so a first load is all there is
   useEffect(() => { loadCollectives(); }, []);
+
+  const toPages = (result: Awaited<ReturnType<typeof api.tool>>, ...keys: string[]): PageRow[] => {
+    const data = partText(result).data;
+    return keys.reduce<Record<string, unknown>[] | undefined>((found, key) => found ?? (arrayOf(data, key) as Record<string, unknown>[] | undefined), undefined)?.map(readPage) ?? [];
+  };
+
+  /** The pages of a collective, read again; those on screen stay while they come where `keep` says so. */
+  const loadPages = (id: number, keep = false) => {
+    const current = guard("pages");
+    if (!keep) setPages(null);
+    setLoadError(null);
+    void api
+      .tool("collectives_get_pages", { collective_id: id }, instance)
+      .then((result) => current() && setPages(toPages(result, "pages", "results")))
+      .catch((error) => current() && setLoadError(sayError(error)));
+  };
 
   const selectCollective = (c: Collective) => {
     setCollectiveId(c.id);
     setCanEditHere(Boolean(c.canEdit));
     setOpen(null);
     setQuery("");
-    setPages(null);
-    void api
-      .tool("collectives_get_pages", { collective_id: c.id }, instance)
-      .then((result) => {
-        const data = partText(result).data;
-        const list = (arrayOf(data, "pages") ?? arrayOf(data, "results") ?? []) as Record<string, unknown>[];
-        setPages(list.map(readPage));
-      })
-      .catch((error) => setProblem(sayError(error)));
+    setProblem(null);
+    loadPages(c.id);
   };
+
   const search = () => {
+    if (collectiveId === null) return;
     const text = query.trim();
-    if (!text || collectiveId === null) return;
+    if (!text) {
+      loadPages(collectiveId); // nothing to look for is the whole list again, not the last search's result
+      return;
+    }
+    const current = guard("pages");
     setSearching(true);
+    setProblem(null);
     void api
       .tool("collectives_search_pages", { collective_id: collectiveId, query: text }, instance)
-      .then((result) => {
-        const data = partText(result).data;
-        const list = (arrayOf(data, "results") ?? arrayOf(data, "pages") ?? []) as Record<string, unknown>[];
-        setPages(list.map(readPage));
-      })
-      .catch((error) => setProblem(sayError(error)))
-      .finally(() => setSearching(false));
+      .then((result) => current() && setPages(toPages(result, "results", "pages")))
+      .catch((error) => current() && setProblem(sayError(error)))
+      .finally(() => current() && setSearching(false));
   };
 
-  const openPage = (row: PageRow) => {
+  /** A page opened to its text, with the etag of its file when it can be written. `draft` is words to put in it instead (a new page's). */
+  const showPage = async (row: PageRow, draft?: string) => {
     if (collectiveId === null || row.id === 0) return;
+    const current = guard("page");
     setOpen(null);
-    void api
-      .tool("collectives_get_page", { collective_id: collectiveId, page_id: row.id }, instance)
-      .then((result) => {
-        const data = partText(result).data as Record<string, unknown> | undefined;
-        if (!data || typeof data.content !== "string") throw new Error(t("The page did not answer in a way this panel reads."));
-        // its own words as they stand where it stands: the title from the answer, else the one the list gave
-        const title = (typeof data.page === "object" && data.page !== null ? String((data.page as Record<string, unknown>).title ?? row.title) : row.title);
-        setOpen({ ...row, title, content: data.content });
-        setPageDraft(data.content);
-      })
-      .catch((error) => setProblem(sayError(error)));
+    setSaved(false);
+    setProblem(null);
+    try {
+      const result = await api.tool("collectives_get_page", { collective_id: collectiveId, page_id: row.id }, instance);
+      const data = partText(result).data as Record<string, unknown> | undefined;
+      if (!data || typeof data.content !== "string") throw new Error(t("The page did not answer in a way this panel reads."));
+      // its own words as they stand where it stands: the title from the answer, else the one the list gave
+      const title = (typeof data.page === "object" && data.page !== null ? String((data.page as Record<string, unknown>).title ?? row.title) : row.title);
+      const at = pagePath(row);
+      let etag: string | undefined;
+      if (canEditHere && at !== undefined) {
+        // The file as it stands now: its etag is what a save is made against (the server writes an existing file only then).
+        const read = partText(await api.tool("nc_webdav_read_file", { path: at }, instance)).data;
+        etag = typeof read === "object" && read !== null ? strOf((read as Record<string, unknown>).etag) : undefined;
+      }
+      if (!current()) return;
+      setOpen({ ...row, title, content: data.content, etag });
+      setPageDraft(draft ?? data.content);
+    } catch (error) {
+      if (current()) setProblem(sayError(error));
+    }
   };
 
-  /** The picked page's text written back where it stands (the way the tools themselves say a page is worded). */
+  const leavePage = async () => {
+    if (dirty && !(await portal.ui.confirm({ title: t("Leave this page without saving?"), message: t("What you changed in it is lost."), confirmLabel: t("Leave"), danger: true }))) return;
+    setOpen(null);
+    setSaved(false);
+  };
+
+  /** The picked page's text written back where it stands, against the etag it was read with. */
   const savePage = async () => {
     if (busy || open === null) return;
     const at = pagePath(open);
-    if (at === undefined) {
+    if (at === undefined || open.etag === undefined) {
       setProblem(t("This page's place in the files could not be read."));
       return;
     }
     setBusy(true);
     setProblem(null);
+    setSaved(false);
     try {
-      await api.tool("nc_webdav_write_file", { path: at, content: pageDraft }, instance);
+      const answer = partText(await api.tool("nc_webdav_write_file", { path: at, content: pageDraft, if_match: open.etag }, instance)).data;
+      let etag = typeof answer === "object" && answer !== null ? strOf((answer as Record<string, unknown>).etag) : undefined;
+      if (etag === undefined) {
+        // the server did not return one (a proxy strips it): the file read again gives it
+        const read = partText(await api.tool("nc_webdav_read_file", { path: at }, instance)).data;
+        etag = typeof read === "object" && read !== null ? strOf((read as Record<string, unknown>).etag) : undefined;
+      }
+      setOpen({ ...open, content: pageDraft, etag });
+      setSaved(true);
+      if (collectiveId !== null) loadPages(collectiveId, true);
     } catch (error) {
-      setProblem(sayError(error));
+      const said = sayError(error);
+      // The page was changed by someone else since it was opened: said as that, and the words stay here.
+      setProblem(/412|precondition|etag|changed|modified|conflict/i.test(said) ? t("The page was changed elsewhere since you opened it. Your words are still here; open the page again to see the new text. ({error})", { error: said }) : said);
     } finally {
       setBusy(false);
     }
@@ -176,29 +229,39 @@ export default function Collectives() {
   const createPage = async () => {
     if (busy || collectiveId === null || newPageTitle.trim() === "") return;
     const title = newPageTitle.trim();
+    const content = newPageContent;
     setBusy(true);
     setProblem(null);
     try {
       const result = await api.tool("collectives_create_page", { collective_id: collectiveId, parent_id: 0, title }, instance);
       setPageFormOpen(false);
       setNewPageTitle("");
-      // the made page's own words: read back where it stands to find its file in the files
-      const pagesResult = await api.tool("collectives_get_pages", { collective_id: collectiveId }, instance);
-      const pdata = partText(pagesResult).data;
-      const list = (arrayOf(pdata, "pages") ?? arrayOf(pdata, "results") ?? []) as Record<string, unknown>[];
-      setPages(list.map(readPage));
-      if (newPageContent !== "") {
-        const data = partText(result).data;
-        const id = Number(typeof data === "object" && data !== null ? (data as Record<string, unknown>).id : NaN);
-        if (!Number.isNaN(id)) {
-          const created = list.find((r) => Number(r.id) === id);
-          if (created !== undefined) {
-            const at = pagePath(created);
-            if (at !== undefined) await api.tool("nc_webdav_write_file", { path: at, content: newPageContent }, instance);
-          }
-        }
-      }
       setNewPageContent("");
+      // the made page's own words: read back where it stands to find its file in the files
+      const list = toPages(await api.tool("collectives_get_pages", { collective_id: collectiveId }, instance), "pages", "results");
+      setPages(list);
+      if (content === "") return;
+      const data = partText(result).data;
+      const id = Number(typeof data === "object" && data !== null ? (data as Record<string, unknown>).id : NaN);
+      const created = list.find((r) => r.id === id);
+      if (created === undefined) {
+        setProblem(t("The page “{title}” is made, but its text could not be put in it: the page was not found in the list.", { title }));
+        return;
+      }
+      // The page's file exists now (the server made it with the page): its text is written against the etag it has.
+      // Where that fails the page stands open with the words in it, ready to be saved again -- they are not lost.
+      try {
+        const at = pagePath(created);
+        if (at === undefined) throw new Error(t("This page's place in the files could not be read."));
+        const read = partText(await api.tool("nc_webdav_read_file", { path: at }, instance)).data;
+        const etag = typeof read === "object" && read !== null ? strOf((read as Record<string, unknown>).etag) : undefined;
+        if (etag === undefined) throw new Error(t("The page's file did not say which version it is."));
+        await api.tool("nc_webdav_write_file", { path: at, content, if_match: etag }, instance);
+        loadPages(collectiveId, true);
+      } catch (error) {
+        await showPage(created, content);
+        setProblem(t("The page “{title}” is made, but its text could not be put in it: {error}", { title, error: sayError(error) }));
+      }
     } catch (error) {
       setProblem(sayError(error));
     } finally {
@@ -206,12 +269,15 @@ export default function Collectives() {
     }
   };
 
+  const banner = problem !== null ? <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner> : null;
+
   // ---- the open page ---------------------------------------------------------------
   if (open !== null) {
-    const writable = canEditHere && pagePath(open) !== undefined;
+    const writable = canEditHere && open.etag !== undefined;
     return (
       <div className="space-y-2">
-        <button type="button" className={portal.ui.classes.ghost} onClick={() => setOpen(null)}>
+        {banner}
+        <button type="button" className={portal.ui.classes.ghost} onClick={() => void leavePage()}>
           ← {t("Pages")}
         </button>
         <div className="nc-share">
@@ -224,17 +290,19 @@ export default function Collectives() {
               onChange={(e) => setPageDraft(e.target.value)}
             />
           ) : open.content ? (
-            <pre className="nc-file-text">{open.content}</pre>
+            <portal.ui.Markdown>{open.content}</portal.ui.Markdown>
           ) : (
             <p className="text-sm text-fg-subtle">{t("This page is empty.")}</p>
           )}
         </div>
         {writable && (
-          <button type="button" className={portal.ui.classes.primary} disabled={busy} onClick={() => void savePage()}>
-            {t("Save the page")}
-          </button>
+          <div className="flex items-center gap-2">
+            <button type="button" className={portal.ui.classes.primary} disabled={busy || !dirty} onClick={() => void savePage()}>
+              {t("Save the page")}
+            </button>
+            {saved && !dirty && <span className="text-xs text-fg-subtle" role="status">{t("Saved.")}</span>}
+          </div>
         )}
-        {problem !== null && <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{problem}</portal.ui.ErrorBanner>}
       </div>
     );
   }
@@ -243,7 +311,8 @@ export default function Collectives() {
   if (collectiveId !== null) {
     return (
       <div className="space-y-2">
-        <button type="button" className={portal.ui.classes.ghost} onClick={() => setCollectiveId(null)}>
+        {banner}
+        <button type="button" className={portal.ui.classes.ghost} onClick={() => { setProblem(null); setLoadError(null); setCollectiveId(null); }}>
           ← {t("Collectives")}
         </button>
         <form
@@ -306,8 +375,8 @@ export default function Collectives() {
           )
         )}
         {pages === null ? (
-          problem && !searching ? (
-            <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The pages could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
+          loadError ? (
+            <portal.ui.LoadFailed error={t("The pages could not be read: {error}", { error: loadError })} onRetry={() => loadPages(collectiveId)} />
           ) : (
             <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
           )
@@ -317,7 +386,7 @@ export default function Collectives() {
           <ul className="nc-list">
             {pages.map((row) => (
               <li key={row.id}>
-                <button type="button" className="nc-row" onClick={() => openPage(row)}>
+                <button type="button" className="nc-row" onClick={() => void showPage(row)}>
                   <span className="flex-1 truncate">{row.emoji ? `${row.emoji} ` : ""}{row.title}</span>
                   <span className="text-xs text-fg-subtle flex flex-col items-end gap-0.5 flex-shrink-0">
                     {row.size > 0 && <span>{Math.max(1, Math.round(row.size / 1024))} KiB</span>}
@@ -334,8 +403,8 @@ export default function Collectives() {
 
   // ---- the collectives ------------------------------------------------------------------
   if (collectives === null) {
-    return problem ? (
-      <portal.ui.ErrorBanner onClose={() => setProblem(null)}>{t("The collectives could not be read: {error}", { error: problem })}</portal.ui.ErrorBanner>
+    return loadError ? (
+      <portal.ui.LoadFailed error={t("The collectives could not be read: {error}", { error: loadError })} onRetry={loadCollectives} />
     ) : (
       <portal.ui.RowsSkeleton rows={3} label={t("Loading…")} />
     );
@@ -386,6 +455,7 @@ export default function Collectives() {
   if (collectives.length === 0) {
     return (
       <div className="space-y-2">
+        {banner}
         <portal.ui.Empty>{t("No collectives are set up on this Nextcloud.")}</portal.ui.Empty>
         {collectiveFormOpen ? collectiveForm : (
           <button type="button" className={portal.ui.classes.ghost} onClick={() => setCollectiveFormOpen(true)}>
@@ -397,6 +467,7 @@ export default function Collectives() {
   }
   return (
     <div className="space-y-2">
+      {banner}
       {collectiveFormOpen ? collectiveForm : (
         <button type="button" className={portal.ui.classes.ghost} onClick={() => setCollectiveFormOpen(true)}>
           + {t("A new collective")}

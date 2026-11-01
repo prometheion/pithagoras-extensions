@@ -125,6 +125,51 @@ function wordOp(op: unknown, i: number): WordOp {
   return { ...after(), table: rows as string[][] };
 }
 
+/** What office_screenshot is to show, as the locate command takes it (seat-page.ts VIEW_LOCATE). */
+export type ViewJob = {
+  kind: "view.locate";
+  args: { kind: "word"; page?: number; quote?: string; nth?: number } | { kind: "cell"; sheet?: string; range?: { col: number; row: number; cols: number; rows: number } };
+};
+
+/** The longest quote office_screenshot looks for. */
+const MAX_VIEW_QUOTE = 1000;
+
+/** office_screenshot's parameters for a document of `ext`, checked: the locate job, or an OpError. Word takes `page`
+ * (from 1) or `quote` (with `nth`, from 1); a spreadsheet `sheet` and `range`. */
+export function viewJob(ext: "docx" | "xlsx", params: Record<string, unknown>): ViewJob {
+  const given = (key: string) => params[key] !== undefined;
+  const whole = (key: string) => {
+    const v = params[key];
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) throw new OpError("bad_op", `${key} is a whole number from 1`);
+    return v;
+  };
+  if (ext === "docx") {
+    const other = ["sheet", "range"].filter(given);
+    if (other.length) throw new OpError("unsupported_format", `${other.join(" and ")} ${other.length === 1 ? "is" : "are"} for spreadsheets; a Word document is shown by page or quote`);
+    if (given("page") && given("quote")) throw new OpError("bad_op", "give page or quote, not both");
+    if (given("nth") && !given("quote")) throw new OpError("bad_op", "nth picks among the places a quote is found: give quote with it");
+    if (given("quote")) {
+      const quote = params.quote;
+      if (typeof quote !== "string" || quote === "" || !oneLine(quote) || quote.length > MAX_VIEW_QUOTE) throw new OpError("bad_op", `quote is text of the page to show, as office_read shows it (one line, at most ${MAX_VIEW_QUOTE} characters)`);
+      return { kind: "view.locate", args: { kind: "word", quote, ...(given("nth") ? { nth: whole("nth") } : {}) } };
+    }
+    return { kind: "view.locate", args: { kind: "word", page: given("page") ? whole("page") : 1 } };
+  }
+  const other = ["page", "quote", "nth"].filter(given);
+  if (other.length) throw new OpError("unsupported_format", `${other.join(" and ")} ${other.length === 1 ? "is" : "are"} for Word documents; a spreadsheet is shown by sheet and range`);
+  const args: { kind: "cell"; sheet?: string; range?: { col: number; row: number; cols: number; rows: number } } = { kind: "cell" };
+  if (given("sheet")) {
+    if (typeof params.sheet !== "string" || params.sheet === "") throw new OpError("bad_op", "sheet is a sheet's name");
+    args.sheet = params.sheet;
+  }
+  if (given("range")) {
+    const range = typeof params.range === "string" ? parseRange(params.range) : null;
+    if (!range) throw new OpError("bad_op", `range is cells as A1:H30 (got ${JSON.stringify(params.range)})`);
+    args.range = range;
+  }
+  return { kind: "view.locate", args };
+}
+
 /** An A1 address or range ("B2", "$B$2", "A1:C3", either corner first): its first column and row (from 0) and size. */
 export function parseRange(range: string): { col: number; row: number; cols: number; rows: number } | null {
   const m = /^\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?$/.exec(range.trim().toUpperCase());

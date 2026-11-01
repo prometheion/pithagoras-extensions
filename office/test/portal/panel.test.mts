@@ -114,6 +114,8 @@ const editorOf = async (page: Page, key: string) => frames(page, "#panel").and(p
 const call = (name: string, details: Record<string, unknown>) => ({ name, status: "done", input: {}, details });
 const EDIT = call("office_edit", { action: "edit", id: "d2", title: "Budget", ext: "xlsx", from: 1, to: 2, ops: 1 });
 const LIST = call("office_list", { action: "list", documents: [{}, {}] });
+const PAGE_SHOT = call("office_screenshot", { action: "screenshot", id: "d1", page: 3, pages: 8, width: 724, height: 1024, bytes: 90_000 });
+const RANGE_SHOT = call("office_screenshot", { action: "screenshot", id: "d2", sheet: "Data", range: "A1:H30", zoom: 100, width: 600, height: 500, bytes: 50_000 });
 
 test("a row of the chat's Office panel opens its document in the panel, beside the chat, never the Office tab; back is the list again; a control opens it in the tab", async () => {
   const page = await chatPage();
@@ -157,6 +159,18 @@ test("an office tool's card opens its document in the chat's Office panel (the p
   assert.deepEqual(now.opens.at(-1), ["office", {}]);
   assert.equal(await frames(page, "#panel").count(), 0);
   assert.deepEqual(now.navigated, [], "never the Office tab");
+  await page.context().close();
+});
+
+test("office_screenshot's card says which page or range it looked at, and opens that document in the panel", async () => {
+  const page = await chatPage([PAGE_SHOT, RANGE_SHOT]);
+  const cards = page.locator("#conversation").getByRole("button", { name: "Open in Office" });
+  const conversation = await page.locator("#conversation").innerText();
+  assert.match(conversation, /Looked at a document\s+Plan\s+Plan\.docx · Page 3/);
+  assert.match(conversation, /Looked at a document\s+Budget\s+Budget\.xlsx · Data A1:H30/);
+  await cards.nth(1).click();
+  await editorOf(page, "key-d2");
+  assert.deepEqual((await seen(page)).opens, [["office", { doc: "d2" }]]);
   await page.context().close();
 });
 

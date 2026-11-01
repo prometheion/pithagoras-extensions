@@ -195,6 +195,10 @@ interface OfficeToolDetails {
   to?: number;
   ops?: number;
   documents?: unknown[];
+  /** office_screenshot's: the page, or the sheet and range, the picture shows. */
+  page?: number;
+  sheet?: string;
+  range?: string;
 }
 
 function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) {
@@ -210,6 +214,7 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
     edit: t("Edited a document"),
     comments: t("Read the comments of a document"),
     list: t("Listed the office documents"),
+    screenshot: t("Looked at a document"),
   };
   const titleText = heading[d.action];
   if (!titleText) return card;
@@ -226,6 +231,8 @@ function OfficeCall(props: ChatProps & { call: ToolCallView; card: ReactNode }) 
     if (d.action === "edit") {
       facts.push(typeof d.from === "number" && typeof d.to === "number" ? t("Revision {from} to {to}", { from: d.from, to: d.to }) : typeof d.to === "number" ? t("Revision {n}", { n: d.to }) : "");
       facts.push(typeof d.ops === "number" ? (d.ops === 1 ? t("1 edit") : t("{n} edits", { n: d.ops })) : "");
+    } else if (d.action === "screenshot") {
+      facts.push(typeof d.page === "number" ? t("Page {n}", { n: d.page }) : typeof d.sheet === "string" ? `${d.sheet} ${d.range ?? ""}`.trim() : "");
     } else if (typeof d.mtimeMs === "number") facts.push(t("Revision {n}", { n: d.mtimeMs }));
   }
 
@@ -304,7 +311,7 @@ export default function office(given: Portal): void {
   });
 
   // A call of one of the tools, in place of the portal's card for a finished one that names its document.
-  for (const tool of ["office_list", "office_create", "office_read", "office_edit", "office_comments"]) {
+  for (const tool of ["office_list", "office_create", "office_read", "office_edit", "office_comments", "office_screenshot"]) {
     portal.slots.register("chat.tool", { id: tool, tool, component: OfficeCall });
   }
 

@@ -60,15 +60,10 @@ export function excludeGlobs(inst: { name: string; capabilities?: Record<string,
   return out;
 }
 
-/** A choice map from the free keep-out lists an earlier version kept: every family whose glob stands in the list is
- * read off there, nothing else -- a glob no family names (the person's own hand work) does not come over, as this
- * module offers no place for it to stand. */
-export function capabilitiesFromExcludeText(instanceName: string, text: string): Record<string, boolean> {
-  const named = text.split(",").map((part) => part.trim()).filter(Boolean);
-  const out: Record<string, boolean> = {};
-  for (const cap of CAPABILITIES) if (globsFor(cap, instanceName).some((glob) => named.includes(glob))) out[cap.id] = false;
-  return out;
-}
+/** The tools the agent may not call without the person's yes: mail that goes out, a public link, a share, and
+ * everything that deletes or clears -- by their raw names, which pi-mcp-adapter matches whatever the instance is
+ * called (`approveTools` of the instance's entry). A person's own list in the entry takes this one's place. */
+export const APPROVE_TOOLS = ["nc_mail_send_message", "nc_share_create*", "nc_share_update*", "nc_share_delete*", "*_delete_*", "*_clear_*"];
 
 /** One tab of the panel and what its showing stands on: at least one of its capabilities turned on. */
 export interface PanelTab {
@@ -77,10 +72,8 @@ export interface PanelTab {
   capabilityIds: string[];
 }
 
-/** The tabs, in their order: what the families of today stand under -- with the ones an earlier version of this
- * extension never showed (mail, news and collectives among them) beside them. */
-/** The standing order of the tabs (Simeon, 2026-10-30): Files stands first and is the default view,
-    then Calendar, Contacts, Notes, Deck, Collectives, Cookbook, Shopping List, Mail, News. */
+/** The tabs, in their order: Files stands first and is the default view, then Calendar, Contacts, Notes, Deck,
+ * Collectives, Cookbook, Shopping List, Mail, News. */
 export const TABS: PanelTab[] = [
   { id: "files", label: "Files", capabilityIds: ["files", "sharing"] },
   { id: "calendar", label: "Calendar", capabilityIds: ["calendar"] },

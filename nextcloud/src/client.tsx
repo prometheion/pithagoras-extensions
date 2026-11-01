@@ -60,12 +60,12 @@ const TAB_ICONS: Record<string, ComponentType> = {
  * has nothing to say (no Nextcloud set) it says that, with the way to where the keys are kept. */
 function NextcloudPanel({ chat, panel }: PanelProps) {
   portal.locale.use();
-  // Files stands first and is the view the panel opens on (Simeon, 2026-10-30).
+  // Files stands first and is the view the panel opens on.
   const [tab, setTab] = useState<string>("files");
   const [status, setStatus] = useState<NextcloudStatus | null>(null);
   const [selected, setSelected] = useState<string | undefined>(undefined);
   // What this chat's own tool switch says of the instances' servers: an instance the conversation turned off does
-  // not stand in its switcher -- what a chat may not call on is offered nowhere to it (Simeon, 2026-10-30).
+  // not stand in its switcher -- what a chat may not call on is offered nowhere to it.
   const [policy, setPolicy] = useState<ChatToolPolicy | null>(null);
   useEffect(() => {
     let gone = false;
@@ -89,9 +89,9 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
   const instances = status?.instances ?? [];
   // What stands in this chat's switcher: every instance, save one this conversation switched off. The off list
   // speaks the portal's <server>_<tool> spelling, and an entry claims to whichever instance its front matches --
-  // longest first, for "nextcloud" is a front of "nextcloud_uni", and the longer name has the claim (Simeon:
-  // a server a chat turned off is offered nowhere in it). Nothing of an instance named off here stands unknown,
-  // and unknown is offered: what was never asked for is not hidden.
+  // longest first, for "nextcloud" is a front of "nextcloud_uni", and the longer name has the claim: a server a
+  // chat turned off is offered nowhere in it. Nothing of an instance named off here stands unknown, and unknown
+  // is offered: what was never asked for is not hidden.
   const ownerOf = (name: string): string | undefined => {
     let best: string | undefined;
     for (const inst of instances)

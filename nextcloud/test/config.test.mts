@@ -1,12 +1,12 @@
 /** What the settings say of themselves: where the store stands (this extension's own data folder, beside pi's files),
- * what an earlier version kept in pi's config file comes over as, what a save keeps and drops there, and what a name
- * may stand under -- each against throwaway directories, never the person's. */
+ * what a save keeps, the entries this extension remembers it wrote, and what a name may stand under -- each against
+ * throwaway directories, never the person's. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadInstances, saveInstances, configured, isValidInstanceName, DEFAULT_INSTANCE_NAME } from "../src/config.ts";
+import { loadInstances, saveInstances, loadWritten, saveWritten, loadEntriesVersion, ENTRIES_VERSION, configured, isValidInstanceName } from "../src/config.ts";
 
 function withHome(fn: () => void): void {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "nextcloud-settings-"));
@@ -29,34 +29,6 @@ test("nothing saved means no instance stands", () => {
   withHome(() => assert.deepEqual(loadInstances(), []));
 });
 
-test("the flat keys of an earlier version come over as its one instance, and leave pi's config file then", () => {
-  withHome(() => {
-    fs.mkdirSync(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
-    fs.writeFileSync(
-      path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"),
-      JSON.stringify({ url: "https://cloud.example.org", username: "user", password: "pw", mcpExcludeTools: "x_*", otherKey: 1 }),
-    );
-    const [inst] = loadInstances();
-    assert.equal(inst.name, DEFAULT_INSTANCE_NAME);
-    assert.equal(inst.url, "https://cloud.example.org");
-    assert.equal(inst.username, "user");
-    assert.equal(inst.password, "pw");
-    assert.deepEqual(inst.capabilities, {}); // an unrecognized keep-out list comes over as no choices
-    assert.equal(configured(inst), true);
-
-    // The store stands in this module's own data folder from the first load -- and pi's config file is no longer read of again.
-    const stored: Record<string, unknown> = JSON.parse(fs.readFileSync(storeFile(), "utf8"));
-    assert.ok(Array.isArray(stored.instances) && (stored.instances as unknown[]).length === 1);
-    const legacyAfterLoad: Record<string, unknown> = JSON.parse(fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), "utf8"));
-    for (const legacy of ["url", "username", "password", "mcpExcludeTools", "instances"]) assert.equal(legacy in legacyAfterLoad, false);
-    assert.equal(legacyAfterLoad.otherKey, 1); // nothing else of the file touched
-
-    const saved = saveInstances([inst]);
-    assert.equal(saved.length, 1);
-    assert.ok(fs.existsSync(storeFile())); // and a save stands where the store does
-  });
-});
-
 test("a save keeps what it is given and only that: a second instance with its port stands as saved", () => {
   withHome(() => {
     const a = { name: "nextcloud", url: "https://a.example.org", username: "u", password: "p" };
@@ -72,34 +44,48 @@ test("a save keeps what it is given and only that: a second instance with its po
   });
 });
 
-test("an earlier version's saved list comes over entry by entry, and leaves pi's config file then", () => {
+test("the entries this extension wrote are remembered beside the instances, and a save of the instances keeps them", () => {
   withHome(() => {
-    fs.mkdirSync(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
-    fs.writeFileSync(
-      path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"),
-      JSON.stringify({ instances: [{ url: "https://x" }, { name: "ok", container: "adopted:somebox" }, { name: "fine", port: -2 }] }),
-    );
-    const insts = loadInstances();
-    assert.equal(insts.length, 2);
-    // an entry that names no instance is dropped; an old container field of a saved version comes over unset -- the
-    // instance takes its own container by name from the plan instead
-    assert.equal((insts[0] as Record<string, unknown>).container, undefined);
-    assert.equal(insts[1].port, undefined); // a port that is not a real one stands unset
-    const afterLoad: Record<string, unknown> = JSON.parse(fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"), "utf8"));
-    assert.equal("instances" in afterLoad, false); // the list came over and left there
+    assert.deepEqual(loadWritten(), []);
+    assert.equal(loadEntriesVersion(), 1, "no store: entries written the way the first version did");
+    saveInstances([{ name: "uni", url: "https://a.example.org", username: "u", password: "p" }]);
+    saveWritten(["uni", "uni", "home"]);
+    assert.deepEqual(loadWritten(), ["uni", "home"]);
+    assert.equal(loadEntriesVersion(), ENTRIES_VERSION);
+    saveInstances([]);
+    assert.deepEqual(loadWritten(), ["uni", "home"], "a save of the list does not forget what was written");
+    assert.equal(loadInstances().length, 0);
   });
 });
 
-test("an old flat entry's keep-out list comes over as its capability choices", () => {
+test("the container name and the choice of plain http stand as saved", () => {
+  withHome(() => {
+    saveInstances([{ name: "uni", url: "http://nas.lan", allowHttp: true, username: "u", password: "p", port: 8001, container: "pithagoras-nextcloud-mcp-uni" }, { name: "b", url: "https://b", username: "u", password: "p" }]);
+    const [a, b] = loadInstances();
+    assert.equal(a.allowHttp, true);
+    assert.equal(a.container, "pithagoras-nextcloud-mcp-uni");
+    assert.equal(b.allowHttp, undefined);
+    assert.equal(b.container, undefined);
+  });
+});
+
+test("the settings file holds app passwords: mode 0600, in a folder of 0700", () => {
+  withHome(() => {
+    saveInstances([{ name: "uni", url: "https://a.example.org", username: "u", password: "secret" }]);
+    assert.equal(fs.statSync(storeFile()).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(storeFile())).mode & 0o777, 0o700);
+  });
+});
+
+test("pi's own settings file is never read or written", () => {
   withHome(() => {
     fs.mkdirSync(process.env.PI_CODING_AGENT_DIR!, { recursive: true });
-    fs.writeFileSync(
-      path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"),
-      JSON.stringify({ url: "https://u.example.org", username: "u@x", password: "pw", mcpExcludeTools: " nextcloud_nc_mail_* , nextcloud_collectives_* " }),
-    );
-    const inst = loadInstances()[0];
-    assert.equal(inst.name, DEFAULT_INSTANCE_NAME); // the flat entry came under that version's one name
-    assert.deepEqual(inst.capabilities, { mail: false, collectives: false }); // only what the list named stands off
+    const theirs = path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json");
+    fs.writeFileSync(theirs, JSON.stringify({ url: "https://old.example.org", username: "u", password: "pw", instances: [{ name: "x", url: "y" }], mine: 1 }));
+    const before = fs.readFileSync(theirs, "utf8");
+    assert.deepEqual(loadInstances(), [], "nothing comes over from it");
+    saveInstances([{ name: "uni", url: "https://a.example.org", username: "u", password: "p" }]);
+    assert.equal(fs.readFileSync(theirs, "utf8"), before);
   });
 });
 

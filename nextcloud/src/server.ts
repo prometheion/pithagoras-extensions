@@ -8,14 +8,19 @@
  * Stateless by design: every route re-reads the keys (the agent's config file) and finds out from Docker itself
  * where things stand; nothing of it is lost where this process was, and two reads never see different worlds. What
  * a save starts -- pulling the image, making or remaking the containers, setting or clearing the mcp.json entries --
- * runs on its own, reported back in the status's task; one run at a time.
+ * runs on its own, reported back in the status's task; one run at a time. A removal is a save of the list without
+ * the instance, and the run behind it takes away what no instance stands for any more: every container of this
+ * extension that no plan names, and every entry it wrote (it keeps their names) that no instance carries.
  */
+import { isDeepStrictEqual } from "node:util";
 import type { ServerHalf } from "@pithagoras/extension-api/server";
-import { setPortal, portal, docker } from "./host";
-import { loadInstances, saveInstances, configured, isValidInstanceName, NextcloudInstance } from "./config";
-import { CAPABILITIES, excludeGlobs, availableFromTools } from "./capabilities";
+import { writesFromHere } from "../../shared/proxy";
+import { setPortal, portal, docker, personGate } from "./host";
+import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
+import { CAPABILITIES, APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
-import { ensureOwn, releaseOwn, containerState, instanceAddress, planOwn, IMAGE, OwnPlan } from "./container";
+import { normalizeUrl, checkAccountSoon, forgetAccount } from "./account";
+import { ensureOwn, releaseOwn, containerState, instanceAddress, ownAddress, planOwn, CONTAINER_BASE, IMAGE, OwnPlan } from "./container";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
  * ask at once they stand in a row: each run waits for the one before it, so every run sees finished runs only, never
@@ -51,6 +56,7 @@ function view(inst: NextcloudInstance): Record<string, unknown> {
   return {
     name: inst.name,
     url: inst.url,
+    ...(inst.allowHttp === true ? { allowHttp: true } : {}),
     username: inst.username,
     ...(inst.capabilities !== undefined ? { capabilities: { ...inst.capabilities } } : {}),
     passwordSet: inst.password !== "",
@@ -58,13 +64,75 @@ function view(inst: NextcloudInstance): Record<string, unknown> {
   };
 }
 
+/** One client for each endpoint, kept: a call is not a handshake (a session each time was never closed, and the
+ * server holds its sessions for half an hour). */
+const clients = new Map<string, ReturnType<typeof mcpClient>>();
+function clientFor(address: string): ReturnType<typeof mcpClient> {
+  let client = clients.get(address);
+  if (!client) clients.set(address, (client = mcpClient(address)));
+  return client;
+}
+/** A client no longer used (its container made again, or gone): its session ended, its tool names forgotten. */
+function forgetClient(address: string): void {
+  const client = clients.get(address);
+  clients.delete(address);
+  toolNamesCache.delete(address);
+  void client?.close();
+}
+
+/** How long a container is given to come up and answer as the Nextcloud MCP server before the run says it did not. */
+const ANSWER_WITHIN_MS = Number(process.env.PITHAGORAS_NEXTCLOUD_ANSWER_MS?.trim()) > 0 ? Number(process.env.PITHAGORAS_NEXTCLOUD_ANSWER_MS) : 60_000;
+
+/** The container running, and answering as the Nextcloud MCP server (the server names itself "Nextcloud MCP"): what
+ * stands on the port may be another program, or the container may have exited because the port is taken. Only a
+ * server that answered goes into pi's config. */
+async function awaitAnswer(d: ReturnType<typeof docker>, plan: OwnPlan): Promise<void> {
+  const address = ownAddress(plan.port);
+  forgetClient(address); // a handshake of its own: what a session made earlier was told is not what stands now
+  const give = Date.now() + ANSWER_WITHIN_MS;
+  let last = "";
+  for (;;) {
+    const state = await containerState(d, plan.containerName);
+    if (state === "exited" || state === "dead") {
+      last = `the container ${state}${plan.port ? ` (is port ${plan.port} taken by another program?)` : ""}`;
+      break;
+    }
+    try {
+      const server = await clientFor(address).ping();
+      if (/nextcloud/i.test(server.name)) return;
+      last = `${address} answers as ${server.name ? `"${server.name}"` : "an unnamed server"}, not as the Nextcloud MCP server`;
+    } catch (error) {
+      last = (error as Error).message;
+    }
+    if (Date.now() >= give) break;
+    await new Promise((wait) => setTimeout(wait, 300));
+  }
+  throw new Error(`${plan.inst.name}: its server did not come up: ${last}. Its log is in Settings -> Docker.`);
+}
+
+/** Whether an entry of pi's mcp.json looks like one this extension wrote: the loopback /mcp of a container, kept
+ * alive, with no login of its own. What an earlier version wrote and left behind is such an entry, with nothing
+ * recorded of it. */
+function looksOwn(entry: Record<string, unknown>): boolean {
+  const login = ["headers", "env", "auth", "oauth", "command", "socket"].some((key) => key in entry) || Object.keys(entry).some((key) => /^bearer/i.test(key));
+  return typeof entry.url === "string" && /^http:\/\/127\.0\.0\.1:\d+\/mcp$/.test(entry.url) && entry.lifecycle === "persistent" && !login;
+}
+
+/** The server of that name in pi's mcp.json, where it is not this extension's to take: one it did not write and that
+ * does not look like its own. */
+function foreignEntry(name: string): boolean {
+  const there = portal().mcp.get(name);
+  return !!there && !loadWritten().includes(name) && !looksOwn(there.entry);
+}
+
 /** Bring every instance's container and its entry in pi's config to where the keys ask for them; a no-op where all
- * is well. Each configured one gets its life of a made container (remade where it no longer matches, started where
- * it stopped); an entry is cleared where the instance behind it is gone or unconfigured, so pi's config keeps saying
- * what is true. The keys
- * are read where the run starts, not where it was asked for: a run standing in the row works on what stands now.
+ * is well. Each configured one gets its life of a made container (remade where what it was made with is no longer
+ * what it says, started where it stopped), and its entry is written once that server answers as the Nextcloud MCP
+ * server. What no configured instance stands for any more goes: the containers of this extension that no plan
+ * names, and the entries it wrote under names no instance carries. An entry it did not write is never touched. The
+ * keys are read where the run starts, not where it was asked for: a run standing in the row works on what stands now.
  *
- * What an entry in pi's config takes -- url, lifecycle and excludeTools beside trusted -- is pi-mcp-adapter's own
+ * What an entry in pi's config takes -- url, lifecycle, excludeTools and approveTools -- is pi-mcp-adapter's own
  * vocabulary, checked by eye against its source, as that API has no types of its own. */
 function ensureApplied(): Promise<void> {
   const asked = loadInstances();
@@ -72,35 +140,71 @@ function ensureApplied(): Promise<void> {
     asked.some(configured) ? "bringing the containers and their entries in pi's config to where they are asked" : "removing the containers this extension made and its entries",
     async () => {
       const d = docker();
-      if (!d) throw new Error("Docker for extensions is not available to this portal");
       const insts = loadInstances();
       const plans = planOwn(insts);
-      let portsChanged = false;
-      for (const plan of plans.values()) if (plan.inst.port !== plan.port) { plan.inst.port = plan.port; portsChanged = true; }
-      if (portsChanged) saveInstances(insts); // the planned ports stand saved from now on: a later save does not shift them
-      for (const inst of insts) {
-        if (configured(inst)) continue; // what stands asks for nothing: it goes, entry as well.
-        const name = plans.get(inst.name)?.containerName;
-        if (name) await releaseOwn(d, name);
-        await portal().mcp.set(inst.name, undefined);
+      let changed = false;
+      for (const plan of plans.values()) {
+        // the planned ports and names stand saved from now on: a later save does not shift or rename them
+        if (plan.inst.port !== plan.port || plan.inst.container !== plan.containerName) {
+          plan.inst.port = plan.port;
+          plan.inst.container = plan.containerName;
+          changed = true;
+        }
       }
-      for (const inst of insts) {
-        if (!configured(inst)) continue;
-        const plan = plans.get(inst.name);
-        if (!plan) continue; // cannot stand: no plan for it (too many instances), and the status says so
-        await ensureOwn(d, plan);
-        await portal().mcp.set(inst.name, { ...carryOver(portal().mcp.get(inst.name)?.entry), url: `http://127.0.0.1:${plan.port}/mcp`, lifecycle: "persistent", excludeTools: excludeGlobs(inst) }, { trusted: true });
+      if (changed) saveInstances(insts);
+      const wanted = insts.filter(configured);
+      const names = new Set(wanted.map((inst) => inst.name));
+      const keep = new Set(wanted.map((inst) => plans.get(inst.name)!.containerName));
+      // Containers no instance stands for: a removed or unfinished instance's, or one a run left that was removed meanwhile.
+      for (const found of await d.containers.list()) {
+        if (!found.name.startsWith(CONTAINER_BASE) || keep.has(found.name)) continue;
+        await releaseOwn(d, found.name);
       }
+      let written = loadWritten();
+      const version = loadEntriesVersion();
+      // Entries this extension wrote under names that no instance carries any more.
+      for (const name of written) if (!names.has(name)) await portal().mcp.set(name, undefined);
+      written = written.filter((name) => names.has(name));
+      saveWritten(written, version);
+      const failed: string[] = [];
+      for (const inst of wanted) {
+        const plan = plans.get(inst.name)!;
+        try {
+          const there = portal().mcp.get(inst.name);
+          if (there && !written.includes(inst.name) && !looksOwn(there.entry))
+            throw new Error(`${inst.name}: pi's mcp.json already holds a server of that name that this extension did not write. Rename the instance, or remove that server in Settings -> MCP.`);
+          if (await ensureOwn(d, plan)) forgetClient(ownAddress(plan.port));
+          // Removed while it was made (a download takes minutes): no entry for it; the run behind that removal sweeps it.
+          if (!loadInstances().some((i) => i.name === inst.name)) continue;
+          await awaitAnswer(d, plan);
+          const entry = { approveTools: APPROVE_TOOLS, ...carryOver(there?.entry), url: ownAddress(plan.port), lifecycle: "persistent", excludeTools: excludeGlobs(inst) };
+          // An entry an earlier version wrote counted as the person's own (trusted). Writing a server again does not
+          // take the name out of Settings -> Guard's trusted servers; removing it does.
+          if (there && version < ENTRIES_VERSION) await portal().mcp.set(inst.name, undefined);
+          else if (there && written.includes(inst.name) && isDeepStrictEqual(there.entry, entry)) continue; // nothing to say again: every set reloads the open chats
+          await portal().mcp.set(inst.name, entry);
+          written = [...written, inst.name];
+          saveWritten(written, version);
+        } catch (error) {
+          failed.push((error as Error).message);
+        }
+      }
+      if (!failed.length) saveWritten(written, ENTRIES_VERSION);
+      if (failed.length) throw new Error(failed.join(" "));
     },
   );
 }
 
 /** What an entry in pi's config keeps of itself where this extension rewrites it: the person's own tuning of that
- * server (the debug flag, the direct-tools flag, whatever stood there) -- but not how the server is reached, which
- * the instance says now. */
+ * server (the debug flag, the direct-tools flag, the tools they chose to be asked about) -- but not how the server
+ * is reached, which the instance says now, and never a login: a header, a token or an environment someone put on
+ * an entry of that name is not sent on to the container. */
 function carryOver(entry: Record<string, unknown> | undefined): Record<string, unknown> {
   const kept: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(entry ?? {})) if (!["url", "command", "socket"].includes(key)) kept[key] = value;
+  for (const [key, value] of Object.entries(entry ?? {})) {
+    if (["url", "command", "args", "cwd", "socket", "headers", "env", "auth", "oauth"].includes(key) || /^bearer/i.test(key)) continue;
+    kept[key] = value;
+  }
   return kept;
 }
 
@@ -128,7 +232,7 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
     health = { ok: false, error: "no plan stands for its container yet" };
   } else {
     try {
-      const server = await mcpClient(address).ping();
+      const server = await clientFor(address).ping();
       health = { ok: true, server };
     } catch (error) {
       health = { ok: false, error: (error as Error).message };
@@ -144,8 +248,13 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
       // the endpoint did not list its tools right now: availability stays unknown for this pass
     }
   }
-  return { name: inst.name, containerName: name, state, address, url: inst.url || undefined, mcp, health, configured: configured(inst), ...(capabilities !== undefined ? { capabilities } : {}) };
+  // Whether the Nextcloud itself takes the login: the server's own answer says nothing of that (its handshake never
+  // reaches Nextcloud). Asked of the host directly, and kept for a minute; a host that is slow to say shows as "checking".
+  const account = configured(inst) ? await checkAccountSoon(inst, ACCOUNT_WAIT_MS) : undefined;
+  return { name: inst.name, containerName: name, state, address, url: inst.url || undefined, mcp, health, configured: configured(inst), ...(account !== undefined ? { account } : {}), ...(capabilities !== undefined ? { capabilities } : {}) };
 }
+
+const ACCOUNT_WAIT_MS = 2_500;
 
 /** The names of one endpoint's tools, asked live and answered from memory for a while: the capability check stands
  * on it, and a status poll is not to make the endpoint list its tools again every turn. */
@@ -154,7 +263,7 @@ const TOOL_NAMES_TTL_MS = 60_000;
 async function toolNames(address: string): Promise<string[]> {
   const hit = toolNamesCache.get(address);
   if (hit && Date.now() - hit.at < TOOL_NAMES_TTL_MS) return hit.names;
-  const names = (await mcpClient(address).listTools()).map((tool) => tool.name);
+  const names = (await clientFor(address).listTools()).map((tool) => tool.name);
   toolNamesCache.set(address, { at: Date.now(), names });
   return names;
 }
@@ -172,10 +281,29 @@ async function status(): Promise<Record<string, unknown>> {
   return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError };
 }
 
+/** The containers this extension made gone and the entries it wrote cleared; the keys stay. Entries first: a chat
+ * must not be offered tools of a server that is going. */
+async function teardown(): Promise<void> {
+  const d = docker();
+  const version = loadEntriesVersion();
+  for (const name of loadWritten()) {
+    await portal().mcp.set(name, undefined);
+    saveWritten(loadWritten().filter((n) => n !== name), version);
+  }
+  const found = (await d.containers.list()).filter((c) => c.name.startsWith(CONTAINER_BASE));
+  await Promise.all(found.map((c) => releaseOwn(d, c.name)));
+  for (const address of [...clients.keys()]) forgetClient(address);
+}
+
 const nextcloud: ServerHalf = async (portalArg) => {
   setPortal(portalArg);
   const r = portal().router;
   const json = portal().http.json();
+  // Changes only from the portal's own pages and only for its primary person, as Office's routes: the portal's cookie
+  // is SameSite=Lax, which a page on another port of the same site is still sent, and these routes start, remove and
+  // call tools that send mail and delete.
+  r.use(writesFromHere);
+  r.use(personGate);
 
   /** Where things stand of every instance, as above. */
   r.get("/status", async (_req, res) => {
@@ -194,19 +322,35 @@ const nextcloud: ServerHalf = async (portalArg) => {
   /** One instance added or amended -- and with it, its container and its entry in pi's config brought to where it
    * asks for them; where that fails, the keys stand and the task says why. */
   r.post("/instances", json, async (req, res) => {
-    const given = req.body as Record<string, unknown>;
+    const given = (req.body ?? {}) as Record<string, unknown>;
     const name = typeof given.name === "string" ? given.name.trim() : "";
     if (!isValidInstanceName(name)) return res.status(400).json({ error: "the instance's name may take letters, numbers, dashes and underscores, and start with a letter" });
     const insts = loadInstances();
-    let inst = insts.find((i) => i.name === name);
-    if (!inst) {
-      inst = { name, url: "", username: "", password: "" };
-      insts.push(inst);
+    const old = insts.find((i) => i.name === name);
+    // A server of that name in pi's mcp.json that this extension did not write is not to be taken over: its settings
+    // and its place would go.
+    if (foreignEntry(name))
+      return res.status(400).json({ error: `pi's mcp.json already holds a server called ${name} that this extension did not make. Use another name, or remove that server in Settings -> MCP first.` });
+    const before = old ? { ...old } : undefined;
+    const inst = old ?? { name, url: "", username: "", password: "" };
+    if (!old) insts.push(inst);
+    for (const key of ["username", "password"] as const) {
+      // The password is only set, never answered back: a page that has none to send says nothing, or nothing in it.
+      if (typeof given[key] === "string" && (key !== "password" || (given[key] as string).trim() !== "")) inst[key] = (given[key] as string).trim();
     }
-    for (const key of ["url", "username", "password"] as const) {
-      // A new instance takes its fields here on the first save; an existing one is amended in place.
-      if (typeof given[key] === "string") inst[key] = (given[key] as string).trim(); // the password is only set, never answered back
+    if (typeof given.allowHttp === "boolean") {
+      if (given.allowHttp) inst.allowHttp = true;
+      else delete inst.allowHttp;
     }
+    if (typeof given.url === "string") inst.url = given.url.trim();
+    if (inst.url !== "") {
+      const checked = normalizeUrl(inst.url, inst.allowHttp === true);
+      if ("error" in checked) return res.status(400).json({ error: checked.error });
+      inst.url = checked.url;
+    }
+    // The saved app password belongs to the host and the user it was typed for: it is not carried to another one.
+    if (before && before.password !== "" && (before.url !== inst.url || before.username !== inst.username) && (typeof given.password !== "string" || given.password.trim() === ""))
+      return res.status(400).json({ error: "A new address or user name needs the app password typed again: the saved one is not sent to another host or account." });
     if (given.capabilities !== undefined) {
       const record = given.capabilities;
       if (typeof record !== "object" || record === null || Array.isArray(record)) return res.status(400).json({ error: "the capabilities stand as a map of their ids to on or off" });
@@ -216,28 +360,23 @@ const nextcloud: ServerHalf = async (portalArg) => {
       inst.capabilities = Object.keys(next).length > 0 ? next : undefined;
     }
     const saved = saveInstances(insts);
+    forgetAccount(inst);
     // Fire-and-forget on purpose (as office's settings route): a first pull takes minutes and must not hold the
     // response open -- the run stands reported in the status's task, one at a time, and its failures stay there.
     void ensureApplied().catch(() => {});
     res.json({ instances: saved.map(view) });
   });
 
-  /** One instance gone: its entry out of pi's config, and its container with it. */
-  r.post("/instances/remove", json, async (req, res) => {
-    const body = req.body as Record<string, unknown>;
+  /** One instance gone: the list saved without it at once, and the run behind that takes its container and its entry
+   * away (what no instance stands for goes). Nothing awaits between reading the list and saving it, so a save at the
+   * same time is not lost, and a run that is pulling its image at the moment finds the instance gone when it comes
+   * round again. */
+  r.post("/instances/remove", json, (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const insts = loadInstances();
-    const gone = insts.find((i) => i.name === name);
-    if (!gone) return res.status(400).json({ error: "no such instance" });
-    if (configured(gone)) {
-      try {
-        await releaseOwn(docker(), planOwn(insts).get(name)?.containerName ?? "");
-      } catch {
-        // the container is gone already or not to be had: the entry still goes
-      }
-    }
+    if (!insts.some((i) => i.name === name)) return res.status(400).json({ error: "no such instance" });
     const saved = saveInstances(insts.filter((i) => i.name !== name));
-    // Fire-and-forget, as the save route above: the run reports itself in the status.
     void ensureApplied().catch(() => {});
     res.json({ instances: saved.map(view) });
   });
@@ -252,27 +391,19 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
   });
 
-  /** The containers this extension made gone and the entries in pi's config cleared; the keys stay. */
+  /** The containers this extension made gone and the entries it wrote cleared; the keys stay. */
   r.post("/reset", json, async (_req, res) => {
     // Fire-and-forget, like the others: stopping and removing every container must not hold the response open;
     // the run reports itself in the status.
-    void apply("removing the containers this extension made and its entries in pi's config", async () => {
-      const d = docker();
-      const insts = loadInstances();
-      const plans = planOwn(insts);
-      for (const inst of insts) {
-        const name = plans.get(inst.name)?.containerName;
-        if (name) await releaseOwn(d, name);
-        await portal().mcp.set(inst.name, undefined);
-      }
-    }).catch(() => {});
+    void apply("removing the containers this extension made and its entries in pi's config", teardown).catch(() => {});
     res.json({ ok: true });
   });
 
   /** One tool of the instance's Nextcloud MCP server, called through: its content parts back, raw -- the client
-   * reads them. The instance named is taken, or the first configured one where none is. */
+   * reads them. The instance named is taken, or the first configured one where none is. Only a tool of a family the
+   * instance has turned on: what the chats may not call, this route does not call either. */
   r.post("/tool", json, async (req, res) => {
-    const body = req.body as Record<string, unknown>;
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const name = typeof body.name === "string" ? body.name : "";
     const args = body.args && typeof body.args === "object" && body.args !== null ? (body.args as Record<string, unknown>) : {};
     if (!name) return res.status(400).json({ error: "a tool name is needed" });
@@ -281,6 +412,9 @@ const nextcloud: ServerHalf = async (portalArg) => {
     const inst = wanted ? insts.find((i) => i.name === wanted) : insts.find(configured);
     if (!inst) return res.status(409).json({ error: wanted ? `no such instance: ${wanted}` : "no Nextcloud is set: save the settings first" });
     if (!configured(inst)) return res.status(409).json({ error: `the instance ${inst.name} is not set up completely yet` });
+    const family = capabilityOfTool(name);
+    if (!family) return res.status(403).json({ error: `${name} is not a tool of any family this extension offers` });
+    if (inst.capabilities?.[family.id] === false) return res.status(403).json({ error: `${family.label} is switched off for ${inst.name}` });
     let plans: Map<string, OwnPlan>;
     try {
       plans = planOwn(insts);
@@ -290,7 +424,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
     const address = instanceAddress(plans, inst);
     if (!address) return res.status(502).json({ error: `the container of ${inst.name} is not running` });
     try {
-      res.json(await mcpClient(address).callTool(name, args));
+      res.json(await clientFor(address).callTool(name, args));
     } catch (error) {
       res.status(502).json({ error: (error as Error).message });
     }
@@ -313,26 +447,12 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
   })();
 
-  return () => {
-    // Where a stop or a removal takes the package: the containers it made go with it, and its entries out of pi's
-    // config; the keys stay, so the next start brings everything back.
-    void (async () => {
-      const d = docker();
-      if (!d) return;
-      const insts = loadInstances();
-      let plans: Map<string, OwnPlan> = new Map();
-      try {
-        plans = planOwn(insts);
-      } catch {
-        // too many instances for the ports: nothing to release by its planned name
-      }
-      for (const inst of insts) {
-        const name = plans.get(inst.name)?.containerName;
-        if (name) await releaseOwn(d, name);
-        await portal().mcp.set(inst.name, undefined);
-      }
-    })().catch(() => {});
-  };
+  // Where a stop or a removal takes the package: the entries it wrote out of pi's config and the containers it made
+  // gone with it; the keys stay, so the next start brings everything back. The portal waits for this before it
+  // starts the half again (an update, a restart of Docker's half), so it is what this returns, and it stands in the
+  // row of runs like any other: the new half's first pass begins after it.
+  return () =>
+    apply("removing the containers this extension made and its entries", teardown).catch(() => {});
 };
 
 export default nextcloud;

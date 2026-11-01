@@ -327,13 +327,15 @@ function formatSaid(made: unknown): string {
   return `${styles.join("")}${r.reflowed ? " The document reflowed; office_screenshot shows the pages." : ""}`;
 }
 
-/** What a spreadsheet edit's answer says where it moved cells (rows or columns inserted or deleted) while people are
+/** What a spreadsheet edit's answer says where it moved cells (rows or columns inserted or deleted, a range sorted) while people are
  * in the workbook (owner's answer 6 of #13: allowed, and they are named): a person mid-entry there may find their cell
  * elsewhere, or see it empty until they reload (DS 10.0). Nothing where nobody is in it. */
 function movesSaid(made: unknown, names: string[]): string {
-  const moved = (made as { shifted?: { sheet: string; kind: "rows" | "columns"; at: number; count: number; made: boolean }[] } | null)?.shifted;
+  const moved = (made as { shifted?: { sheet: string; kind: "rows" | "columns" | "sort"; range?: string; at: number; count: number; made: boolean }[] } | null)?.shifted;
   if (!Array.isArray(moved) || !moved.length || !names.length) return "";
   const lines = (m: (typeof moved)[number]) => {
+    // A sort moves every row of its range, so a cell someone is typing in may hold another row's content.
+    if (m.kind === "sort") return `${m.range} of ${JSON.stringify(m.sheet)} sorted (its rows changed places)`;
     const name = (k: number) => (m.kind === "rows" ? String(k + 1) : colName(k));
     const which = m.count === 1 ? `${m.kind === "rows" ? "row" : "column"} ${name(m.at)}` : `${m.kind} ${name(m.at)}:${name(m.at + m.count - 1)}`;
     return `${which} of ${JSON.stringify(m.sheet)} ${m.made ? "inserted" : "deleted"} (the ${m.kind} ${m.kind === "rows" ? "below" : "right of"} ${m.count === 1 ? "it" : "them"} moved ${m.made ? (m.kind === "rows" ? "down" : "right") : m.kind === "rows" ? "up" : "left"})`;

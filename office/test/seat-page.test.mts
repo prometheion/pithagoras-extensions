@@ -327,9 +327,10 @@ const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = 
  * fails in its step, which the check cannot foresee.
  * `before` runs before each command (with how many ran before it): a person's change between two steps. A freeze, an
  * unfreeze and an autofit show from the next command on, as in an editor people have co-edited (the Document Server's
- * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does.
+ * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does. `nameLag`: the
+ * commands a name made takes to show (1 by default).
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean } = {}) {
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean; nameLag?: number } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
   const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0, names: {} as Record<string, string> };
@@ -653,6 +654,8 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         if (b.whole === "columns") for (let c = b.c1; c <= b.c2; c++) delete sh.colLooks[c];
         if (b.whole === "rows") for (let r = b.r1; r <= b.r2; r++) delete sh.rowLooks[r];
         sh.merges = sh.merges.filter((m) => !meets(bounds(m), b));
+        // It takes the conditional formats that meet the cells off too (docbuilder, DS 10.0).
+        sh.rules = sh.rules.filter((r) => !meets(bounds(r.applies), b));
       },
       // The merged cells take the top-left one's value (the others' go) and its formats (DS 10.0).
       Merge: (across: boolean) => {
@@ -732,8 +735,10 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       // on (the editor, measured in e2e 34; docbuilder makes them at once). The link's look replaces the cell's font.
       SetHyperlink: (address: string, link: string, sub = "", tip = "", text?: string) => {
         if (!/^https?:|^mailto:|^$/.test(link) || link.length > 2000) throw new Error('Incorrect "address".');
+        // A link to the address the cell has already shows at once; its text and look land a command later still.
+        const known = cellsOf(address).flat().every((a) => sh.links[a]?.address === link);
         later.push({
-          due: state.commands + 1,
+          due: state.commands + (known ? 2 : 1),
           fn: () => {
             for (const a of cellsOf(address).flat()) {
               sh.links[a] = { address: link, sub, tip };
@@ -806,7 +811,7 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       if (ref.includes("!") && !sheets.some((x) => x.name === sheetName)) throw new Error("Invalid range.");
       // A name made shows from the next command on (the lock, measured in e2e 34); a change and a delete are at once.
       const made = ref.includes("!") ? `${/^\w+$/.test(sheetName!) ? sheetName : `'${sheetName!.replace(/'/g, "''")}'`}!${m[3]}` : ref;
-      later.push({ due: state.commands + 1, fn: () => void (state.names[name] = made) });
+      later.push({ due: state.commands + (options.nameLag ?? 1), fn: () => void (state.names[name] = made) });
       return true;
     },
     GetDefName: (name: string) => {
@@ -2909,7 +2914,8 @@ test("a sort: the rows of the range ordered by up to three columns through the b
   s1.looks.A3 = { bold: true, fill: "#FF0000" };
   const before = readable(s1);
   const ok = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A2:C5", by: ["B desc", "A"] }]).args });
-  assert.deepEqual(ok.result, { ops: 1, cells: 0 }, JSON.stringify(ok));
+  // The rows change places: the answer carries it, for the people in the workbook to be named (tools.ts, movesSaid).
+  assert.deepEqual(ok.result, { ops: 1, cells: 0, shifted: [{ sheet: "Sheet1", kind: "sort", range: "A2:C5", at: 0, count: 0, made: true }] }, JSON.stringify(ok));
   assert.deepEqual([2, 3, 4, 5].map((r) => s1.cells[`A${r}`]), ["apple", "fig", "kiwi", "pear"]);
   assert.equal(s1.formats.B2, "0.00", "formats move with their rows");
   assert.equal(s1.looks.A2.bold, true);
@@ -2981,6 +2987,114 @@ test("a named range: made, changed and deleted through the workbook, each taken 
   assert.match(missing.error.message, /there is no sheet named "Nope"/);
   const none = await plugin(workbook(["Sheet1"]), { kind: "cell.edit", args: editJob("xlsx", [{ name: "Nope", delete: true }]).args });
   assert.match(none.error.message, /there is no name "Nope"/);
+});
+
+test("a format clear takes the conditional formats of its cells with it (DS 10.0): taken back, the answer names them as not taken back; a clear over cells without rules names no rule", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "h", B2: 5 });
+  s1.looks.B2 = { bold: true };
+  s1.rules.push({ type: "xlCellValue", applies: "B2:B9", operator: "xlGreater", f1: "1000", fill: "#C6EFCE" }, { type: "xlDataBar", applies: "D2:D9" });
+  const out = await plugin(book, formatting([{ format: "A1:C5", set: { clear: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Not taken back: the conditional formats of A1:C5 of "Sheet1" that op 1 cleared\./);
+  assert.deepEqual(s1.rules.map((r) => r.applies), ["D2:D9"], "the rule that met the cells is gone, the other is not touched");
+  assert.equal(s1.looks.B2?.bold, true, "the looks themselves are back");
+  // No rule on the cells: nothing is lost, and the call is taken back whole.
+  const plain = workbook(["Sheet1"], { poisonLook: "Z99" });
+  plain.state.sheets[0].rules.push({ type: "xlDataBar", applies: "D2:D9" });
+  plain.state.sheets[0].looks.B2 = { bold: true };
+  const whole = await plugin(plain, formatting([{ format: "A1:C5", set: { clear: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.doesNotMatch(whole.error.message, /conditional format/, "(a clear always names the alignment and borders it cannot read back)");
+  assert.equal(plain.state.sheets[0].rules.length, 1);
+});
+
+test("a rule a person widened to other cells after the step is kept and named, not taken for gone", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].rules.find((r) => r.applies === "B2:B9")!.applies = "B2:B20"; } });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = 1;
+  const out = await plugin(book, formatting([{ conditional: "B2:B9", set: { rule: "cell", operator: ">", value: 1000, fill: "#C6EFCE" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: the conditional format B2:B9 of "Sheet1"\.$/);
+  assert.deepEqual(s1.rules.map((r) => r.applies), ["B2:B20"]);
+});
+
+test("a rule is refused on a sheet that holds more than 2,000 already, before anything changes; a clear is not", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  for (let k = 0; k < 2001; k++) s1.rules.push({ type: "xlDataBar", applies: `A${k + 1}` });
+  const refused = await plugin(book, formatting([{ conditional: "B2:B9", set: { rule: "dataBar" } }]));
+  assert.match(refused.error.message, /^op 1: "Sheet1" holds 2001 conditional formats, and a rule is made by reading every one of them: more than 2000 are too many/);
+  assert.equal(book.state.commands, 1, "the check alone");
+  assert.equal(s1.rules.length, 2001);
+  const cleared = await plugin(book, formatting([{ conditional: "A1:A5", set: { clear: true } }]));
+  assert.deepEqual(cleared.result, { ops: 1, cells: 0 }, JSON.stringify(cleared));
+});
+
+test("validation put back names what Add cannot set: the cells whose ignore blank, in-cell dropdown, error alert or input message was another", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.validations.E3 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, false, "", "", "", "", true, true];
+  s1.validations.E4 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "", "", "", "", true, true];
+  s1.validations.E5 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "", "", "", "", false, true];
+  const out = await plugin(book, formatting([{ validate: "E2:E5", set: { list: ["a"] } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the validation settings of "Sheet1"!E3, E5 \(op 1\), which stay as this call set them\.$/);
+  assert.equal(s1.validations.E4?.[3], "1", "the validation itself is back, also where nothing differs");
+});
+
+test("a link to the address a cell has already: its text and look land after the link shows, and the inverse waits for them (they are no person's change)", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.cells.A5 = "Old";
+  s1.links.A5 = { address: "https://example.com/x", sub: "", tip: "" };
+  s1.looks.A5 = { underline: "single", color: "#0563C1" };
+  const out = await plugin(book, formatting([{ link: "A5", set: { url: "https://example.com/x", text: "New" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.undone, true, JSON.stringify(out));
+  assert.equal(s1.cells.A5, "Old");
+  assert.equal(s1.links.A5.address, "https://example.com/x");
+});
+
+test("a link a person changed to another address after the step keeps the whole cell as they made it: its text and look are not put back under it", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].links.A2 = { address: "https://example.com/theirs", sub: "", tip: "" }; } });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = 1;
+  const out = await plugin(book, formatting([{ link: "A2", set: { url: "https://example.com/mine" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: the link A2 of "Sheet1"\.$/);
+  assert.equal(s1.links.A2.address, "https://example.com/theirs");
+  assert.equal(s1.cells.A2, "https://example.com/mine", "the text stays");
+  assert.equal(s1.looks.A2?.underline, "single", "and the look");
+});
+
+test("an old link put back takes the cell's font over (a bold link comes back plain): the answer names the font; a link with the link look comes back clean", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A5: "Old", A6: "Plain" });
+  s1.links.A5 = { address: "https://example.com/old", sub: "", tip: "" };
+  s1.looks.A5 = { bold: true, underline: "single", color: "#0563C1" };
+  const out = await plugin(book, formatting([{ link: "A5", set: { url: "https://example.com/new", text: "New" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the font of "Sheet1"!A5 \(op 1\), which stay as this call set them\.$/);
+  assert.equal(s1.links.A5.address, "https://example.com/old");
+  assert.equal(s1.cells.A5, "Old");
+  // A link that has the link's own look loses nothing.
+  const clean = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const c1 = clean.state.sheets[0];
+  c1.cells.A5 = "Old";
+  c1.links.A5 = { address: "https://example.com/old", sub: "", tip: "" };
+  c1.looks.A5 = { underline: "single", color: "#0563C1" };
+  const whole = await plugin(clean, formatting([{ link: "A5", set: { url: "https://example.com/new", text: "New" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(whole.undone, true, JSON.stringify(whole));
+});
+
+test("a name made and deleted in one call, taken back: the name the delete's inverse makes again shows late, and the make's inverse waits for it to delete it", async () => {
+  const book = workbook(["Sheet1"], { poison: "Z9", nameLag: 3 });
+  const out = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ name: "X", refersTo: "A1" }, { name: "X", delete: true }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(out.undone, true, JSON.stringify(out));
+  // Let whatever the editor was asked for come.
+  for (let k = 0; k < 5; k++) book.run("function () { return { result: {} }; }", {});
+  assert.deepEqual(book.state.names, {}, "no name is left in the workbook");
 });
 
 test("a chart: the data range with its sheet quoted and absolute, the type, size and place, then its titles and legend; it has no inverse and is named when a later op fails", async () => {

@@ -511,7 +511,8 @@ function formatOp(op: unknown, i: number): FormatOp {
   if ("range" in op || "values" in op) throw new OpError("unsupported_format", `op ${n} is a spreadsheet edit ({range, values}), and this is a Word document`, i);
   const content = ["quote", "replacement", "paragraphs", "table", "remove"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the document says): make it with office_edit, and its look here`);
-  const sheetOnly = SHEET_FORMAT_SHAPES.find((k) => k !== "format" && k !== "set" && k in op);
+  // (An op with a Word shape of its own is a Word op with a key out of place: the shape check below names the key.)
+  const sheetOnly = FORMAT_SHAPES.some((k) => k !== "set" && k in op) ? undefined : SHEET_FORMAT_SHAPES.find((k) => k !== "format" && k !== "set" && k in op);
   if (sheetOnly) throw new OpError("unsupported_format", `op ${n} is a spreadsheet op (\`${sheetOnly}\`), and this is a Word document`, i);
   const shapes = FORMAT_SHAPES.filter((k) => k !== "set" && k in op);
   if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its quote the value of its first key ({${shapes[1]}: "<quote>", …})` : missingFirstKey(op)}`, i);
@@ -1249,6 +1250,8 @@ function cfRule(g: Record<string, unknown>, bad: Bad): CfRule {
       const text = (v: unknown, key: string) => {
         if (typeof v === "number" && Number.isFinite(v)) return String(v);
         if (!lineOf(v, 255)) throw bad(`set.${key} is a number or a text (a text starting with "=" is a formula or a cell: "=$F$1")`);
+        // The builder wraps a text in quotes without doubling the ones inside it: the file would hold a broken formula.
+        if (!(v as string).startsWith("=") && (v as string).includes('"')) throw bad(`set.${key} holds a double quote, which the file cannot hold in a rule's text (it would break the rule): leave it out`);
         return v as string;
       };
       if (g.value === undefined) throw bad("set.value is what the cells are compared with");
@@ -1308,7 +1311,7 @@ function validation(g: Record<string, unknown>, bad: Bad): Validation | null {
     const ref = typeof v === "string" ? sheetRef(v.replace(/^=/, "")) : null;
     if (ref) return { type: "xlValidateList", operator: "xlBetween", f1: `=${ref.sheet !== undefined ? `${quoteSheet(ref.sheet)}!` : ""}${ref.address}` };
     const items = Array.isArray(v) ? v.map((x) => (typeof x === "number" && Number.isFinite(x) ? String(x) : x)) : null;
-    if (!items || items.length === 0 || items.length > 100 || !items.every((x) => lineOf(x, 255) && !(x as string).includes(","))) throw bad('set.list is the allowed entries, as ["Open", "Done"] (no commas in an entry; 255 characters in all), or the cells that hold them, as "Data!$A$2:$A$9"');
+    if (!items || items.length === 0 || items.length > 100 || !items.every((x) => lineOf(x, 255) && !/[,"]/.test(x as string))) throw bad('set.list is the allowed entries, as ["Open", "Done"] (no commas or double quotes in an entry, which the file cannot hold there; 255 characters in all), or the cells that hold them, as "Data!$A$2:$A$9"');
     const joined = (items as string[]).map((x) => x.trim()).join(",");
     if (joined.length > 255) throw bad("set.list holds at most 255 characters in all; put longer lists in cells and give their range");
     return { type: "xlValidateList", operator: "xlBetween", f1: joined };

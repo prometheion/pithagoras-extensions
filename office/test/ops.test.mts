@@ -774,6 +774,21 @@ test("office_format (spreadsheet): charts, filters, tables and cleared rules com
   refusal(() => formatJob("xlsx", [{ validate: "A1:CV200", set: { clear: true } }, { format: "B1:B5", set: { bold: true } }, { asTable: "A201:A202" }]), /formats 20,000 cells at most \(got 20,007/, "bad_op", null);
 });
 
+test("office_format: a double quote in a rule's text or a list entry is refused (the builder writes it into the file without doubling it, which breaks the formula)", () => {
+  refusal(() => formatJob("xlsx", [{ conditional: "B2:B9", set: { rule: "cell", operator: "=", value: 'He said "no"', fill: "#FF0000" } }]), /^op 1: set\.value holds a double quote, which the file cannot hold in a rule's text/);
+  refusal(() => formatJob("xlsx", [{ conditional: "B2:B9", set: { rule: "cell", operator: "between", value: "a", value2: 'b"c', fill: "#FF0000" } }]), /set\.value2 holds a double quote/);
+  refusal(() => formatJob("xlsx", [{ validate: "C2:C9", set: { list: ['5" pipe', '10" pipe'] } }]), /^op 1: set\.list is the allowed entries.*no commas or double quotes in an entry/);
+  // A formula may hold quotes, and a text without them is as before.
+  assert.doesNotThrow(() => formatJob("xlsx", [{ conditional: "B2:B9", set: { rule: "cell", operator: "=", value: '="x"&A1', fill: "#FF0000" } }, { conditional: "C2:C9", set: { rule: "formula", formula: '=$A2="x"', fill: "#FF0000" } }, { conditional: "D2:D9", set: { rule: "cell", operator: "=", value: "plain", fill: "#FF0000" } }, { validate: "C2:C9", set: { list: ["Open", "Done"] } }]));
+});
+
+test("office_format: a Word op with a spreadsheet's key out of place is told so by the Word shape check, not refused as a spreadsheet op", () => {
+  refusal(() => formatJob("docx", [{ format: "Q3 results", link: "https://example.com" }]), /^op 1: "link" is not part of \{format, through, nth, set\}/);
+  refusal(() => formatJob("docx", [{ footnote: "a", text: "b", filter: "A1" }]), /"filter" is not part of/);
+  // Without a Word shape it is still a spreadsheet op.
+  refusal(() => formatJob("docx", [{ link: "A1", set: { url: "https://example.com" } }]), /is a spreadsheet op \(`link`\)/, "unsupported_format");
+});
+
 test("office_format: a spreadsheet's new ops given to a Word document, and the reverse, are refused with their place named", () => {
   refusal(() => formatJob("docx", [{ conditional: "A1", set: { rule: "dataBar" } }]), /op 1 is a spreadsheet op \(`conditional`\), and this is a Word document/, "unsupported_format");
   refusal(() => formatJob("docx", [{ chart: "A1:B5" }]), /is a spreadsheet op \(`chart`\)/, "unsupported_format");

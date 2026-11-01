@@ -2219,6 +2219,21 @@ async function run(PITHAGORAS: string): Promise<void> {
     // (A table over a linked cell breaks that cell's formats in the editor: refused, so the table goes elsewhere.)
     assert.match(await failing(tools.office_format.execute("y-linked-table", { id: doc, ops: [{ asTable: "A1:C5" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and A\d of "Sheet1" has one/);
     await tools.office_edit.execute("y-tag", { id: doc, ops: [{ range: "F1:G3", values: [["Tag", "Weight"], ["a", 1], ["b", 2]] }] });
+    // A link's look replaces the cell's font: a bold link replaced by another and taken back comes back with its link, and
+    // the answer names the font it could not put back. (The sort above moved the old link to A4.)
+    await tools.office_format.execute("y-bold", { id: doc, ops: [{ format: "A4", set: { bold: true } }] });
+    const boldLink = await failing(tools.office_format.execute("y-bold-link", { id: doc, ops: [{ link: "A4", set: { url: "https://example.com/new", text: "Fig again" } }, { filter: "none" }] }));
+    console.log(`34. a bold link replaced and taken back: ${boldLink}`);
+    await delay(800);
+    assert.match(boldLink, /^error:partial op 2: .* cannot read back the font of "Sheet1"!A4 \(op 1\), which stay as this call set them\./);
+    assert.match(await readSheet(doc, "Sheet1"), /\nA4: "Fig"\n/, "the text is back");
+    assert.match(await readSheet(doc, "Sheet1"), /Links: .*A4 https:\/\/example\.com\/old/, "and the old link");
+    // A clear of formats takes the rules of its cells off with it (DS 10.0): the answer says they are not back.
+    assert.match(await readSheet(doc, "Sheet1"), /\nConditional: /, "a rule is there");
+    const cleared = await failing(tools.office_format.execute("y-clear-rules", { id: doc, ops: [{ format: "A1:D9", set: { clear: true } }, { filter: "none" }] }));
+    console.log(`34. a clear over a rule, taken back: ${cleared}`);
+    assert.match(cleared, /Not taken back: the conditional formats of A1:D9 of "Sheet1" that op 1 cleared\./);
+    assert.doesNotMatch(await readSheet(doc, "Sheet1"), /\nConditional: /, "the clear took the rule with it, as the answer said");
     const stays: [string, unknown[], RegExp][] = [
       ["a chart", [{ chart: "A1:B5", set: { title: "Qty" } }, { filter: "none" }], /^error:partial op 2: "Sheet1" has no filter to take off\. The ops before it are taken back, but not all of them whole\. Not taken back: the chart of A1:B5 of "Sheet1" that op 1 made\./],
       ["a table", [{ asTable: "F1:G3" }, { filter: "none" }], /Not taken back: the table F1:G3 of "Sheet1" that op 1 made\./],

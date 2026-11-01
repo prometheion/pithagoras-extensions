@@ -167,7 +167,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   take a number format (`"#,##0.00"`, `"0%"`, `"dd.mm.yyyy"`), font, size, bold, italic, underline, strike,
   superscript and subscript (in cells that hold text: OnlyOffice sets them on a text's characters), colour, fill,
   alignment, wrap, text rotation, borders (single, double, dashed or dotted lines), merging and splitting, and taking
-  all of a cell's formatting off (`clear`, merges too; the values stay). Columns take a width (in characters, as the
+  all of a cell's formatting off (`clear`, merges too, and the conditional formats of those cells: OnlyOffice takes them off with it, and a call taken back cannot make them again, so the answer names them; the values stay). Columns take a width (in characters, as the
   sheet shows it), rows a height (in points), and both can be hidden, shown and fitted to their contents; frozen
   panes keep the rows above and the columns left of a cell in view. A call is made whole or not at all: it is checked
   against the workbook first (superscript on a number, a freeze of a hidden sheet, more than 20,000 cells, whole
@@ -194,12 +194,14 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   changes and deletes **named ranges**. The same rule holds for them as for formats: a call is checked first, and
   where a later op fails what the call made is put back: a rule the call added is deleted (one a person changed since
   stays, and is named), validation goes back to what the cells had (cell by cell; the messages of a person's
-  validation are lost with the validation the call replaces, and the answer says so), a link to the text, look and
-  link the cell had, a sort to the values, formulas and readable formats the range had (the alignment and borders it moved
+  validation, and whether it ignores blanks, shows a dropdown in the cell, an error alert and an input message, are lost
+  with the validation the call replaces, and the answer says so), a link to the text, look and
+  link the cell had (the link's look replaces the cell's font, so a bold cell with a link comes back plain, and the
+  answer names its font; a link a person changed meanwhile keeps its cell as they made it), a sort to the values, formulas and readable formats the range had (the alignment and borders it moved
   cannot be read back, so the answer names them), a name to its old reference or none. OnlyOffice's API takes **no chart,
   no table away again, and a filter only whole** (`filter: "none"` takes the sheet's off), and a
   rule cleared cannot be made again: these go last in a call, and the answer names the ones made before the op that
-  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word, and a table over a cell with a link is refused (OnlyOffice 10.0 can no longer read that cell's formats afterwards). A sort moves the links of its cells with them, and where a later op fails the links stay where the sort put them (the answer names them).
+  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word, and a table over a cell with a link is refused (OnlyOffice 10.0 can no longer read that cell's formats afterwards). A sort moves the links of its cells with them, and where a later op fails the links stay where the sort put them (the answer names them). A sort re-orders the rows of its range: while you are in the workbook the agent's answer names the people in it, as it does after inserted or deleted rows (merging cells moves none, so it does not). A text in a rule or a list of a validation cannot hold a double quote (the file would hold a broken formula), a sheet with more than 2,000 conditional formats takes no new one (each is made by reading all of them).
   A cell under a conditional format reads the rule's fill as its own in `office_read` (the API gives what is drawn);
   taking back a format of such a cell can then set that fill on it. `office_read` with `formatting: true` says how
   each sheet looks: the font most cells have, the cells that look otherwise (grouped into ranges), merged cells, the

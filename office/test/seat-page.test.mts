@@ -1238,6 +1238,25 @@ test("a text whose characters mix a key the format sets is not flattened by the 
   assert.ok(read.formats.every((f: { look: Record<string, unknown> }) => !Object.values(f.look).includes(null)), JSON.stringify(read.formats));
 });
 
+test("a text formatted in its middle only (one bold word) reads mixed before the step: the inverse does not flatten it, and the answer names it; a text past the characters a step compares is named so", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "abc", B1: "plain" });
+  s1.chars.A1 = [{}, { bold: true }, {}];
+  const out = await plugin(book, formatting([{ format: "A1:B1", set: { bold: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the mixed text formatting of "Sheet1"!A1 \(op 1\), which stay as this call set them\.$/);
+  assert.equal(s1.looks.A1?.bold, true, "the person's bold b is not taken off with the rest of the text");
+  assert.equal(s1.looks.B1, undefined, "the plain text is as it was");
+  // 40,000 characters are compared one by one; a text of 20,000 more is past the room a step has.
+  const long = workbook(["Sheet1"], { poisonLook: "Z99" });
+  Object.assign(long.state.sheets[0].cells, { A1: "x".repeat(40_000), B1: "y".repeat(20_000) });
+  const past = await plugin(long, formatting([{ format: "A1:B1", set: { italic: true } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(past.error?.code, "partial", JSON.stringify(past).slice(0, 400));
+  assert.match(past.error.message, /cannot read back the mixed text formatting \(or of a text too long to read character by character\) of "Sheet1"!B1 \(op 1\)/);
+  assert.equal(long.state.sheets[0].looks.A1, undefined, "the text that was compared is put back");
+});
+
 test("a whole column taken back keeps a cell a person formatted after the step beyond the used range it read, and names it", async () => {
   const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 2) sheets[0].looks.C50 = { fill: "#FF0000" }; } });
   const [s1] = book.state.sheets;

@@ -1177,12 +1177,17 @@ function grid(v) { return Array.isArray(v) ? (v.length && !Array.isArray(v[0]) ?
  * cell's gives the cell's own font, and a text whose characters differ reads null where they do). Bold, italic,
  * strike, superscript and subscript read true or something else (false, or null where it is not set), so a text whose
  * characters differ there reads as if none had it: lookOf compares the first and the last character with the whole,
- * and reads a key they differ in as null (mixed), which is not put back. Superscript
+ * and reads a key they differ in as null (mixed), which is not put back. What a format step reads before it changes
+ * anything compares every character (up to MIXED_CHARS of them a step; a longer text past them reads null in every
+ * key of its font): one bold word inside a text is mixed too. Superscript
  * and subscript are set on a text's characters only: a number, a formula or an empty cell takes none. There is no
  * getter for alignment and borders, `SetAlignHorizontal` takes no "general", and `SetBorders` with "None" changes
  * nothing: only `ClearFormats` (every format, and merges) takes them off. `Merge` keeps the top-left cell's value
  * only; `UnMerge` gives the others none back.
  */
+/** The most characters of texts a format step compares one by one, before it changes anything (CELL_LOOK_SRC). */
+const MIXED_CHARS = 50_000;
+
 const CELL_LOOK_SRC = `
 var LOOK_KEYS = ["numberFormat", "font", "size", "bold", "italic", "underline", "strike", "vertAlign", "color", "fill", "wrap", "rotation"];
 var UNDERLINES = { xlUnderlineStyleNone: "none", xlUnderlineStyleSingle: "single", xlUnderlineStyleDouble: "double", xlUnderlineStyleSingleAccounting: "singleAccounting", xlUnderlineStyleDoubleAccounting: "doubleAccounting" };
@@ -1207,8 +1212,10 @@ function fontKey(font, key) {
   var c = font.GetColor();
   return c && c.GetRGB ? hexOf(c.GetRGB()) : null;
 }
-function lookOf(cell, keys) {
-  var out = {}, font = null, ends = null;
+// With \`deep\` ({room, blind}), every character of a text is compared, out of room characters, which it uses up; a text
+// past the room reads null in its font's keys, and is counted in blind.
+function lookOf(cell, keys, deep) {
+  var out = {}, font = null, ends = null, unknown = false;
   for (var k = 0; k < keys.length; k++) {
     var key = keys[k];
     if (key === "numberFormat") out.numberFormat = cell.GetNumberFormat();
@@ -1217,12 +1224,16 @@ function lookOf(cell, keys) {
     else if (key === "rotation") { var o = cell.GetOrientation(); out.rotation = typeof o === "number" ? o : Number(o) || 0; }
     else {
       if (!font) {
-        var n = String(cell.GetText() == null ? "" : cell.GetText()).length;
+        var n = String(cell.GetText() == null ? "" : cell.GetText()).length, text = n > 1 && isText(cell), every = Boolean(deep) && text && n > 2;
         font = cell.GetCharacters(1, Math.max(1, n)).GetFont();
-        // A text's first and last character: where either differs from the whole, its characters mix that key.
-        ends = n > 1 && isText(cell) ? [cell.GetCharacters(1, 1).GetFont(), cell.GetCharacters(n, 1).GetFont()] : [];
+        // A text's characters (its first and last one, or with deep every one): where one differs from the whole, its
+        // characters mix that key.
+        ends = [];
+        if (every && deep.room < n - 2) { unknown = true; deep.blind++; }
+        else if (text) for (var ch = 1; ch <= n; ch++) if (every || ch === 1 || ch === n) ends.push(cell.GetCharacters(ch, 1).GetFont());
+        if (every && !unknown) deep.room -= n - 2;
       }
-      var v = fontKey(font, key);
+      var v = unknown ? null : fontKey(font, key);
       for (var e = 0; e < ends.length && v !== null; e++) if (fontKey(ends[e], key) !== v) v = null;
       out[key] = v;
     }
@@ -1263,11 +1274,11 @@ function mergesIn(ws, address) {
   return out;
 }
 // The looks of \`keys\` of a range's cells, row by row, each key as runs of [value, how many].
-function readLooks(ws, address, keys) {
+function readLooks(ws, address, keys, deep) {
   var runs = {};
   keys.forEach(function (k) { runs[k] = []; });
   addressesOf(address).forEach(function (row) { row.forEach(function (a) {
-    var look = lookOf(ws.GetRange(a), keys);
+    var look = lookOf(ws.GetRange(a), keys, deep);
     keys.forEach(function (k) { var list = runs[k], last = list[list.length - 1]; if (last && last[0] === look[k]) last[1]++; else list.push([look[k], 1]); });
   }); });
   return runs;
@@ -1797,7 +1808,9 @@ const CELL_STEP = `function () {
         }
       }
       var state = { sheet: fname, format: op.format, keys: keys, cells: parts.cells, lines: parts.lines() };
-      if (parts.cells && keys.length) state.before = readLooks(fws, parts.cells, keys);
+      // Every character of the texts compared (one bold word reads mixed), out of a room a step has.
+      var deep = { room: ${MIXED_CHARS}, blind: 0 };
+      if (parts.cells && keys.length) state.before = readLooks(fws, parts.cells, keys, deep);
       state.lines.forEach(function (l) { l.before = lookOf(fws.GetRange(l.at), keys); });
       if (op.looks.merge !== undefined || op.looks.clear) state.merges = mergesIn(fws, parts.cells);
       // A merge keeps the top-left cell's value only: the others' are put back with it.
@@ -1822,7 +1835,7 @@ const CELL_STEP = `function () {
       if (state.values) state.values.left = capture(fws, op.format);
       var lostKeys = unreadableOf(op.looks), lostList = [];
       if (lostKeys.length) lostList.push({ op: i, what: lostKeys, where: where(fws, op.format) });
-      if (mixed.length) lostList.push({ op: i, what: ["mixed text formatting"], where: where(fws, mixed.length > 8 ? mixed.slice(0, 8).join(", ") + " and " + (mixed.length - 8) + " more" : mixed.join(", ")) });
+      if (mixed.length) lostList.push({ op: i, what: [deep.blind ? "mixed text formatting (or of a text too long to read character by character)" : "mixed text formatting"], where: where(fws, mixed.length > 8 ? mixed.slice(0, 8).join(", ") + " and " + (mixed.length - 8) + " more" : mixed.join(", ")) });
       return { result: { inverse: { restoreFormat: state, real: true }, read: many, unreadable: lostList.length ? lostList : undefined } };
     }
     if (op.restoreFormat !== undefined) {

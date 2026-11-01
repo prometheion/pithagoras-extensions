@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { LuPlus } from "react-icons/lu";
 import { portal, t } from "../portal";
-import { api, partText, arrayOf, sayError, useNextcloudInstance } from "./api";
-import { Ask, AskState } from "./widgets";
+import { api, partText, arrayOf, sayError, useGuard, useNextcloudInstance } from "./api";
+import { confirmDelete } from "./widgets";
 
 /** The Contacts tab: one address book chosen of the books; its contacts, with a search that runs over the words of
  * name, e-mail and phone; and one contact open to its detail -- the common fields read and changed (the name, one
@@ -36,6 +36,7 @@ interface ContactRow {
 export default function Contacts() {
   portal.locale.use();
   const instance = useNextcloudInstance(); // the panel's current instance: where the contact calls go
+  const guard = useGuard();
   const [books, setBooks] = useState<BookRow[] | null>(null);
   const [bookProblem, setBookProblem] = useState<string | null>(null);
   const [bookUri, setBookUri] = useState<string | null>(null);
@@ -53,6 +54,7 @@ export default function Contacts() {
   const [editOrg, setEditOrg] = useState("");
   const [editNote, setEditNote] = useState("");
   const [contactProblem, setContactProblem] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
 
   // the new contact form, which stays folded until its button is pressed (Nextcloud does it the same way)
   const [creating, setCreating] = useState(false);
@@ -63,9 +65,6 @@ export default function Contacts() {
   const [newNote, setNewNote] = useState("");
 
   const [busy, setBusy] = useState(false);
-
-  // what is about to go away, where it happens -- the panel's own yes-and-no, no window of the browser
-  const [ask, setAsk] = useState<AskState | null>(null);
 
   // the preferred one leads, as the server's own primary_email does
   const pick = (fields: unknown): string | undefined => {
@@ -96,34 +95,42 @@ export default function Contacts() {
   };
 
   const loadBooks = () => {
+    const current = guard("books");
     setBooks(null);
     setBookProblem(null);
     void api
       .tool("nc_contacts_list_addressbooks", {}, instance)
       .then((result) => {
+        if (!current()) return;
         const found = (arrayOf(partText(result).data, "addressbooks") ?? []).map((b) => ({ uri: String(b.uri), displayName: String(b.displayname ?? b.uri) }));
         setBooks(found);
-        if (found.length > 0 && bookUri === null) loadContacts(found[0].uri, "");
+        // the first book is the chosen one at once: the search, the save and the new contact all stand on it
+        setBookUri((now) => (now !== null && found.some((b) => b.uri === now) ? now : (found[0]?.uri ?? null)));
       })
-      .catch((error) => setBookProblem(sayError(error)));
+      .catch((error) => current() && setBookProblem(sayError(error)));
   };
 
   useEffect(() => {
     loadBooks();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadContacts = (uri: string | null, query: string) => {
+  /** The contacts of a book that answer the words, sorted by name. */
+  const fetchContacts = async (uri: string, query: string): Promise<ContactRow[]> => {
+    const result = await api.tool(query.trim() !== "" ? "nc_contacts_search_contacts" : "nc_contacts_list_contacts", query.trim() !== "" ? { query: query.trim(), addressbook: uri } : { addressbook: uri }, instance);
+    const data = partText(result).data;
+    const list = typeof data === "object" && data !== null ? (data as Rec).contacts : undefined;
+    return Array.isArray(list) ? list.map(mapRow).sort((a, b) => a.fn.localeCompare(b.fn)) : [];
+  };
+
+  /** The list, read again; the rows on screen stay while it comes, and only the last question's answer is taken. */
+  const loadContacts = (uri: string | null, query: string, keep = false) => {
     if (uri === null) return;
-    setRows(null);
+    const current = guard("rows");
+    if (!keep) setRows(null);
     setListProblem(null);
-    void api
-      .tool(query.trim() !== "" ? "nc_contacts_search_contacts" : "nc_contacts_list_contacts", query.trim() !== "" ? { query: query.trim(), addressbook: uri } : { addressbook: uri }, instance)
-      .then((result) => {
-        const data = partText(result).data;
-        const list = typeof data === "object" && data !== null ? (data as Rec).contacts : undefined;
-        setRows(Array.isArray(list) ? list.map(mapRow).sort((a, b) => a.fn.localeCompare(b.fn)) : []);
-      })
-      .catch((error) => setListProblem(sayError(error)));
+    void fetchContacts(uri, query)
+      .then((list) => current() && setRows(list))
+      .catch((error) => current() && setListProblem(sayError(error)));
   };
 
   // an open search follows its words with a short rest between keystrokes; switching books starts the list again
@@ -137,6 +144,7 @@ export default function Contacts() {
     if (busy) return;
     setContact(row);
     setContactProblem(null);
+    setSaved(false);
     setEditFn(row.fn);
     setEditEmail(row.email ?? "");
     setEditPhone(row.phone ?? "");
@@ -144,36 +152,35 @@ export default function Contacts() {
     setEditNote(row.note ?? "");
   };
 
-  const saveContact = () => {
-    if (contact === null || bookUri === null) return;
+  /** What the open contact's words change against the card, as the update tool takes them. */
+  const changes = (): Rec => {
     const data: Rec = {};
-    let changed = false;
-    if (editFn.trim() !== "" && editFn !== contact.fn) {
-      data.fn = editFn.trim();
-      changed = true;
-    }
-    if (editEmail !== (contact.email ?? "")) {
-      data.email = editEmail; // the update tool takes the one e-mail as a plain word
-      changed = true;
-    }
-    if (editPhone !== (contact.phone ?? "")) {
-      data.tel = editPhone; // and the one phone the same way
-      changed = true;
-    }
-    if (editOrg !== (contact.organization ?? "")) {
-      data.organization = editOrg;
-      changed = true;
-    }
-    if (editNote !== (contact.note ?? "")) {
-      data.note = editNote;
-      changed = true;
-    }
-    if (!changed) return;
+    if (contact === null) return data;
+    if (editFn.trim() !== "" && editFn !== contact.fn) data.fn = editFn.trim();
+    if (editEmail !== (contact.email ?? "")) data.email = editEmail; // the update tool takes the one e-mail as a plain word
+    if (editPhone !== (contact.phone ?? "")) data.tel = editPhone; // and the one phone the same way
+    if (editOrg !== (contact.organization ?? "")) data.organization = editOrg;
+    if (editNote !== (contact.note ?? "")) data.note = editNote;
+    return data;
+  };
+  const changed = contact !== null && Object.keys(changes()).length > 0;
+  portal.ui.useUnsavedDraft(changed || (creating && newFn.trim() !== ""));
+
+  const saveContact = () => {
+    if (contact === null || bookUri === null || !changed) return;
+    const data = changes();
     void (async () => {
       setBusy(true);
+      setContactProblem(null);
       try {
         await api.tool("nc_contacts_update_contact", { addressbook: bookUri, uid: contact.uid, contact_data: data, etag: contact.etag ?? "" }, instance);
-        loadContacts(bookUri, search);
+        // The card as it stands now, with the etag the server gave it: a second Save starts from it, not from the old one.
+        const fresh = (await fetchContacts(bookUri, "")).find((c) => c.uid === contact.uid);
+        if (fresh) {
+          openContact(fresh);
+          setSaved(true);
+        } else setContact(null);
+        loadContacts(bookUri, search, true);
       } catch (error) {
         setContactProblem(sayError(error));
       } finally {
@@ -182,24 +189,24 @@ export default function Contacts() {
     })();
   };
 
-  const deleteContact = (asked = false) => {
+  const back = async () => {
+    if (changed && !(await portal.ui.confirm({ title: t("Leave this contact without saving?"), message: t("What you changed in it is lost."), confirmLabel: t("Leave"), danger: true }))) return;
+    setContact(null);
+  };
+
+  const deleteContact = async () => {
     if (contact === null || bookUri === null) return;
-    if (!asked) {
-      setAsk({ text: t("Take this contact away for good?"), run() { deleteContact(true); } });
-      return;
+    if (!(await confirmDelete(t("Take this contact away for good?"), contact.fn, t("Delete this contact")))) return;
+    setBusy(true);
+    try {
+      await api.tool("nc_contacts_delete_contact", { addressbook: bookUri, uid: contact.uid }, instance);
+      setContact(null);
+      loadContacts(bookUri, search, true);
+    } catch (error) {
+      setContactProblem(sayError(error));
+    } finally {
+      setBusy(false);
     }
-    void (async () => {
-      setBusy(true);
-      try {
-        await api.tool("nc_contacts_delete_contact", { addressbook: bookUri, uid: contact.uid }, instance);
-        setContact(null);
-        loadContacts(bookUri, search);
-      } catch (error) {
-        setContactProblem(sayError(error));
-      } finally {
-        setBusy(false);
-      }
-    })();
   };
 
   const createContact = () => {
@@ -211,6 +218,7 @@ export default function Contacts() {
     if (newNote !== "") data.note = newNote;
     void (async () => {
       setBusy(true);
+      setListProblem(null);
       try {
         const uid = `pithagoras-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         await api.tool("nc_contacts_create_contact", { addressbook: bookUri, uid, contact_data: data }, instance);
@@ -220,7 +228,7 @@ export default function Contacts() {
         setNewOrg("");
         setNewNote("");
         setCreating(false);
-        loadContacts(bookUri, search);
+        loadContacts(bookUri, search, true);
       } catch (error) {
         setListProblem(sayError(error));
       } finally {
@@ -234,9 +242,8 @@ export default function Contacts() {
   if (contact !== null) {
     return (
       <div className="space-y-2">
-        {ask !== null && <Ask ask={ask} onNo={() => setAsk(null)} />}
         <div className="flex items-center gap-1">
-          <button type="button" className={portal.ui.classes.ghost} onClick={() => setContact(null)}>
+          <button type="button" className={portal.ui.classes.ghost} onClick={() => void back()}>
             ← {t("Back to the list")}
           </button>
           <span className="flex-1" />
@@ -257,9 +264,10 @@ export default function Contacts() {
         <input className={portal.ui.classes.input} value={editOrg} placeholder={t("Organization")} aria-label={t("Organization")} onChange={(e) => setEditOrg(e.target.value)} />
         <textarea className="nc-note-text" rows={3} value={editNote} placeholder={t("Note")} aria-label={t("Note")} onChange={(e) => setEditNote(e.target.value)} />
         {contact.title !== undefined && <p className="px-1 text-xs text-fg-subtle">{t("Title")}: {contact.title}</p>}
-        <button type="button" className={portal.ui.classes.primarySmall} disabled={busy} onClick={() => void saveContact()}>
+        <button type="button" className={portal.ui.classes.primarySmall} disabled={busy || !changed} onClick={() => void saveContact()}>
           {t("Save")}
         </button>
+        {saved && !changed && <p className="px-1 text-xs text-fg-subtle" role="status">{t("Saved.")}</p>}
         {contactProblem !== null && <portal.ui.ErrorBanner onClose={() => setContactProblem(null)}>{contactProblem}</portal.ui.ErrorBanner>}
       </div>
     );
@@ -269,7 +277,7 @@ export default function Contacts() {
     <div className="space-y-2">
       {books === null ? (
         bookProblem !== null ? (
-          <portal.ui.ErrorBanner onClose={() => setBookProblem(null)}>{t("The address books could not be read: {error}", { error: bookProblem })}</portal.ui.ErrorBanner>
+          <portal.ui.LoadFailed error={t("The address books could not be read: {error}", { error: bookProblem })} onRetry={loadBooks} />
         ) : (
           <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
         )
@@ -277,13 +285,7 @@ export default function Contacts() {
         <portal.ui.Empty>{t("No address books yet.")}</portal.ui.Empty>
       ) : (
         <>
-          <div className="flex gap-1" role="group">
-            {books.map((b) => (
-              <button key={b.uri} type="button" aria-pressed={b.uri === bookUri} className={`nc-tab${b.uri === bookUri ? " nc-tab-on" : ""}`} onClick={() => setBookUri(b.uri)}>
-                {b.displayName}
-              </button>
-            ))}
-          </div>
+          <portal.ui.Segments label={t("Address books")} value={bookUri ?? ""} options={books.map((b) => ({ id: b.uri, label: b.displayName }))} onChange={setBookUri} />
 
           <div className="flex items-center gap-1">
             <input
@@ -324,7 +326,7 @@ export default function Contacts() {
 
           {rows === null ? (
             listProblem !== null ? (
-              <portal.ui.ErrorBanner onClose={() => setListProblem(null)}>{t("The contacts could not be read: {error}", { error: listProblem })}</portal.ui.ErrorBanner>
+              <portal.ui.LoadFailed error={t("The contacts could not be read: {error}", { error: listProblem })} onRetry={() => loadContacts(bookUri, search)} />
             ) : (
               <portal.ui.RowsSkeleton rows={4} label={t("Loading…")} />
             )

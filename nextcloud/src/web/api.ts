@@ -5,7 +5,7 @@
  * refused is. Which of the instances a tool call goes to is what its panel holds (InstanceContext): each open
  * panel keeps its own choice, and every tool call is sent with it.
  */
-import { createContext, useContext } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef } from "react";
 import { portal } from "../portal";
 
 /** What GET /status says of where things stand: every instance -- its container, its entry in pi's config, and
@@ -124,4 +124,26 @@ export function sayError(error: unknown): string {
   if (typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).error === "string")
     return (error as Record<string, unknown>).error as string;
   return String(error);
+}
+
+/**
+ * A guard against answers that come late: a request that is asked while an earlier one of the same `key` is still on
+ * its way makes the earlier one stale, and so does the view being left. Ask for the check before the request, and
+ * look at it in the answer: `const current = guard("rows"); api.tool(...).then((r) => { if (!current()) return; ... })`.
+ * Without it a slow answer for the board that was pressed first overwrites the board pressed after it.
+ */
+export function useGuard(): (key?: string) => () => boolean {
+  const counters = useRef(new Map<string, number>());
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return useCallback((key = "") => {
+    const n = (counters.current.get(key) ?? 0) + 1;
+    counters.current.set(key, n);
+    return () => mounted.current && counters.current.get(key) === n;
+  }, []);
 }

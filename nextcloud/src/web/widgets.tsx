@@ -1,7 +1,7 @@
 /** Small pieces the tabs share: a switcher of sub-views in one tab (the same chip look as the list pickers), and the
  * panel's own yes-and-no, where the browser's question window would otherwise stand. */
 
-import { t } from "../portal";
+import { portal, t } from "../portal";
 
 export interface SubTab {
   id: string;
@@ -50,4 +50,10 @@ export function Ask({ ask, onNo }: { ask: AskState; onNo(): void }) {
       </div>
     </div>
   );
+}
+
+/** The portal's own question before something goes away for good: its dialog over the page (focus on the safe button,
+ * Escape to leave, and the person's setting to be asked or not), in place of a question drawn in the panel. */
+export function confirmDelete(title: string, message?: string, confirmLabel: string = t("Delete")): Promise<boolean> {
+  return portal.ui.confirm({ title, message, confirmLabel, danger: true, deletes: true });
 }

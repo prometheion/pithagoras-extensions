@@ -53,7 +53,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 
 ## What you get
 
-- **The library**, on the portal's Office tab: create blank Word documents and spreadsheets, open one full screen in
+- **The library**, on the portal's Office tab: create blank Word documents (text in Arial 11, set in the document's own defaults, so a built-in table style
+  shows one font in every row; a document you add keeps its own) and spreadsheets, open one full screen in
   the embedded editor, sort the list by name, modified, size or type, and download a copy. Every document lives in an
   agent's home or a project's folder and belongs to that agent or project; there are no documents of nobody's. Every
   `.docx` and `.xlsx` in the agents' homes and the projects' folders (not the folders other chats work in, nor the rest
@@ -76,7 +77,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   tabs) is one editing session seen twice.
 - **The agent's tools**, in the chats of agents and projects (a chat in a folder inside a project is the project's,
   as the portal says whose a chat is; the panel beside it lists by the same rule): `office_list`, `office_create`,
-  `office_read`, `office_edit`, `office_comments` and `office_screenshot`. An agent sees the documents in its own
+  `office_read`, `office_edit`, `office_format`, `office_comments` and `office_screenshot`. An agent sees the documents in its own
   folder (its home, or its project's) and the ones it was granted by a mention; another agent's, and the files in
   another agent's or project's folder, are not
   there for it, and asking for one gets the same answer as for a document that does not exist. What an agent makes
@@ -93,18 +94,95 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   written over. An edit is made whole or not at all: every quote, sheet name and position is checked against the
   document as it stands first, and an edit that fails after it changed something is taken back. Where even that
   fails (a person changed the same sheets meanwhile), the agent hears so (`error:partial`) and reads the document
-  again. After an edit the Document Server is asked to save the session, and the agent hears the new revision; that
+  again. In a spreadsheet, what you changed yourself after the agent's step (a cell you typed into or formatted, a
+  row or a sheet of the call's you wrote into, frozen panes you moved) is never taken back with the agent's call: it stays as you made it, and the agent's answer
+  (`error:partial`) names it. After an edit the Document Server is asked to save the session, and the agent hears the new revision; that
   save holds what you typed until then too.
-  Word: replace quoted text, add paragraphs (with a heading style) or a table after a paragraph, remove a paragraph
-  (a document keeps one: its only paragraph removed leaves it empty).
+  Word: replace quoted text, add paragraphs (in any paragraph style the document has) or a table after a paragraph,
+  remove a paragraph (a document keeps one: its only paragraph removed leaves it empty). A quote is looked for in the
+  body's text only: not in headers, footers, footnotes or a table of contents' entries (which repeat the headings),
+  and a text found more than once is refused unless the call says which place it means (`nth`, from 1, in reading
+  order). A list item's number or bullet is no part of its text: `office_read` gives the list in the brackets
+  (`[5] (bullet) Point`).
+  **How a Word document looks** is `office_format`'s, a tool of its own (so a chat that never formats can leave it
+  lazy in Settings → Tools, and pay nothing for it): characters (font, size, bold, italic, underline, strike,
+  superscript, subscript, colour, highlight, links on and off, character styles, and taking a text's own formatting
+  off), paragraphs (alignment, spacing, line spacing, indents, bulleted and numbered lists with their levels and a
+  new start, page break before, keep with next), styles (new paragraph and character styles; an existing one changes
+  only when the call says `change: true`, and the answer counts the paragraphs that use it), tables (a table style,
+  width, column widths, header rows, borders, cell fills, alignment, row heights, merged cells), the page (size,
+  orientation, margins, headers and footers with the page number and count, a first page of its own), sections,
+  page breaks, footnotes and a table of contents. A table of contents follows the document: every `office_edit` and
+  `office_format` call that changes a document holding one brings its entries and page numbers up to date as the last
+  part of the same step (so a failed call's Undo takes that back too), and its answer says so; what was changed by
+  hand in the entries is overwritten then, as Word's own update does. A comment on an entry is made again on the text of
+  the new entry (the one with its text, else the one at its place), with its author, time, state and replies, so its
+  thread and its chat go on; the answer says that too. A table of contents that lists nothing yet is found by the editor's
+  English text for it ("No table of contents entries found.", as Office's editors and an English Word write it): one
+  made in a Word of another language is not brought up to date until it lists something. With two tables of contents
+  that list nothing yet in sections of different widths, the second one's new entries take their page-number tab at
+  the first one's width. Each update lays the whole document out: in the agent's editor about 17 seconds for 340 pages
+  of text (a file of 130 kB), so an `office_edit` or `office_format` call has more time the larger the document's file
+  is (two minutes at most). Each op names its place by a quote, as
+  `office_edit`'s do. A call
+  is made whole or not at all: everything it names is checked first (quotes, styles, tables and cells, what a header
+  holds), and a call that fails after it changed something is taken back by the editor's own Undo, as one step. A
+  header or footer that holds more than text (a picture, a table, a field other than the page number and count) is
+  replaced only with `replace: true`; setting the header of a later section that showed the one before it gives it
+  one of its own, and the earlier one stays (`""` there gives it an empty one, so its pages show none). A link is
+  changed or taken off whole: a quote of part of a link is refused. A style is never based on itself, also not
+  through others. A section break's type (`continuous`, `evenPage`, `oddPage`) is how the section after it starts,
+  and a page size alone keeps the section's orientation. Lengths are points, or a text with its unit (`"2.5cm"`, `"10mm"`,
+  `"1in"`), colours `"#RRGGBB"`. Borders are single lines (the editor draws no other kind through its API). When a
+  call moves the pages (page setup, a style changed, a section, a page break, a table of contents), its answer says
+  so, and `office_screenshot` shows them. `office_read` with `formatting: true` also says how a Word document looks:
+  the document's defaults and the styles in use (each as it is itself; what it inherits from another is not added),
+  each section's page, margins, header and footer (or the earlier section's it shows), the footnotes and where each
+  one's mark is (a table's in its cell), and each paragraph's and run's own formatting (not what its style gives it;
+  what it sets off or to zero is said too, "not bold", "indent left 0cm", as it hides the style's), a numbered item's number as the editor gives it (`(numbered "3.")`, so a list that
+  goes on and one that starts again are told apart), a table's style, header rows, merged cells and borders, and
+  each cell's own fill, vertical alignment and borders with its paragraphs' and runs' own formatting (`B2: fill
+  #FFFF00, valign center; (right) "42": bold`, under the table's rows; a table or a content control inside a cell is the
+  cell's text, its paragraphs counted and read with the cell's); 50,000 characters of it at most. Not read: the saved file's formatting, when Office is stopped.
   Excel: write values and formulas into a range of any sheet (the editor computes the formulas; `=Data!A1` and
-  `='My data'!A1` reach other sheets), and make, rename, move, copy, hide, show and delete sheets, up to 20 of these
+  `='My data'!A1` reach other sheets), insert and delete rows and columns (`{insertRows: "5:6"}` makes new rows 5
+  and 6; formulas follow the cells they name, and those that named deleted cells turn `#REF!`), and make, rename,
+  move, copy, hide, show and delete sheets, up to 20 of these
   in one call (Excel's rules for names: at most 31 characters, none of `[]:*?/\`, no two alike in any case; one sheet
   always stays visible). A hidden sheet is moved by showing it, moving it and hiding it again. Deleting a sheet turns
   the formulas that name it into `#REF!`, as in Excel. `office_read` lists every sheet with its position and whether
   it is hidden, and reads one sheet or all of them. A change to the sheets shows in your editor once the Document
   Server has let it through, a moment after the call makes it. A sheet the edit deletes is hidden and renamed
-  `~deleted …` at once, and goes when the edit's other ops are made. The agent cannot write comments or tracked
+  `~deleted …` at once, and goes when the edit's other ops are made. Deleted rows and columns cannot be taken back, so
+  a call deletes them last, after every op that can be (a call that does otherwise is refused); where the call fails
+  after a delete was made, what it changed below or right of the deleted lines stays too (its cells moved), and the
+  answer names those ops. A call inserts and deletes 20,000 rows and columns at most. Rows and columns are
+  inserted and deleted while you are in the workbook too: the agent's answer then names the people in it, as their
+  cells move. If you are in the middle of typing into a cell when the agent's insert moves it, OnlyOffice 10.0 puts
+  what you type at the cell's old address (a row off after a row inserted above it), and your own editor may show the
+  cell empty until you reload it: the Document Server's co-editing, reported as
+  [ONLYOFFICE/DocumentServer#3867](https://github.com/ONLYOFFICE/DocumentServer/issues/3867). Your editor's view can
+  also differ when the agent writes the very cell you are typing in.
+  **How a spreadsheet looks** is `office_format`'s too: cells (`"A1:D9"`, or whole columns `"C:D"` and rows `"5:6"`)
+  take a number format (`"#,##0.00"`, `"0%"`, `"dd.mm.yyyy"`), font, size, bold, italic, underline, strike,
+  superscript and subscript (in cells that hold text: OnlyOffice sets them on a text's characters), colour, fill,
+  alignment, wrap, text rotation, borders (single, double, dashed or dotted lines), merging and splitting, and taking
+  all of a cell's formatting off (`clear`, merges too; the values stay). Columns take a width (in characters, as the
+  sheet shows it), rows a height (in points), and both can be hidden, shown and fitted to their contents; frozen
+  panes keep the rows above and the columns left of a cell in view. A call is made whole or not at all: it is checked
+  against the workbook first (superscript on a number, a freeze of a hidden sheet, more than 20,000 cells, whole
+  columns and rows counting the used cells in them, are refused before anything changes), each op reads what it
+  changes first, and where a later op of the call fails, what it changed is put back. Some things cannot be put
+  back, because OnlyOffice's API cannot read them: the alignment and the borders, the formatting of a text whose
+  characters differ (part of it bold, say) and the width of a hidden column. Where a later op fails, they stay as the
+  call set them, and the answer (`error:partial`) names them. OnlyOffice's API takes no border off and sets no
+  "general" alignment back: only `clear` takes them off, with everything else. A merge keeps the top-left cell's
+  value (as in Excel); taking a merge back puts the others' values back. A column width or row height put back is the
+  column's or row's own from then on (the API sets none back to the sheet's default), which looks the same. `office_read` with `formatting: true` says how
+  each sheet looks: the font most cells have, the cells that look otherwise (grouped into ranges), merged cells, the
+  columns' widths and rows' heights that differ from the sheet's, hidden ones and frozen panes, 50,000 characters of it
+  at most. It cannot say the alignment or the borders (OnlyOffice has no getter for them): `office_screenshot` shows
+  them. The agent cannot write comments or tracked
   changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
   is in a document its session stays open after the people left it, so it is saved as the last person leaves: what
@@ -129,7 +207,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   the same page). The agent's own active cell shows only as its highlighted column letter and row number. The text
   the picture shows comes with it, as office_read gives it, so the guard reads it: a Word page's body text (of a table
   over many pages, the rows on the page), or the cells of the range that are shown; 20,000 characters at most. Only in
-  the picture, so the guard does not read them: a page's header and footer, text boxes, shapes and charts, text inside
+  the picture, so the guard does not read them: a page's header, footer and footnotes, text boxes, shapes and charts, text inside
   the document's own pictures, and a long text that runs into the range from a cell outside it. A model that cannot
   take pictures is refused (`error:no_images`) before anything is done. A picture costs the model about 1,000 to
   1,600 input tokens on every later turn of the chat. Taking one moves the agent's own view (its page, zoom, sheet and
@@ -348,12 +426,19 @@ agents' editor.
 - What the portal knows of the editor's sessions (which one saved which revision) is kept in memory. An editor that
   stays open across a restart of the portal, and saved once before it, has its later saves kept as conflict copies,
   not written.
-- The agent edits text, paragraphs, tables, cells and sheets; it cannot change formatting beyond a paragraph's style,
+- The agent edits text, paragraphs, tables, cells and sheets, and formats Word documents and spreadsheets; it cannot
   write comments of its own or make tracked changes (it answers in the threads it was asked in). A sheet the agent copies takes the values, formulas, number formats and
   column widths of the old one, not its other formatting (fonts, colours, borders), charts, pictures, row heights or
   settings. An edit made while a person types in the same paragraph merges as the editor merges two people's typing.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
+- `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
+  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A link lies
+  inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out what a table that holds a
+  picture looks like and the cells of a table inside a cell (`office_screenshot` shows them). For spreadsheets `office_format` leaves out, for now:
+  conditional formats, data validation, charts, filters, tables, sorting, named ranges, pictures, cell styles, a
+  sheet's tab colour, grouped rows and columns, protection and print setup; `office_read` does not read a sheet's
+  alignment and borders (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
   editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most. A Word picture
@@ -393,6 +478,29 @@ that the agent's commands rely on); they are opt-in, as they need Docker Engine 
 ./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office
 ```
 
+What the editor's API does (a getter's answer, a setter's arguments) is quickest to pin with the Document Server's own
+docbuilder, which runs the same builder API on a file of its own in about two seconds, with no editor and no network.
+A script in `probe/probe.docbuilder`:
+
+```js
+builder.CreateFile("xlsx");
+var ws = Api.GetActiveSheet();
+ws.GetRange("A1").SetValue("abc");
+ws.GetRange("A1").GetCharacters(2, 1).GetFont().SetBold(true);
+console.log(ws.GetRange("A1").GetCharacters(1, 3).GetFont().GetBold()); // null: the characters mix it
+builder.CloseFile();
+```
+
+prints what it logs:
+
+```sh
+docker run --rm --network none -v "$PWD/probe:/probe" --entrypoint /var/www/onlyoffice/documentserver/server/FileConverter/bin/docbuilder \
+  onlyoffice/documentserver:<version> /probe/probe.docbuilder
+```
+
+What lands later in the editor than in docbuilder (anything that goes through the Document Server's co-editing lock,
+as a freeze, an autofit or a change to the sheets) is for the end-to-end tests to pin.
+
 `real-portal.test.mts` proves the same in a real portal: the portal's own server started from that folder (built with
 `npm run build` there), Docker for extensions and Office installed into it through `POST /api/packages`, a person in
 the real Office page in Chromium, and the agent's office tools called from a chat whose model is a script
@@ -403,6 +511,23 @@ own (Node's alpine image, with this machine's Docker socket), on a network of it
 ```sh
 OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras [OFFICE_PORTAL_MODE=container] npm run test:real -w office
 ```
+
+Its case p gives a real model a fixed task (a report with a title, headings, lists, a table, a style, a footnote, the
+page set up, a header, a footer and a table of contents, written and formatted with the office tools) and counts the
+calls it made, the ones refused and their codes, so the tool texts can be changed until a run has no refusal they
+could have prevented. It runs only where a model is given, any model with an OpenAI-compatible API, with the portal on
+the machine. Its chat has the office tools alone (every other tool switched off for it, so the model has no shell
+and no file tools on the machine), the proxy refuses a request that offers the model any other tool, and the
+model's key stays in the test's own process (the portal is started without any `OFFICE_REAL_MODEL_*`):
+
+```sh
+OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras OFFICE_REAL_MODEL_URL=<its API, ending in /v1> OFFICE_REAL_MODEL=<its id> \
+  [OFFICE_REAL_MODEL_KEY=<key>] [OFFICE_REAL_MODEL_IMAGES=1] [OFFICE_REAL_MODEL_REPORT=calls.json] \
+  node --import tsx --test --test-timeout=1800000 --test-name-pattern='^(the portal|p: )' test/portal/real-portal.test.mts
+```
+
+(from `office/`; the pattern runs the portal's set-up and case p alone). With a report named, the last request the
+model got is kept beside it (`calls.json.request.json`): what the model wrote and the pictures office_screenshot gave it.
 
 `scripts/make-fixtures.mjs` makes `fixtures/sample.docx` and `fixtures/sample.xlsx` again (`node
 scripts/make-fixtures.mjs` in `office/`; the zip entries carry the time of the run, so the bytes differ but not what

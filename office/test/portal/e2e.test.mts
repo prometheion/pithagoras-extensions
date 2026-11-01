@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
+import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import https from "node:https";
 import os from "node:os";
-import zlib from "node:zlib";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1115,6 +1115,331 @@ async function run(PITHAGORAS: string): Promise<void> {
     await writer.page.context().close();
   });
 
+  /** What a person's Word editor holds, as its own select-all gives it as HTML (the runs' look in their styles), without
+   * the editor's own copy of it in binary (which carries ids of its own). */
+  const personHtml = async (frame: import("@playwright/test").Frame) => String(await frame.evaluate(`(function () { var e = window.Asc.editor; e.asc_EditSelectAll(); var h = e.pluginMethod_GetSelectedContent({ type: "html" }); e.asc_RemoveSelection && e.asc_RemoveSelection(); return h; })()`)).replace(/ class="docData;[^"]*"/g, "");
+  /** The style of the HTML element the text `text` starts in (the last style before it). */
+  const styleOf = (html: string, text: string) => {
+    const at = html.indexOf(text);
+    return at < 0 ? `(not found in ${html.slice(0, 2000)})` : ([...html.slice(0, at).matchAll(/style="([^"]*)"/g)].at(-1)?.[1] ?? `(no style before it: ${html.slice(Math.max(0, at - 400), at + 50)})`);
+  };
+
+  test("21. office_format in the real editor: one call with every op and key; office_read with formatting says them, a person's editor shows them at once, and the save holds them", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Formatted report", "word");
+    await tools.office_edit.execute("f0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Quarterly report for Meridian Labs" },
+        { after: "Quarterly report for Meridian Labs", paragraphs: ["Findings"], style: "Heading 1" },
+        { after: "Findings", paragraphs: ["Revenue grew. There was a discrepancy here.", "Water is H2O and energy is E=mc2.", "first point", "second point", "sub point", "Plain closing words.", "Strike me."] },
+        { after: "Strike me.", table: [["Item", "Amount", "Note"], ["Ledger", "42", "ok"]] },
+        { paragraphs: ["End text"] },
+      ],
+    });
+    // Formatting of its own on a text, which `clear` takes off below.
+    await tools.office_format.execute("f00", { id: doc, ops: [{ format: "Plain closing", set: { italic: true, underline: true, color: "#00AA00", fontSize: 16 } }] });
+    const person = await personOpens(doc);
+    const ops = [
+      { format: "Quarterly report", set: { font: "Arial", fontSize: 14, bold: true, italic: true, underline: true, color: "#C81E1E", highlight: "yellow", align: "center", spaceBefore: 12, spaceAfter: "6pt", keepWithNext: true } },
+      { format: "Meridian Labs", set: { link: "https://example.com/meridian" } },
+      { defineStyle: "Callout", basedOn: "Normal", set: { italic: true, color: "#005AA0", indentLeft: "1.27cm" } },
+      { defineStyle: "Mark", type: "character", set: { bold: true, color: "#006100" } },
+      { format: "Revenue grew", set: { style: "Callout", lineSpacing: 1.5, indentRight: "1cm", firstLine: "-0.5cm" } },
+      { format: "discrepancy", set: { style: "Mark" } },
+      { format: "2", nth: 1, set: { subscript: true } },
+      { format: "2", nth: 2, set: { superscript: true } },
+      { format: "first point", through: "second point", set: { list: "bullet" } },
+      { format: "sub point", set: { list: "number", level: 2, listStart: 3 } },
+      { format: "Strike me.", set: { strike: true, pageBreakBefore: true } },
+      { format: "Plain closing", set: { bold: true, clear: true } },
+      { formatTable: "Ledger", set: { tableStyle: "Grid Table 4 - Accent 1", width: "100%", columnWidths: ["7cm", "3cm", "3cm"], headerRows: 1, borders: { bottom: "single 1.5pt #C00000" } } },
+      { formatTable: "Ledger", cells: "B2", set: { fill: "#FFFF00", align: "right", valign: "center", rowHeight: "1cm", bold: true } },
+      { formatTable: "Item", cells: "B1:C1", set: { merge: true } },
+      { page: "*", set: { pageSize: "A4", orientation: "landscape", margins: "2cm", header: "Meridian Labs — Findings", footer: "Page {page} of {pages}", differentFirstPage: false } },
+      { footnote: "discrepancy", text: "The audit of March." },
+      { sectionBreak: "Plain closing words.", type: "nextPage" },
+      { after: "End text", pageBreak: true },
+      { toc: true, levels: 3 },
+    ];
+    const t0 = Date.now();
+    const made = (await tools.office_format.execute("f1", { id: doc, ops })).content[0].text;
+    console.log(`21. one call of ${ops.length} ops: ${made} (${Date.now() - t0} ms)`);
+    assert.match(made, /^Formatted "Formatted report" \(20 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Made the style "Callout"\. Made the style "Mark"\. The document reflowed; office_screenshot shows the pages\.$/);
+    const read = (await tools.office_read.execute("f2", { id: doc, formatting: true })).content[0].text;
+    console.log(`21. office_read with formatting:\n${read}`);
+    for (const want of [
+      /Styles in use: .*Callout \(paragraph, based on Normal: italic, #005AA0; indent left 1\.27cm\).*Mark \(character[^)]*: bold, #006100\)/,
+      /Section 1: A4 landscape, margins 2\/2\/2\/2 cm \(top\/right\/bottom\/left\)\. Header: "Meridian Labs — Findings"\. Footer: "Page \{page\} of \{pages\}"\./,
+      /Section 2 \(from \[\d+\]\): A4 landscape/,
+      /Footnotes: \[1\] in \[\d+\] after "Revenue grew\. There was a discrepancy": The audit of March\./,
+      /\] \(toc 1\) Findings\t\d/,
+      /\] \(center, space before 12pt, space after 6pt, keep with next\) Quarterly report for Meridian Labs\n {4}"Quarterly report": Arial 14, bold, italic, underline, #C81E1E, highlight yellow; "Meridian Labs": style "Hyperlink", link https:\/\/example\.com\/meridian/,
+      /\] \(Callout, line spacing 1\.5, indent right 1cm, hanging 0\.5cm\) Revenue grew\. There was a discrepancy here\.\n {4}"discrepancy": style "Mark"/,
+      /\] Water is H2O and energy is E=mc2\.\n {4}"2": subscript; "2": superscript/,
+      /\] \(bullet\) first point\n\[\d+\] \(bullet\) second point/,
+      /\] \(numbered lowerLetter "c\.", level 2\) sub point/,
+      /\] \(page break before\) Strike me\.\n {4}"Strike me\.": strike/,
+      /\] Plain closing words\.\n {4}"Plain closing": bold\n/,
+      /\] table \(style "Grid Table 4 - Accent 1", header row 1, B1 spans 2 columns, borders bottom single 1\.5pt #C00000\)\n\| Item \| Amount \/ Note \|\n\| Ledger \| 42 \| ok \|/,
+      // The cell's own formatting under the rows: what the read had left to a screenshot before.
+      /\| Ledger \| 42 \| ok \|(?:\n {4}[A-C]\d: [^\n]*)*\n {4}B2: fill #FFFF00, valign center; \(right\) "42": bold\n/,
+    ]) assert.match(read, want);
+    // The person's editor has it, without a reload.
+    const html = await personHtml(person.frame);
+    console.log(`21. the person's editor: "Quarterly report" ${JSON.stringify(styleOf(html, "Quarterly report"))}, "Plain closing" ${JSON.stringify(styleOf(html, "Plain closing"))}`);
+    // (Its HTML says bold and italic by tags of their own; the font, size, colour and highlight in the style.)
+    assert.match(styleOf(html, "Quarterly report"), /font-family:'Arial';font-size:14pt;background-color:#ffff00;color:#c81e1e/i);
+    assert.doesNotMatch(styleOf(html, "Plain closing"), /#00aa00|16pt/i, "clear took its own colour and size off");
+    // The save holds every part.
+    const xml = await partOf(doc, "word/document.xml");
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    const part = async (name: string) => (await zip.file(name)?.async("string")) ?? "";
+    const footer = (await Promise.all(Object.keys(zip.files).filter((n) => /^word\/footer\d*\.xml$/.test(n)).map(part))).join("");
+    const header = (await Promise.all(Object.keys(zip.files).filter((n) => /^word\/header\d*\.xml$/.test(n)).map(part))).join("");
+    assert.match(await part("word/styles.xml"), /<w:name w:val="Callout"\s*\/>[\s\S]*?<\/w:style>/);
+    assert.match(await part("word/styles.xml"), /w:type="character"[^>]*>(?:(?!<\/w:style>)[\s\S])*<w:name w:val="Mark"/);
+    assert.match(await part("word/numbering.xml"), /<w:numFmt w:val="bullet"\s*\/>/);
+    assert.match(xml, /<w:pgSz [^>]*w:orient="landscape"/);
+    assert.equal((xml.match(/<w:sectPr/g) ?? []).length, 2, "two sections");
+    assert.match(header, /Meridian Labs — Findings/);
+    assert.match(footer, /PAGE/);
+    assert.match(footer, /NUMPAGES/);
+    assert.match(await part("word/footnotes.xml"), /The audit of March\./);
+    assert.match(xml, /<w:instrText[^>]*>TOC \\o &quot;1-3&quot;/);
+    assert.match(xml, /<w:tblStyle w:val="[^"]+"\s*\/>/);
+    assert.match(xml, /<w:gridSpan w:val="2"\s*\/>/);
+    assert.match(xml, /<w:tblHeader\s*\/>/);
+    assert.match(xml, /<w:vertAlign w:val="superscript"\s*\/>/);
+    assert.match(xml, /<w:vertAlign w:val="subscript"\s*\/>/);
+    assert.match(xml, /<w:highlight w:val="yellow"\s*\/>/);
+    assert.match(xml, /<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*Meridian Labs/, "the link is there");
+    assert.match(xml, /<w:br w:type="page"/);
+    assert.match(xml, /<w:gridCol w:w="3969"\s*\/>/, "7 cm, in twips (SetColumnWidth takes EMU)");
+
+    // The link off again: its runs leave it, and its style with them.
+    await tools.office_format.execute("f3", { id: doc, ops: [{ format: "Meridian Labs", set: { link: "" } }] });
+    const unlinked = await partOf(doc, "word/document.xml");
+    assert.doesNotMatch(unlinked, /<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*Meridian Labs/, "no link around the text");
+    assert.doesNotMatch((await tools.office_read.execute("f4", { id: doc, formatting: true })).content[0].text, /"Meridian Labs": [^\n]*(Hyperlink|link)/);
+    await person.page.context().close();
+  });
+
+  test("22. after a table of contents and a header that repeat a heading, the heading is still quoted (the body's only); a repeat needs nth; a call that fails at its last op leaves the document as it was, in the person's editor and the save", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Quoted", "word");
+    await tools.office_edit.execute("q0", { id: doc, ops: [{ quote: "New document", replacement: "Report" }, { after: "Report", paragraphs: ["Findings"], style: "Heading 1" }, { after: "Findings", paragraphs: ["Total", "Total", "Alpha text here."] }, { after: "Alpha text here.", table: [["c11", "c12", "c13"], ["c21", "c22", "c23"]] }] });
+    await tools.office_format.execute("q1", { id: doc, ops: [{ toc: true }, { page: "*", set: { header: "Findings, in the header" } }, { formatTable: "c12", cells: "B1:C1", set: { merge: true } }] });
+    const italic = await tools.office_format.execute("q2", { id: doc, ops: [{ format: "Findings", set: { italic: true } }] });
+    assert.match(italic.content[0].text, /^Formatted "Quoted" \(1 op\)/, "the heading is the one place: not the TOC's entry, not the header");
+    assert.match(await tools.office_edit.execute("q3", { id: doc, ops: [{ quote: "Total", replacement: "Sum" }] }).then(() => "", (e: Error) => e.message), /^error:quote_ambiguous .*2 times.*give nth/);
+    await tools.office_edit.execute("q4", { id: doc, ops: [{ quote: "Total", nth: 2, replacement: "Sum" }] });
+    const read = (await tools.office_read.execute("q5", { id: doc, formatting: true })).content[0].text;
+    assert.match(read, /\(Heading 1\) Findings\n {4}"Findings": italic\n\[\d+\] Total\n\[\d+\] Sum\n/);
+    // A call whose last op cannot be made once the ops before it are (its quote is parted by the footnote op 3 puts
+    // in it, which the check, made on the document as it stands, cannot see): the editor's Undo takes the whole call
+    // back, the footnote with it.
+    const person = await personOpens(doc);
+    const before = { read: (await tools.office_read.execute("q6", { id: doc, formatting: true })).content[0].text, html: await personHtml(person.frame), xml: await partOf(doc, "word/document.xml") };
+    const t0 = Date.now();
+    const failed = await tools.office_format.execute("q7", { id: doc, ops: [{ format: "Alpha", set: { bold: true, highlight: "yellow" } }, { format: "Report", set: { fontSize: 30 } }, { footnote: "Alpha", text: "A note the Undo takes back." }, { format: "Alpha text", set: { italic: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    console.log(`22. a call failing at its last op: ${failed} (${Date.now() - t0} ms)`);
+    assert.match(failed, /^error:quote_not_found op 4: /);
+    await delay(3000);
+    assert.equal((await tools.office_read.execute("q8", { id: doc, formatting: true })).content[0].text, before.read, "the agent's editor is as it was");
+    assert.equal(await personHtml(person.frame), before.html, "so is the person's");
+    await tools.office_edit.execute("q9", { id: doc, ops: [{ quote: "Sum", replacement: "Sum." }] });
+    const saved = await partOf(doc, "word/document.xml");
+    assert.doesNotMatch(saved, /<w:highlight w:val="yellow"/, "the next save has nothing of the failed call");
+    assert.doesNotMatch(saved, /<w:footnoteReference/, "nor its footnote");
+    await person.page.context().close();
+  });
+
+  test("23. after the first review: a call that fails having changed nothing leaves the agent's earlier edits (here, its merge refused against the grid); a section break's type starts the section after it; a section's inherited header is read and taken off; formatting set off or to zero is read; each footnote at its own mark, a cell's too; part of a link is refused; a size alone keeps landscape", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Reviewed", "word");
+    await tools.office_edit.execute("r0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Alpha words" },
+        { after: "Alpha words", paragraphs: ["S one text"] },
+        { after: "S one text", paragraphs: ["Heading words"], style: "Heading 1" },
+        { after: "Heading words", paragraphs: ["Indented item"] },
+        { after: "Indented item", table: [["c11", "c12", "c13"], ["c21", "cellnote", "c23"]] },
+        { paragraphs: ["Tail para", "S two text"] },
+      ],
+    });
+    await tools.office_format.execute("r1", { id: doc, ops: [{ formatTable: "c11", cells: "B1:C1", set: { merge: true } }] });
+    assert.match((await tools.office_edit.execute("r2", { id: doc, ops: [{ quote: "Alpha words", replacement: "Beta words" }] })).content[0].text, /saved as revision/);
+    const person = await personOpens(doc);
+    // B1 spans two columns, so A1:B2 is no rectangle of the grid. Refused, and the edit before it stays: in the agent's
+    // editor, the person's and the save (before the review, the plugin's Undo took that edit back).
+    const failed = await tools.office_format.execute("r3", { id: doc, ops: [{ formatTable: "c11", cells: "A1:B2", set: { merge: true } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    console.log(`23. a merge that is no rectangle: ${failed}`);
+    assert.match(failed, /^error:bad_op op 1: the cells to merge are no rectangle of the table's grid/);
+    await delay(3000);
+    assert.match((await tools.office_read.execute("r4", { id: doc })).content[0].text, /\n\[1\] Beta words\n/);
+    assert.match(await personHtml(person.frame), /Beta words/);
+    await tools.office_edit.execute("r5", { id: doc, ops: [{ quote: "Tail para", replacement: "Tail para." }] });
+    assert.match(await partOf(doc, "word/document.xml"), /Beta words/);
+    assert.doesNotMatch(await partOf(doc, "word/document.xml"), /Alpha words/);
+
+    // Set off and to zero, over a style's; footnotes in a cell and after it; part of a link.
+    await tools.office_format.execute("r6", { id: doc, ops: [{ defineStyle: "Indented", set: { indentLeft: "1.27cm" } }, { format: "Indented item", set: { style: "Indented" } }, { format: "Beta words", set: { link: "https://example.com/beta" } }] });
+    await tools.office_format.execute("r7", { id: doc, ops: [{ format: "Indented item", set: { indentLeft: 0 } }, { format: "Heading", set: { bold: false } }, { footnote: "cellnote", text: "Note in the cell." }, { footnote: "Tail para", text: "Note at the tail." }] });
+    const part = await tools.office_format.execute("r8", { id: doc, ops: [{ format: "Beta", set: { link: "" } }] }).then((r) => r.content[0].text, (e: Error) => e.message);
+    assert.match(part, /^error:bad_op op 1: the quote is part of the link "Beta words", and a link changes or goes off whole/);
+    const looks = (await tools.office_read.execute("r9", { id: doc, formatting: true })).content[0].text;
+    console.log(`23. office_read with formatting:\n${looks}`);
+    assert.match(looks, /\] \(Indented, indent left 0cm\) Indented item\n/);
+    assert.match(looks, /\] \(Heading 1\) Heading words\n {4}"Heading": not bold\n/);
+    assert.match(looks, /\nFootnotes: \[1\] in \[\d+\] cell B2 after "cellnote": Note in the cell\.; \[2\] in \[\d+\] after "Tail para": Note at the tail\.\n/);
+
+    // A section break's type is how the section after it starts; that section shows the header before it until it
+    // has one of its own, and "" gives it an empty one.
+    await tools.office_format.execute("r10", { id: doc, ops: [{ sectionBreak: "S one text", type: "continuous" }, { page: "Beta words", set: { header: "Head one", orientation: "landscape" } }] });
+    const xml = await partOf(doc, "word/document.xml");
+    const sects = [...xml.matchAll(/<w:sectPr[\s\S]*?<\/w:sectPr>/g)].map((m) => m[0]);
+    assert.equal(sects.length, 2, "two sections");
+    assert.match(sects[1], /<w:type w:val="continuous"\s*\/>/, "the section after the break starts continuous");
+    assert.doesNotMatch(sects[0], /w:val="continuous"/, "the one before it starts as it did");
+    const inherited = (await tools.office_read.execute("r11", { id: doc, formatting: true })).content[0].text;
+    assert.match(inherited, /\nSection 1: [^\n]*landscape[^\n]* Header: "Head one"\.\n/);
+    assert.match(inherited, /\nSection 2 \(from \[\d+\]\): [^\n]* Header: section 1's \(none of its own\)\.\n/);
+    await tools.office_format.execute("r12", { id: doc, ops: [{ page: "S two text", set: { header: "" } }, { page: "Beta words", set: { pageSize: "Letter" } }] });
+    const after = (await tools.office_read.execute("r13", { id: doc, formatting: true })).content[0].text;
+    console.log(`23. after the header was taken off section 2:\n${after.split("\n\n")[1]}`);
+    assert.match(after, /\nSection 1: Letter landscape[^\n]* Header: "Head one"\.\n/, "a size alone kept landscape");
+    assert.match(after, /\nSection 2 \(from \[\d+\]\): [^\n]* Header: ""\.\n/, "an empty header of its own");
+    await person.page.context().close();
+  });
+
+  test("24. a table of contents follows the agent's calls: a heading added and text that pushes a heading to the next page by office_edit, a heading made body text by office_format; the entries and page numbers are those the editor lays out, also past a landscape section, in the read and the save", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Contents", "word");
+    // Lines that wrap on a portrait page and not on a landscape one: the landscape section's pages, counted at the
+    // portrait width, would be more.
+    const wide = Array.from({ length: 60 }, (_, n) => `Wide line ${n + 1}: words enough to wrap once on a portrait page and not on a landscape one.`);
+    await tools.office_edit.execute("t0", {
+      id: doc,
+      ops: [
+        { quote: "New document", replacement: "Report" },
+        { after: "Report", paragraphs: ["Overview"], style: "Heading 1" },
+        { after: "Overview", paragraphs: ["First words."] },
+        { after: "First words.", paragraphs: ["Planning ahead"], style: "Heading 1" },
+        { after: "Planning ahead", paragraphs: ["Plan words."] },
+        { paragraphs: ["Wide part"], style: "Heading 1" },
+        { paragraphs: wide },
+        { paragraphs: ["Appendix"], style: "Heading 1" },
+        { paragraphs: ["Closing words."] },
+      ],
+    });
+    const made = (await tools.office_format.execute("t1", { id: doc, ops: [{ sectionBreak: "Plan words.", type: "nextPage" }, { page: "Wide part", set: { orientation: "landscape" } }, { toc: true, levels: 2 }] })).content[0].text;
+    assert.doesNotMatch(made, /Updated the table of contents/, "a TOC the call made");
+    /** The TOC's entries as office_read gives them, and each heading's page as the editor lays it out (the page
+     * office_screenshot finds the heading on; no heading's text is in another paragraph). */
+    const entries = async (label: string) => {
+      const read = (await tools.office_read.execute(`t-${label}`, { id: doc })).content[0].text;
+      const listed = [...read.matchAll(/^\[\d+\] \(toc 1\) (.+)\t(\d+)$/gm)].map((m) => [m[1], Number(m[2])] as [string, number]);
+      const laid: [string, number][] = [];
+      for (const [heading] of listed) laid.push([heading, (await shoot(`24. ${label} ${heading}`, { id: doc, quote: heading })).out.details.page as number]);
+      console.log(`24. ${label}: the TOC ${JSON.stringify(listed)}, the pages ${JSON.stringify(laid)}`);
+      return { listed, laid };
+    };
+    const first = await entries("made");
+    assert.deepEqual(first.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(first.listed, first.laid);
+    const planWas = first.laid[1][1];
+
+    // A person comments on the entry "Planning ahead" in their editor (the editor's own call, on the entry's text
+    // selected); the update makes the entries anew, and the comment goes on on the new entry.
+    const person = await personOpens(doc);
+    const note = "Please give this section a shorter name";
+    // The editor's own methods (those a plugin reaches): from the start, the first "Planning ahead" is the entry.
+    const put = await person.frame.evaluate(`(function () {
+      var e = window.Asc.editor;
+      e.pluginMethod_MoveCursorToStart(false);
+      e.pluginMethod_SearchNext({ searchString: "Planning ahead", matchCase: true }, true);
+      if (e.pluginMethod_GetSelectedText() !== "Planning ahead") return "selected " + JSON.stringify(e.pluginMethod_GetSelectedText());
+      e.pluginMethod_AddComment({ UserName: "Ann Example", Text: ${JSON.stringify(note)}, Time: String(Date.now()), Solved: false });
+      return "put";
+    })()`);
+    assert.equal(put, "put");
+    const threads = async () => (await tools.office_comments.execute(`t-c-${Math.random()}`, { id: doc })).content[0].text;
+    assert.ok(await until(async () => (await threads()).includes(note), 20_000), "the agent's editor has the person's comment");
+    console.log(`24. the threads before the edit: ${await threads()}; the person's: ${JSON.stringify(await person.frame.evaluate(`(function () { return window.Asc.editor.pluginMethod_GetAllComments(); })()`))}`);
+    const personComments = () => person.frame.evaluate(`(function () { return (window.Asc.editor.pluginMethod_GetAllComments() || []).map(function (c) { return c.Data.QuoteText + " | " + c.Data.Text; }); })()`) as Promise<string[]>;
+
+    // A heading added, and text after it that pushes "Planning ahead" onto a later page.
+    const filler = Array.from({ length: 45 }, (_, n) => `Risk line ${n + 1}.`);
+    const edited = (await tools.office_edit.execute("t2", { id: doc, ops: [{ after: "First words.", paragraphs: ["Risks"], style: "Heading 1" }, { after: "Risks", paragraphs: filler }] })).content[0].text;
+    console.log(`24. office_edit: ${edited}`);
+    assert.match(edited, /saved as revision [\d.]+\.( 1 person in the document saw it live\.)? Updated the table of contents \(1 comment on its entries was moved onto the new entries\)\.$/);
+    const after = await threads();
+    console.log(`24. the threads after the edit: ${after}; the person's: ${JSON.stringify(await person.frame.evaluate(`(function () { return window.Asc.editor.pluginMethod_GetAllComments(); })()`))}`);
+    // On the entry's text itself: on the search's hit in the entry's link, the editor took it one character in.
+    assert.ok(after.includes(note) && after.includes('on: "Planning ahead"'), after);
+    assert.ok(await until(async () => (await personComments()).some((c) => c.startsWith("Planning ahead") && c.endsWith(note)), 10_000), `the person's editor: ${JSON.stringify(await personComments())}`);
+    const second = await entries("after the edit");
+    assert.deepEqual(second.listed.map((e) => e[0]), ["Overview", "Risks", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(second.listed, second.laid);
+    assert.ok(second.laid[2][1] > planWas, `"Planning ahead" went from page ${planWas} to ${second.laid[2][1]}`);
+
+    // The save: the entries with those page numbers, each one's page-number tab at the TOC's own section's width.
+    const xml = await partOf(doc, "word/document.xml");
+    const paras = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((m) => m[0]);
+    const textOf = (p: string) => [...p.replace(/<w:pPr>[\s\S]*?<\/w:pPr>/, "").matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:tab\/>/g)].map((m) => (m[0] === "<w:tab/>" ? "\t" : m[1])).join("");
+    const saved = paras.map((p) => [p, /^(.+)\t(\d+)$/.exec(textOf(p))] as const).filter(([, m]) => m);
+    assert.deepEqual(saved.map(([, m]) => [m![1], Number(m![2])]), second.laid, "the saved entries");
+    const sect = /<w:sectPr[\s\S]*?<\/w:sectPr>/.exec(xml)![0];
+    const width = Number(/<w:pgSz [^>]*w:w="(\d+)"/.exec(sect)![1]) - Number(/<w:pgMar [^>]*w:left="(\d+)"/.exec(sect)![1]) - Number(/<w:pgMar [^>]*w:right="(\d+)"/.exec(sect)![1]);
+    for (const [p] of saved) assert.match(p, new RegExp(`<w:tab w:val="right" w:leader="dot" w:pos="${width}"`), "the tab at the portrait section's width");
+
+    // office_format: a heading made body text leaves the TOC.
+    const formatted = (await tools.office_format.execute("t3", { id: doc, ops: [{ format: "Risks", set: { style: "Normal" } }] })).content[0].text;
+    assert.match(formatted, /Updated the table of contents( \(1 comment on its entries was moved onto the new entries\))?\.$/);
+    const third = await entries("after the format");
+    assert.deepEqual(third.listed.map((e) => e[0]), ["Overview", "Planning ahead", "Wide part", "Appendix"]);
+    assert.deepEqual(third.listed, third.laid);
+    assert.ok((await threads()).includes(note), "the comment is still there");
+
+    // A call that changed nothing (the style each heading has already) brings nothing up to date.
+    const same = (await tools.office_format.execute("t4", { id: doc, ops: [{ format: "Overview", set: { style: "Heading 1" } }] })).content[0].text;
+    console.log(`24. a format that changed nothing: ${same}`);
+    assert.doesNotMatch(same, /table of contents/);
+    assert.deepEqual((await entries("after nothing changed")).listed, third.listed);
+    await person.page.context().close();
+  });
+
+  test("25. how long a table of contents takes in the real editor on a document of about 340 pages: made, then brought up to date after a heading added at the start; both within the time a Word call of that size has", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Long report", "word");
+    const line = "This paragraph of body text runs over about three lines on a page so that the document gets long, with words and more words to fill the width of the page many times over and again";
+    // 400 sections of a heading and 24 paragraphs, in four calls (an op of each, 200 ops a call).
+    for (let part = 0; part < 4; part++) {
+      const ops = Array.from({ length: 100 }, (_, k) => {
+        const n = part * 100 + k + 1;
+        return [{ paragraphs: [`Section ${n}`], style: "Heading 1" }, { paragraphs: Array.from({ length: 24 }, (_, m) => `${line} ${n}.${m + 1}.`) }];
+      }).flat();
+      const t0 = Date.now();
+      await tools.office_edit.execute(`l-${part}`, { id: doc, ops });
+      console.log(`25. part ${part + 1} of the text: ${Date.now() - t0} ms`);
+    }
+    const bytes = readFileSync(await fileOf(doc)).length;
+    let t0 = Date.now();
+    const made = (await tools.office_format.execute("l-toc", { id: doc, ops: [{ toc: true, levels: 1 }] })).content[0].text;
+    const madeMs = Date.now() - t0;
+    t0 = Date.now();
+    const edited = (await tools.office_edit.execute("l-edit", { id: doc, ops: [{ after: "Section 1", nth: 1, paragraphs: ["Summary first"], style: "Heading 1" }] })).content[0].text;
+    const editMs = Date.now() - t0;
+    const shot = await shoot("25. the last heading", { id: doc, quote: "Section 400" });
+    const read = (await tools.office_read.execute("l-read", { id: doc })).content[0].text;
+    const listed = [...read.matchAll(/^\[\d+\] \(toc 1\) (.+)\t(\d+)$/gm)].map((m) => [m[1], Number(m[2])] as [string, number]);
+    console.log(`25. ${bytes} bytes, ${shot.out.details.pages} pages: the toc op ${madeMs} ms, the update after an edit ${editMs} ms (${edited}); ${listed.length} entries, the last ${JSON.stringify(listed.at(-1))}`);
+    assert.match(edited, /Updated the table of contents\.$/);
+    assert.ok(made.startsWith("Formatted"), made);
+    assert.equal(listed.length, 401);
+    // The entries' page numbers are the pages the editor lays the headings out on (the TOC itself takes ten pages).
+    const heading = await shoot("25. the new heading", { id: doc, quote: "Summary first" });
+    console.log(`25. the new heading's shot: ${heading.text.split("\n").slice(0, 4).join(" / ").slice(0, 600)}`);
+    assert.deepEqual(listed[1], ["Summary first", heading.out.details.page]);
+    assert.deepEqual(listed.at(-1), ["Section 400", shot.out.details.page]);
+  });
 
   /* ------------------------------------------------------------------ */
   /* the pictures on a Word page                                          */
@@ -1218,7 +1543,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     };
   }
 
-  test("21. office_screenshot of Word waits for the document's pictures: right after opening and on a later page each picture is in its page though the Document Server serves it slowly; one slower than the wait is taken without it, and the answer says so", { timeout: 600_000 }, async () => {
+  test("26. office_screenshot of Word waits for the document's pictures: right after opening and on a later page each picture is in its page though the Document Server serves it slowly; one slower than the wait is taken without it, and the answer says so", { timeout: 600_000 }, async () => {
     const RED: [number, number, number] = [230, 30, 30];
     const BLUE: [number, number, number] = [30, 30, 230];
     // In a page of 724 x 1,024 px (A4) the picture of 15 x 11.25 cm is at about x 88-605, y 105-493: two points in it,
@@ -1233,23 +1558,23 @@ async function run(PITHAGORAS: string): Promise<void> {
     // As the Document Server serves them: how long its pictures take to come (what the wait's bound rests on).
     const quick = await agentDoc("Pictured quickly", "word");
     const sizes = await picturesFile(quick, 4, { 1: RED, 3: BLUE });
-    const q = await shoot("21. quickly, page 1", { id: quick });
+    const q = await shoot("26. quickly, page 1", { id: quick });
     const fetched = await inEditors<{ name: string; ms: number }[]>(`performance.getEntriesByType("resource").filter(function (r) { return /\\/media\\//.test(r.name); }).map(function (r) { return { name: r.name.split("?")[0].split("/").pop(), ms: Math.round(r.responseEnd - r.startTime) }; })`);
-    console.log(`21. the pictures (${JSON.stringify(sizes)} bytes) as the Document Server serves them: ${JSON.stringify(fetched.find((e) => /Pictured quickly/.test(e.title))?.value)}`);
-    const ql = await looks("21. quickly, page 1", q);
+    console.log(`26. the pictures (${JSON.stringify(sizes)} bytes) as the Document Server serves them: ${JSON.stringify(fetched.find((e) => /Pictured quickly/.test(e.title))?.value)}`);
+    const ql = await looks("26. quickly, page 1", q);
     assert.ok(red(ql.a) && red(ql.b) && !red(ql.c), "the picture in its page");
     // Each picture held 4 s: the picture right after opening, and the later page's right after it.
     const doc = await agentDoc("Pictured slowly", "word");
     await picturesFile(doc, 4, { 1: RED, 3: BLUE });
     let slow = slowPictures(4000);
     await slow.ready;
-    const first = await shoot("21. slowly, page 1 right after opening", { id: doc });
-    const third = await shoot("21. slowly, page 3 right after", { id: doc, page: 3 });
+    const first = await shoot("26. slowly, page 1 right after opening", { id: doc });
+    const third = await shoot("26. slowly, page 3 right after", { id: doc, page: 3 });
     const held = await slow.stop();
-    console.log(`21. held: ${held.join(" | ")}`);
+    console.log(`26. held: ${held.join(" | ")}`);
     assert.equal(held.filter((l) => /^HELD .*\/media\/image[12]\.png/.test(l)).length, 2, "both of its pictures were held");
-    const fl = await looks("21. slowly, page 1", first);
-    const tl = await looks("21. slowly, page 3", third);
+    const fl = await looks("26. slowly, page 1", first);
+    const tl = await looks("26. slowly, page 3", third);
     assert.ok(red(fl.a) && red(fl.b) && !red(fl.c), `page 1's picture is in it (${first.took} ms)`);
     assert.ok(blue(tl.a) && blue(tl.b) && !blue(tl.c), "page 3's picture is in it");
     assert.ok(first.took >= 2000, `the first waited for its pictures (${first.took} ms)`);
@@ -1262,22 +1587,422 @@ async function run(PITHAGORAS: string): Promise<void> {
     await picturesFile(late, 2, { 1: RED });
     slow = slowPictures(20_000);
     await slow.ready;
-    const gap = await shoot("21. a picture held 20 s", { id: late });
-    console.log(`21. held: ${(await slow.stop()).join(" | ")}`);
+    const gap = await shoot("26. a picture held 20 s", { id: late });
+    console.log(`26. held: ${(await slow.stop()).join(" | ")}`);
     assert.match(gap.text, /^Page 1 of 2 of "Pictured late" \(id [^)]+\), as your editor shows it now\. 1 of the document's pictures was still loading after a wait of up to 6 s, so it is missing from the picture if on this page: take it again in a moment\. Its text:/);
     assert.equal(gap.out.details.picturesLoading, 1);
     assert.ok(gap.took >= 5000 && gap.took < 12_000, `waited its bound and no more (${gap.took} ms)`);
-    const gl = await looks("21. a picture held 20 s", gap);
+    const gl = await looks("26. a picture held 20 s", gap);
     assert.ok(!red(gl.a) && !red(gl.b), "the picture is not in it");
     // Let go, the next picture has it.
     let again = gap;
     for (let i = 0; i < 20 && /still loading/.test(again.text); i++) {
       await delay(1000);
-      again = await shoot("21. once let go", { id: late });
+      again = await shoot("26. once let go", { id: late });
     }
-    const al = await looks("21. once let go", again);
+    const al = await looks("26. once let go", again);
     assert.ok(red(al.a) && red(al.b), "the picture once it came");
     assert.doesNotMatch(again.text, /pictures/);
+  });
+
+  test("27. a new document has Arial 11 as its defaults: a Grid Table 4 - Accent 1 table shows one font in every row (the editor's own text, office_read, office_screenshot), the save holds the defaults, and a document with defaults of its own keeps them", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Table fonts", "word");
+    await tools.office_edit.execute("w0", { id: doc, ops: [{ quote: "New document", replacement: "Fonts" }, { after: "Fonts", table: [["Item", "Amount"], ["Ledger", "42"], ["Rent", "17"], ["Tax", "5"]] }, { paragraphs: ["Closing words."] }] });
+    await tools.office_format.execute("w1", { id: doc, ops: [{ formatTable: "Ledger", set: { tableStyle: "Grid Table 4 - Accent 1", headerRows: 1 } }] });
+    const read = (await tools.office_read.execute("w2", { id: doc, formatting: true })).content[0].text;
+    console.log(`27. office_read with formatting:\n${read}`);
+    assert.match(read, /\nDocument defaults: Arial 11\.\n/);
+    // The editor's own text of each row (a person's editor, as the agent's draws the same file): font and size of the
+    // table's cells and of the text outside it.
+    const person = await personOpens(doc);
+    const html = await personHtml(person.frame);
+    const looks: string[] = [];
+    for (const text of ["Item", "Amount", "Ledger", "42", "Rent", "17", "Tax", "Closing words."]) {
+      const style = styleOf(html, text);
+      looks.push(`${text}: ${style}`);
+      assert.match(style, /font-family:'Arial'/i, `${text}: Arial (${style})`);
+      assert.match(style, /font-size:11pt/i, `${text}: 11 pt (${style})`);
+    }
+    console.log(`27. the editor's text:\n${looks.join("\n")}`);
+    await person.page.context().close();
+    // What the agent sees of it.
+    const shot = await shoot("27. the table", { id: doc });
+    if (process.env.OFFICE_E2E_SHOT_DIR) writeFileSync(path.join(process.env.OFFICE_E2E_SHOT_DIR, "27-table.jpg"), Buffer.from(shot.image, "base64"));
+    // The save holds the defaults as the document's own.
+    const styles = await partOf(doc, "word/styles.xml");
+    const defaults = /<w:docDefaults>([\s\S]*?)<\/w:docDefaults>/.exec(styles)?.[1] ?? "";
+    console.log(`27. the saved docDefaults: ${defaults}`);
+    assert.match(defaults, /<w:rFonts [^>]*w:ascii="Arial"/);
+    assert.match(defaults, /<w:sz w:val="22"\s*\/>/);
+
+    // A document a person adds has its own defaults, and the agent's work on it leaves them.
+    const own = await agentDoc("Own defaults", "word");
+    const file = await fileOf(own);
+    const ownStyles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`;
+    writeFileSync(file, rewriteZip(readFileSync(file), { "word/styles.xml": ownStyles }));
+    const later = new Date(Date.now() + 5000);
+    (await import("node:fs")).utimesSync(file, later, later);
+    assert.match((await tools.office_read.execute("w3", { id: own, formatting: true })).content[0].text, /\nDocument defaults: Calibri 12\.\n/);
+    await tools.office_edit.execute("w4", { id: own, ops: [{ paragraphs: ["Their words."] }] });
+    const ownSaved = /<w:docDefaults>([\s\S]*?)<\/w:docDefaults>/.exec(await partOf(own, "word/styles.xml"))?.[1] ?? "";
+    assert.match(ownSaved, /w:ascii="Calibri"/);
+    assert.match(ownSaved, /<w:sz w:val="24"\s*\/>/);
+    assert.doesNotMatch(ownSaved, /Arial/);
+    assert.match((await tools.office_read.execute("w5", { id: own, formatting: true })).content[0].text, /\nDocument defaults: Calibri 12\.\n/);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* office_format in spreadsheets, rows and columns (#13 PR 3)          */
+  /* ------------------------------------------------------------------ */
+
+  /** What the person's spreadsheet editor shows of a cell (its own API, with the cell selected): every zero-argument
+   * `asc_get…` of the cell's formats, colours as their hex, and its text. */
+  const personCell = async (frame: import("@playwright/test").Frame, a: string) =>
+    String(
+      await frame.evaluate(`(function (a) {
+        var e = window.Asc.editor;
+        e.asc_findCell(a);
+        var info = e.asc_getCellInfo(), x = info && info.asc_getXfs ? info.asc_getXfs() : null, out = {};
+        var plain = function (v) {
+          if (v === null || v === undefined || typeof v !== "object") return v;
+          if (typeof v.get_hex === "function") return v.get_hex();
+          if (typeof v.asc_getR === "function") return [v.asc_getR(), v.asc_getG(), v.asc_getB()].join(",");
+          if (typeof v.get_r === "function") return [v.get_r(), v.get_g(), v.get_b()].join(",");
+          if (typeof v.asc_getFormat === "function") return v.asc_getFormat();
+          return "(object)";
+        };
+        if (x) for (var k in x) if (/^asc_get/.test(k) && typeof x[k] === "function" && x[k].length === 0) { try { out[k.slice(7)] = plain(x[k]()); } catch (err) {} }
+        try { out.text = info.asc_getText(); } catch (err) {}
+        return JSON.stringify(out);
+      })(${JSON.stringify(a)})`),
+    );
+  /** Several cells as the person's editor shows them. */
+  const personCells = async (frame: import("@playwright/test").Frame, list: string[]) => {
+    const out: Record<string, string> = {};
+    for (const a of list) out[a] = await personCell(frame, a);
+    return out;
+  };
+  /** The saved workbook's first sheet: each cell's formats as the file holds them (its style's number format, font,
+   * fill, alignment and borders), the columns, rows, merged cells and frozen pane, and the shared strings' runs. */
+  const savedSheet = async (docId: string) => {
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(docId)));
+    const part = async (name: string) => (await zip.file(name)?.async("string")) ?? "";
+    const sheet = await part("xl/worksheets/sheet1.xml");
+    const styles = await part("xl/styles.xml");
+    const list = (tag: string, item: string) => (new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`).exec(styles)?.[1] ?? "").match(new RegExp(`<${item}\\b[^>]*?(?:/>|>[\\s\\S]*?</${item}>)`, "g")) ?? [];
+    const xfs = list("cellXfs", "xf");
+    const fonts = list("fonts", "font");
+    const fills = list("fills", "fill");
+    const borders = list("borders", "border");
+    const numFmts = Object.fromEntries([...styles.matchAll(/<numFmt numFmtId="(\d+)" formatCode="([^"]*)"/g)].map((m) => [m[1], m[2].replace(/&quot;/g, '"')]));
+    const cell = (ref: string) => {
+      const s = new RegExp(`<c r="${ref}"(?: [^>]*?)? s="(\\d+)"`).exec(sheet)?.[1];
+      const xf = s ? xfs[Number(s)] : "";
+      const id = (k: string) => Number(new RegExp(`${k}="(\\d+)"`).exec(xf)?.[1] ?? 0);
+      const numFmt = id("numFmtId");
+      return {
+        numFmt: numFmts[numFmt] ?? (numFmt ? `#${numFmt}` : "General"),
+        font: (fonts[id("fontId")] ?? "").replace(/<\/?font>/g, ""),
+        fill: /rgb="FF([0-9A-F]{6})"/.exec(fills[id("fillId")] ?? "")?.[1] ?? "none",
+        alignment: /<alignment[^>]*>/.exec(xf)?.[0] ?? "",
+        borders: [...(borders[id("borderId")] ?? "").matchAll(/<(left|right|top|bottom) style="(\w+)"/g)].filter((m) => m[2] !== "none").map((m) => `${m[1]} ${m[2]}`).join(", "),
+      };
+    };
+    return { sheet, cell, strings: await part("xl/sharedStrings.xml") };
+  };
+  const failing = async (call: Promise<unknown>) => call.then((r) => `answered: ${(r as { content: { text: string }[] }).content[0].text}`, (e: Error) => e.message);
+  const readSheet = async (doc: string, sheet?: string) => (await tools.office_read.execute("x-read", { id: doc, formatting: true, ...(sheet ? { sheet } : {}) })).content[0].text.split("\n\n").slice(1).join("\n\n");
+  // An op that fails in its step, which the check before the first step cannot foresee (it foresees superscript on a
+  // number, say): a format beyond the used range of the sheet "Fail" grows it, so that whole rows that met none of it
+  // in the check count 26,000 used cells in their step. Each call takes a band of rows of its own (`k`), past the
+  // ones the calls before grew the used range to.
+  const failOps = (k: number) => [{ sheet: "Fail", format: `Z${(k + 2) * 1000}`, set: { bold: true } }, { sheet: "Fail", format: `${(k + 1) * 1000 + 1}:${(k + 2) * 1000}`, set: { italic: true } }];
+  const failSaid = /^error:bad_op op \d+: the call formats more than 20,000 cells/;
+
+  test("28. office_format in a real spreadsheet: one call with every op and key; office_read with formatting says what can be read, the person's editor shows it at once, and the save holds it all", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Invoice", "cell");
+    await tools.office_edit.execute("i0", {
+      id: doc,
+      ops: [
+        { range: "A1", values: [["Invoice March"]] },
+        { range: "A3:D3", values: [["Item", "Qty", "Price", "Total"]] },
+        { range: "A4:D6", values: [["Paper", 2, 4.5, "=B4*C4"], ["Ink", 1, 30, "=B5*C5"], ["Pens", 10, 1.2, "=B6*C6"]] },
+        { range: "A7:D7", values: [["Total", "", "", "=SUM(D4:D6)"]] },
+        { range: "A9:A10", values: [["H2O"], ["A note long enough to wrap in its cell"]] },
+        // A superscript, and cells formatted and then cleared (merges too): their values stay.
+        { range: "B9", values: [["m2"]] },
+        { range: "G9:I9", values: [["c1", "c2", "m"]] },
+      ],
+    });
+    const person = await personOpens(doc);
+    const shown = await personCells(person.frame, ["A3", "C4", "B3"]);
+    const ops = [
+      { format: "A1", set: { font: "Arial", fontSize: 16, bold: true, color: "#1F4E79" } },
+      { format: "A3:D3", set: { bold: true, fill: "#1F4E79", color: "#FFFFFF", align: "center", valign: "center", borders: "all" } },
+      { format: "C4:D7", set: { numberFormat: "#,##0.00" } },
+      { format: "A7:D7", set: { bold: true, borders: { top: "double #000000" } } },
+      { format: "A9", set: { subscript: true } },
+      { format: "B9", set: { superscript: true } },
+      { format: "G9:H9", set: { numberFormat: "0.00", bold: true, fill: "#FF0000", borders: "all", align: "right" } },
+      { format: "G9:H9", set: { clear: true } },
+      { format: "I9:J9", set: { merge: true, fill: "#00FF00" } },
+      { format: "I9:J9", set: { clear: true } },
+      { format: "A10", set: { wrap: true, italic: true, underline: true, strike: true } },
+      { format: "B3", set: { rotation: 45 } },
+      { format: "F1", set: { bold: true, fontSize: 14 } },
+      { format: "A1:D1", set: { merge: true } },
+      { columns: "A", width: 20 },
+      { columns: "E", hide: true },
+      { rows: "3", height: 30 },
+      { freeze: "A4" },
+    ];
+    const t0 = Date.now();
+    const made = (await tools.office_format.execute("i1", { id: doc, ops })).content[0].text;
+    console.log(`28. one call of ${ops.length} ops: ${made} (${Date.now() - t0} ms)`);
+    assert.match(made, /^Formatted "Invoice" \(18 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\.$/);
+    const read = await readSheet(doc);
+    console.log(`28. office_read with formatting:\n${read}`);
+    for (const want of [
+      /\nFormatting: font Calibri 11 where no other is said; alignment and borders are not read \(office_screenshot shows them\)\.\n/,
+      // A merge gives the merged cells the top-left one's formats.
+      /A1:D1 Arial 16, bold, #1F4E79/,
+      /A3, C3:D3 bold, #FFFFFF, fill #1F4E79/,
+      /B3 bold, #FFFFFF, fill #1F4E79, rotated 45°/,
+      /"#,##0\.00"/,
+      /A9 subscript/,
+      /B9 superscript/,
+      /\nG9: "c1"\nH9: "c2"\nI9: "m"\n/,
+      /A10 italic, strike, underline, wrap/,
+      /F1 14, bold/,
+      /\nMerged: A1:D1\.\n/,
+      /\nColumns: A 20, E hidden \(others [\d.]+\)\.\n/,
+      /\nRows: 1 19\.5pt, 3 30pt, 10 28\.5pt \(others 14\.25pt\)\.\n/,
+      /\nFrozen: rows 1-3\.$/,
+    ]) assert.match(read, want);
+    // The person's editor has it, without a reload.
+    let now: Record<string, string> = {};
+    assert.ok(await until(async () => JSON.stringify((now = await personCells(person.frame, ["A3", "C4", "B3"]))) !== JSON.stringify(shown) && now.A3 !== shown.A3 && now.C4 !== shown.C4 && now.B3 !== shown.B3, 5000), `the person's editor shows the new formats (before ${JSON.stringify(shown)}, now ${JSON.stringify(now)})`);
+    console.log(`28. the person's A3 before ${shown.A3}\n   after ${now.A3}`);
+    // The save holds what cannot be read too (alignment, borders).
+    const saved = await savedSheet(doc);
+    console.log(`28. saved A3 ${JSON.stringify(saved.cell("A3"))}, B3 ${JSON.stringify(saved.cell("B3"))}, D7 ${JSON.stringify(saved.cell("D7"))}`);
+    assert.equal(saved.cell("A3").fill, "1F4E79");
+    assert.match(saved.cell("A3").alignment, /horizontal="center"/);
+    assert.match(saved.cell("A3").alignment, /vertical="center"/);
+    assert.equal(saved.cell("A3").borders, "left thin, right thin, top thin, bottom thin");
+    assert.match(saved.cell("B3").alignment, /textRotation="45"/);
+    assert.match(saved.cell("C4").numFmt, /^(#,##0\.00|#4)$/, "(4 is Excel's own #,##0.00)");
+    assert.match(saved.cell("A7").borders, /top double/);
+    assert.match(saved.cell("A10").alignment, /wrapText="1"/);
+    assert.match(saved.cell("A10").font, /<i\/>[\s\S]*<strike\/>|<strike\/>[\s\S]*<i\/>/);
+    // Set on a cell's whole text, the subscript (and the superscript) is saved as the cell's own font, not as a run of
+    // rich text: the strings hold the plain texts.
+    console.log(`28. saved A9 font ${saved.cell("A9").font}, B9 font ${saved.cell("B9").font}; strings ${saved.strings.match(/<si>(?:(?!<\/si>)[\s\S])*?(?:H2O|m2)(?:(?!<\/si>)[\s\S])*?<\/si>/g)?.join(" ")}`);
+    assert.match(saved.cell("A9").font, /<vertAlign val="subscript"\/>/);
+    assert.match(saved.cell("B9").font, /<vertAlign val="superscript"\/>/);
+    // Clear took every format off, the merge too; the values stayed (the read above).
+    for (const ref of ["G9", "H9", "I9"]) {
+      const c = saved.cell(ref);
+      assert.deepEqual([c.numFmt, c.fill, c.borders, c.alignment, /<b\/>/.test(c.font)], ["General", "none", "", "", false], `${ref} ${JSON.stringify(c)}`);
+    }
+    assert.doesNotMatch(saved.sheet, /<mergeCell ref="I9:J9"\/>/);
+    assert.match(saved.sheet, /<mergeCell ref="A1:D1"\/>/);
+    // (A freeze has once reached the file only with the save after the call's: the Document Server got it after the
+    // call's other changes. It is in the next one.)
+    if (!/<pane [^>]*ySplit="3"[^>]*state="frozen"/.test(saved.sheet)) {
+      console.log("28. the frozen pane is not in the call's own save; one more edit");
+      await tools.office_edit.execute("i2", { id: doc, ops: [{ range: "Z1", values: [[1]] }] });
+    }
+    assert.match((await savedSheet(doc)).sheet, /<pane [^>]*ySplit="3"[^>]*state="frozen"/);
+    assert.match(saved.sheet, /<col [^>]*min="1" max="1"[^>]*width="20\.\d*"|<col [^>]*width="20\.\d*"[^>]*min="1" max="1"/);
+    assert.match(saved.sheet, /<col [^>]*hidden="1"[^>]*min="5" max="5"|<col [^>]*min="5" max="5"[^>]*hidden="1"/);
+    assert.match(saved.sheet, /<row r="3"[^>]* ht="30"/);
+    // A freeze at a cell where the panes are frozen at a cell already moves them (the builder alone leaves them).
+    for (const [at, want] of [["B2", "row 1 and column A"], ["C4", "rows 1-3 and columns A-B"]]) {
+      await tools.office_format.execute(`i-${at}`, { id: doc, ops: [{ freeze: at }] });
+      const frozen = /\nFrozen: .*$|$/.exec(await readSheet(doc))![0];
+      console.log(`28. freeze at ${at}: ${frozen.trim() || "(none)"}`);
+      assert.equal(frozen, `\nFrozen: ${want}.`);
+    }
+    await person.page.context().close();
+  });
+
+  test("29. the inverse matrix: each sheet format, column, row, freeze and row and column insert, made and then failed at a last op, is taken back in the agent's editor, the person's and the save; what the editor cannot read back (alignment, borders) stays and the answer names it; the call before stays", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Matrix", "cell");
+    await tools.office_edit.execute("m0", { id: doc, ops: [{ range: "A1:C5", values: [["a1", "b1", 3], ["a2", "b2", 6], ["a3", "b3", 9], ["a4", "b4", 12], ["note", "x", 15]] }, { range: "A6:B6", values: [["six", "seven"]] }, { range: "D1", values: [["=SUM(C1:C5)"]] }] });
+    // The calls before the matrix: a merge and a freeze that stay.
+    await tools.office_format.execute("m1", { id: doc, ops: [{ format: "A6:B6", set: { merge: true } }, { format: "A1:C1", set: { italic: true } }] });
+    const person = await personOpens(doc);
+    // The sheet the failing ops grow (failOps), made once the person is in Sheet1: their editor stays there.
+    await tools.office_edit.execute("m-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
+    const cells = ["A1", "B1", "C1", "A2", "B2", "C2", "A5", "A6"];
+    const cases: { name: string; tool: "office_format" | "office_edit"; ops: unknown[]; partial?: RegExp }[] = [
+      { name: "readable keys", tool: "office_format", ops: [{ format: "A1:C2", set: { numberFormat: "0.00", font: "Arial", fontSize: 14, bold: true, italic: false, underline: true, strike: true, color: "#FF0000", fill: "#00FF00", wrap: true, rotation: 30 } }] },
+      { name: "superscript", tool: "office_format", ops: [{ format: "A5", set: { superscript: true } }] },
+      { name: "merge", tool: "office_format", ops: [{ format: "A1:B2", set: { merge: true } }], partial: /The editor cannot read back the alignment and borders of "Sheet1"!A1:B2 \(op 1\), which stay as this call set them\.$/ },
+      { name: "split", tool: "office_format", ops: [{ format: "A6:B6", set: { merge: false } }] },
+      { name: "whole columns", tool: "office_format", ops: [{ format: "B:C", set: { fill: "#FFFF00", bold: true } }] },
+      { name: "whole rows", tool: "office_format", ops: [{ format: "2:3", set: { italic: true, fontSize: 9 } }] },
+      { name: "columns", tool: "office_format", ops: [{ columns: "A:B", width: 25 }, { columns: "C", hide: true }, { columns: "D", autofit: true }] },
+      { name: "rows", tool: "office_format", ops: [{ rows: "2:3", height: 40 }, { rows: "4", hide: true }, { rows: "1", autofit: true }] },
+      { name: "freeze", tool: "office_format", ops: [{ freeze: "B2" }] },
+      // (Every freeze goes through the co-editing lock and shows after its command: review round 2.)
+      { name: "freeze rows", tool: "office_format", ops: [{ freeze: "A2" }] },
+      { name: "freeze columns, then none", tool: "office_format", ops: [{ freeze: "C1" }, { freeze: "none" }] },
+      { name: "freeze at a cell over a cell", tool: "office_format", ops: [{ freeze: "B2" }, { freeze: "C3" }] },
+      { name: "rows and columns inserted", tool: "office_edit", ops: [{ insertRows: "2" }, { insertColumns: "B:C" }, { range: "Z9", values: [["=SUM("]] }] },
+      { name: "alignment and borders", tool: "office_format", ops: [{ format: "A1:B2", set: { align: "right", valign: "top", borders: "all" } }], partial: /The ops before it are taken back, but not all of them whole\. The editor cannot read back the alignment and borders of "Sheet1"!A1:B2 \(op 1\), which stay as this call set them\.$/ },
+      { name: "clear", tool: "office_format", ops: [{ format: "A1:C1", set: { clear: true } }], partial: /The editor cannot read back the alignment and borders of "Sheet1"!A1:C1 \(op 1\), which stay as this call set them\.$/ },
+    ];
+    const timings: string[] = [];
+    for (const [k, c] of cases.entries()) {
+      const before = { read: await readSheet(doc, "Sheet1"), person: await personCells(person.frame, cells) };
+      const ops = c.tool === "office_format" ? [...c.ops, ...failOps(k)] : c.ops;
+      const t0 = Date.now();
+      const said = await failing(tools[c.tool].execute(`m-${c.name}`, { id: doc, ops }));
+      timings.push(`${c.name} ${Date.now() - t0} ms`);
+      console.log(`29. ${c.name}: ${said}`);
+      if (c.partial) {
+        assert.match(said, /^error:partial op \d+: /, c.name);
+        assert.match(said.replace(/ Part of this call may be in the document: .*$/, ""), c.partial, c.name);
+      } else assert.match(said, c.tool === "office_format" ? failSaid : /^error:bad_value op 3: /, c.name);
+      // (A column width or row height put back is the column's or row's own from then on: the builder sets none back to
+      // the sheet's default. The used range the read names may then reach further, with nothing more in it.)
+      const after = await readSheet(doc, "Sheet1");
+      const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
+      if (after !== before.read) console.log(`29. ${c.name}: the read's used range ${/Sheet "Sheet1" \(([^)]*)\)/.exec(before.read)?.[1]} -> ${/Sheet "Sheet1" \(([^)]*)\)/.exec(after)?.[1]}`);
+      assert.equal(used(after), used(before.read), `${c.name}: the agent's editor reads as before`);
+      let seen: Record<string, string> = {};
+      const same = await until(async () => JSON.stringify((seen = await personCells(person.frame, cells))) === JSON.stringify(before.person), 5000);
+      const differs = Object.keys(seen).filter((a) => seen[a] !== before.person[a]);
+      // What cannot be read back stays: the person sees that alignment (and the borders, which the cell info does not give).
+      if (c.partial) console.log(`29. ${c.name}: the person's cells that differ: ${differs.map((a) => `${a} ${before.person[a]} -> ${seen[a]}`).join("; ")}`);
+      else assert.ok(same, `${c.name}: the person's editor is as it was (differ: ${differs.map((a) => `${a} ${before.person[a]} -> ${seen[a]}`).join("; ")})`);
+    }
+    console.log(`29. failing calls: ${timings.join(", ")}`);
+    // The mistake the check foresees (superscript on a number) is refused before the first op changes anything: the
+    // alignment op before it, which could not be put back, is not made (B2 stays right-aligned in the save below).
+    const foreseen = await failing(tools.office_format.execute("m-foreseen", { id: doc, ops: [{ format: "A1:B2", set: { align: "center", borders: "outside" } }, { format: "C3", set: { subscript: true } }] }));
+    console.log(`29. foreseen: ${foreseen}`);
+    assert.match(foreseen, /^error:bad_op op 2: subscript takes text, and "Sheet1"!C3 holds a number/);
+    assert.doesNotMatch(foreseen, /taken back/);
+    // The save: none of the failed calls' readable formats; the earlier call's merge and italic; what stayed of the last two.
+    await tools.office_edit.execute("m-save", { id: doc, ops: [{ range: "Z50", values: [["saved"]] }] });
+    const saved = await savedSheet(doc);
+    console.log(`29. saved A1 ${JSON.stringify(saved.cell("A1"))}, B2 ${JSON.stringify(saved.cell("B2"))}, C2 ${JSON.stringify(saved.cell("C2"))}`);
+    assert.match(saved.sheet, /<mergeCell ref="A6:B6"\/>/);
+    assert.doesNotMatch(saved.sheet, /<mergeCell ref="A1:B2"\/>/);
+    assert.doesNotMatch(saved.sheet, /<pane /, "no frozen pane");
+    assert.doesNotMatch(saved.sheet, /hidden="1"/, "no hidden column or row");
+    console.log(`29. saved columns ${/<cols>[\s\S]*?<\/cols>/.exec(saved.sheet)?.[0] ?? "(none)"}; rows ${[...saved.sheet.matchAll(/<row [^>]*>/g)].map((m) => m[0]).join(" ")}`);
+    assert.equal(saved.cell("C2").fill, "none");
+    assert.equal(saved.cell("C2").numFmt, "General");
+    assert.doesNotMatch(saved.cell("A2").font, /<b\/>|Arial/);
+    assert.match(saved.cell("B2").alignment, /horizontal="right"/, "the alignment the answer named stays");
+    assert.equal(saved.cell("B2").borders, "left thin, right thin, top thin, bottom thin", "and the borders");
+    assert.match(readFileSync(await fileOf(doc)).length ? (await readSheet(doc)) : "", /\nA2: "a2"\nB2: "b2"\nC2: 6\n/, "the values a merge took are back");
+    await person.page.context().close();
+  });
+
+  test("30. a person's change wins over the inverse: a cell they typed into after the agent's write, and one they made bold after its format, stay as they made them, and the answer names them", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Kept", "cell");
+    await tools.office_edit.execute("k0", { id: doc, ops: [{ range: "A1:B2", values: [["one", "two"], [3, 4]] }, { range: "C1", values: [[5]] }] });
+    const person = await personOpens(doc);
+    // A write, then sheet ops each waiting for the Document Server (time for the person), then an op that fails.
+    const writing = failing(tools.office_edit.execute("k1", { id: doc, ops: [{ range: "A1:B1", values: [["agent", "agent too"]] }, ...Array.from({ length: 6 }, (_, k) => ({ addSheet: `Wait ${k}` })), { range: "Z9", values: [["=SUM("]] }] }));
+    assert.ok(await until(async () => /agent/.test(await personCell(person.frame, "A1")), 10_000), "the person sees the agent's write");
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("A1")`);
+    await person.page.keyboard.type("person\n", { delay: 20 });
+    const said = await writing;
+    console.log(`30. the write taken back around the person's: ${said}`);
+    assert.match(said, /^error:partial op 8: .* Kept as a person changed them after this call: A1 of "Sheet1"\./);
+    await delay(1500);
+    const read = await readSheet(doc);
+    assert.match(read, /^Sheets: 1 "Sheet1"\n/, "the sheets the call added are gone");
+    assert.match(read, /\nA1: "person"\nB1: "two"\n/, "A1 is the person's, B1 as it was");
+
+    // A format of many steps (time for the person), then one that fails: the person makes B1 bold again after the
+    // call's first op made A1:B1 not bold. B1 stays as the person left it (bold, and the call's fill on it), A1 is as
+    // it was.
+    await tools.office_format.execute("k2", { id: doc, ops: [{ format: "A1:B1", set: { bold: true } }] });
+    await tools.office_edit.execute("k-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
+    const steps = Array.from({ length: 150 }, (_, k) => ({ format: "H1:H100", set: { italic: k % 2 === 0 } }));
+    const t0 = Date.now();
+    const formatting = failing(tools.office_format.execute("k3", { id: doc, ops: [{ format: "A1:B1", set: { bold: false, fill: "#FF0000" } }, ...steps, ...failOps(0)] }));
+    const plain = await personCell(person.frame, "A2");
+    assert.ok(await until(async () => /"FontBold":false/.test(await personCell(person.frame, "B1")) && (await personCell(person.frame, "B1")) !== plain, 10_000), "the person sees the call's first op");
+    console.log(`30. the person sees the first op ${Date.now() - t0} ms into the call`);
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("B1")`);
+    await person.page.keyboard.press("Control+B");
+    const said2 = await formatting;
+    console.log(`30. the format taken back around the person's (${Date.now() - t0} ms): ${said2}`);
+    assert.match(said2, /^error:partial op 153: .* Kept as a person changed them after this call: B1 of "Sheet1"\./);
+    await delay(1500);
+    const looks = await readSheet(doc, "Sheet1");
+    console.log(`30. after:\n${looks}`);
+    assert.match(looks, /\nFormats: A1 bold; B1 bold, fill #FF0000\.(\n|$)/, "A1 as it was, B1 as the person left it");
+    await person.page.context().close();
+  });
+
+  test("31. rows and columns while a person is mid-entry in the sheet: the agent's insert is made, the answer names the people in the workbook; deletes go last and turn formulas into them into #REF!", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Moving", "cell");
+    await tools.office_edit.execute("v0", { id: doc, ops: [{ range: "A1:A12", values: Array.from({ length: 12 }, (_, k) => [`row ${k + 1}`]) }, { range: "C1", values: [["=A8"]] }] });
+    const person = await personOpens(doc);
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("B10")`);
+    await person.page.keyboard.type("TYPING", { delay: 20 });
+    const inserted = (await tools.office_edit.execute("v1", { id: doc, ops: [{ insertRows: "5" }] })).content[0].text;
+    console.log(`31. ${inserted}`);
+    assert.match(inserted, / is in this workbook, and its cells moved: row 5 of "Sheet1" inserted \(the rows below it moved down\)\. A cell someone was typing in may be elsewhere now: tell them if they work there\.$/);
+    await person.page.keyboard.press("Enter");
+    await delay(2500);
+    const agentSees = await readSheet(doc);
+    const personSees = { B10: await personCell(person.frame, "B10"), B11: await personCell(person.frame, "B11") };
+    console.log(`31. after the person's Enter: the agent reads ${JSON.stringify(agentSees.split("\n").filter((l) => /^B1[01]:|^A1[01]:/.test(l)))}; the person's editor shows B10 ${personSees.B10}, B11 ${personSees.B11}`);
+    assert.match(agentSees, /TYPING/, "the person's entry is in the document");
+    assert.match(agentSees, /\nA6: "row 5"\n/, "the rows below moved");
+    assert.match(agentSees, /\nC1: "row 8" \(=A9\)\n/, "a formula follows its cell");
+    // A delete is refused before an op that can be taken back; last, it is made, and a formula into it turns #REF!.
+    assert.match(await failing(tools.office_edit.execute("v2", { id: doc, ops: [{ deleteRows: "9" }, { range: "Z1", values: [[1]] }] })), /^error:bad_op op 1 cannot be taken back once made \(deleted rows\)/);
+    const deleted = (await tools.office_edit.execute("v3", { id: doc, ops: [{ range: "Z1", values: [[1]] }, { deleteRows: "9" }, { deleteColumns: "Z" }] })).content[0].text;
+    console.log(`31. ${deleted}`);
+    assert.match(deleted, /row 9 of "Sheet1" deleted \(the rows below it moved up\); column Z of "Sheet1" deleted \(the columns right of it moved left\)\./);
+    assert.match(await readSheet(doc), /\nC1: "#REF!" \(=#REF!\)\n|\nC1: #REF! \(=#REF!\)\n/);
+    await person.page.context().close();
+  });
+
+  test("32. after the second review: autofits that land in their command, or change nothing, keep a call short; a freeze over frozen rows and an autofit with a person in are taken back whole", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Fitting", "cell");
+    const columns = "BCDEFGHIJKL".split("");
+    await tools.office_edit.execute("f0", { id: doc, ops: [{ range: "A1:L1", values: [["head", ...columns.map((c) => `a text long enough to widen column ${c}`)]] }] });
+    // Nobody else in the workbook: eleven autofits one by one, then the same again (fitted already, nothing changes).
+    for (const round of ["fit", "fitted already"]) {
+      const t0 = Date.now();
+      const said = (await tools.office_format.execute(`f-${round}`, { id: doc, ops: columns.map((c) => ({ columns: c, autofit: true })) })).content[0].text;
+      const ms = Date.now() - t0;
+      console.log(`32. eleven autofits, ${round}: ${said} (${ms} ms)`);
+      assert.match(said, round === "fit" ? /^Formatted "Fitting" \(11 ops\), saved as revision/ : /^Formatted "Fitting" \(11 ops\)|changed nothing/);
+      assert.ok(ms < 15_000, `${round}: ${ms} ms`);
+    }
+    const fitted = await readSheet(doc);
+    console.log(`32. ${/\nColumns: .*/.exec(fitted)?.[0].trim()}`);
+    // (The read names the width most of them have as the usual one: "Columns: A 8.43, B-C 32.14, … (others 32.29).")
+    assert.ok(Number(/\nColumns: A 8\.43, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
+    // A person in the workbook: a freeze of no panes over frozen rows, and an autofit, each failed at a last op.
+    await tools.office_format.execute("f-rows", { id: doc, ops: [{ freeze: "A3" }] });
+    const person = await personOpens(doc);
+    await tools.office_edit.execute("f-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
+    await tools.office_edit.execute("f-long", { id: doc, ops: [{ range: "M1", values: [["another text long enough to widen its column"]] }] });
+    for (const [k, ops] of [[[{ freeze: "none" }]], [[{ columns: "M", autofit: true }]], [[{ freeze: "B5" }, { freeze: "A2" }]]].map((x, k) => [k, x[0]] as const)) {
+      const before = await readSheet(doc, "Sheet1");
+      const said = await failing(tools.office_format.execute(`f-back-${k}`, { id: doc, ops: [...ops, ...failOps(k)] }));
+      console.log(`32. ${JSON.stringify(ops)} with a person in, failed at a last op: ${said}`);
+      assert.match(said, failSaid, JSON.stringify(ops));
+      // (A width put back is the column's own: the used range the read names may reach further, as in 29.)
+      const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
+      assert.equal(used(await readSheet(doc, "Sheet1")), used(before), `${JSON.stringify(ops)}: as before`);
+    }
+    assert.match(await readSheet(doc, "Sheet1"), /\nFrozen: rows 1-2\.$/);
+    await person.page.context().close();
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

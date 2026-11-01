@@ -88,7 +88,7 @@ export const LIMITS = {
   toolWindowMs: 5 * 60_000,
 };
 
-type Outcome = { result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: boolean };
+type Outcome = { result?: unknown; error?: { code?: string; message?: string; op?: number; shifted?: unknown[] }; ran?: boolean };
 type Job = {
   id: string;
   kind: string;
@@ -102,6 +102,8 @@ type Job = {
   hold?: string;
   /** Called as it is handed: its time starts then. */
   onHand?: () => void;
+  /** Its time, from when it is handed. */
+  ms: number;
 };
 
 type Editor = {
@@ -138,7 +140,9 @@ type Editor = {
 /** A coded refusal the tools pass on as `error:<code> <message>`. `ran`: the editor's plugin had taken the job, so
  * the command may have run, and an edit may be in the document (office_edit records it all the same). */
 export class SeatError extends Error {
-  constructor(public readonly code: string, message: string, public readonly op?: number, public readonly ran = false) {
+  /** `shifted`: of a spreadsheet edit that failed partly made, the rows and columns it left moved (seat-page.ts,
+   * cellEdit), which the answer names to the people in the workbook. */
+  constructor(public readonly code: string, message: string, public readonly op?: number, public readonly ran = false, public readonly shifted?: unknown[]) {
     super(message);
   }
 }
@@ -236,7 +240,7 @@ export function seats(): { home: string; docId: string; mode: SeatMode; key: str
 export async function run(home: string, docId: string, mode: SeatMode, job: SeatJob, options: { signal?: AbortSignal; timeoutMs?: number; post?: boolean } = {}): Promise<unknown> {
   if (!deps) throw new SeatError("agent_unavailable", "the seats are not set up");
   // A view-mode editor takes no edit and no reply, a comment-only one no edit: refused here, before its plugin is asked.
-  if ((mode === "view" && changes(job.kind)) || (mode === "comment" && job.kind.endsWith(".edit"))) throw new SeatError("read_only", "the agent's editor of this document is read-only");
+  if ((mode === "view" && changes(job.kind)) || (mode === "comment" && (job.kind.endsWith(".edit") || job.kind.endsWith(".format")))) throw new SeatError("read_only", "the agent's editor of this document is read-only");
   const edit = changes(job.kind);
   // A read opens the file anew where it changed outside the editor; an edit hears `behind` first.
   const editor = await editorFor(home, docId, mode, options.signal, !edit);
@@ -248,7 +252,7 @@ export async function run(home: string, docId: string, mode: SeatMode, job: Seat
     // Closed between the find and now (another call made room for its document): never handed, so nothing ran.
     if (!editors.has(editor.id)) throw new SeatError("editor_closed", "the agent's editor of this document was closed for another document as the call began; try again");
     const outcome = await handOver(editor, job, options);
-    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op, outcome.ran ?? false);
+    if (outcome.error) throw new SeatError(outcome.error.code ?? "failed", outcome.error.message ?? "the command failed", outcome.error.op, outcome.ran ?? false, Array.isArray(outcome.error.shifted) ? outcome.error.shifted : undefined);
     if (!edit) return outcome.result;
     let changed: boolean;
     try {
@@ -330,10 +334,10 @@ function turn(before: Promise<void>, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Whether a job changes the document (an edit, or a reply on a comment): it is waited for until the editor sent it, and
- * a view-mode editor is never handed it. */
+/** Whether a job changes the document (an edit, its formatting, or a reply on a comment): it is waited for until the
+ * editor sent it, and a view-mode editor is never handed it. */
 export function changes(kind: string): boolean {
-  return kind.endsWith(".edit") || kind.endsWith(".reply");
+  return kind.endsWith(".edit") || kind.endsWith(".format") || kind.endsWith(".reply");
 }
 
 /** The key the editor of (`home`, `docId`) has open, where one is open: the session an edit's save is asked of. */
@@ -369,8 +373,9 @@ async function editorFor(home: string, docId: string, mode: SeatMode, signal?: A
       await idle(editor, signal);
       if (editors.has(editor.id)) close(editor, `it opens in ${mode} mode now`);
       return editorFor(home, docId, mode, signal, reopenBehind);
-    } else if (editor.ready && !editor.held && Date.now() - editor.lastPoll > limits.deadMs) {
-      // Its plugin stopped polling (a crashed frame, a reload of the browser): opened anew, once.
+    } else if (editor.ready && !editor.held && !editor.queue.some((j) => j.handed) && Date.now() - editor.lastPoll > limits.deadMs) {
+      // Its plugin stopped polling (a crashed frame, a reload of the browser): opened anew, once. (One running a job
+      // polls again when the job ends: a long job, a Word call of a long document, is no dead plugin.)
       if (editor.reopened) {
         close(editor, "its plugin stopped polling again");
         throw new SeatError("editor_not_ready", "the agent's editor of this document stopped answering twice; try again");
@@ -388,9 +393,9 @@ async function editorFor(home: string, docId: string, mode: SeatMode, signal?: A
 }
 
 /** Waits until `editor` runs no job (none queued, none handed, no call using it), at most as long as a job and its
- * send may take; an abort ends the wait. */
+ * send may take (the longest of its jobs: a Word call of a long document has more time); an abort ends the wait. */
 async function idle(editor: Editor, signal?: AbortSignal): Promise<void> {
-  const until = Date.now() + limits.jobMs + limits.sentMs;
+  const until = Date.now() + Math.max(limits.jobMs, ...editor.queue.map((j) => j.ms)) + limits.sentMs;
   while (editors.has(editor.id) && (editor.busy || editor.queue.length) && Date.now() < until) {
     if (signal?.aborted) throw new SeatError("aborted", "the call was aborted");
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -534,6 +539,7 @@ function handOver(editor: Editor, job: SeatJob & { hold?: string }, options: { s
       handed: false,
       handedAt: 0,
       unsentAtHand: false,
+      ms,
       ...(job.hold ? { hold: job.hold } : {}),
       settle: (outcome) => {
         if (over) return;
@@ -862,7 +868,7 @@ function pluginRoute(req: IncomingMessage, res: ServerResponse, editor: Editor, 
         }
         return json(res, 413, { error: "the result is too large", code: "too_large" });
       }
-      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number }; ran?: unknown } = {};
+      let done: { jobId?: unknown; result?: unknown; error?: { code?: string; message?: string; op?: number; shifted?: unknown[] }; ran?: unknown } = {};
       try {
         done = JSON.parse(body.toString("utf8"));
       } catch {

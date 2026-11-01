@@ -53,7 +53,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 
 ## What you get
 
-- **The library**, on the portal's Office tab: create blank Word documents and spreadsheets, open one full screen in
+- **The library**, on the portal's Office tab: create blank Word documents (text in Arial 11, set in the document's own defaults, so a built-in table style
+  shows one font in every row; a document you add keeps its own) and spreadsheets, open one full screen in
   the embedded editor, sort the list by name, modified, size or type, and download a copy. Every document lives in an
   agent's home or a project's folder and belongs to that agent or project; there are no documents of nobody's. Every
   `.docx` and `.xlsx` in the agents' homes and the projects' folders (not the folders other chats work in, nor the rest
@@ -158,8 +159,10 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   answer names those ops. A call inserts and deletes 20,000 rows and columns at most. Rows and columns are
   inserted and deleted while you are in the workbook too: the agent's answer then names the people in it, as their
   cells move. If you are in the middle of typing into a cell when the agent's insert moves it, OnlyOffice 10.0 puts
-  what you type into the document, but your own editor may show that cell empty until you reload it (the Document
-  Server's co-editing; it is the same when the agent writes the cell you are typing in).
+  what you type at the cell's old address (a row off after a row inserted above it), and your own editor may show the
+  cell empty until you reload it: the Document Server's co-editing, reported as
+  [ONLYOFFICE/DocumentServer#3867](https://github.com/ONLYOFFICE/DocumentServer/issues/3867). Your editor's view can
+  also differ when the agent writes the very cell you are typing in.
   **How a spreadsheet looks** is `office_format`'s too: cells (`"A1:D9"`, or whole columns `"C:D"` and rows `"5:6"`)
   take a number format (`"#,##0.00"`, `"0%"`, `"dd.mm.yyyy"`), font, size, bold, italic, underline, strike,
   superscript and subscript (in cells that hold text: OnlyOffice sets them on a text's characters), colour, fill,

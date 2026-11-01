@@ -39,6 +39,16 @@ test("templateDocx: minimal docx parses with ooxml.parseDocx and carries real co
   for (const name of ["[Content_Types].xml", "_rels/.rels", "word/document.xml", "word/styles.xml"]) assert.ok(zip.file(name), `missing ${name}`);
 });
 
+test("templateDocx: the styles part gives the document Arial 11 as its defaults (a table style that sets a font on some rows only then shows one font)", async () => {
+  const zip = await JSZip.loadAsync(await templateDocx());
+  const styles = await zip.file("word/styles.xml")!.async("string");
+  const rpr = /<w:docDefaults>\s*<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>\s*<\/w:rPrDefault>/.exec(styles)?.[1] ?? "";
+  for (const attr of ["ascii", "hAnsi", "eastAsia", "cs"]) assert.match(rpr, new RegExp(`<w:rFonts [^>]*w:${attr}="Arial"`), `${attr} font`);
+  assert.match(rpr, /<w:sz w:val="22"\s*\/>/, "11 pt");
+  assert.match(rpr, /<w:szCs w:val="22"\s*\/>/, "11 pt for complex scripts");
+  assert.doesNotMatch(styles, /Times New Roman/);
+});
+
 test("templateXlsx: minimal xlsx parses with ooxml.parseXlsx as one empty Sheet1", async () => {
   const buf = await templateXlsx();
   const parsed = parseXlsx(buf); // throws if workbook/rels/sheet parts are missing/broken

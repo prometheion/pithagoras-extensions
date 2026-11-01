@@ -182,7 +182,13 @@ const DOCX_DOCUMENT =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
   `<w:document ${W_NS}><w:body><w:p><w:r><w:t xml:space="preserve">New document</w:t></w:r></w:p></w:body></w:document>`;
 
-const DOCX_STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles ${W_NS}></w:styles>`;
+// The document's own defaults: Arial 11, the font the Document Server's built-in table styles (Grid Table 4 - Accent 1
+// and the like) set on some of their rows only. An empty styles part leaves the format's default (Times New Roman 10),
+// and a table of such a style then shows two fonts. Only a document made here gets this: an uploaded one has its own.
+const DOCX_STYLES =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles ${W_NS}>` +
+  `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Arial" w:cs="Arial"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>` +
+  `</w:styles>`;
 
 /** A minimal valid docx (jszip, DEFLATE): [Content_Types].xml, _rels/.rels, word/document.xml (one paragraph
  * saying "New document"), word/styles.xml -- plus word/_rels/document.xml.rels so the styles part is properly

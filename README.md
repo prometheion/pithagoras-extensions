@@ -13,6 +13,10 @@ a separate npm package. You install the ones you want into your portal; nothing 
 - [Inline UI](inline-ui/README.md) (`@pithagoras/inline-ui`): the agent shows you an interactive card of its
   own HTML in the chat, sandboxed and with no network, and what you do in it comes back to the agent as events. It
   needs no container and no Docker.
+- [Nextcloud](nextcloud/README.md) (`@pithagoras/nextcloud`): your Nextcloud in the portal: the community's
+  Nextcloud MCP server, one per instance, in a container through Docker for extensions, its tools in every chat,
+  and its ten tabs — Files (sharing built in), Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook,
+  Shopping List and Notes — in a panel beside the chat.
 - [Office](office/README.md) (`@pithagoras/office`): Word and Excel documents that you edit in a real OnlyOffice Document
   Server editor in the portal, which the extension runs in a container through Docker for extensions, and that the
   agent reads and edits through tools of its own.
@@ -24,7 +28,7 @@ nobody signs in to anything else.
 
 ## What they need
 
-Blender and Godot (Inline UI's and Office's READMEs say what they need):
+Blender, Godot and Nextcloud (Inline UI's and Office's READMEs say what they need):
 
 - Pithagoras 0.3.0 or later.
 - [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker) (`pithagoras-docker` 1.3.0 or later).
@@ -50,13 +54,21 @@ network is its way in, and its way back runs over the way in, held open from the
 documents in a headless Chromium of Office's own on that network, beside the people in them. Office's README says
 more under Security.
 
+Nextcloud's containers run the other way: they must reach the person's own Nextcloud across the machine's usual
+networking, which an isolated network cannot do. So each stands on the portal's own loopback (Docker for extensions'
+shared network) and serves its /mcp endpoint to the portal alone, bound to 127.0.0.1 of that loopback, one port per
+instance. Nextcloud's README says more under Security.
+
 ## Installing
 
 In the portal, Settings → Extensions → Discover → **Install by name**: `npm:@pithagoras/blender`,
-`npm:@pithagoras/godot`, `npm:@pithagoras/inline-ui` or `npm:@pithagoras/office`. For Blender and Godot, then open
-Settings → Blender (or Godot) and press **Install**: the extension picks a card, downloads its image
-(`ghcr.io/prometheion/pithagoras-blender` or `ghcr.io/prometheion/pithagoras-godot`, tagged with the package's version),
-makes a volume for the projects and starts the container. For Office, open Settings → Office and press **Start
+`npm:@pithagoras/godot`, `npm:@pithagoras/inline-ui`, `npm:@pithagoras/nextcloud` or `npm:@pithagoras/office`. For
+Blender and Godot, then open Settings → Blender (or Godot) and press **Install**: the extension picks a card,
+downloads its image (`ghcr.io/prometheion/pithagoras-blender` or `ghcr.io/prometheion/pithagoras-godot`, tagged with
+the package's version), makes a volume for the projects and starts the container. For Nextcloud, open Settings →
+Nextcloud and save your first instance — its name, host, user and an app password: its container starts at once,
+and the extension pulls the image it runs (`ghcr.io/cbcoutinho/nextcloud-mcp-server`) once, shared by all
+instances. For Office, open Settings → Office and press **Start
 container**: it switches Office on, pulls OnlyOffice's own Document Server image (`onlyoffice/documentserver`) and the
 agents' editor's (`chromedp/headless-shell`) at once, and starts the Document Server.
 
@@ -85,12 +97,13 @@ PITHAGORAS_DIR=$PWD/.pithagoras npm run test:portal   # the portal-tier tests
 lifecycle, the GPU probe, an MCP client, the tool relay and the proxy). A build bundles what an extension imports of
 it into its server half's one file, so a published package needs nothing beside it.
 
-A release is a tag, `blender-v<version>`, `godot-v<version>`, `inline-ui-v<version>` or `office-v<version>`, matching the version in that
-extension's `package.json`. Merging a pull request that changes that version releases it: the extension's release
-workflow (`.github/workflows/blender-release.yml`, `godot-release.yml`, `inline-ui-release.yml` or `office-release.yml`) runs on the push to
-main, puts the tag on the merged commit and pushes it, and a push to main whose version already has its tag releases
-nothing. A tag pushed by hand still makes a release. For Blender and Godot the workflow builds and smoke-tests the
-image, pushes it to GHCR and makes a GitHub release with the sources that go with the image; for Inline UI and Office, which have
+A release is a tag, `blender-v<version>`, `godot-v<version>`, `inline-ui-v<version>`, `nextcloud-v<version>` or
+`office-v<version>`, matching the version in that extension's `package.json`. Merging a pull request that changes that
+version releases it: the extension's release workflow (`.github/workflows/blender-release.yml`, `godot-release.yml`,
+`inline-ui-release.yml`, `nextcloud-release.yml` or `office-release.yml`) runs on the push to main, puts the tag on the
+merged commit and pushes it, and a push to main whose version already has its tag releases nothing. A tag pushed by
+hand still makes a release. For Blender and Godot the workflow builds and smoke-tests the image, pushes it to GHCR
+and makes a GitHub release with the sources that go with the image; for Inline UI, Nextcloud and Office, which have
 no image of their own, it builds and tests the package and makes the GitHub release. Each then publishes the package to npm under the
 `@pithagoras` scope, through npm's trusted publishing for that workflow, with no token. The first version of a package
 is published by hand, as only a package that is there can be given a trusted publisher; the workflow's header says how.
@@ -109,5 +122,5 @@ Apache-2.0 ([LICENSE](LICENSE)), with two exceptions:
   package ships them.
 
 Each extension's README and NOTICE say under which licences what its image redistributes is, and where their sources
-are. Office's server half bundles jszip (MIT or GPL-3.0-or-later, used under the MIT licence); its README and NOTICE say
-more.
+are. Office's server half bundles jszip (MIT or GPL-3.0-or-later, used under the MIT licence), and Nextcloud's browser
+half the Lucide icons it uses from react-icons (MIT; the icons ISC); each README and NOTICE says more.

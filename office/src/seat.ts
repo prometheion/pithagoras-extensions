@@ -465,7 +465,10 @@ async function connected(signal?: AbortSignal): Promise<void> {
 async function sent(editor: Editor, since: number, at: number, pending: boolean, signal?: AbortSignal): Promise<boolean> {
   const changed = () => pending || editor.unsentAt >= since;
   const done = () => !editors.has(editor.id) || (changed() ? editor.sentSeq > editor.unsentSeq : Date.now() - at >= limits.quietMs);
-  const quiet = setTimeout(() => {
+  // Rechecked, not once: where the one check at quiet time landed where the wall clock was a tick behind the timer's
+  // own, nothing would come to wake again (an edit that changed nothing raises no further event) and the wait would
+  // end in error though the quiet had held.
+  const quiet = setInterval(() => {
     for (const wake of editor.stateWaiters.splice(0)) wake();
   }, limits.quietMs);
   try {
@@ -475,7 +478,7 @@ async function sent(editor: Editor, since: number, at: number, pending: boolean,
     if (e instanceof SeatError && e.code === "aborted") throw new SeatError("aborted", e.message, undefined, true);
     throw e;
   } finally {
-    clearTimeout(quiet);
+    clearInterval(quiet);
   }
   return changed();
 }

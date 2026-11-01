@@ -204,7 +204,14 @@ test("shot runs the client in the relay with its spec, and turns its answer into
   assert.deepEqual(calls[0].cmd.slice(0, 4), ["node", "--no-warnings", "-e", CDP_SRC]);
   assert.equal(calls[0].ms, 15_000);
   const spec = JSON.parse(calls[0].cmd[4]);
-  assert.deepEqual(spec, { browser: "pithagoras-office-ds-agent", port: 9222, editorId: "e1", ms: 12_000, target: { kind: "word", page: 2, pages: 4, large: true, side: SHOT_SIDE, quality: SHOT_QUALITY, maxBytes: SHOT_MAX_BYTES, settleMs: 300, settleMaxMs: 5000 } });
+  assert.deepEqual(spec, { browser: "pithagoras-office-ds-agent", port: 9222, editorId: "e1", ms: 12_000, target: { kind: "word", page: 2, pages: 4, large: true, side: SHOT_SIDE, quality: SHOT_QUALITY, maxBytes: SHOT_MAX_BYTES, settleMs: 300, settleMaxMs: 5000, picturesMs: 6000, picturesSpareMs: 2500 } });
+  // A Word page's pictures as the frame counted them; not known where it says so or gives no counts.
+  output = answer({ data: picture, width: 7, height: 9, pages: 4, pictures: { loading: 2, failed: 1 } });
+  assert.deepEqual((await shot("e1", { kind: "word", page: 2, pages: 4 }, deps)).pictures, { loading: 2, failed: 1 });
+  for (const pictures of [null, { loading: -1, failed: 0 }, { loading: "2", failed: 0 }, { loading: 1.5, failed: 0 }, 7]) {
+    output = answer({ data: picture, width: 7, height: 9, pages: 4, pictures });
+    assert.equal((await shot("e1", { kind: "word", page: 2, pages: 4 }, deps)).pictures, null, JSON.stringify(pictures));
+  }
   output = answer({ error: { code: "no_page", message: "the document has 3 pages as the editor lays it out now" } });
   await assert.rejects(shot("e1", { kind: "word", page: 4, pages: 4 }, deps), (e: unknown) => e instanceof ShotError && e.code === "no_page");
   output = answer({ data: "not base64!", width: 1, height: 1 });
@@ -304,7 +311,7 @@ function canvas(width: number, height: number, pixel: (x: number, y: number) => 
 async function frameFn(window: Record<string, unknown>, t: Record<string, unknown>): Promise<any> {
   const fn = vm.runInNewContext(`(${FRAME_FN})`, window);
   // As CDP gives it back (returnByValue): plain data, of this realm.
-  return JSON.parse(JSON.stringify(await fn({ side: SHOT_SIDE, quality: SHOT_QUALITY, maxBytes: SHOT_MAX_BYTES, settleMs: 60, settleMaxMs: 2000, until: Date.now() + 5000, ...t })));
+  return JSON.parse(JSON.stringify(await fn({ side: SHOT_SIDE, quality: SHOT_QUALITY, maxBytes: SHOT_MAX_BYTES, settleMs: 60, settleMaxMs: 2000, picturesMs: 2000, picturesSpareMs: 500, until: Date.now() + 5000, ...t })));
 }
 
 const WHITE = [255, 255, 255, 255];
@@ -325,7 +332,7 @@ test("frame function, Word: the page count waited for until it holds still, fit 
   const began = Date.now();
   const out = await frameFn(w.window, { kind: "word", page: 3, pages: 3 });
   assert.ok(Date.now() - began >= 60, "waited until the count held still");
-  assert.deepEqual(out, { data: "QUJD", width: 160, height: 280, pages: 3 });
+  assert.deepEqual(out, { data: "QUJD", width: 160, height: 280, pages: 3, pictures: null }, "no image loader in this editor: its pictures not known");
   assert.deepEqual(did, ["marks false", "fit", "page 2"]);
   assert.equal(w.drawn.length, 1);
   assert.equal(w.drawn[0].from, viewer, "drawn from the editor's own page canvas");
@@ -367,6 +374,97 @@ test("frame function, Word: a large page is made smaller to 1,024 px on its long
   w = frameWindow({ editor }, { id_viewer: viewer });
   out = await frameFn(w.window, { kind: "word", page: 1, pages: 1, large: true });
   assert.deepEqual([out.width, out.height], [900, 1272], "never made larger than the editor draws it");
+});
+
+/**
+ * The editor's image loader as DS 10.0 has it, under minified names: one object among AscCommon's that holds the API
+ * (`sb`) and its map (`jO`) of entries `{src, Image, YC}`, `Image` an <img> (here its `complete`), null once it failed.
+ * The editor's own placeholders are in it too (data: URIs, loaded). Around it, objects of other shapes.
+ */
+function imageLoader(editor: object, entries: Record<string, { complete: boolean } | null>) {
+  const jO: Record<string, unknown> = { "data:image/png;base64,iVBOR": { src: "data:image/png;base64,iVBOR", Image: { complete: true }, YC: 2 } };
+  for (const [src, img] of Object.entries(entries)) jO[src] = { src, Image: img, YC: img && img.complete ? 2 : 1 };
+  // A map of the same shape that does not belong to the editor's loader (no API in its object): never waited for.
+  const other = { cache: { "http://x/never.png": { src: "http://x/never.png", Image: { complete: false } } } };
+  return { AscCommon: { W8i: { jO, sb: editor, nFa: true }, other, ev: { urls: { "media/image1.png": "http://x" } }, CImage: function () {} } };
+}
+
+test("frame function, Word: the document's pictures are waited for until none is loading (the loader found by its shape), and only then is the page gone to and drawn", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const did: string[] = [];
+  const editor = { getCountPages: () => 4, zoomFitToPage: () => did.push("fit"), goToPage: (n: number) => did.push(`page ${n}`), asc_setDrawCollaborationMarks: () => did.push("marks") };
+  const first = { complete: false }, third = { complete: false };
+  setTimeout(() => ((first.complete = true), did.push("picture 1")), 120);
+  setTimeout(() => ((third.complete = true), did.push("picture 3")), 240);
+  const w = frameWindow({ editor, ...imageLoader(editor, { "http://ds/media/image1.png": first, "http://ds/media/image3.png": third }) }, { id_viewer: viewer });
+  const began = Date.now();
+  const out = await frameFn(w.window, { kind: "word", page: 1, pages: 4 });
+  assert.ok(Date.now() - began >= 240, "waited for both, the one on another page too");
+  assert.ok(Date.now() - began < 1500, "not for the other map's picture, which never loads");
+  assert.deepEqual(did, ["picture 1", "picture 3", "marks", "fit", "page 0"]);
+  assert.deepEqual(out.pictures, { loading: 0, failed: 0 });
+  // All loaded already: nothing waited for.
+  const done = frameWindow({ editor, ...imageLoader(editor, { "http://ds/media/image1.png": { complete: true } }) }, { id_viewer: viewer });
+  const t0 = Date.now();
+  assert.deepEqual((await frameFn(done.window, { kind: "word", page: 1, pages: 4 })).pictures, { loading: 0, failed: 0 });
+  assert.ok(Date.now() - t0 < 400);
+});
+
+test("frame function, Word: a picture still loading at the wait's end, or one that failed, is counted in the answer: the page is taken, not refused", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const editor = { getCountPages: () => 2, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };
+  const pictures = { "http://ds/media/slow.png": { complete: false }, "http://ds/media/also-slow.png": { complete: false }, "http://ds/media/gone.png": null, "http://ds/media/fine.png": { complete: true } };
+  let w = frameWindow({ editor, ...imageLoader(editor, pictures) }, { id_viewer: viewer });
+  let began = Date.now();
+  let out = await frameFn(w.window, { kind: "word", page: 2, pages: 2, picturesMs: 200 });
+  const took = Date.now() - began;
+  assert.ok(took >= 200 && took < 1000, `waited its bound, 200 ms (${took} ms)`);
+  assert.deepEqual(out.pictures, { loading: 2, failed: 1 });
+  assert.deepEqual([out.width, out.height, out.pages], [160, 280, 2], "the page as it is");
+  // The wait ends before the script's deadline, leaving the page its time: here 700 ms less 500.
+  w = frameWindow({ editor, ...imageLoader(editor, pictures) }, { id_viewer: viewer });
+  began = Date.now();
+  out = await frameFn(w.window, { kind: "word", page: 2, pages: 2, picturesMs: 5000, until: Date.now() + 700, picturesSpareMs: 500 });
+  assert.ok(Date.now() - began < 600, `${Date.now() - began} ms`);
+  assert.deepEqual(out.pictures, { loading: 2, failed: 1 });
+  assert.equal(out.data, "QUJD");
+});
+
+test("frame function, Word: a picture whose fetch failed just before the page is taken counts as failed, though its error event came after the wait looked", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const editor = { getCountPages: () => 1, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };
+  // As Chromium has a broken <img>: `complete` once its fetch failed, and the loader's onerror (Image = null) a task
+  // later, here 10 ms after the frame function first looked.
+  const loader = imageLoader(editor, { "http://ds/media/broken.png": { complete: true } });
+  const w = frameWindow({ editor, ...loader }, { id_viewer: viewer });
+  setTimeout(() => ((loader.AscCommon.W8i.jO["http://ds/media/broken.png"] as { Image: unknown }).Image = null), 10);
+  const out = await frameFn(w.window, { kind: "word", page: 1, pages: 1 });
+  assert.deepEqual(out.pictures, { loading: 0, failed: 1 });
+  assert.equal(out.data, "QUJD", "the page is taken");
+});
+
+test("frame function, Word: a page past the count is refused at once, not after the wait for a picture still loading", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const did: string[] = [];
+  const editor = { getCountPages: () => 8, zoomFitToPage: () => did.push("fit"), goToPage: () => did.push("page"), asc_setDrawCollaborationMarks() {} };
+  const w = frameWindow({ editor, ...imageLoader(editor, { "http://ds/media/hanging.png": { complete: false } }) }, { id_viewer: viewer });
+  const began = Date.now();
+  const out = await frameFn(w.window, { kind: "word", page: 9, pages: 8, picturesMs: 2000 });
+  assert.deepEqual(out, { error: { code: "no_page", message: "the document has 8 pages as the editor lays it out now" } });
+  assert.ok(Date.now() - began < 500, `refused in ${Date.now() - began} ms`);
+  assert.deepEqual(did, [], "the view not moved");
+});
+
+test("frame function, Word: without the editor's image loader (another shape, none, or one that throws when looked at) nothing is waited for and the answer says it is not known", async () => {
+  const viewer = canvas(200, 300, (x, y) => (x >= 20 && x <= 179 && y >= 10 && y <= 289 ? WHITE : GREY));
+  const editor = { getCountPages: () => 1, zoomFitToPage() {}, goToPage() {}, asc_setDrawCollaborationMarks() {} };
+  const throwing = { W8i: Object.defineProperty({ sb: editor }, "jO", { enumerable: true, get() { throw new Error("no"); } }) };
+  for (const over of [{}, { AscCommon: {} }, { AscCommon: { W8i: { jO: {}, sb: editor } } }, { AscCommon: { W8i: { jO: { a: { href: "x" } }, sb: editor } } }, { AscCommon: throwing }]) {
+    const w = frameWindow({ editor, ...over }, { id_viewer: viewer });
+    const out = await frameFn(w.window, { kind: "word", page: 1, pages: 1 });
+    assert.equal(out.pictures, null, JSON.stringify(Object.keys(over)));
+    assert.equal(out.data, "QUJD");
+  }
 });
 
 /**

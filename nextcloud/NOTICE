@@ -1,0 +1,14 @@
+@pithagoras/nextcloud
+Copyright 2026 piggidragon and Contributors
+
+The extension (its TypeScript, its stylesheet and its build) is licensed under the Apache License, Version 2.0
+(LICENSE). Its server half bundles no package of its own: everything it needs comes from the portal's extension API
+and pithagoras-docker, which it asks for by name at runtime. Its browser half bundles the icons it uses from
+react-icons 5.7.0 (https://github.com/react-icons/react-icons, MIT), which are Lucide's (https://lucide.dev, ISC);
+their licence texts are in THIRD-PARTY-LICENSES.
+
+The package does not contain a Nextcloud or the Nextcloud MCP server. When an instance is started, the portal pulls
+the community image ghcr.io/cbcoutinho/nextcloud-mcp-server (https://github.com/cbcoutinho/nextcloud-mcp-server)
+once; it runs in a container of the portal's, under its own licence.
+
+This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the service it talks to.

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
@@ -1438,6 +1439,170 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`25. the new heading's shot: ${heading.text.split("\n").slice(0, 4).join(" / ").slice(0, 600)}`);
     assert.deepEqual(listed[1], ["Summary first", heading.out.details.page]);
     assert.deepEqual(listed.at(-1), ["Section 400", shot.out.details.page]);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* the pictures on a Word page                                          */
+  /* ------------------------------------------------------------------ */
+
+  /** A PNG of `width` x `height` in `rgb`, with noise in its low bits so that it stays large (about 3 bytes a pixel),
+   * as a photo is. */
+  const png = (width: number, height: number, rgb: [number, number, number]) => {
+    const chunk = (type: string, body: Buffer) => {
+      const head = Buffer.alloc(8);
+      head.writeUInt32BE(body.length, 0);
+      head.write(type, 4, "latin1");
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(zlib.crc32(body, zlib.crc32(Buffer.from(type, "latin1"))) >>> 0);
+      return Buffer.concat([head, body, crc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr.set([8, 2, 0, 0, 0], 8);
+    const raw = Buffer.alloc((width * 3 + 1) * height);
+    let seed = 12345;
+    for (let y = 0; y < height; y++) {
+      const row = y * (width * 3 + 1);
+      for (let x = 0; x < width * 3; x++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        const v = rgb[x % 3];
+        raw[row + 1 + x] = v > 127 ? v - (seed >> 16) % 24 : v + (seed >> 16) % 24;
+      }
+    }
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw, { level: 1 })), chunk("IEND", Buffer.alloc(0))]);
+  };
+  /**
+   * A Word document made outside the editor, written over `docId`'s file: A4 pages with a line of text each, a page
+   * break between them, and on each page `pictures` names (1-based) a picture of 15 x 11.25 cm right below its line,
+   * in that page's colour.
+   */
+  async function picturesFile(docId: string, pages: number, pictures: Record<number, [number, number, number]>): Promise<Record<number, number>> {
+    const zip = new JSZip();
+    const bytes: Record<number, number> = {};
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+    const picture = (n: number) =>
+      `<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="5400000" cy="4050000"/><wp:docPr id="${n}" name="Picture ${n}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${n}" name="page${n}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdP${n}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="5400000" cy="4050000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const body = Array.from({ length: pages }, (_, k) => {
+      const n = k + 1;
+      return `<w:p><w:r><w:t>Page ${n} of the pictured document</w:t></w:r></w:p>${pictures[n] ? picture(n) : ""}${n < pages ? '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' : ""}`;
+    }).join("");
+    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file("word/_rels/document.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + Object.keys(pictures).map((n) => `<Relationship Id="rIdP${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/page${n}.png"/>`).join("") + "</Relationships>");
+    for (const [n, rgb] of Object.entries(pictures)) {
+      const data = png(1600, 1200, rgb);
+      bytes[Number(n)] = data.length;
+      zip.file(`word/media/page${n}.png`, data);
+    }
+    zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+    return bytes;
+  }
+  /**
+   * The agents' browser's picture fetches held back: through the debugging port from the relay (as cdp.ts reaches
+   * it), every image the seat page or its editors ask for is paused (`Fetch`) and let go `ms` after it was asked for,
+   * as a slow Document Server would answer. It holds until `stop()` (or `seconds`), and says what it held.
+   */
+  function slowPictures(ms: number, seconds = 120): { ready: Promise<void>; stop: () => Promise<string[]> } {
+    const src = `
+      const dns = require("dns");
+      (async () => {
+        const a = (await dns.promises.lookup(process.argv[1])).address;
+        const list = await (await fetch("http://" + a + ":9222/json/list")).json();
+        const seat = list.find((p) => p.type === "page" && /\\/seat\\//.test(p.url));
+        const ws = new WebSocket("ws://" + a + ":9222" + seat.webSocketDebuggerUrl.replace(/^ws:\\/\\/[^/]+/, ""));
+        let n = 0;
+        const send = (method, params) => ws.send(JSON.stringify({ id: ++n, method, params: params || {} }));
+        ws.onmessage = (e) => {
+          const m = JSON.parse(e.data);
+          if (m.method !== "Fetch.requestPaused") return;
+          const at = Date.now();
+          console.log("HELD " + at + " " + m.params.request.url.split("?")[0]);
+          setTimeout(() => { send("Fetch.continueRequest", { requestId: m.params.requestId }); console.log("LET " + Date.now() + " " + m.params.request.url.split("?")[0]); }, Number(process.argv[2]));
+        };
+        await new Promise((ok) => (ws.onopen = ok));
+        send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Image", requestStage: "Request" }] });
+        console.log("READY");
+        setTimeout(() => process.exit(0), Number(process.argv[3]) * 1000);
+        process.stdin.on("data", () => process.exit(0));
+      })().catch((e) => { console.log("FAILED " + e.message); process.exit(0); });`;
+    const child = spawn("docker", ["exec", "-i", `${PREFIX}-relay`, "node", "--no-warnings", "-e", src, `${PREFIX}-agent`, String(ms), String(seconds)], { stdio: ["pipe", "pipe", "inherit"] });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    const ready = new Promise<void>((ok) => child.stdout.on("data", () => /READY|FAILED/.test(out) && ok()));
+    return {
+      ready,
+      stop: async () => {
+        if (child.exitCode === null) {
+          child.stdin.write("x\n");
+          await once(child, "exit");
+        }
+        return out.trim().split("\n");
+      },
+    };
+  }
+
+  test("26. office_screenshot of Word waits for the document's pictures: right after opening and on a later page each picture is in its page though the Document Server serves it slowly; one slower than the wait is taken without it, and the answer says so", { timeout: 600_000 }, async () => {
+    const RED: [number, number, number] = [230, 30, 30];
+    const BLUE: [number, number, number] = [30, 30, 230];
+    // In a page of 724 x 1,024 px (A4) the picture of 15 x 11.25 cm is at about x 88-605, y 105-493: two points in it,
+    // one below it.
+    const inside: [number, number][] = [[300, 250], [500, 420]];
+    const below: [number, number] = [300, 700];
+    const looks = async (label: string, shot: Awaited<ReturnType<typeof shoot>>) => {
+      const [a, b, c] = await pixels(shot.image, [...inside, below]);
+      console.log(`${label}: ${a} ${b} below ${c}`);
+      return { a, b, c };
+    };
+    // As the Document Server serves them: how long its pictures take to come (what the wait's bound rests on).
+    const quick = await agentDoc("Pictured quickly", "word");
+    const sizes = await picturesFile(quick, 4, { 1: RED, 3: BLUE });
+    const q = await shoot("26. quickly, page 1", { id: quick });
+    const fetched = await inEditors<{ name: string; ms: number }[]>(`performance.getEntriesByType("resource").filter(function (r) { return /\\/media\\//.test(r.name); }).map(function (r) { return { name: r.name.split("?")[0].split("/").pop(), ms: Math.round(r.responseEnd - r.startTime) }; })`);
+    console.log(`26. the pictures (${JSON.stringify(sizes)} bytes) as the Document Server serves them: ${JSON.stringify(fetched.find((e) => /Pictured quickly/.test(e.title))?.value)}`);
+    const ql = await looks("26. quickly, page 1", q);
+    assert.ok(red(ql.a) && red(ql.b) && !red(ql.c), "the picture in its page");
+    // Each picture held 4 s: the picture right after opening, and the later page's right after it.
+    const doc = await agentDoc("Pictured slowly", "word");
+    await picturesFile(doc, 4, { 1: RED, 3: BLUE });
+    let slow = slowPictures(4000);
+    await slow.ready;
+    const first = await shoot("26. slowly, page 1 right after opening", { id: doc });
+    const third = await shoot("26. slowly, page 3 right after", { id: doc, page: 3 });
+    const held = await slow.stop();
+    console.log(`26. held: ${held.join(" | ")}`);
+    assert.equal(held.filter((l) => /^HELD .*\/media\/image[12]\.png/.test(l)).length, 2, "both of its pictures were held");
+    const fl = await looks("26. slowly, page 1", first);
+    const tl = await looks("26. slowly, page 3", third);
+    assert.ok(red(fl.a) && red(fl.b) && !red(fl.c), `page 1's picture is in it (${first.took} ms)`);
+    assert.ok(blue(tl.a) && blue(tl.b) && !blue(tl.c), "page 3's picture is in it");
+    assert.ok(first.took >= 2000, `the first waited for its pictures (${first.took} ms)`);
+    for (const shot of [first, third]) {
+      assert.doesNotMatch(shot.text, /pictures/, "all drawn: nothing said");
+      assert.equal(shot.out.details.picturesLoading, undefined);
+    }
+    // A picture held longer than the wait: the page as it is, and the answer says one was still loading.
+    const late = await agentDoc("Pictured late", "word");
+    await picturesFile(late, 2, { 1: RED });
+    slow = slowPictures(20_000);
+    await slow.ready;
+    const gap = await shoot("26. a picture held 20 s", { id: late });
+    console.log(`26. held: ${(await slow.stop()).join(" | ")}`);
+    assert.match(gap.text, /^Page 1 of 2 of "Pictured late" \(id [^)]+\), as your editor shows it now\. 1 of the document's pictures was still loading after a wait of up to 6 s, so it is missing from the picture if on this page: take it again in a moment\. Its text:/);
+    assert.equal(gap.out.details.picturesLoading, 1);
+    assert.ok(gap.took >= 5000 && gap.took < 12_000, `waited its bound and no more (${gap.took} ms)`);
+    const gl = await looks("26. a picture held 20 s", gap);
+    assert.ok(!red(gl.a) && !red(gl.b), "the picture is not in it");
+    // Let go, the next picture has it.
+    let again = gap;
+    for (let i = 0; i < 20 && /still loading/.test(again.text); i++) {
+      await delay(1000);
+      again = await shoot("26. once let go", { id: late });
+    }
+    const al = await looks("26. once let go", again);
+    assert.ok(red(al.a) && red(al.b), "the picture once it came");
+    assert.doesNotMatch(again.text, /pictures/);
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

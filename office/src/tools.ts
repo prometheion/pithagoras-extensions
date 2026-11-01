@@ -43,6 +43,7 @@ import { saveNow, type SaveAfterEdit } from "./editing";
 import { editJob, formatJob, OpError, viewJob, type EditJob, type FormatJob } from "./ops";
 import * as seat from "./seat";
 import { MAX_READ_FORMAT, MAX_SHOWN_TEXT } from "./seat-page";
+import { PICTURES_MS, type ShotPictures } from "./cdp";
 import * as docchat from "./docchat";
 
 /** Marks a text to be translated where it is shown: a label kept in a table (de.ts has its German). */
@@ -92,7 +93,7 @@ export type ToolsSeat = {
   run(home: string, docId: string, mode: seat.SeatMode, job: seat.SeatJob, options?: { signal?: AbortSignal; timeoutMs?: number; post?: boolean }): Promise<unknown>;
   keyOf(home: string, docId: string): string | undefined;
   closeDoc(docId: string, why?: string): void;
-  shot(home: string, docId: string, mode: seat.SeatMode, locate: seat.SeatJob, options?: { signal?: AbortSignal; large?: boolean }): Promise<{ located: Record<string, unknown>; image: { data: string; width: number; height: number; zoom?: number; pages?: number } }>;
+  shot(home: string, docId: string, mode: seat.SeatMode, locate: seat.SeatJob, options?: { signal?: AbortSignal; large?: boolean }): Promise<{ located: Record<string, unknown>; image: { data: string; width: number; height: number; zoom?: number; pages?: number; pictures?: ShotPictures } }>;
 };
 
 /** Injection seams for registerTools. Every field is optional and LAZY -- defaults read portal() only when actually used, so unit tests pass plain values and never reach the real portal. */
@@ -461,6 +462,20 @@ function cellLookLines(cells: CellLook[]): string[] {
     else lines.push({ at, words });
   }
   return lines.map((l) => `${l.at}: ${l.words.join("; ")}`);
+}
+
+/**
+ * What a Word page's picture says of the document's pictures where one may be missing from it: still loading after
+ * the wait, not loadable, or not known (the editor's image loader not found). Nothing where all of them are drawn.
+ */
+function picturesNote(p: ShotPictures | undefined): string {
+  if (p === undefined) return "";
+  if (p === null) return " Whether the document's pictures had all loaded could not be checked: one may be missing from the picture.";
+  const n = (k: number) => `${k} of the document's pictures`;
+  return (
+    (p.loading ? ` ${n(p.loading)} ${p.loading === 1 ? "was" : "were"} still loading after a wait of up to ${PICTURES_MS / 1000} s, so ${p.loading === 1 ? "it is" : "they are"} missing from the picture if on this page: take it again in a moment.` : "") +
+    (p.failed ? ` ${n(p.failed)} could not be loaded by the editor, so ${p.failed === 1 ? "it is" : "they are"} missing from the picture if on this page.` : "")
+  );
 }
 
 /** `first`: the number of the first block (a page's blocks are numbered as office_read numbers the document's). A
@@ -958,8 +973,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const page = Number(located.page);
         const pages = image.pages ?? Number(located.pages);
         const blocks = located as unknown as WordBlocks & { first?: number };
-        said = `Page ${page} of ${pages} of "${doc.title}" (id ${doc.docId}), as your editor shows it now. Its text:\n\n${wordText(blocks, blocks.first ?? 1)}${blocks.truncated ? `\n(the text is cut here: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives all of it)` : ""}`;
-        shown = { page, pages };
+        said = `Page ${page} of ${pages} of "${doc.title}" (id ${doc.docId}), as your editor shows it now.${picturesNote(image.pictures)} Its text:\n\n${wordText(blocks, blocks.first ?? 1)}${blocks.truncated ? `\n(the text is cut here: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives all of it)` : ""}`;
+        shown = { page, pages, ...(image.pictures === null ? { pictures: "unknown" } : image.pictures?.loading || image.pictures?.failed ? { picturesLoading: image.pictures.loading, picturesFailed: image.pictures.failed } : {}) };
       } else {
         const zoom = Math.round((image.zoom ?? Number(located.zoom)) * 100);
         const cells = Array.isArray(located.cells) ? (located.cells as { a: string; v: unknown; f?: string }[]) : [];

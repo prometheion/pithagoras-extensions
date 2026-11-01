@@ -342,10 +342,10 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
           {CAPABILITIES.map((cap) => {
             const provided = status?.capabilities?.available[cap.id]; // grey where the endpoint says it does not have it
             return (
-              <label key={cap.id} className={`flex items-center gap-2 ${provided === false ? "opacity-40" : ""}`}>
-                <input type="checkbox" checked={(card.capabilities?.[cap.id] ?? true)} disabled={busy || provided === false} onChange={(e) => setCapability(cap.id, e.target.checked)} />
+              <div key={cap.id} className={`flex items-center gap-2 ${provided === false ? "opacity-40" : ""}`}>
+                <portal.ui.Switch on={card.capabilities?.[cap.id] ?? true} label={t(cap.label)} disabled={busy || provided === false} onChange={(on) => setCapability(cap.id, on)} />
                 <span>{t(cap.label)}</span>
-              </label>
+              </div>
             );
           })}
         </div>

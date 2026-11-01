@@ -457,6 +457,29 @@ that the agent's commands rely on); they are opt-in, as they need Docker Engine 
 ./scripts/pithagoras.sh && OFFICE_E2E=1 PITHAGORAS_DIR=$PWD/.pithagoras npm run test:e2e -w office
 ```
 
+What the editor's API does (a getter's answer, a setter's arguments) is quickest to pin with the Document Server's own
+docbuilder, which runs the same builder API on a file of its own in about two seconds, with no editor and no network.
+A script in `probe/probe.docbuilder`:
+
+```js
+builder.CreateFile("xlsx");
+var ws = Api.GetActiveSheet();
+ws.GetRange("A1").SetValue("abc");
+ws.GetRange("A1").GetCharacters(2, 1).GetFont().SetBold(true);
+console.log(ws.GetRange("A1").GetCharacters(1, 3).GetFont().GetBold()); // null: the characters mix it
+builder.CloseFile();
+```
+
+prints what it logs:
+
+```sh
+docker run --rm --network none -v "$PWD/probe:/probe" --entrypoint /var/www/onlyoffice/documentserver/server/FileConverter/bin/docbuilder \
+  onlyoffice/documentserver:<version> /probe/probe.docbuilder
+```
+
+What lands later in the editor than in docbuilder (anything that goes through the Document Server's co-editing lock,
+as a freeze, an autofit or a change to the sheets) is for the end-to-end tests to pin.
+
 `real-portal.test.mts` proves the same in a real portal: the portal's own server started from that folder (built with
 `npm run build` there), Docker for extensions and Office installed into it through `POST /api/packages`, a person in
 the real Office page in Chromium, and the agent's office tools called from a chat whose model is a script

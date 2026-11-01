@@ -28,13 +28,17 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * review (the text names office_screenshot for a sheet's alignment and borders, as the owner's answer 7 has it).
  * Merged with PR 2 as it stood at 1440423 (its table of contents text and its cell formatting): the caps below are
  * the merged texts' measured costs (office_read 303 and 336 -> 339, office_edit 974 and 1,061 -> 1,061, office_format 711
- * and 936 -> 941: the table of contents's "it updates itself" and the cell formatting's words, with the sheet's). */
+ * and 936 -> 941: the table of contents's "it updates itself" and the cell formatting's words, with the sheet's).
+ * #13's PR 4, the sheet extras (plan: office_format ~1,050, office_edit ~1,090, office_read ~330): office_format 941 ->
+ * 1,153 with a conditional format, validation, a link, a chart, a filter and a table (one example each; the refusals
+ * name the keys and values the text leaves out), office_edit 1,061 -> 1,140 with sort and names (their five keys in
+ * the schema among it), office_read 339 -> 355 with what it now lists of a sheet. */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 200,
-  office_read: 339,
-  office_edit: 1061,
-  office_format: 941,
+  office_read: 355,
+  office_edit: 1140,
+  office_format: 1153,
   office_comments: 181,
   office_screenshot: 254,
 };
@@ -59,7 +63,7 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 3089);
+  assert.equal(agreed, 3396);
 });
 
 test("office_edit sends formatting to office_format once, for Word and sheets alike", () => {

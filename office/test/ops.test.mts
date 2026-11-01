@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { colour, editJob, formatJob, length, MAX_ARGS_BYTES, MAX_FORMAT_CELLS, MAX_MERGE_CELLS, MAX_OPS, MAX_SET_KEYS, MAX_SHEET_OPS, OpError, parseArea, parseLines, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
+import { colour, editJob, formatJob, length, nameProblem, sheetRef, MAX_ARGS_BYTES, MAX_FORMAT_CELLS, MAX_MERGE_CELLS, MAX_OPS, MAX_SET_KEYS, MAX_SHEET_OPS, OpError, parseArea, parseLines, parseRange, sheetNameProblem, type CellOp, type SheetOp, type WordOp } from "../src/ops";
 import { SHEET_MODEL_SRC, WORD_MODEL_SRC } from "../src/seat-page";
 
 /** The command's own check (WORD_MODEL_SRC), run here: on paragraphs' texts in reading order, null where every op
@@ -567,4 +567,285 @@ test("office_edit (spreadsheet): rows and columns inserted and deleted, by numbe
   assert.deepEqual(parseArea("$b$2"), { area: { col: 1, row: 1, cols: 1, rows: 1 }, text: "B2" });
   assert.deepEqual(parseArea("d:c")?.text, "C:D");
   assert.equal(parseArea("5"), null);
+});
+
+const BLACK = { r: 0, g: 0, b: 0 };
+const refusal = (run: () => unknown, message: RegExp, code = "bad_op", op: number | null = 0) =>
+  assert.throws(run, (e: unknown) => {
+    assert.ok(e instanceof OpError, String(e));
+    assert.equal(e.code, code, e.message);
+    if (op !== null) assert.equal(e.op, op, e.message);
+    assert.match(e.message, message);
+    return true;
+  });
+
+test("office_format (spreadsheet): conditional formats, in the agent's words, reach the command as the builder takes them", () => {
+  const job = formatJob("xlsx", [
+    { sheet: "Data", conditional: "b2:b9", set: { rule: "cell", operator: ">", value: 1000, fill: "#c6efce", color: "#006100", bold: true } },
+    { conditional: "C:C", rule: "cell", operator: "between", value: 5, value2: "9", italic: true, underline: true, strike: false },
+    { conditional: "D2:D9", set: { rule: "formula", formula: "=$A2=\"x\"", fill: "#FFC7CE" } },
+    { conditional: "E2:E9", set: { rule: "colorScale" } },
+    { conditional: "E2:E9", set: { rule: "colorScale", colors: ["#FF0000", "#00FF00"] } },
+    { conditional: "F2:F9", set: { rule: "dataBar", color: "#638EC6" } },
+    { conditional: "G2:G9", set: { rule: "top", rank: 3, bottom: true, percent: true, bold: true } },
+    { conditional: "G2:G9", set: { rule: "top", fill: "#FFFF00" } },
+    { conditional: "H2:H9", set: { rule: "duplicates", fill: "#FFEB9C" } },
+    { conditional: "H2:H9", set: { rule: "duplicates", unique: true, color: "#000000" } },
+    { conditional: "A1:H9", set: { clear: true } },
+  ]);
+  assert.equal(job.kind, "cell.format");
+  const rgb = (r: number, g: number, b: number) => ({ r, g, b });
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", conditional: "B2:B9", area: { col: 1, row: 1, cols: 1, rows: 8 }, rule: { rule: "cell", operator: "xlGreater", value: "1000", fill: rgb(198, 239, 206), color: rgb(0, 97, 0), bold: true } },
+    { conditional: "C:C", area: { col: 2, row: 0, cols: 1, rows: 1048576, whole: "columns" }, rule: { rule: "cell", operator: "xlBetween", value: "5", value2: "9", italic: true, underline: true, strike: false } },
+    { conditional: "D2:D9", area: { col: 3, row: 1, cols: 1, rows: 8 }, rule: { rule: "formula", formula: '=$A2="x"', fill: rgb(255, 199, 206) } },
+    { conditional: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, rule: { rule: "colorScale" } },
+    { conditional: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, rule: { rule: "colorScale", colors: [rgb(255, 0, 0), rgb(0, 255, 0)] } },
+    { conditional: "F2:F9", area: { col: 5, row: 1, cols: 1, rows: 8 }, rule: { rule: "dataBar", color: rgb(99, 142, 198) } },
+    { conditional: "G2:G9", area: { col: 6, row: 1, cols: 1, rows: 8 }, rule: { rule: "top", rank: 3, bottom: true, percent: true, bold: true } },
+    { conditional: "G2:G9", area: { col: 6, row: 1, cols: 1, rows: 8 }, rule: { rule: "top", rank: 10, bottom: false, percent: false, fill: rgb(255, 255, 0) } },
+    { conditional: "H2:H9", area: { col: 7, row: 1, cols: 1, rows: 8 }, rule: { rule: "duplicates", unique: false, fill: rgb(255, 235, 156) } },
+    { conditional: "H2:H9", area: { col: 7, row: 1, cols: 1, rows: 8 }, rule: { rule: "duplicates", unique: true, color: BLACK } },
+    { conditional: "A1:H9", area: { col: 0, row: 0, cols: 8, rows: 9 }, clear: true },
+  ]);
+  for (const op of ["<", "<=", "=", "<>", "notBetween", "NOT BETWEEN"]) {
+    const two = /between/i.test(op);
+    assert.doesNotThrow(() => formatJob("xlsx", [{ conditional: "A1", set: { rule: "cell", operator: op, value: 1, ...(two ? { value2: 2 } : {}), bold: true } }]), op);
+  }
+});
+
+test("office_format (spreadsheet): a conditional format that does not hold is refused, naming what its rule takes", () => {
+  const no = (set: unknown, message: RegExp) => refusal(() => formatJob("xlsx", [{ conditional: "B2:B9", set }]), message);
+  no({}, /set.rule is one of cell, formula, colorScale, dataBar, top, duplicates, or clear: true to take rules off/);
+  no({ rule: "bold" }, /set.rule is one of cell, formula/);
+  no({ rule: "cell", operator: "~", value: 1, bold: true }, /set.operator is one of > >= < <= = <> between notBetween/);
+  no({ rule: "cell", operator: ">", bold: true }, /set.value is what the cells are compared with/);
+  no({ rule: "cell", operator: ">", value: 1 }, /a "cell" rule changes how cells look: give fill, color, bold, italic, underline, strike/);
+  no({ rule: "cell", operator: ">", value: 1, value2: 2, bold: true }, /> takes set.value alone/);
+  no({ rule: "cell", operator: "between", value: 1, bold: true }, /between takes set.value and set.value2/);
+  no({ rule: "cell", operator: ">", value: "a\nb", bold: true }, /set.value is a number or a text/);
+  no({ rule: "cell", operator: ">", value: 1, fill: "red" }, /set.fill is "#RRGGBB"/);
+  no({ rule: "cell", operator: ">", value: 1, bold: "yes" }, /set.bold is true or false/);
+  no({ rule: "cell", operator: ">", value: 1, bold: true, colors: [] }, /"colors" is not a key of a "cell" rule \(it takes operator, value, value2, fill, color/);
+  no({ rule: "formula", formula: "A1>1", bold: true }, /set.formula is a formula starting with "="/);
+  no({ rule: "formula", formula: "=A1>1" }, /changes how cells look/);
+  no({ rule: "colorScale", colors: ["#FF0000"] }, /set.colors is two or three colours/);
+  no({ rule: "colorScale", colors: ["#FF0000", "#00FF00", "#0000FF", "#FFFFFF"] }, /set.colors is two or three colours/);
+  no({ rule: "colorScale", colors: ["#FF0000", "red"] }, /set.colors is "#RRGGBB"/);
+  no({ rule: "dataBar", fill: "#FF0000" }, /"fill" is not a key of a "dataBar" rule \(it takes color\)/);
+  no({ rule: "top", rank: 0, bold: true }, /set.rank is how many cells/);
+  no({ rule: "top", rank: 2.5, bold: true }, /set.rank/);
+  no({ rule: "duplicates" }, /changes how cells look/);
+  no({ rule: "duplicates", unique: "yes", bold: true }, /set.unique is true or false/);
+  no({ clear: true, rule: "cell" }, /clear is true, and the only key then/);
+  no({ clear: false }, /clear is true/);
+  no({ rule: { cell: "x" } }, /set.rule is one of/);
+  refusal(() => formatJob("xlsx", [{ conditional: "B2:B9", set: "x" }]), /set is an object of conditional's keys \(rule, operator/);
+  refusal(() => formatJob("xlsx", [{ conditional: "B2:B9", rule: "cell", operator: ">", value: 1, bold: true, tint: 1 }]), /"tint" is not a key of conditional \(they are rule, operator/);
+  refusal(() => formatJob("xlsx", [{ conditional: "B", set: { clear: true } }]), /conditional is the cells, as "B2:B9" or a whole column "C:C" \(got "B"\)/);
+});
+
+test("office_format (spreadsheet): validation: a list, a number, a date or a length with its condition, a message, or clear", () => {
+  const job = formatJob("xlsx", [
+    { sheet: "Data", validate: "e2:e9", set: { list: ["Open", "Done", " Blocked "], message: "Pick one" } },
+    { validate: "E2:E9", set: { list: "Data!A2:A9" } },
+    { validate: "E2:E9", set: { list: "'My data'!$B$1:$B$5" } },
+    { validate: "E2:E9", set: { list: [1, 2, 3] } },
+    { validate: "B2:B9", set: { whole: ">= 0" } },
+    { validate: "B2:B9", whole: "between 1 and 10", message: "1 to 10" },
+    { validate: "C2:C9", set: { decimal: "<>0" } },
+    { validate: "D2:D9", set: { date: ">= 2026-01-31" } },
+    { validate: "D2:D9", set: { date: "notBetween 2026-01-01 and 2026-12-31" } },
+    { validate: "F2:F9", set: { length: "<= 20" } },
+    { validate: "F2:F9", set: { clear: true } },
+  ]);
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "Open,Done,Blocked", message: "Pick one" } },
+    { validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "='Data'!$A$2:$A$9" } },
+    { validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "='My data'!$B$1:$B$5" } },
+    { validate: "E2:E9", area: { col: 4, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateList", operator: "xlBetween", f1: "1,2,3" } },
+    { validate: "B2:B9", area: { col: 1, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateWholeNumber", operator: "xlGreaterEqual", f1: "0" } },
+    { validate: "B2:B9", area: { col: 1, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateWholeNumber", operator: "xlBetween", f1: "1", f2: "10", message: "1 to 10" } },
+    { validate: "C2:C9", area: { col: 2, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateDecimal", operator: "xlNotEqual", f1: "0" } },
+    // The date as its serial day number: 2026-01-31 is day 46053.
+    { validate: "D2:D9", area: { col: 3, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateDate", operator: "xlGreaterEqual", f1: "46053" } },
+    { validate: "D2:D9", area: { col: 3, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateDate", operator: "xlNotBetween", f1: "46023", f2: "46387" } },
+    { validate: "F2:F9", area: { col: 5, row: 1, cols: 1, rows: 8 }, check: { type: "xlValidateTextLength", operator: "xlLessEqual", f1: "20" } },
+    { validate: "F2:F9", area: { col: 5, row: 1, cols: 1, rows: 8 }, check: null },
+  ]);
+});
+
+test("office_format (spreadsheet): a validation that does not hold is refused", () => {
+  const no = (set: unknown, message: RegExp) => refusal(() => formatJob("xlsx", [{ validate: "E2:E9", set }]), message);
+  no({}, /give exactly one of list, whole, decimal, date, length or clear \(it has none\)/);
+  no({ list: ["a"], whole: "> 1" }, /exactly one of list, whole.*\(it has list and whole\)/);
+  no({ list: [] }, /set.list is the allowed entries/);
+  no({ list: ["a,b"] }, /set.list is the allowed entries.*no commas/);
+  no({ list: [""] }, /set.list is the allowed entries/);
+  no({ list: Array.from({ length: 101 }, (_, k) => `v${k}`) }, /set.list is the allowed entries/);
+  no({ list: ["x".repeat(130), "y".repeat(130)] }, /set.list holds at most 255 characters in all/);
+  no({ list: "not a range" }, /set.list is the allowed entries/);
+  no({ whole: "> 1.5" }, /set.whole is a condition on the cells' number: ">= 0", "= 5", "between 1 and 10"/);
+  no({ whole: 5 }, /set.whole is a condition/);
+  no({ decimal: "between 1 and" }, /set.decimal is a condition/);
+  no({ decimal: "> abc" }, /set.decimal is a condition/);
+  no({ length: "> -1" }, /set.length is a condition on the cells' text length/);
+  no({ date: "> 31.01.2026" }, /set.date is a condition on the cells' date.*dates as 2026-01-31/);
+  no({ date: "> 2026-02-30" }, /set.date is a condition/);
+  no({ whole: "> 1", message: "" }, /set.message is what a refused entry shows/);
+  no({ whole: "> 1", message: "a\nb" }, /set.message/);
+  no({ whole: "> 1", message: "x".repeat(256) }, /set.message/);
+  no({ clear: true, message: "x" }, /clear is true, and the only key then/);
+  no({ clear: 1 }, /clear is true/);
+  no({ whole: "> 1", format: 2 }, /"format" is not a key of validate \(they are list, whole, decimal, date, length, message, clear\)/);
+  refusal(() => formatJob("xlsx", [{ validate: "E:E", set: { clear: true } }]), /validate takes cells \("A1:D9"\), not whole columns or rows/);
+});
+
+test("office_format (spreadsheet): a link in a cell, a chart, a filter and a table, in the agent's words", () => {
+  const job = formatJob("xlsx", [
+    { sheet: "Data", link: "a2", set: { url: "https://example.com/x", text: "Example" } },
+    { link: "B2", url: "mailto:a@example.com" },
+    { sheet: "Data", chart: "a1:c5", set: { type: "bar", title: "Revenue", xTitle: "Region", yTitle: "EUR", legend: "bottom", at: "h2", width: "10cm", height: 200, rows: true } },
+    { chart: "A1:B5" },
+    { chart: "A1:B5", set: { type: "pie" } },
+    { filter: "a1:d9" },
+    { filter: "A1:D9", set: { column: "b", criteria: ">500" } },
+    { filter: "A1:D9", set: { column: "C", criteria: "N", or: "S" } },
+    { filter: "A1:D9", column: "D", criteria: "<5", and: ">1" },
+    { filter: "none" },
+    { asTable: "A1:C5" },
+  ]);
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", link: "A2", at: { col: 0, row: 1 }, url: "https://example.com/x", text: "Example" },
+    { link: "B2", at: { col: 1, row: 1 }, url: "mailto:a@example.com" },
+    // Sizes in EMU (a twip is 635): 10cm, and 200pt.
+    { sheet: "Data", chart: "A1:C5", area: { col: 0, row: 0, cols: 3, rows: 5 }, chartType: "horizontalBar", title: "Revenue", xTitle: "Region", yTitle: "EUR", legend: "bottom", at: { col: 7, row: 1 }, width: 5669 * 635, height: 4000 * 635, inRows: true },
+    // Right of the data by default, 12 x 7.5 cm, a column chart.
+    { chart: "A1:B5", area: { col: 0, row: 0, cols: 2, rows: 5 }, chartType: "bar", at: { col: 3, row: 0 }, width: 6803 * 635, height: 4252 * 635, inRows: false },
+    { chart: "A1:B5", area: { col: 0, row: 0, cols: 2, rows: 5 }, chartType: "pie", at: { col: 3, row: 0 }, width: 6803 * 635, height: 4252 * 635, inRows: false },
+    { filter: "A1:D9", area: { col: 0, row: 0, cols: 4, rows: 9 } },
+    { filter: "A1:D9", area: { col: 0, row: 0, cols: 4, rows: 9 }, column: 2, criteria: ">500" },
+    { filter: "A1:D9", area: { col: 0, row: 0, cols: 4, rows: 9 }, column: 3, criteria: "N", or: "S" },
+    { filter: "A1:D9", area: { col: 0, row: 0, cols: 4, rows: 9 }, column: 4, criteria: "<5", and: ">1" },
+    { filter: "none" },
+    { asTable: "A1:C5", area: { col: 0, row: 0, cols: 3, rows: 5 } },
+  ]);
+});
+
+test("office_format (spreadsheet): a link, chart, filter or table that does not hold is refused", () => {
+  const no = (ops: unknown, message: RegExp, code = "bad_op", op = 0) => refusal(() => formatJob("xlsx", ops as unknown[]), message, code, op);
+  no([{ link: "A1:A2", set: { url: "https://example.com" } }], /link is one cell, as "A2"/);
+  no([{ link: "A1", set: { url: "javascript:alert(1)" } }], /set.url is the link's address \(http, https or mailto\)/);
+  no([{ link: "A1", set: {} }], /set.url is the link's address/);
+  no([{ link: "A1", set: { url: "https://example.com", text: "" } }], /set.text is the cell's text/);
+  no([{ link: "A1", set: { url: "https://example.com", target: "x" } }], /"target" is not a key of link \(they are url, text\)/);
+  no([{ chart: "A1:C1" }], /a chart takes the data with its header row: at least two rows/);
+  no([{ chart: "A1:C5", set: { type: "radar" } }], /set.type is one of column, columnStacked, bar, barStacked, line, pie, doughnut, area, scatter/);
+  no([{ chart: "A1:C5", set: { title: "" } }], /set.title is a text/);
+  no([{ chart: "A1:C5", set: { legend: "inside" } }], /set.legend is right, bottom, top, left, none/);
+  no([{ chart: "A1:C5", set: { at: "H2:I3" } }], /set.at is the cell the chart's top left corner sits in/);
+  no([{ chart: "A1:C5", set: { width: "1cm" } }], /set.width is a length from 2cm to 50cm/);
+  no([{ chart: "A1:C5", set: { height: "80cm" } }], /set.height is a length from 2cm to 50cm/);
+  no([{ chart: "A1:C5", set: { rows: "yes" } }], /set.rows is true or false/);
+  no([{ chart: "XFA1:XFB5" }], /no room for the chart right of the data/);
+  no([{ chart: "A:C" }], /chart takes cells \("A1:D9"\), not whole columns or rows/);
+  no([{ filter: "A1:D1" }], /a filter needs the header row and at least one row of data/);
+  no([{ filter: "A1:D9", set: { criteria: ">1" } }], /criteria go with column/);
+  no([{ filter: "A1:D9", set: { column: "F", criteria: ">1" } }], /set.column is one column of the range, as a letter between A and D/);
+  no([{ filter: "A1:D9", set: { column: "B" } }], /set.criteria is what the column shows/);
+  no([{ filter: "A1:D9", set: { column: "B", criteria: ">1", and: ">0", or: "<5" } }], /and or or, not both/);
+  no([{ filter: "A1:D9", set: { column: "B", criteria: ">1", or: "" } }], /set.or is a second criterion/);
+  no([{ filter: "none", set: { column: "B" } }], /filter "none" takes no other key/);
+  no([{ filter: "everything" }], /filter is the range with its header row, as "A1:D9", or "none"/);
+  no([{ asTable: "A1:C1" }], /a table needs a header row with its column names and at least one row of data/);
+  no([{ asTable: "A1:C5", set: { style: "x" } }], /"set" is not part of \{sheet\?, asTable\}: the table gets the editor's default style/);
+  no([{ asTable: "A1:C5", style: "Medium9" }], /"style" is not part of \{sheet\?, asTable\}/);
+  no([{ asTable: "A1:C5", chart: "A1:C5" }], /each is an op of its own/);
+});
+
+test("office_format (spreadsheet): charts, filters, tables and cleared rules come last in a call; the rest can be taken back and goes before", () => {
+  const ok = [{ format: "A1", set: { bold: true } }, { conditional: "A1:A9", set: { rule: "cell", operator: ">", value: 1, bold: true } }, { validate: "B2:B9", set: { clear: true } }, { link: "C1", url: "https://example.com", text: "x" }, { chart: "A1:C5" }, { filter: "A1:D9" }, { asTable: "A1:C5" }, { conditional: "A1:A9", set: { clear: true } }];
+  assert.doesNotThrow(() => formatJob("xlsx", ok));
+  const no = (ops: unknown[], message: RegExp, op: number) => refusal(() => formatJob("xlsx", ops), message, "bad_op", op);
+  no([{ chart: "A1:C5" }, { format: "A1", set: { bold: true } }], /^op 1 cannot be taken back once made \(a chart, which the editor's API cannot remove\), so it goes after every op that can: put it last in the call \(op 2 comes after it\)/, 0);
+  no([{ filter: "A1:D9" }, { freeze: "A2" }], /^op 1 cannot be taken back once made \(a filter, which the editor's API cannot take off again\)/, 0);
+  no([{ asTable: "A1:C5" }, { columns: "C", width: 9 }], /^op 1 cannot be taken back once made \(a formatted table, which the editor's API cannot turn back\)/, 0);
+  no([{ format: "A1", set: { bold: true } }, { conditional: "A1:A9", set: { clear: true } }, { validate: "A1:A9", set: { clear: true } }], /^op 2 cannot be taken back once made \(cleared conditional formats, which cannot be made again\)/, 1);
+  // The cells they read count against the call's 20,000, as a format's do.
+  refusal(() => formatJob("xlsx", [{ validate: "A1:CV200", set: { clear: true } }, { format: "B1:B5", set: { bold: true } }, { asTable: "A201:A202" }]), /formats 20,000 cells at most \(got 20,007/, "bad_op", null);
+});
+
+test("office_format: a spreadsheet's new ops given to a Word document, and the reverse, are refused with their place named", () => {
+  refusal(() => formatJob("docx", [{ conditional: "A1", set: { rule: "dataBar" } }]), /op 1 is a spreadsheet op \(`conditional`\), and this is a Word document/, "unsupported_format");
+  refusal(() => formatJob("docx", [{ chart: "A1:B5" }]), /is a spreadsheet op \(`chart`\)/, "unsupported_format");
+  refusal(() => formatJob("xlsx", [{ sort: "A2:D9", by: ["B"] }]), /`sort` is an office_edit op \(what the sheet holds\)/);
+  refusal(() => formatJob("xlsx", [{ name: "Sales", refersTo: "A1" }]), /`name` is an office_edit op/);
+  refusal(() => editJob("xlsx", [{ conditional: "A1", set: { rule: "dataBar" } }]), /`conditional` is an office_format op \(how the sheet looks\)/);
+  refusal(() => editJob("xlsx", [{ link: "A1", url: "https://example.com" }]), /`link` is an office_format op/);
+  refusal(() => editJob("xlsx", [{ validate: "A1", set: { clear: true } }]), /`validate` is an office_format op/);
+  refusal(() => editJob("xlsx", [{ asTable: "A1:B3" }]), /`asTable` is an office_format op/);
+});
+
+test("office_edit (spreadsheet): a sort by up to three columns, ascending unless desc, taken as the range's own columns", () => {
+  const job = editJob("xlsx", [{ sheet: "Data", sort: "a2:d9", by: ["b desc", "C", " d  Ascending "] }, { sort: "B3:C5", by: "C Descending" }, { range: "A1", values: [[1]] }]);
+  assert.equal(job.kind, "cell.edit");
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", sort: "A2:D9", area: { col: 0, row: 1, cols: 4, rows: 8 }, by: [{ col: 1, desc: true }, { col: 2, desc: false }, { col: 3, desc: false }] },
+    { sort: "B3:C5", area: { col: 1, row: 2, cols: 2, rows: 3 }, by: [{ col: 2, desc: true }] },
+    { range: "A1", values: [[1]] },
+  ]);
+  const no = (ops: unknown[], message: RegExp, op = 0) => refusal(() => editJob("xlsx", ops), message, "bad_op", op);
+  no([{ sort: "A2:D9" }], /by is one to three columns of the range to sort by, as \["B desc", "C"\]/);
+  no([{ sort: "A2:D9", by: [] }], /by is one to three columns/);
+  no([{ sort: "A2:D9", by: ["A", "B", "C", "D"] }], /by is one to three columns/);
+  no([{ sort: "A2:D9", by: ["E"] }], /by names column E, which is outside A2:D9/);
+  no([{ sort: "A2:D9", by: ["B", "b desc"] }], /by names a column twice/);
+  no([{ sort: "A2:D9", by: ["B up"] }], /by holds columns as "B" or "B desc" \(got "B up"\)/);
+  no([{ sort: "A2:D9", by: [2] }], /by holds columns as "B" or "B desc"/);
+  no([{ sort: "A2:D2", by: ["A"] }], /a sort needs two rows at least/);
+  no([{ sort: "A:D", by: ["A"] }], /sort is the cells whose rows are sorted, without a header row, as "A2:D9" \(got "A:D"\)/);
+  no([{ sort: "A2:D9", by: ["A"], values: [[1]] }], /must be exactly one of/);
+  no([{ sort: "A2:D9", by: ["A"], order: "desc" }], /"order" is not part of \{sheet\?, sort, by\}/);
+  no([{ sort: "A2:D9", by: ["A"], insertRows: "5" }], /must be exactly one of/);
+  no([{ sheet: "", sort: "A2:D9", by: ["A"] }], /sheet is a sheet's name/);
+  // A sort reads its cells to be taken back: as many as a format reads.
+  assert.doesNotThrow(() => editJob("xlsx", [{ sort: "A1:CV200", by: ["A"] }]));
+  refusal(() => editJob("xlsx", [{ sort: "A1:CV200", by: ["A"] }, { sort: "A201:A202", by: ["A"] }]), /^one call sorts 20,000 cells at most \(got 20,002\)/, "bad_op", null);
+  // Deleting rows or columns still goes after it.
+  refusal(() => editJob("xlsx", [{ deleteRows: "9" }, { sort: "A2:D8", by: ["A"] }]), /^op 1 cannot be taken back once made \(deleted rows\)/, "bad_op", 0);
+});
+
+test("office_edit (spreadsheet): a named range made, changed or deleted, with cells in their absolute form", () => {
+  const job = editJob("xlsx", [
+    { name: "Sales", refersTo: "Inventory!b6:c9" },
+    { name: "Rows", refersTo: "'My data'!$5:$6" },
+    { name: "Cols", refersTo: "Data!C:D" },
+    { name: "One", refersTo: "$B$2" },
+    { name: "Umsätze", refersTo: "B2:B9" },
+    { name: "Old", delete: true },
+    { name: "It", refersTo: "'It''s'!A1" },
+  ]);
+  assert.deepEqual(job.args.ops, [
+    { name: "Sales", refersTo: { sheet: "Inventory", address: "$B$6:$C$9" } },
+    { name: "Rows", refersTo: { sheet: "My data", address: "$5:$6" } },
+    { name: "Cols", refersTo: { sheet: "Data", address: "$C:$D" } },
+    { name: "One", refersTo: { address: "$B$2" } },
+    { name: "Umsätze", refersTo: { address: "$B$2:$B$9" } },
+    { name: "Old", delete: true },
+    { name: "It", refersTo: { sheet: "It's", address: "$A$1" } },
+  ]);
+  const no = (ops: unknown[], message: RegExp) => refusal(() => editJob("xlsx", ops), message);
+  no([{ name: "Sales" }], /give refersTo \(the cells it names\) or delete: true/);
+  no([{ name: "Sales", refersTo: "A1", delete: true }], /give refersTo/);
+  no([{ name: "Sales", delete: false }], /delete is true/);
+  no([{ name: "Sales", refersTo: "zzz" }], /refersTo is cells with their sheet, as "Data!\$B\$6:\$C\$9"/);
+  no([{ name: "Sales", refersTo: "=SUM(A1:A3)" }], /refersTo is cells with their sheet/);
+  no([{ name: "Sales", refersTo: "Data![A1]" }], /refersTo is cells with their sheet/);
+  no([{ name: "Sales", refersTo: "A1", sheet: "Data" }], /"sheet" is not part of \{name, refersTo \| delete\}/);
+  for (const bad of ["", "1x", "my name", "my.name", "A1", "XFD1048576", "R1C1", "R", "c", "TRUE", "x".repeat(256)]) no([{ name: bad, refersTo: "A1" }], /^op 1: (a name has 1 to 255 characters|a name starts with a letter|"[^"]*" reads as a cell address)/);
+  assert.equal(nameProblem("Sales_2026"), null);
+  assert.equal(nameProblem("_hidden"), null);
+  assert.equal(nameProblem("ABCD1"), null);
+  assert.deepEqual(sheetRef("Data!$A$1:B2"), { sheet: "Data", address: "$A$1:$B$2" });
+  assert.equal(sheetRef("Da[ta!A1"), null);
 });

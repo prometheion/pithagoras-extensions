@@ -271,8 +271,18 @@ type FakeSheet = {
   frozen: { cols: number; rows: number };
   /** A text's characters that look otherwise than its cell (rich text), by cell: each character's own, from the first. */
   chars: Record<string, Partial<Look>[]>;
+  /** #13 PR 4: conditional formats (in the order made), validation by cell (ApiValidation's getters in turn), links by
+   * cell, charts, the sheet's filter (its range) and the criteria set on it, and formatted tables (their ranges). */
+  rules: FakeRule[];
+  validations: Record<string, (string | boolean | null)[]>;
+  links: Record<string, { address: string; sub: string; tip: string }>;
+  charts: { type: string; ref: string; title?: string; xTitle?: string; yTitle?: string; legend?: string; col: number; row: number; width: number; height: number; inRows: boolean }[];
+  filter: string | null;
+  criteria: unknown[][];
+  tables: string[];
 };
-const freshSheet = (name: string, hidden = false): FakeSheet => ({ name, hidden, cells: {}, formats: {}, widths: {}, looks: {}, colLooks: {}, rowLooks: {}, aligns: {}, borders: {}, merges: [], heights: {}, hiddenCols: [], hiddenRows: [], frozen: { cols: 0, rows: 0 }, chars: {} });
+type FakeRule = { type: string; applies: string; operator?: string; f1?: string; f2?: string; rank?: number; topBottom?: string; percent?: boolean; dupe?: string; fill?: string; fontColor?: string; bold?: boolean; italic?: boolean; underline?: string; strike?: boolean; barColor?: string; colors?: string[] };
+const freshSheet = (name: string, hidden = false): FakeSheet => ({ name, hidden, cells: {}, formats: {}, widths: {}, looks: {}, colLooks: {}, rowLooks: {}, aligns: {}, borders: {}, merges: [], heights: {}, hiddenCols: [], hiddenRows: [], frozen: { cols: 0, rows: 0 }, chars: {}, rules: [], validations: {}, links: {}, charts: [], filter: null, criteria: [], tables: [] });
 
 const colOf = (l: string) => [...l].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
 const nameOf = (n: number) => { let out = ""; for (n++; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(65 + ((n - 1) % 26)) + out; return out; };
@@ -322,7 +332,7 @@ const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = 
 function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
-  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0 };
+  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0, names: {} as Record<string, string> };
   const ask = (what: string, fn: () => void) => {
     state.asked.push(what);
     const never = typeof options.never === "function" ? options.never(what) : options.never;
@@ -348,13 +358,14 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     return { ...DEFAULT_LOOK, ...sh.rowLooks[p.r], ...sh.colLooks[p.c], ...sh.looks[a] };
   };
   /** The cells a setter reaches: a cell range's own, or of whole columns or rows the cells that have anything there. */
+  const huge = (b: ReturnType<typeof bounds>) => (b.c2 - b.c1 + 1) * (b.r2 - b.r1 + 1) > 100_000;
   const reached = (sh: FakeSheet, b: ReturnType<typeof bounds>) => {
-    if (!b.whole) {
+    if (!b.whole && !huge(b)) {
       const out: string[] = [];
       for (let r = b.r1; r <= b.r2; r++) for (let c = b.c1; c <= b.c2; c++) out.push(at(c, r));
       return out;
     }
-    return [...new Set([...Object.keys(sh.cells), ...Object.keys(sh.looks)])].filter((a) => inside(a, b));
+    return [...new Set([...Object.keys(sh.cells), ...Object.keys(sh.looks), ...Object.keys(sh.links)])].filter((a) => inside(a, b));
   };
   const setLook = (sh: FakeSheet, address: string, key: keyof Look, v: unknown) => {
     const b = bounds(address);
@@ -404,10 +415,116 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     sh.aligns = move(sh.aligns);
     sh.borders = move(sh.borders);
   };
+  /* #13 PR 4's parts of the builder, as docbuilder and the editor showed them (DS 10.0.0.1): */
+  const rgbOf = (c: { r: number; g: number; b: number } | undefined) => (c ? hexOf(c) : undefined);
+  const ruleItem = (sh: FakeSheet, rule: FakeRule) => {
+    const item: Record<string, unknown> = {
+      GetType: () => rule.type,
+      GetAppliesTo: () => rangeOf(sh, rule.applies),
+      Delete: () => void sh.rules.splice(sh.rules.indexOf(rule), 1),
+      SetFillColor: (c: { r: number; g: number; b: number }) => void (rule.fill = rgbOf(c)),
+      GetFillColor: () => (rule.fill ? colourOf(rule.fill) : undefined),
+      GetFont: () => ({
+        GetColor: () => (rule.fontColor ? colourOf(rule.fontColor) : undefined),
+        GetBold: () => rule.bold,
+        SetColor: (c: { r: number; g: number; b: number }) => void (rule.fontColor = rgbOf(c)),
+        SetBold: (v: boolean) => void (rule.bold = v),
+        SetItalic: (v: boolean) => void (rule.italic = v),
+        // The conditional font takes the editor's own names for an underline, not a boolean.
+        SetUnderline: (v: string) => {
+          if (!/^xlUnderlineStyle/.test(String(v))) throw new Error('Invalid type of parametr "isUnderline".');
+          rule.underline = v;
+        },
+        SetStrikethrough: (v: boolean) => void (rule.strike = v),
+      }),
+    };
+    // Only the kinds that have them answer these (the others have no such method).
+    if (rule.type === "xlCellValue" || rule.type === "xlExpression") Object.assign(item, { GetFormula1: () => rule.f1, GetFormula2: () => rule.f2 ?? "" });
+    if (rule.type === "xlCellValue") item.GetOperator = () => rule.operator;
+    if (rule.type === "xlTop10") Object.assign(item, { GetRank: () => rule.rank, GetTopBottom: () => rule.topBottom, GetPercent: () => rule.percent, SetRank: (n: number) => void (rule.rank = n), SetTopBottom: (v: string) => void (rule.topBottom = v), SetPercent: (v: boolean) => void (rule.percent = v) });
+    if (rule.type === "xlUniqueValues") Object.assign(item, { GetDupeUnique: () => rule.dupe, SetDupeUnique: (v: string) => void (rule.dupe = v) });
+    if (rule.type === "xlDataBar") Object.assign(item, { SetBarColor: (c: { r: number; g: number; b: number }) => void (rule.barColor = rgbOf(c)) });
+    if (rule.type === "xlColorScale") item.GetColorScaleCriteria = () => (rule.colors ?? []).map((_, k) => ({ SetColor: (c: { r: number; g: number; b: number }) => void (rule.colors![k] = hexOf(c)) }));
+    return item;
+  };
+  /** A range's conditional formats: those that meet it, counted and taken by their number from 1. */
+  const conditions = (sh: FakeSheet, address: string) => {
+    const b = bounds(address);
+    const mine = () => sh.rules.filter((r) => meets(bounds(r.applies), b));
+    const make = (rule: Omit<FakeRule, "applies">, address: string) => {
+      state.calls.push(`rule ${rule.type} ${address}`);
+      const made = { ...rule, applies: address } as FakeRule;
+      sh.rules.push(made);
+      return ruleItem(sh, made);
+    };
+    return {
+      GetCount: () => mine().length,
+      GetItem: (k: number) => ruleItem(sh, mine()[k - 1]),
+      Delete: () => void mine().forEach((r) => sh.rules.splice(sh.rules.indexOf(r), 1)),
+      Add: (type: string, operator?: string, f1?: string, f2?: string) => make({ type, operator, f1: f1?.replace(/^=/, ""), f2 }, address),
+      AddColorScale: (n: number) => make({ type: "xlColorScale", colors: Array.from({ length: n }, () => "#FFFFFF") }, address),
+      AddDatabar: () => make({ type: "xlDataBar" }, address),
+      AddTop10: () => make({ type: "xlTop10", rank: 10, topBottom: "xlTop10Top", percent: false }, address),
+      AddUniqueValues: () => make({ type: "xlUniqueValues", dupe: "xlUnique" }, address),
+    };
+  };
+  const VALIDATION_TYPES = ["xlValidateList", "xlValidateWholeNumber", "xlValidateDecimal", "xlValidateDate", "xlValidateTextLength", "xlValidateCustom"];
+  /** The getters of one cell's validation in turn: type, alert style, operator, formulas, ignore blank, in-cell
+   * dropdown, error message and title, input message and title, show error, show input. */
+  const NO_VALIDATION = ["xlValidateInputOnly", "xlValidAlertStop", "xlBetween", "", "", true, true, "", "", "", "", true, true];
+  const validation = (sh: FakeSheet, cells: string[]) => {
+    const getters = ["GetType", "GetAlertStyle", "GetOperator", "GetFormula1", "GetFormula2", "GetIgnoreBlank", "GetInCellDropdown", "GetErrorMessage", "GetErrorTitle", "GetInputMessage", "GetInputTitle", "GetShowError", "GetShowInput"];
+    const first = cells[0];
+    const out: Record<string, unknown> = {
+      Add: (type: string, alert: string, operator: string, f1: string, f2?: string) => {
+        if (cells.some((a) => sh.validations[a])) throw new Error("Validation already exists.");
+        if (!VALIDATION_TYPES.includes(type)) return null;
+        state.calls.push(`validation ${type} ${cells[0]}..${cells.at(-1)}`);
+        for (const a of cells) sh.validations[a] = [type, alert, operator, f1, f2 ?? "", true, true, "", "", "", "", true, true];
+        return out;
+      },
+      Delete: () => void cells.forEach((a) => delete sh.validations[a]),
+    };
+    getters.forEach((g, k) => (out[g] = () => (sh.validations[first] ?? NO_VALIDATION)[k]));
+    // The setters of the rest: the same slots, on every cell of the range.
+    for (const [name, k] of [["SetIgnoreBlank", 5], ["SetInCellDropdown", 6], ["SetErrorMessage", 7], ["SetErrorTitle", 8], ["SetInputMessage", 9], ["SetInputTitle", 10], ["SetShowError", 11], ["SetShowInput", 12]] as [string, number][]) {
+      out[name] = (v: string | boolean) => cells.forEach((a) => sh.validations[a] && (sh.validations[a][k] = v));
+    }
+    return out;
+  };
+  const linkOf = (sh: FakeSheet, a: string) => ({
+    GetAddress: () => sh.links[a].address,
+    GetSubAddress: () => sh.links[a].sub,
+    GetScreenTip: () => sh.links[a].tip,
+    GetTextToDisplay: () => String(sh.cells[a] ?? ""),
+    GetRange: () => rangeOf(sh, a),
+  });
+  /** The rows of a range ordered by up to three columns, the cells' values, formats and looks moving with them. */
+  const sortRows = (sh: FakeSheet, b: ReturnType<typeof bounds>, keys: { col: number; desc: boolean }[]) => {
+    const rows = Array.from({ length: b.r2 - b.r1 + 1 }, (_, k) => b.r1 + k);
+    const rank = (v: unknown) => (v === undefined || v === "" ? 3 : typeof v === "number" ? 0 : typeof v === "string" ? 1 : 2);
+    const order = [...rows].sort((x, y) => {
+      for (const key of keys) {
+        const [vx, vy] = [sh.cells[at(key.col, x)], sh.cells[at(key.col, y)]];
+        if (rank(vx) !== rank(vy)) return rank(vx) - rank(vy);
+        const d = typeof vx === "number" ? (vx as number) - (vy as number) : String(vx ?? "").toLowerCase() < String(vy ?? "").toLowerCase() ? -1 : String(vx ?? "").toLowerCase() > String(vy ?? "").toLowerCase() ? 1 : 0;
+        if (d) return key.desc ? -d : d;
+      }
+      return x - y;
+    });
+    const maps = [sh.cells, sh.formats, sh.looks, sh.aligns, sh.borders, sh.chars] as Record<string, unknown>[];
+    const before = maps.map((m) => ({ ...m }));
+    maps.forEach((m, i) => {
+      for (let c = b.c1; c <= b.c2; c++) rows.forEach((r, k) => {
+        const from = at(c, order[k]), to = at(c, r);
+        if (from in before[i]) m[to] = before[i][from]; else delete m[to];
+      });
+    });
+  };
   const rangeOf = (sh: FakeSheet, address: string): Record<string, unknown> => {
     state.ranges++;
     const b = bounds(address);
-    const grid = b.whole ? [] : cellsOf(address);
+    const grid = b.whole || huge(b) ? [] : cellsOf(address);
     const first = at(b.c1, b.r1);
     const one = !b.whole && grid.length === 1 && grid[0].length === 1;
     const formula = (v: unknown) => typeof v === "string" && v.startsWith("=");
@@ -554,6 +671,29 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
       Insert: (dir: string) => { state.calls.push(`Insert ${address} ${dir}`); shift(sh, b.whole === "columns" ? "columns" : "rows", b.whole === "columns" ? b.c1 : b.r1, b.whole === "columns" ? b.c2 - b.c1 + 1 : b.r2 - b.r1 + 1); },
       Delete: (dir: string) => { state.calls.push(`Delete ${address} ${dir}`); shift(sh, b.whole === "columns" ? "columns" : "rows", b.whole === "columns" ? b.c1 : b.r1, -(b.whole === "columns" ? b.c2 - b.c1 + 1 : b.r2 - b.r1 + 1)); },
     };
+    Object.assign(range, {
+      GetFormatConditions: () => conditions(sh, address),
+      GetValidation: () => validation(sh, b.whole ? [first] : grid.flat()),
+      GetHyperlinks: () => reached(sh, b).filter((a) => sh.links[a]).map((a) => linkOf(sh, a)),
+      ClearHyperlinks: () => void reached(sh, b).forEach((a) => delete sh.links[a]),
+      // The first column of each key counts; a header is taken only when asked ("xlYes"); merged cells are not sorted.
+      SetSort: (k1?: string, o1?: string, k2?: string, o2?: string, k3?: string, o3?: string, header?: string) => {
+        state.calls.push(`SetSort ${address} ${[k1, o1, k2, o2, k3, o3, header].join(" ")}`);
+        if (sh.merges.some((m) => meets(bounds(m), b))) return;
+        const keys = ([[k1, o1], [k2, o2], [k3, o3]] as [string | undefined, string | undefined][]).filter(([k]) => k).map(([k, o]) => ({ col: parse(k!).c, desc: o === "xlDescending" }));
+        if (keys.some((k) => k.col < b.c1 || k.col > b.c2)) return;
+        sortRows(sh, { ...b, r1: header === "xlYes" ? b.r1 + 1 : b.r1 }, keys);
+      },
+      // With nothing: a filter on these cells, or off where it is there already (docbuilder); with a column: its criteria.
+      SetAutoFilter: (...args: unknown[]) => {
+        state.calls.push(`SetAutoFilter ${address} ${JSON.stringify(args)}`);
+        if (args.length === 0) sh.filter = sh.filter === address ? null : address;
+        else {
+          sh.filter = address;
+          sh.criteria.push(args);
+        }
+      },
+    });
     Object.defineProperty(range, "MergeArea", { get: () => rangeOf(sh, sh.merges.find((m) => inside(first, bounds(m))) ?? first) });
     return range;
   };
@@ -586,6 +726,50 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
           throw new Error("H.aH is not a function");
         },
       }),
+      // The address goes into the cell as its text where the cell holds none, and the link's look comes with it.
+      // It goes through the co-editing lock, as a freeze does: the link, the text and the look show from the next command
+      // on (the editor, measured in e2e 34; docbuilder makes them at once). The link's look replaces the cell's font.
+      SetHyperlink: (address: string, link: string, sub = "", tip = "", text?: string) => {
+        if (!/^https?:|^mailto:|^$/.test(link) || link.length > 2000) throw new Error('Incorrect "address".');
+        later.push({
+          due: state.commands + 1,
+          fn: () => {
+            for (const a of cellsOf(address).flat()) {
+              sh.links[a] = { address: link, sub, tip };
+              if (text !== undefined) sh.cells[a] = text;
+              else if (!isText(sh, a)) sh.cells[a] = link;
+              sh.looks[a] = { underline: "single", color: "#0563C1" };
+            }
+          },
+        });
+        return true;
+      },
+      GetHyperlinks: () => Object.keys(sh.links).map((a) => linkOf(sh, a)),
+      // A chart of a type the editor does not have is none (null); a range it cannot find is made all the same.
+      AddChart: (ref: string, inRows: boolean, type: string, _style: number, width: number, height: number, col: number, _colOffset: number, row: number) => {
+        if (!["bar", "barStacked", "horizontalBar", "horizontalBarStacked", "lineNormal", "pie", "doughnut", "area", "scatter"].includes(type)) return null;
+        const chart = { type, ref, col, row, width, height, inRows } as FakeSheet["charts"][number];
+        sh.charts.push(chart);
+        return {
+          GetChartType: () => chart.type,
+          SetTitle: (t: string) => { chart.title = t; return true; },
+          SetHorAxisTitle: (t: string) => { chart.xTitle = t; return true; },
+          SetVerAxisTitle: (t: string) => { chart.yTitle = t; return true; },
+          SetLegendPos: (p: string) => { chart.legend = p; return true; },
+          GetTitle: () => (chart.title === undefined ? null : `${chart.title}\n`),
+          GetPosition: () => ({ fromCol: chart.col, colOffset: 0, fromRow: chart.row, rowOffset: 0 }),
+        };
+      },
+      GetAllCharts: () => sh.charts.map((chart) => ({ GetChartType: () => chart.type, GetTitle: () => (chart.title === undefined ? null : `${chart.title}\n`), GetPosition: () => ({ fromCol: chart.col, fromRow: chart.row }) })),
+      // The editor gives a filter object with no range where there is none (docbuilder gives null).
+      GetAutoFilter: () => ({ GetRange: () => (sh.filter ? rangeOf(sh, sh.filter) : null) }),
+      // A table over cells that are in a table already is ignored without a word (docbuilder).
+      FormatAsTable: (address: string) => {
+        state.calls.push(`FormatAsTable ${address}`);
+        if (options.poisonLook && inside(options.poisonLook, bounds(address))) throw new Error("the editor refused the format");
+        if (!sh.tables.some((t) => meets(bounds(t), bounds(address)))) sh.tables.push(address);
+        return true;
+      },
       Delete: () => ask(`delete ${sh.name}`, () => sheets.splice(sheets.indexOf(sh), 1)),
       Move: (before?: object, after?: object) =>
         ask(`move ${sh.name}`, () => {
@@ -612,6 +796,26 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
         activate(made);
       }),
     CreateColorFromRGB: (r: number, g: number, b: number) => ({ r, g, b, GetRGB: () => ({ r, g, b }) }),
+    // Names are the workbook's: a name taken (in any case) or one the builder does not take is "Invalid name"; a
+    // reference to a sheet that is not there is "Invalid range"; what is read back has no quotes where none are needed.
+    AddDefName: (name: string, ref: string) => {
+      if (Object.keys(state.names).some((n) => n.toLowerCase() === name.toLowerCase()) || !/^[\p{L}_][\p{L}\p{N}_]*$/u.test(name) || /^[A-Za-z]{1,3}\d+$/.test(name)) throw new Error("Invalid name.");
+      const m = /^(?:'((?:[^']|'')+)'|([^'!]+))?!?(.*)$/.exec(ref)!;
+      const sheetName = (m[1] ?? m[2])?.replace(/''/g, "'");
+      if (ref.includes("!") && !sheets.some((x) => x.name === sheetName)) throw new Error("Invalid range.");
+      state.names[name] = ref.includes("!") ? `${/^\w+$/.test(sheetName!) ? sheetName : `'${sheetName!.replace(/'/g, "''")}'`}!${m[3]}` : ref;
+      return true;
+    },
+    GetDefName: (name: string) => {
+      const key = Object.keys(state.names).find((n) => n.toLowerCase() === name.toLowerCase());
+      if (!key) throw new Error(`Defined name does not exist:${name}`);
+      return {
+        GetName: () => key,
+        GetRefersTo: () => state.names[key],
+        SetRefersTo: (ref: string) => void (state.names[key] = ref),
+        Delete: () => void delete state.names[key],
+      };
+    },
     // A freeze at the selected cell, of the active sheet, where the selection is in it.
     SetFreezePanesType: (type: string) => {
       const sel = state.selected;
@@ -2507,4 +2711,358 @@ test("word.read with formatting: a numbered item carries its label as the editor
   assert.deepEqual(out.error, undefined, JSON.stringify(out));
   assert.deepEqual(out.result.blocks.map((b: { p: string; label?: string }) => [b.p, b.label]), [["Step two", "2."], ["Step three", "3."], ["Again one", "1."], ["Dot", undefined]]);
   assert.deepEqual(command("word.read", { GetDocument: () => doc }, {}).result.blocks.map((b: { label?: string }) => b.label), [undefined, undefined, undefined, undefined]);
+});
+
+/* ------------------------------------------------------------------ */
+/* #13 PR 4: conditional formats, validation, links, sort, names, charts, filters, tables */
+/* ------------------------------------------------------------------ */
+
+/** What a fake sheet holds of PR 4's parts, for "as it was" comparisons. */
+const extras = (book: ReturnType<typeof workbook>) => {
+  const sorted = (v: unknown): unknown => (Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted((v as Record<string, unknown>)[k])])) : v);
+  return JSON.stringify(sorted([book.state.sheets.map((s) => [s.rules, s.validations, s.links, s.charts, s.filter, s.tables, s.cells, s.formats, s.looks]), book.state.names]));
+};
+
+test("a conditional format: every rule kind reaches the builder, each with its look; taken back it takes away the rule it made, not an equal one that was there", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { B2: 5, B3: 1500, C2: 1, C3: 2 });
+  // The rule a person made: the same as the first this call makes.
+  s1.rules.push({ type: "xlCellValue", applies: "B2:B9", operator: "xlGreater", f1: "1000", fill: "#C6EFCE", fontColor: "#006100", bold: true });
+  const before = extras(book);
+  const ops = [
+    { conditional: "B2:B9", set: { rule: "cell", operator: ">", value: 1000, fill: "#C6EFCE", color: "#006100", bold: true } },
+    { conditional: "B2:B9", set: { rule: "cell", operator: "between", value: 1, value2: 9, italic: true, underline: true, strike: true } },
+    { conditional: "C:C", set: { rule: "formula", formula: "=$B1>8", fill: "#FFC7CE" } },
+    { conditional: "D2:D9", set: { rule: "colorScale", colors: ["#FF0000", "#00FF00", "#0000FF"] } },
+    { conditional: "E2:E9", set: { rule: "dataBar", color: "#638EC6" } },
+    { conditional: "F2:F9", set: { rule: "top", rank: 3, bottom: true, percent: true, fill: "#FFFF00" } },
+    { conditional: "G2:G9", set: { rule: "duplicates", unique: true, color: "#FF0000" } },
+    { conditional: "G2:G9", set: { rule: "duplicates", bold: true } },
+  ];
+  const made = await plugin(book, formatting(ops));
+  assert.deepEqual(made.result, { ops: 8, cells: 0 }, JSON.stringify(made));
+  assert.deepEqual(s1.rules.slice(1), [
+    { type: "xlCellValue", applies: "B2:B9", operator: "xlGreater", f1: "1000", f2: undefined, fill: "#C6EFCE", fontColor: "#006100", bold: true },
+    { type: "xlCellValue", applies: "B2:B9", operator: "xlBetween", f1: "1", f2: "9", italic: true, underline: "xlUnderlineStyleSingle", strike: true },
+    { type: "xlExpression", applies: "C:C", operator: undefined, f1: "$B1>8", f2: undefined, fill: "#FFC7CE" },
+    { type: "xlColorScale", applies: "D2:D9", colors: ["#FF0000", "#00FF00", "#0000FF"] },
+    { type: "xlDataBar", applies: "E2:E9", barColor: "#638EC6" },
+    { type: "xlTop10", applies: "F2:F9", rank: 3, topBottom: "xlTop10Bottom", percent: true, fill: "#FFFF00" },
+    { type: "xlUniqueValues", applies: "G2:G9", dupe: "xlUnique", fontColor: "#FF0000" },
+    { type: "xlUniqueValues", applies: "G2:G9", dupe: "xlDuplicate", bold: true },
+  ]);
+  s1.rules.splice(1);
+  // Failing at the last op: the rules this call made go, the person's stays (the equal one among the rules is told by order).
+  const failed = await plugin(book, formatting([...ops, { format: "Z99", set: { bold: true } }]));
+  assert.equal(failed.undone, true, JSON.stringify(failed));
+  assert.equal(extras(book), before);
+  assert.equal(s1.rules.length, 1);
+});
+
+test("a conditional format taken back leaves one a person changed or took away; a clear has no inverse and is named when a later op fails", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) { sheets[0].rules.find((r) => r.applies === "B2:B9")!.f1 = "2000"; sheets[0].rules.splice(sheets[0].rules.findIndex((r) => r.applies === "C2:C9"), 1); } } });
+  const [s1] = book.state.sheets;
+  s1.cells.A1 = 1;
+  const out = await plugin(book, formatting([
+    { conditional: "B2:B9", set: { rule: "cell", operator: ">", value: 1000, fill: "#C6EFCE" } },
+    { conditional: "C2:C9", set: { rule: "dataBar" } },
+    { format: "Z99", set: { bold: true } },
+  ]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: the conditional format B2:B9 of "Sheet1"\.$/);
+  assert.deepEqual(s1.rules.map((r) => [r.applies, r.f1]), [["B2:B9", "2000"]], "the changed rule stays, the one taken away is gone, nothing else is there");
+
+  // A clear takes every rule that meets the cells, and cannot be made again: the answer says so.
+  const book2 = workbook(["Sheet1"], { poisonLook: "A1" });
+  const [t1] = book2.state.sheets;
+  Object.assign(t1.cells, { A1: "h1", B1: "h2", A2: 1 });
+  t1.rules.push({ type: "xlCellValue", applies: "B2:B9", operator: "xlGreater", f1: "1" }, { type: "xlDataBar", applies: "D2:D9" });
+  const cleared = await plugin(book2, formatting([{ conditional: "A1:C9", set: { clear: true } }, { asTable: "A1:B2" }]));
+  assert.equal(cleared.error?.code, "partial", JSON.stringify(cleared));
+  assert.match(cleared.error.message, /Not taken back: the conditional formats of A1:C9 of "Sheet1" that op 1 cleared\./);
+  assert.deepEqual(t1.rules.map((r) => r.applies), ["D2:D9"], "only the rules that meet the cells went");
+});
+
+test("validation: a list, a number and a message reach the builder after the cells' own validation is deleted (Add refuses cells that have one); taken back it puts the old one back, cell by cell", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  s1.validations.E3 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true];
+  s1.validations.E4 = ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true];
+  s1.validations.F2 = ["xlValidateDecimal", "xlValidAlertStop", "xlGreater", "0", "", true, true, "", "", "", "", true, true];
+  const before = extras(book);
+  const ok = await plugin(book, formatting([
+    { validate: "E2:E5", set: { list: ["Open", "Done"], message: "Pick one" } },
+    { validate: "B2:B3", set: { whole: "between 1 and 10" } },
+    { validate: "F2", set: { clear: true } },
+  ]));
+  assert.deepEqual(ok.result, { ops: 3, cells: 0 }, JSON.stringify(ok));
+  assert.deepEqual(s1.validations.E3, ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", "", true, true, "Pick one", "", "", "", true, true]);
+  assert.deepEqual(s1.validations.B3?.slice(0, 5), ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "10"]);
+  assert.equal(s1.validations.F2, undefined, "cleared");
+  const failed = await plugin(book, formatting([
+    { validate: "E2:E5", set: { decimal: "> 0" } },
+    { validate: "G2:G3", set: { length: "<= 3" } },
+    { format: "Z99", set: { bold: true } },
+  ]));
+  assert.equal(failed.undone, true, JSON.stringify(failed));
+  assert.deepEqual(s1.validations.E3?.slice(0, 5), ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", ""]);
+  assert.equal(s1.validations.G2, undefined);
+  // The same from the start, to be sure "as it was" is the whole state.
+  const fresh = workbook(["Sheet1"], { poisonLook: "Z99" });
+  Object.assign(fresh.state.sheets[0].validations, { E3: s1.validations.E3 === undefined ? [] : ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true], E4: ["xlValidateWholeNumber", "xlValidAlertStop", "xlBetween", "1", "9", true, true, "old", "", "", "", true, true] });
+  const was = JSON.stringify(fresh.state.sheets[0].validations);
+  await plugin(fresh, formatting([{ validate: "E2:E5", set: { list: ["a"] } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(JSON.stringify(fresh.state.sheets[0].validations), was, "the old validation of E3 and E4 is back, E2 and E5 have none again");
+  assert.ok(before);
+});
+
+test("validation taken back keeps a cell whose validation a person changed since, and names it", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].validations.E3 = ["xlValidateDecimal", "xlValidAlertStop", "xlGreater", "5", "", true, true, "", "", "", "", true, true]; } });
+  const [s1] = book.state.sheets;
+  const out = await plugin(book, formatting([{ validate: "E2:E4", set: { whole: ">= 0" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: E3 of "Sheet1"\.$/);
+  assert.deepEqual(Object.keys(s1.validations), ["E3"], "E2 and E4 have none again; E3 is the person's");
+  assert.equal(s1.validations.E3?.[0], "xlValidateDecimal");
+});
+
+test("a link: a text cell keeps its text, an empty cell shows the address, a number or a formula needs set.text; taken back it puts back the text, the look and the link the cell had", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "Home", A2: 42, A3: "=1+2", A4: "Old" });
+  s1.links.A4 = { address: "https://old.example.com", sub: "", tip: "tip" };
+  s1.looks.A4 = { underline: "single", color: "#0563C1" };
+  const refused = await plugin(book, formatting([{ link: "A2", set: { url: "https://example.com" } }]));
+  assert.match(refused.error.message, /^op 1: A2 of "Sheet1" holds a number, which a link would replace with its address: give set.text, the text it shows$/);
+  assert.match((await plugin(book, formatting([{ link: "A3", set: { url: "https://example.com" } }]))).error.message, /A3 of "Sheet1" holds a formula/);
+  assert.equal(book.state.commands, 2, "the check alone each time");
+  const before = extras(book);
+  const ok = await plugin(book, formatting([
+    { link: "A1", set: { url: "https://example.com/a" } },
+    { link: "B1", set: { url: "mailto:a@example.com" } },
+    { link: "A2", set: { url: "https://example.com/n", text: "forty-two" } },
+    { link: "A4", set: { url: "https://example.com/new", text: "New" } },
+  ]));
+  assert.deepEqual(ok.result, { ops: 4, cells: 0 }, JSON.stringify(ok));
+  assert.deepEqual([s1.cells.A1, s1.cells.B1, s1.cells.A2, s1.cells.A4], ["Home", "mailto:a@example.com", "forty-two", "New"]);
+  assert.equal(s1.links.A4.address, "https://example.com/new");
+  assert.equal(s1.looks.A1.underline, "single");
+  const failed = await plugin(book, formatting([
+    { link: "A1", set: { url: "https://example.com/a" } },
+    { link: "B1", set: { url: "mailto:a@example.com" } },
+    { link: "A2", set: { url: "https://example.com/n", text: "forty-two" } },
+    { link: "A4", set: { url: "https://example.com/new", text: "New" } },
+    { format: "Z99", set: { bold: true } },
+  ]));
+  // (The call before stays; these four go again.)
+  assert.equal(failed.undone, true, JSON.stringify(failed));
+  assert.deepEqual([s1.cells.A1, s1.cells.B1, s1.cells.A2, s1.cells.A4], ["Home", "mailto:a@example.com", "forty-two", "New"]);
+  assert.ok(before);
+});
+
+test("a link taken back puts the cell as it was: its text and number, its look, and the link it had; a cell a person changed since is kept", async () => {
+  const book = workbook(["Sheet1"], { poisonLook: "Z99" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A2: 42, A4: "Old", B1: "plain" });
+  s1.links.A4 = { address: "https://old.example.com", sub: "", tip: "tip" };
+  s1.looks.A4 = { underline: "single", color: "#0563C1" };
+  // The link's look takes the cell's font over: A2 is bold and red before, and neither after.
+  s1.looks.A2 = { bold: true, color: "#FF0000" };
+  const was = extras(book);
+  const out = await plugin(book, formatting([
+    { link: "A2", set: { url: "https://example.com/n", text: "forty-two" } },
+    { link: "A4", set: { url: "https://example.com/new", text: "New" } },
+    { link: "B1", set: { url: "https://example.com/b" } },
+    { format: "Z99", set: { bold: true } },
+  ]));
+  assert.equal(out.undone, true, JSON.stringify(out));
+  assert.equal(extras(book), was.replace(/"tip":"tip"/, '"tip":"tip"'), "number, text, looks and link are back");
+  assert.equal(s1.links.A4.address, "https://old.example.com");
+
+  const person = workbook(["Sheet1"], { poisonLook: "Z99", before: (n, sheets) => { if (n === 3) sheets[0].cells.B1 = "typed"; } });
+  person.state.sheets[0].cells.B1 = "plain";
+  const kept = await plugin(person, formatting([{ link: "B1", set: { url: "https://example.com/b" } }, { format: "Z99", set: { bold: true } }]));
+  assert.equal(kept.error?.code, "partial", JSON.stringify(kept));
+  assert.match(kept.error.message, /Kept as a person changed them after this call: B1 of "Sheet1"/);
+  assert.equal(person.state.sheets[0].cells.B1, "typed");
+  assert.equal(person.state.sheets[0].links.B1, undefined, "the link itself is gone");
+});
+
+test("a sort: the rows of the range ordered by up to three columns through the builder (no header guessed), taken back with values, formulas and formats; alignment and borders are named", async () => {
+  const book = workbook(["Sheet1"], { poison: "Z9" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "Name", A2: "pear", A3: "apple", A4: "fig", A5: "kiwi", B1: "Qty", B2: 3, B3: 10, B4: 7, B5: 7, C2: "=B2*2", C3: "=B3*2", C4: "=B4*2", C5: "=B5*2" });
+  s1.formats.B3 = "0.00";
+  s1.looks.A3 = { bold: true, fill: "#FF0000" };
+  const before = readable(s1);
+  const ok = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A2:C5", by: ["B desc", "A"] }]).args });
+  assert.deepEqual(ok.result, { ops: 1, cells: 0 }, JSON.stringify(ok));
+  assert.deepEqual([2, 3, 4, 5].map((r) => s1.cells[`A${r}`]), ["apple", "fig", "kiwi", "pear"]);
+  assert.equal(s1.formats.B2, "0.00", "formats move with their rows");
+  assert.equal(s1.looks.A2.bold, true);
+  assert.equal(s1.cells.A1, "Name", "the header is outside the range");
+  assert.ok(book.state.calls.includes("SetSort A2:C5 B2 xlDescending A2 xlAscending   xlNo"), book.state.calls.join(" | "));
+  // Taken back: a later write fails.
+  const failed = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A2:C5", by: ["A desc"] }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(failed.error?.code, "partial", JSON.stringify(failed));
+  assert.match(failed.error.message, /The editor cannot read back the alignment and borders of "Sheet1"!A2:C5 \(op 1\), which stay as this call set them\.$/);
+  assert.deepEqual([2, 3, 4, 5].map((r) => s1.cells[`A${r}`]), ["apple", "fig", "kiwi", "pear"], "as the first sort left them");
+  assert.ok(before);
+  const fresh = workbook(["Sheet1"], { poison: "Z9" });
+  const f1 = fresh.state.sheets[0];
+  Object.assign(f1.cells, { A2: "pear", A3: "apple", A4: "fig", B2: 3, B3: 10, B4: 7, C2: "=B2*2", C3: "=B3*2", C4: "=B4*2" });
+  f1.formats.B3 = "0.00";
+  f1.looks.A3 = { bold: true, fill: "#FF0000" };
+  const start = readable(f1);
+  const undone = await plugin(fresh, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A2:C4", by: ["B desc"] }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(undone.error?.code, "partial", JSON.stringify(undone));
+  assert.equal(readable(f1), start, "values, formulas, number formats and looks as they were");
+});
+
+test("a sort of merged cells is refused before anything is changed; a person's change after the sort stays and is named", async () => {
+  const book = workbook(["Sheet1"], { poison: "Z9" });
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "b", A2: "a", A3: "c" });
+  s1.merges.push("A2:B2");
+  const refused = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A1:B3", by: ["A"] }]).args });
+  assert.equal(refused.error?.message, 'op 1: a sort needs cells that are not merged, and A2:B2 of "Sheet1" is merged (split it first)');
+  assert.equal(book.state.commands, 1);
+  s1.merges = [];
+  const person = workbook(["Sheet1"], { poison: "Z9", before: (n, sheets) => { if (n === 3) sheets[0].cells.A1 = "typed"; } });
+  Object.assign(person.state.sheets[0].cells, { A1: "b", A2: "a", A3: "c" });
+  const out = await plugin(person, { kind: "cell.edit", args: editJob("xlsx", [{ sort: "A1:A3", by: ["A"] }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: A1 of "Sheet1"/);
+  assert.equal(person.state.sheets[0].cells.A1, "typed");
+});
+
+test("a named range: made, changed and deleted through the workbook, each taken back (the old reference, the old name, or none); a person's change stays and is named", async () => {
+  const book = workbook(["Sheet1", "My data"], { poison: "Z9" });
+  book.state.names.Old = "Sheet1!$A$1";
+  book.state.names.Gone = "'My data'!$B$2:$C$3";
+  const ok = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ name: "Sales", refersTo: "My data!B6:C9" }, { name: "Old", refersTo: "Sheet1!B2:B9" }, { name: "Gone", delete: true }, { name: "Plain", refersTo: "A1:A3" }]).args });
+  assert.deepEqual(ok.result, { ops: 4, cells: 0 }, JSON.stringify(ok));
+  assert.deepEqual(book.state.names, { Old: "'Sheet1'!$B$2:$B$9", Sales: "'My data'!$B$6:$C$9", Plain: "Sheet1!$A$1:$A$3" });
+  const was = JSON.stringify(book.state.names);
+  const failed = await plugin(book, { kind: "cell.edit", args: editJob("xlsx", [{ name: "Fresh", refersTo: "A1" }, { name: "Old", refersTo: "Sheet1!C2" }, { name: "Plain", delete: true }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(failed.undone, true, JSON.stringify(failed));
+  assert.equal(JSON.stringify(book.state.names), was);
+
+  const person = workbook(["Sheet1"], { poison: "Z9", before: (n, sheets) => void n });
+  const p = person.state.names;
+  const changed = workbook(["Sheet1"], { poison: "Z9", before: (n) => { if (n === 3) { p2.names.Fresh = "Sheet1!$D$4"; p2.names.Edit = "Sheet1!$E$5"; } } });
+  const p2 = changed.state;
+  p2.names.Edit = "Sheet1!$A$1";
+  const out = await plugin(changed, { kind: "cell.edit", args: editJob("xlsx", [{ name: "Fresh", refersTo: "A1" }, { name: "Edit", refersTo: "B2" }, { range: "Z9", values: [[1]] }]).args });
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: the name "Edit"; the name "Fresh"\.$/);
+  assert.deepEqual(p2.names, { Fresh: "Sheet1!$D$4", Edit: "Sheet1!$E$5" });
+  assert.ok(p);
+  // A sheet the name refers to must be there.
+  const missing = await plugin(workbook(["Sheet1"]), { kind: "cell.edit", args: editJob("xlsx", [{ name: "X", refersTo: "Nope!A1" }]).args });
+  assert.match(missing.error.message, /there is no sheet named "Nope"/);
+  const none = await plugin(workbook(["Sheet1"]), { kind: "cell.edit", args: editJob("xlsx", [{ name: "Nope", delete: true }]).args });
+  assert.match(none.error.message, /there is no name "Nope"/);
+});
+
+test("a chart: the data range with its sheet quoted and absolute, the type, size and place, then its titles and legend; it has no inverse and is named when a later op fails", async () => {
+  const book = workbook(["Sheet1", "My data"], { poisonLook: "A1" });
+  const [s1, data] = book.state.sheets;
+  Object.assign(data.cells, { A1: "Region", B1: "2025", A2: "North", B2: 10, A3: "South", B3: 8 });
+  const ok = await plugin(book, formatting([{ sheet: "my data", chart: "A1:B3", set: { type: "line", title: "Revenue", xTitle: "Region", yTitle: "EUR", legend: "bottom", at: "E2", width: "10cm", height: "6cm", rows: true } }]));
+  assert.deepEqual(ok.result, { ops: 1, cells: 0 }, JSON.stringify(ok));
+  assert.deepEqual(data.charts, [{ type: "lineNormal", ref: "'My data'!$A$1:$B$3", col: 4, row: 1, width: 5669 * 635, height: 3402 * 635, inRows: true, title: "Revenue", xTitle: "Region", yTitle: "EUR", legend: "bottom" }]);
+  assert.deepEqual(s1.charts, []);
+  // The data must hold numbers.
+  const empty = await plugin(book, formatting([{ chart: "A1:B3" }]));
+  assert.equal(empty.error?.message, 'op 1: the data of a chart holds numbers, and A1:B3 of "Sheet1" holds none (write them first)');
+  // A chart made, then a table the builder fails at: the chart stays, and the answer says so.
+  Object.assign(s1.cells, { A1: "x", A2: 1 });
+  const partial = await plugin(book, formatting([{ chart: "A1:A2", set: { type: "pie", title: "T" } }, { asTable: "A1:A2" }]));
+  assert.equal(partial.error?.code, "partial", JSON.stringify(partial));
+  assert.match(partial.error.message, /Not taken back: the chart of A1:A2 of "Sheet1" that op 1 made\./);
+  assert.equal(s1.charts.length, 1, "the chart is there");
+});
+
+test("a chart whose titles the editor refuses after it was made is named as made", async () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "x", A2: 1 });
+  const sheet = book.state.sheets[0];
+  // The builder throws at the title: a chart is there all the same.
+  const real = (sheet as unknown as { __x?: unknown }).__x;
+  assert.equal(real, undefined);
+  const failing = workbook(["Sheet1"]);
+  const f = failing.state.sheets[0];
+  Object.assign(f.cells, { A1: "x", A2: 1 });
+  const out = failing.run(CELL_EDIT_COMMANDS.step, { op: { sheet: "Sheet1", chart: "A1:A2", area: { col: 0, row: 0, cols: 1, rows: 2 }, chartType: "nope", at: { col: 3, row: 0 }, width: 1, height: 1, inRows: false }, index: 0, pending: [] });
+  assert.equal(out.error?.message, "op 1: the editor did not make the chart");
+});
+
+test("a table, a filter: the builder's calls; a table needs text headers, all different, in cells that are not merged", async () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "Name", B1: "Qty", A2: "pear", B2: 3, A3: "fig", B3: 7 });
+  const ok = await plugin(book, formatting([{ filter: "A1:B3", set: { column: "B", criteria: ">5" } }, { asTable: "D1:E3" }]));
+  // (D1:E3 holds nothing: its header is empty.)
+  assert.match(ok.error.message, /^op 2: the first row of a table holds its column names as texts, and D1 of "Sheet1" is empty \(write the names first\)$/);
+  assert.equal(book.state.commands, 1, "the check alone");
+  const good = await plugin(book, formatting([{ filter: "A1:B3", set: { column: "B", criteria: ">5", or: "<2" } }, { asTable: "A1:B3" }]));
+  assert.deepEqual(good.result, { ops: 2, cells: 0 }, JSON.stringify(good));
+  assert.equal(s1.filter, "A1:B3");
+  assert.deepEqual(s1.criteria, [[2, ">5", "xlOr", "<2"]]);
+  assert.deepEqual(s1.tables, ["A1:B3"]);
+  s1.cells.B1 = 7;
+  assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /B1 of "Sheet1" is a number or a formula/);
+  s1.cells.B1 = "Name";
+  assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /the column names of a table are all different, and "Name" is in B1 of "Sheet1" twice/);
+  s1.cells.B1 = "Qty";
+  s1.merges.push("A3:B3");
+  assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /a table needs cells that are not merged, and A3:B3 of "Sheet1" is merged/);
+});
+
+test("cell.read with formatting: conditional formats, validation, links, the filter and the charts of a sheet, each within the room the read has", () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "Name", B1: "Qty", B2: 5, B3: 8, C2: "Open" });
+  s1.rules.push({ type: "xlCellValue", applies: "B2:B3", operator: "xlGreater", f1: "6", fill: "#C6EFCE", fontColor: "#006100", bold: true }, { type: "xlColorScale", applies: "C2:C3", colors: [] }, { type: "xlExpression", applies: "A:A", f1: "$B1>8" });
+  s1.validations.C2 = ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", "", true, true, "Pick", "", "", "", true, true];
+  s1.validations.C3 = [...s1.validations.C2];
+  s1.links.A1 = { address: "https://example.com/a", sub: "", tip: "" };
+  s1.filter = "A1:C3";
+  s1.charts.push({ type: "bar", ref: "x", title: "Revenue", col: 4, row: 1, width: 1, height: 1, inRows: false });
+  const out = book.run(CELL_EDIT_COMMANDS.step === "" ? "" : COMMANDS["cell.read"].source, { formatting: true }) as { result: { sheets: { look: any }[] } };
+  const look = out.result.sheets[0].look;
+  assert.deepEqual(look.rules, [
+    ["xlCellValue", "B2:B3", "xlGreater", "6", "", null, null, null, null, "#C6EFCE", "#006100", true],
+    ["xlColorScale", "C2:C3", null, null, null, null, null, null, null, null, null, null],
+    ["xlExpression", "A:A", null, "$B1>8", "", null, null, null, null, null, null, null],
+  ].map((r) => r.map((v) => (v === undefined ? null : v))));
+  assert.deepEqual(look.validation, [{ a: "C2:C3", v: ["xlValidateList", "xlValidAlertStop", "xlBetween", "Open,Done", "", true, true, "Pick", "", "", "", true, true] }]);
+  assert.deepEqual(look.links, [["A1", "https://example.com/a", "", "Name"]]);
+  assert.equal(look.filter, "A1:C3");
+  assert.deepEqual(look.charts, [["bar", "Revenue", "E2"]]);
+});
+
+test("cell.read with formatting: the editor gives what a conditional format draws as the cell's own look, so a cell a rule covers lists no fill, font colour, bold, italic, underline or strike; its number format, size and wrap stay", () => {
+  const book = workbook(["Sheet1"]);
+  const [s1] = book.state.sheets;
+  Object.assign(s1.cells, { A1: "head", B2: 5, B3: 8, C2: 1, D5: 9 });
+  // B2, C2 and D5 look as a rule draws them (B and a whole column D are covered); A1 is formatted by hand.
+  s1.looks.A1 = { bold: true, fill: "#FFFF00" };
+  s1.looks.B2 = { bold: true, fill: "#FF0000", color: "#006100", italic: true, underline: "single", strike: true, size: 14, wrap: true };
+  s1.looks.B3 = { fill: "#FF0000" };
+  s1.looks.C2 = { fill: "#00FF00" };
+  s1.looks.D5 = { fill: "#0000FF" };
+  s1.formats.B2 = "0.00";
+  s1.rules.push({ type: "xlCellValue", applies: "B2:B9", operator: "xlGreater", f1: "1" }, { type: "xlDataBar", applies: "D:D" });
+  const out = book.run(COMMANDS["cell.read"].source, { formatting: true }) as { result: { sheets: { look: any }[] } };
+  const formats = out.result.sheets[0].look.formats as { look: Record<string, unknown>; ranges: string[] }[];
+  const byRange = Object.fromEntries(formats.flatMap((f) => f.ranges.map((r) => [r, f.look])));
+  assert.deepEqual(byRange.A1, { bold: true, fill: "#FFFF00" }, "a cell no rule covers is listed as it is");
+  assert.deepEqual(byRange.C2, { fill: "#00FF00" });
+  assert.deepEqual(byRange.B2, { numberFormat: "0.00", size: 14, wrap: true });
+  assert.equal(byRange.B3, undefined, "nothing is left to say of B3");
+  assert.equal(byRange.D5, undefined, "a whole column's rule covers its cells");
 });

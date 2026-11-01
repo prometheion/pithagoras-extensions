@@ -49,6 +49,11 @@ import { PI_TOOLS, portalEnv, realModelMay, realModelProxy } from "./real-model.
  * file's parts, in office_read with formatting and in office_screenshot's pictures; an existing style and a pictured
  * header refused without change and replace; a call failing at its last op taken back while the person types on.
  *
+ * Case r is the sheet extras (#13 PR 4) from a chat on a spreadsheet the agent made: a sort, a named range, conditional
+ * formats, validation and links, then a chart, a filter and a formatted table, seen live in a person's editor, in
+ * office_read with formatting, in office_screenshot's pictures and in the saved file's parts; two calls failing at their
+ * last revertible op leave the workbook as it was.
+ *
  * Case n is office_screenshot from a chat: a model that says it takes pictures (scripted-eye) gets a Word page and a
  * sheet range of its agent's documents, each one JPEG within the caps (the very bytes pi gave the model, which the
  * scripted model keeps) with the text it shows; a person's editor of the document is as it was after the shot; a model
@@ -1672,6 +1677,196 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const heads = (await Promise.all(Object.keys(plain.files).filter((n) => /^word\/header\d*\.xml$/.test(n)).map((n) => plain.file(n)!.async("string")))).join("\n");
     assert.match(heads, /Plain words/);
     assert.doesNotMatch(heads, /<w:drawing>|Logo/, "the picture went with replace: true");
+  });
+
+  /**
+   * r: the sheet extras (#13 PR 4) from a chat, as a person's colleague would use them: a scripted model sorts a range,
+   * names it, and puts conditional formats, validation and links on a spreadsheet it owns, then a chart, a filter and a
+   * formatted table (which have no inverse and so come last); a person's editor shows each live, the save holds them
+   * (unzipped: the sheet's XML, the chart and table parts, the defined names), office_read with formatting says them,
+   * office_screenshot draws the rule's fill and the chart; two calls that fail at their last revertible op leave the
+   * workbook as it was.
+   */
+  /** What the person's spreadsheet editor says of a cell (its own API, the cell selected): its text, data validation,
+   * link and filter. */
+  const personCellInfo = (frame: Frame, a: string) =>
+    frame.evaluate(`(function (a) {
+      var e = window.Asc.editor;
+      e.asc_findCell(a);
+      var info = e.asc_getCellInfo(), out = {};
+      var pick = function (o, names) { var r = {}; names.forEach(function (n) { try { var v = o[n](); r[n.slice(7)] = v && typeof v === "object" ? "(object)" : v; } catch (x) {} }); return r; };
+      try { out.text = info.asc_getText(); } catch (x) {}
+      var v = info.asc_getDataValidation && info.asc_getDataValidation();
+      if (v) out.validation = pick(v, ["asc_getType", "asc_getOperator"]);
+      var h = info.asc_getHyperlink && info.asc_getHyperlink();
+      if (h) out.link = pick(h, ["asc_getHyperlinkUrl", "asc_getText"]);
+      var f = info.asc_getAutoFilterInfo && info.asc_getAutoFilterInfo();
+      if (f) out.filter = pick(f, ["asc_getIsAutoFilter", "asc_getIsApplyAutoFilter"]);
+      return JSON.stringify(out);
+    })(${JSON.stringify(a)})`).then((s) => JSON.parse(String(s))) as Promise<{ text?: string; validation?: { Type?: number }; link?: { HyperlinkUrl?: string; Text?: string }; filter?: { IsAutoFilter?: boolean } }>;
+  /** The pixels of a JPEG at `points` ([r, g, b] each), as a page of Chromium decodes it. */
+  const pixelsOf = async (bytes: Buffer, points: [number, number][]) => {
+    const probe = await browser.newPage();
+    try {
+      return (await probe.evaluate(`(async function () {
+        var img = new Image();
+        img.src = "data:image/jpeg;base64," + ${JSON.stringify(bytes.toString("base64"))};
+        await img.decode();
+        var c = document.createElement("canvas");
+        c.width = img.width; c.height = img.height;
+        var g = c.getContext("2d");
+        g.drawImage(img, 0, 0);
+        return ${JSON.stringify(points)}.map(function (p) { return Array.prototype.slice.call(g.getImageData(p[0], p[1], 1, 1).data, 0, 3); });
+      })()`)) as number[][];
+    } finally {
+      await probe.close();
+    }
+  };
+
+  test("r: the sheet extras from a chat: a sort, a name, conditional formats, validation, links, then a chart, a filter and a formatted table, seen live in a person's editor, in office_read, in the picture and in the save; two calls failing at their last revertible op leave the workbook as it was", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    const unwrap = (r: string) => r.replace(/^<<<untrusted:([0-9a-f]+)>>>[^\n]*\n([\s\S]*)\n<<<\/untrusted:\1>>>$/, "$2");
+    const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]) => (await ran(chatId, calls)).results.map(unwrap);
+    const [created] = await say(eye, [{ name: "office_create", arguments: { title: "Sheet extras", type: "cell" } }]);
+    console.log(`r. ${created}`);
+    const made = (await state()).docs.find((d) => d.title === "Sheet extras");
+    assert.ok(made, "the agent made the spreadsheet");
+    assert.equal(made.owner, realpathSync(env.AGENT_HOME), "the agent's own: in its home");
+    const doc = made.docId;
+    const { page, frame } = await personOpens(doc, "cell");
+    const rows = [["Item", "Qty", "Region", "Due"], ["Pear", 3, "N", 45000], ["Apple", 10, "S", 45010], ["Fig", 700, "N", 45020], ["Kiwi", 7, "E", 45030], ["Date", 1200, "S", 45040], ["Plum", 7, "E", 45050]];
+    const [filled] = await say(eye, [
+      { name: "office_edit", arguments: { id: doc, ops: [{ range: "A1:D7", values: rows }, { range: "J1:K4", values: [["Tag", "Weight"], ["a", 1], ["b", 2], ["c", 3]] }, { addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] } },
+    ]);
+    assert.match(filled, /^Edited "Sheet extras" \(4 ops\)/);
+    assert.ok(await until(async () => (await personCellInfo(frame, "A7")).text === "Plum", 10_000), "the person's editor has the rows");
+    const readOf = async (sheet = "Sheet1") => {
+      const [text] = await say(eye, [{ name: "office_read", arguments: { id: doc, formatting: true, sheet } }]);
+      return text;
+    };
+    const sheetXml = () => partOf(doc, "xl/worksheets/sheet1.xml");
+    const count = (text: string, pattern: RegExp) => (text.match(pattern) ?? []).length;
+    const plain = await readOf();
+
+    // The first call: a sort (largest quantities first) and a named range over the quantities it sorted.
+    const t0 = Date.now();
+    const [sorted] = await say(eye, [{ name: "office_edit", arguments: { id: doc, ops: [{ sort: "A2:D7", by: ["B desc"] }, { name: "Quantities", refersTo: "Sheet1!B2:B7" }] } }]);
+    console.log(`r. office_edit (${Date.now() - t0} ms): ${sorted}`);
+    assert.match(sorted, /^Edited "Sheet extras" \(2 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\./);
+    assert.ok(await until(async () => (await personCellInfo(frame, "A2")).text === "Date" && (await personCellInfo(frame, "A7")).text === "Pear", 10_000), "the person's editor shows the sort");
+    const sortedRead = await readOf();
+    assert.deepEqual(sortedRead.split("\n").filter((l) => /^A[2-7]: /.test(l)).map((l) => l.slice(4)), ['"Date"', '"Fig"', '"Apple"', '"Kiwi"', '"Plum"', '"Pear"'].map((v) => v), "the rows by quantity, the equal ones in the order they had");
+    assert.match(sortedRead, /\nD2: 45040\n/, "the rows moved whole");
+
+    // The second call: rules, validation and links (each with an inverse), then the three that have none.
+    const ops = [
+      { format: "A1:D1", set: { bold: true } },
+      { conditional: "B2:B7", set: { rule: "cell", operator: ">", value: 100, fill: "#FF0000" } },
+      { conditional: "C2:C7", set: { rule: "formula", formula: '=$C2="N"', color: "#0000FF", bold: true } },
+      { conditional: "D2:D7", set: { rule: "colorScale" } },
+      { conditional: "A2:A7", set: { rule: "duplicates", fill: "#FFEB9C" } },
+      { validate: "C2:C7", set: { list: ["N", "S", "E"] } },
+      { validate: "B2:B7", set: { whole: ">= 0" } },
+      { link: "A2", set: { url: "https://example.com/date" } },
+      { link: "F1", set: { url: "mailto:sales@example.com", text: "Mail us" } },
+      { chart: "A1:B7", set: { type: "column", title: "Quantity by item", xTitle: "Item", yTitle: "Qty", legend: "bottom", at: "H2", width: "12cm", height: "7cm" } },
+      { filter: "A1:D7", set: { column: "B", criteria: ">5" } },
+      { asTable: "J1:K4" },
+    ];
+    const t1 = Date.now();
+    const [formatted] = await say(eye, [{ name: "office_format", arguments: { id: doc, ops } }]);
+    console.log(`r. office_format (${Date.now() - t1} ms): ${formatted}`);
+    assert.match(formatted, new RegExp(`^Formatted "Sheet extras" \\(${ops.length} ops\\), saved as revision [\\d.]+\\. 1 person in the document saw it live\\.`));
+    const read = await readOf();
+    console.log(`r. office_read with formatting, after the extras:\n${read.split("\n").slice(-10).join("\n")}`);
+    for (const want of [
+      /\nConditional: B2:B7 cell > 100 → fill #FF0000; C2:C7 formula =\$C2="N" → #0000FF, bold; D2:D7 colour scale; A2:A7 duplicate values → fill #FFEB9C\./,
+      /\nValidation: B2:B7 whole >= 0; C2:C7 list "N,S,E"\./,
+      /\nLinks: .*A2 https:\/\/example\.com\/date \("Date"\)/,
+      /F1 mailto:sales@example\.com \("Mail us"\)/,
+      /\nFilter: A1:D7\./,
+      /\nCharts: column "Quantity by item" at H2\./,
+      /\nRows: 7 hidden/,
+    ]) assert.match(read, want);
+    // The person's editor, not reloaded, has them.
+    assert.equal((await personCellInfo(frame, "C3")).validation?.Type, 4, "the person's editor has the list");
+    assert.equal((await personCellInfo(frame, "A2")).link?.HyperlinkUrl, "https://example.com/date");
+    assert.equal((await personCellInfo(frame, "F1")).link?.Text, "Mail us");
+    assert.equal((await personCellInfo(frame, "B1")).filter?.IsAutoFilter, true, "and the filter");
+    await notReloaded(page, frame);
+
+    // The pictures: the rule's red at B2 and B3 (1,200 and 700) and not at B4 (10); the chart drawn.
+    const shots = await ran(eye, [
+      { name: "office_screenshot", arguments: { id: doc, range: "A1:F7" } },
+      { name: "office_screenshot", arguments: { id: doc, range: "H1:Q18" } },
+    ]);
+    console.log(`r. the range: ${JSON.stringify(shots.results[0].split("\n").slice(0, 2).join(" | "))}\nr. the chart's region: ${JSON.stringify(shots.results[1].split("\n")[0])}`);
+    const grid = pictureOf(shots, 0, "r-range");
+    const chart = pictureOf(shots, 1, "r-chart");
+    const [b2, b3, b4] = await pixelsOf(grid.bytes, [[26 + 64 + 40, 19 + 19 * 1 + 9], [26 + 64 + 40, 19 + 19 * 2 + 9], [26 + 64 + 40, 19 + 19 * 3 + 9]]);
+    const red = (p: number[]) => p[0] > 200 && p[1] < 90 && p[2] < 90;
+    console.log(`r. B2 ${b2}, B3 ${b3}, B4 ${b4}`);
+    assert.ok(red(b2) && red(b3), `B2 and B3 are red: ${b2} ${b3}`);
+    assert.ok(!red(b4), `B4 is not: ${b4}`);
+    const points: [number, number][] = [];
+    for (let x = 30; x < 600; x += 12) for (let y = 40; y < 330; y += 12) points.push([x, y]);
+    const drawn = (await pixelsOf(chart.bytes, points)).filter((p) => p.some((v) => v < 235)).length;
+    console.log(`r. the chart's region: ${drawn} of ${points.length} sampled points are not paper`);
+    assert.ok(drawn > 25, `the chart is drawn (${drawn})`);
+
+    // The save holds them: the sheet's XML, the chart and table parts, the defined name.
+    let sheet1 = "";
+    assert.ok(await until(async () => /<autoFilter /.test((sheet1 = await sheetXml())), 90_000, 1000), "the file has the filter");
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    console.log(`r. the save: ${Object.keys(zip.files).filter((n) => /chart|table|drawing|rels/.test(n)).join(", ")}`);
+    assert.match(sheet1, /cfRule type="cellIs"[^>]*operator="greaterThan"/, "the cell rule");
+    assert.match(sheet1, /type="colorScale"/);
+    assert.match(sheet1, /type="duplicateValues"/);
+    assert.match(sheet1, /dataValidation [^>]*type="list"/);
+    assert.match(sheet1, /type="whole"/);
+    assert.equal(count(sheet1, /<hyperlink /g), 2);
+    assert.match(await partOf(doc, "xl/worksheets/_rels/sheet1.xml.rels"), /mailto:sales@example\.com/);
+    assert.match(sheet1, /<autoFilter ref="A1:D7"[\s\S]*?<filterColumn colId="1"/);
+    assert.match(await partOf(doc, "xl/charts/chart1.xml"), /Quantity by item/);
+    assert.match(await partOf(doc, "xl/tables/table1.xml"), /ref="J1:K4"/);
+    assert.match(await partOf(doc, "xl/workbook.xml"), /<definedName name="Quantities"[^>]*>Sheet1!\$B\$2:\$B\$7</);
+
+    // Two calls failing at their last revertible op: the workbook as it was, in the read, the person's editor and the save.
+    const failOps = [{ sheet: "Fail", format: "Z2000", set: { bold: true } }, { sheet: "Fail", format: "1001:2000", set: { italic: true } }];
+    const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
+    const cellsBefore = async () => JSON.stringify(await Promise.all(["A4", "C3", "D3", "B2"].map((a) => personCellInfo(frame, a))));
+    const beforeRead = await readOf();
+    const beforeCells = await cellsBefore();
+    const beforeXml = { sheet: await sheetXml(), book: await partOf(doc, "xl/workbook.xml") };
+    const [formatFailed, editFailed] = await say(eye, [
+      { name: "office_format", arguments: { id: doc, ops: [{ conditional: "D2:D7", set: { rule: "cell", operator: "<", value: 0, fill: "#00FF00" } }, { validate: "D2:D7", set: { decimal: ">= 0" } }, { link: "A4", set: { url: "https://example.com/x" } }, ...failOps] } },
+      { name: "office_edit", arguments: { id: doc, ops: [{ name: "Tmp", refersTo: "Sheet1!A1:A2" }, { name: "Quantities", refersTo: "Sheet1!B2:B3" }, { range: "Z9", values: [["=SUM("]] }] } },
+    ]);
+    console.log(`r. office_format failing at its last op: ${formatFailed}\nr. office_edit failing at its last op: ${editFailed}`);
+    assert.match(formatFailed, /^error:bad_op op 5: the call formats more than 20,000 cells/);
+    assert.match(editFailed, /^error:bad_value op 3: /);
+    assert.equal(used(await readOf()), used(beforeRead), "the read is as before: no rule, validation, link or name of the failed calls");
+    assert.equal(await cellsBefore(), beforeCells, "the person's editor is as before");
+    assert.equal((await personCellInfo(frame, "D3")).validation, undefined, "no validation on D3");
+    assert.equal((await personCellInfo(frame, "A4")).link, undefined, "no link on A4");
+    // The next call saves; the file has nothing of the two.
+    const [marker] = await say(eye, [{ name: "office_edit", arguments: { id: doc, ops: [{ range: "Z50", values: [["saved"]] }] } }]);
+    assert.match(marker, /^Edited "Sheet extras"/);
+    let after = "";
+    assert.ok(await until(async () => /Z50/.test((after = await sheetXml())), 90_000, 1000), "the file has the marker");
+    assert.equal(count(after, /<(?:x14:)?cfRule /g), count(beforeXml.sheet, /<(?:x14:)?cfRule /g), "the rule count in the file");
+    assert.equal(count(after, /<hyperlink /g), 2);
+    assert.equal(count(after, /<dataValidation /g), count(beforeXml.sheet, /<dataValidation /g));
+    // (The rest of the workbook part may differ in what the editor writes anew at each save: only the names are the call's.)
+    const names = (book: string) => (book.match(/<definedName [^>]*>[^<]*<\/definedName>/g) ?? []).join("\n");
+    const bookAfter = await partOf(doc, "xl/workbook.xml");
+    if (bookAfter !== beforeXml.book) console.log(`r. the workbook part differs outside the names: ${JSON.stringify([beforeXml.book.replace(/<definedName.*<\/definedNames>/s, ""), bookAfter.replace(/<definedName.*<\/definedNames>/s, "")].map((b) => b.slice(b.indexOf("<bookViews"))))}`);
+    assert.equal(names(bookAfter), names(beforeXml.book), "the defined names are as before");
+    assert.match(names(bookAfter), /Quantities[^\n]*\$B\$2:\$B\$7/, "Quantities still refers to B2:B7");
+    assert.doesNotMatch(names(bookAfter), /Tmp/, "and Tmp was not made");
+    assert.doesNotMatch(after, /00FF00|lessThan/i);
+    await personCloses(page);
+    await noConflictCopy("Sheet extras");
   });
 
   /**

@@ -53,7 +53,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 
 ## What you get
 
-- **The library**, on the portal's Office tab: create blank Word documents and spreadsheets, open one full screen in
+- **The library**, on the portal's Office tab: create blank Word documents (text in Arial 11, set in the document's own defaults, so a built-in table style
+  shows one font in every row; a document you add keeps its own) and spreadsheets, open one full screen in
   the embedded editor, sort the list by name, modified, size or type, and download a copy. Every document lives in an
   agent's home or a project's folder and belongs to that agent or project; there are no documents of nobody's. Every
   `.docx` and `.xlsx` in the agents' homes and the projects' folders (not the folders other chats work in, nor the rest

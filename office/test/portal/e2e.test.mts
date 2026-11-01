@@ -1605,6 +1605,52 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.doesNotMatch(again.text, /pictures/);
   });
 
+  test("27. a new document has Arial 11 as its defaults: a Grid Table 4 - Accent 1 table shows one font in every row (the editor's own text, office_read, office_screenshot), the save holds the defaults, and a document with defaults of its own keeps them", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Table fonts", "word");
+    await tools.office_edit.execute("w0", { id: doc, ops: [{ quote: "New document", replacement: "Fonts" }, { after: "Fonts", table: [["Item", "Amount"], ["Ledger", "42"], ["Rent", "17"], ["Tax", "5"]] }, { paragraphs: ["Closing words."] }] });
+    await tools.office_format.execute("w1", { id: doc, ops: [{ formatTable: "Ledger", set: { tableStyle: "Grid Table 4 - Accent 1", headerRows: 1 } }] });
+    const read = (await tools.office_read.execute("w2", { id: doc, formatting: true })).content[0].text;
+    console.log(`27. office_read with formatting:\n${read}`);
+    assert.match(read, /\nDocument defaults: Arial 11\.\n/);
+    // The editor's own text of each row (a person's editor, as the agent's draws the same file): font and size of the
+    // table's cells and of the text outside it.
+    const person = await personOpens(doc);
+    const html = await personHtml(person.frame);
+    const looks: string[] = [];
+    for (const text of ["Item", "Amount", "Ledger", "42", "Rent", "17", "Tax", "Closing words."]) {
+      const style = styleOf(html, text);
+      looks.push(`${text}: ${style}`);
+      assert.match(style, /font-family:'Arial'/i, `${text}: Arial (${style})`);
+      assert.match(style, /font-size:11pt/i, `${text}: 11 pt (${style})`);
+    }
+    console.log(`27. the editor's text:\n${looks.join("\n")}`);
+    await person.page.context().close();
+    // What the agent sees of it.
+    const shot = await shoot("27. the table", { id: doc });
+    if (process.env.OFFICE_E2E_SHOT_DIR) writeFileSync(path.join(process.env.OFFICE_E2E_SHOT_DIR, "27-table.jpg"), Buffer.from(shot.image, "base64"));
+    // The save holds the defaults as the document's own.
+    const styles = await partOf(doc, "word/styles.xml");
+    const defaults = /<w:docDefaults>([\s\S]*?)<\/w:docDefaults>/.exec(styles)?.[1] ?? "";
+    console.log(`27. the saved docDefaults: ${defaults}`);
+    assert.match(defaults, /<w:rFonts [^>]*w:ascii="Arial"/);
+    assert.match(defaults, /<w:sz w:val="22"\s*\/>/);
+
+    // A document a person adds has its own defaults, and the agent's work on it leaves them.
+    const own = await agentDoc("Own defaults", "word");
+    const file = await fileOf(own);
+    const ownStyles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`;
+    writeFileSync(file, rewriteZip(readFileSync(file), { "word/styles.xml": ownStyles }));
+    const later = new Date(Date.now() + 5000);
+    (await import("node:fs")).utimesSync(file, later, later);
+    assert.match((await tools.office_read.execute("w3", { id: own, formatting: true })).content[0].text, /\nDocument defaults: Calibri 12\.\n/);
+    await tools.office_edit.execute("w4", { id: own, ops: [{ paragraphs: ["Their words."] }] });
+    const ownSaved = /<w:docDefaults>([\s\S]*?)<\/w:docDefaults>/.exec(await partOf(own, "word/styles.xml"))?.[1] ?? "";
+    assert.match(ownSaved, /w:ascii="Calibri"/);
+    assert.match(ownSaved, /<w:sz w:val="24"\s*\/>/);
+    assert.doesNotMatch(ownSaved, /Arial/);
+    assert.match((await tools.office_read.execute("w5", { id: own, formatting: true })).content[0].text, /\nDocument defaults: Calibri 12\.\n/);
+  });
+
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Stopped", "word");
     await tools.office_edit.execute("s1", { id: doc, ops: [{ paragraphs: ["Saved before the stop"] }] });

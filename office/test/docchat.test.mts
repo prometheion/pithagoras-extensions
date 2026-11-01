@@ -535,7 +535,8 @@ test("after a restart of the half, a run asked for whose chat's last run is stil
   await settle();
   assert.equal(prompts.length, 4);
   docchat.__resetDocchatForTests();
-  Object.assign(docchat.runTimings, { listenMs: 30 });
+  // A window wide enough that a slow runner's settle() ends inside it (30 ms was not, on CI).
+  Object.assign(docchat.runTimings, { listenMs: 300 });
   configure();
   posts = [];
   try {
@@ -545,10 +546,10 @@ test("after a restart of the half, a run asked for whose chat's last run is stil
     assert.deepEqual(replies(), [], "nothing said while it may still start");
     // The portal starts the second one meanwhile (a reload of its chat settled first); the first never comes.
     answers[two] = { status: "running", answer: "Erste Antwort." };
-    await delay(100);
+    await delay(400);
     assert.deepEqual(replies(), [["00000001", "Aegis was interrupted before it answered. Reply to try again."]]);
     answers[two] = { status: "done", answer: "Zweite Antwort." };
-    await delay(100);
+    await delay(400);
     assert.deepEqual(replies(), [
       ["00000001", "Aegis was interrupted before it answered. Reply to try again."],
       ["00000002", "Zweite Antwort."],

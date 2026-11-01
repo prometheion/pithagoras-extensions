@@ -661,6 +661,229 @@ const CELL_REPLY = `function () {
   }
 }`;
 
+/** The most text a picture's locate gives of what the picture shows, in characters: a page holds far less, but a page
+ * the editor cannot place (it starts in a text box), or one in a long table, is answered with the text around it; a
+ * range of narrow columns and low rows shows thousands of cells. */
+export const MAX_SHOWN_TEXT = 20_000;
+
+/** The most columns and rows a sheet's picture takes, hidden ones counted (about three times what fits at 75 % with
+ * the default sizes): a range of many hidden rows "fits" by its pixels, and every row of it costs a look in the
+ * builder and the frame function. */
+export const SHEET_MOST = { cols: 100, rows: 200 };
+
+/**
+ * The sheet's view the fit is reckoned on (seat-page EDITOR_SIZE's spreadsheet editor, measured in DS 10.0): its grid
+ * at 100 % is 1506 x 802 px less the headers (26 x 19 px), at 75 % less theirs (20 x 14 px), in px at 100 %. A
+ * column is `width * 7 + 5` px for its width in characters (8.43 is 64 px), a row `height * 4 / 3` px for its height
+ * in points, and 19 px where the builder gives none (the default).
+ */
+export const SHEET_VIEW = { width: 1506, height: 802, header: { 1: [26, 19], 0.75: [20, 14] } as Record<string, [number, number]> };
+
+/** word.pages: how many pages the editor has laid out now (the plugin waits until that holds still, VIEW_SETTLE). */
+const WORD_PAGES = `function () {
+  try {
+    return { result: Api.GetDocument().GetPageCount() };
+  } catch (e) {
+    return { error: { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
+/** How long the page count must hold still before a page is located, and the longest wait for that (the layout of 20
+ * pages lands 0.3 to 0.7 s after an edit). */
+export const VIEW_SETTLE = { ms: 300, max: 5_000, every: 50 };
+
+/**
+ * view.locate: what office_screenshot is to show, checked in the document as it stands, with the text it shows and
+ * the target the picture is taken of (cdp.ts ShotTarget). Changes nothing but the agent's own selection.
+ * Word (`kind: "word"`, `page` from 1, or the page of `quote`, the `nth` time it is found): the page, the page count,
+ * and the page's blocks as office_read numbers them, from the one the page starts in to the one the next page starts
+ * in (the cursor put at each page's start and the paragraph there looked up), of a table there its rows from the one
+ * to the other (`row`, from 1, and `of`, its rows, where not all of them are given). A page's start is not in a block
+ * of the body where it is in a text box: then the text goes from the start, or to the end, of the document. Up to
+ * MAX_SHOWN_TEXT characters (`truncated`).
+ * Sheets (`kind: "cell"`, `sheet`, `range` as {col, row, cols, rows} from ops.ts): the sheet (the first visible one
+ * by default; a hidden one is refused), the range (by default the used range from A1), and the zoom it fits at:
+ * 100 %, else 75 %, from its columns' widths and rows' heights (hidden ones count nothing; frozen panes the range is
+ * beyond take their part of the view). A range that fits at neither is refused with the largest one from its first
+ * cell that does; the default range is cut to that (`cut`). A range spans SHEET_MOST columns and rows at most, hidden
+ * ones counted. Its cells as cell.read gives them, of its rows and columns that are not hidden (what the picture shows;
+ * the frame function skips the hidden ones too), up to MAX_SHOWN_TEXT characters (`truncated`).
+ */
+const VIEW_LOCATE = `function () {
+  ${WORD_COLLECT_SRC}
+  ${CELL_ADDRESS_SRC}
+  ${SHEET_MODEL_SRC}
+  var a = Asc.scope.args;
+  function word() {
+    var doc = Api.GetDocument(), pages = doc.GetPageCount(), page = a.page || 1;
+    if (a.quote !== undefined) {
+      var hits = doc.Search(a.quote, true) || [], nth = a.nth || 1, q = JSON.stringify(a.quote);
+      if (!hits.length) throw { code: "quote_not_found", message: "the quote " + q + " is not in the document" };
+      if (hits.length > 1 && !a.nth) throw { code: "quote_ambiguous", message: "the quote " + q + " is in the document " + hits.length + " times: give nth (from 1) or quote more of it" };
+      if (nth > hits.length) throw { code: "quote_not_found", message: "the quote " + q + " is in the document " + hits.length + " time" + (hits.length === 1 ? "" : "s") + ", not " + nth };
+      page = hits[nth - 1].GetStartPage() + 1;
+    }
+    if (page > pages) throw { code: "no_page", message: "the document has " + pages + " page" + (pages === 1 ? "" : "s") };
+    // The blocks as office_read numbers them, and where each paragraph is: its block, and in a table its row.
+    var blocks = [], of = {};
+    (function add(content) {
+      for (var i = 0; i < content.GetElementsCount(); i++) {
+        var el = content.GetElement(i), type = el.GetClassType();
+        if (type === "paragraph") { of[el.GetInternalId()] = { block: blocks.length, row: -1 }; blocks.push(el); }
+        else if (type === "table") {
+          for (var r = 0; r < el.GetRowsCount(); r++) {
+            var row = el.GetRow(r);
+            for (var c = 0; c < row.GetCellsCount(); c++) collect(row.GetCell(c).GetContent(), []).forEach(function (x) { of[x.p.GetInternalId()] = { block: blocks.length, row: r }; });
+          }
+          blocks.push(el);
+        } else if (type === "blockLvlSdt") add(el.GetContent());
+      }
+    })(doc);
+    var startOf = function (k) {
+      doc.GoToPage(k);
+      doc.MoveCursorRight(1, true);
+      var range = doc.GetRangeBySelect(), paras = range ? range.GetAllParagraphs() : [];
+      return (paras.length && of[paras[0].GetInternalId()]) || null;
+    };
+    var first = startOf(page - 1), last = page < pages ? startOf(page) : { block: blocks.length - 1, row: -1 };
+    doc.RemoveSelection();
+    if (first === null) first = { block: 0, row: -1 };
+    if (last === null || last.block < first.block) last = last === null ? { block: blocks.length - 1, row: -1 } : first;
+    // A table the page starts or ends in gives the rows from the one the page starts in to the one the next page starts
+    // in (a table can run over many pages); the text stops at MAX_SHOWN_TEXT, also inside a table or a paragraph.
+    var shown = [], size = 0, truncated = false;
+    var room = function (t) {
+      if (size + t.length <= ${MAX_SHOWN_TEXT}) { size += t.length; return t; }
+      truncated = true;
+      t = t.slice(0, Math.max(0, ${MAX_SHOWN_TEXT} - size));
+      size = ${MAX_SHOWN_TEXT};
+      return t;
+    };
+    for (var b = first.block; b <= last.block && !truncated; b++) {
+      var el = blocks[b];
+      if (el.GetClassType() === "paragraph") {
+        var style = "";
+        try { var st = el.GetParaPr().GetStyle(); style = st ? st.GetName() : ""; } catch (e) { style = ""; }
+        var text = room(clean(el.GetText()));
+        shown.push(style && style !== "Normal" ? { p: text, style: style } : { p: text });
+      } else {
+        var count = el.GetRowsCount(), from = b === first.block && first.row > 0 ? first.row : 0, to = b === last.block && last.row >= from ? last.row : count - 1, rows = [];
+        for (var r2 = from; r2 <= to && !truncated; r2++) {
+          var cells = [], tr = el.GetRow(r2);
+          for (var c2 = 0; c2 < tr.GetCellsCount() && !truncated; c2++) cells.push(room(cellText(tr.GetCell(c2))));
+          rows.push(cells);
+        }
+        var table = { table: rows };
+        if (from > 0 || from + rows.length < count) { table.row = from + 1; table.of = count; }
+        shown.push(table);
+      }
+    }
+    return { page: page, pages: pages, first: first.block + 1, blocks: shown, truncated: truncated, view: { kind: "word", page: page, pages: pages } };
+  }
+  function cell() {
+    var all = Api.GetSheets(), book = all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }), at = -1;
+    if (a.sheet !== undefined) {
+      at = sheetAt(book, a.sheet);
+      if (at === -1) throw { code: "not_found", message: "there is no sheet named " + JSON.stringify(a.sheet) + " (the sheets: " + book.map(function (s) { return JSON.stringify(s.name); }).join(", ") + ")" };
+    } else for (var k = 0; k < book.length && at === -1; k++) if (!book[k].hidden) at = k;
+    if (book[at].hidden) throw { code: "sheet_hidden", message: JSON.stringify(book[at].name) + " is hidden, and the editor shows no hidden sheet: show it first (office_edit showSheet)" };
+    var ws = all[at], used = String(ws.GetUsedRange().GetAddress(false, false)), r = a.range, given = Boolean(r);
+    if (!r) {
+      var u = /^([A-Z]+)(\\d+)(?::([A-Z]+)(\\d+))?$/.exec(used);
+      r = { col: 0, row: 0, cols: u ? colIndex(u[3] || u[1]) + 1 : 1, rows: u ? Number(u[4] || u[2]) : 1 };
+    }
+    // Frozen panes: the first cell after them (0 where none are frozen that way).
+    var fc = 0, fr = 0;
+    try {
+      var panes = ws.GetFreezePanes(), loc = panes ? panes.GetLocation() : null, f = loc ? /^\\$?([A-Z]+)\\$?(\\d+)(?::\\$?([A-Z]+)\\$?(\\d+))?$/.exec(String(loc.GetAddress(false, false))) : null;
+      if (f) {
+        var ec = colIndex(f[3] || f[1]), er = Number(f[4] || f[2]) - 1;
+        fc = ec >= 16383 ? 0 : ec + 1;
+        fr = er >= 1048575 ? 0 : er + 1;
+      }
+    } catch (e) { fc = 0; fr = 0; }
+    var colPx = function (c) {
+      var name = colName(c);
+      if (ws.GetRange(name + ":" + name).GetHidden()) return 0;
+      var w = ws.GetRange(name + "1").GetColumnWidth();
+      return Math.round((typeof w === "number" ? w : 8.43) * 7 + 5);
+    };
+    var rowPx = function (row) {
+      if (ws.GetRange((row + 1) + ":" + (row + 1)).GetHidden()) return 0;
+      var h = ws.GetRange("A" + (row + 1)).GetRowHeight();
+      return typeof h === "number" ? Math.round(h * 4 / 3) : 19;
+    };
+    // The sizes (px at 100 %, 0 for a hidden one) of the range's columns and rows, as many as a picture takes at most.
+    var sizes = function (from, n, px, most) { var out = []; for (var k = 0; k < n && k < most; k++) out.push(px(from + k)); return out; };
+    var colW = sizes(r.col, r.cols, colPx, ${SHEET_MOST.cols}), rowH = sizes(r.row, r.rows, rowPx, ${SHEET_MOST.rows});
+    // How many of them fit in room (px at 100 %).
+    var fitting = function (px, room) {
+      var sum = 0, k = 0;
+      for (; k < px.length; k++) { sum += px[k]; if (sum > room) break; }
+      return k;
+    };
+    var frozenOff = function (count, start, px) { var sum = 0; if (count && start >= count) for (var k = 0; k < count; k++) sum += px(k); return sum; };
+    var offW = frozenOff(fc, r.col, colPx), offH = frozenOff(fr, r.row, rowPx), zoom = 0, cols = 0, rows = 0, cut = false;
+    var views = [[1, ${SHEET_VIEW.header[1][0]}, ${SHEET_VIEW.header[1][1]}], [0.75, ${SHEET_VIEW.header[0.75][0]}, ${SHEET_VIEW.header[0.75][1]}]];
+    for (var v = 0; v < views.length && !zoom; v++) {
+      var z = views[v][0];
+      cols = fitting(colW, (${SHEET_VIEW.width} - views[v][1]) / z - offW);
+      rows = fitting(rowH, (${SHEET_VIEW.height} - views[v][2]) / z - offH);
+      if (cols >= r.cols && rows >= r.rows) zoom = z;
+    }
+    var from = colName(r.col) + (r.row + 1);
+    var largest = from + ":" + colName(r.col + Math.max(1, cols) - 1) + (r.row + Math.max(1, rows));
+    if (!zoom) {
+      var most = r.cols > ${SHEET_MOST.cols} || r.rows > ${SHEET_MOST.rows} ? " (a picture takes ${SHEET_MOST.cols} columns and ${SHEET_MOST.rows} rows at most, hidden ones counted)" : "";
+      if (given) throw { code: "range_too_large", message: "the range " + from + ":" + colName(r.col + r.cols - 1) + (r.row + r.rows) + " is larger than the editor shows at 75 %" + most + ": the largest range from " + from + " that fits is " + largest + "; take it in parts" };
+      r = { col: r.col, row: r.row, cols: Math.max(1, cols), rows: Math.max(1, rows) };
+      zoom = 0.75;
+      cut = true;
+    }
+    var range = from + ":" + colName(r.col + r.cols - 1) + (r.row + r.rows);
+    // The hidden columns and rows of the range: the picture leaves them out, and so does its text.
+    var hiddenCols = [], hiddenRows = [];
+    for (var hc = 0; hc < r.cols; hc++) if (!colW[hc]) hiddenCols.push(r.col + hc);
+    for (var hr = 0; hr < r.rows; hr++) if (!rowH[hr]) hiddenRows.push(r.row + hr);
+    if (hiddenCols.length === r.cols || hiddenRows.length === r.rows) throw { code: "range_hidden", message: "every " + (hiddenCols.length === r.cols ? "column" : "row") + " of the range " + range + " is hidden, so a picture shows nothing of it" };
+    var values = grid(ws.GetRange(range).GetValue()), formulas = grid(ws.GetRange(range).GetFormula()), shown = [], size = 0, truncated = false;
+    for (var y = 0; y < values.length && !truncated; y++) {
+      if (!rowH[y]) continue;
+      for (var x = 0; x < values[y].length; x++) {
+        if (!colW[x]) continue;
+        var value = values[y][x], formula = formulas[y] ? formulas[y][x] : "";
+        if (value === "" && !(typeof formula === "string" && formula.charAt(0) === "=")) continue;
+        if (size > ${MAX_SHOWN_TEXT}) { truncated = true; break; }
+        var one = { a: colName(r.col + x) + (r.row + y + 1), v: value };
+        if (typeof formula === "string" && formula.charAt(0) === "=") one.f = formula;
+        size += one.a.length + String(value).length + (one.f ? one.f.length : 0);
+        shown.push(one);
+      }
+    }
+    var c1 = r.col, r1 = r.row, c2 = r.col + r.cols - 1, r2 = r.row + r.rows - 1;
+    var crosses = (fr > r1 && fr <= r2) || (fc > c1 && fc <= c2);
+    var away = r2 + 300 < 1048576 ? [c1, r2 + 300] : [c1, 0];
+    // The centre among the columns and rows that are shown (the editor does not scroll to a hidden one).
+    var middle = function (lo, hi, hidden) {
+      var showing = [];
+      for (var k = lo; k <= hi; k++) if (hidden.indexOf(k) === -1) showing.push(k);
+      return showing[Math.floor((showing.length - 1) / 2)];
+    };
+    var view = { kind: "cell", index: ws.GetIndex(), name: ws.GetName(), c1: c1, r1: r1, c2: c2, r2: r2, centre: [middle(c1, c2, hiddenCols), middle(r1, r2, hiddenRows)], away: away, zoom: zoom };
+    if (crosses) view.frozen = [fc, fr];
+    if (hiddenCols.length || hiddenRows.length) view.hidden = { cols: hiddenCols, rows: hiddenRows };
+    var out = { sheet: ws.GetName(), range: range, used: used, cut: cut, zoom: zoom, cells: shown, view: view };
+    if (truncated) out.truncated = true;
+    if (view.hidden) out.hidden = true;
+    return out;
+  }
+  try {
+    return { result: a.kind === "word" ? word() : cell() };
+  } catch (e) {
+    return { error: e && e.code ? { code: e.code, message: e.message } : { code: "failed", message: String(e && e.message || e) } };
+  }
+}`;
+
 /** The job kinds and the command each runs; edits recalculate the document after them, reads do not. (cell.edit is
  * the plugin's own run of CELL_EDIT_COMMANDS.) */
 export const COMMANDS: Record<string, { source: string; edit: boolean }> = {
@@ -671,6 +894,8 @@ export const COMMANDS: Record<string, { source: string; edit: boolean }> = {
   "word.reply": { source: WORD_REPLY, edit: true },
   "cell.comments": { source: CELL_COMMENTS, edit: false },
   "cell.reply": { source: CELL_REPLY, edit: true },
+  "word.pages": { source: WORD_PAGES, edit: false },
+  "view.locate": { source: VIEW_LOCATE, edit: false },
 };
 
 /**
@@ -850,14 +1075,32 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       });
     });
   }
+  // A picture's locate: in Word, once the page count held still (the editor lays a document out after an edit, not at
+  // once), so the page and its text are those the picture shows.
+  function viewLocate(job) {
+    if (!job.args || job.args.kind !== "word") return command(job);
+    var pages = -1, since = Date.now(), began = Date.now();
+    (function look() {
+      call(commands["word.pages"].run, {}, false, function (out) {
+        if (out.error) return command(job);
+        if (out.result !== pages) { pages = out.result; since = Date.now(); }
+        if (Date.now() - since >= ${VIEW_SETTLE.ms} || Date.now() - began >= ${VIEW_SETTLE.max}) return command(job);
+        setTimeout(look, ${VIEW_SETTLE.every});
+      });
+    })();
+  }
   function run(job) {
     if (job.kind === "cell.edit") return cellEdit(job);
     if ((job.kind === "word.reply" || job.kind === "cell.reply") && job.args && job.args.how === "method") return methodReply(job);
     if (job.kind === "chat.send") return chatSend(job);
-    var command = commands[job.kind];
-    if (!command) return done(job, { error: { code: "bad_op", message: "no command " + job.kind } });
+    if (job.kind === "view.locate") return viewLocate(job);
+    command(job);
+  }
+  function command(job) {
+    var found = commands[job.kind];
+    if (!found) return done(job, { error: { code: "bad_op", message: "no command " + job.kind } });
     window.Asc.scope.args = job.args;
-    window.Asc.plugin.callCommand(command.run, false, command.edit, function (outcome) {
+    window.Asc.plugin.callCommand(found.run, false, found.edit, function (outcome) {
       if (!outcome || typeof outcome !== "object") return done(job, { error: { code: "failed", message: "the editor ran the command but gave nothing back" } });
       if (outcome.error && outcome.touched) {
         window.Asc.plugin.executeMethod("Undo", [], function () { done(job, { error: outcome.error, undone: true }); });
@@ -905,12 +1148,21 @@ export function pluginIndex(ds: string): string {
 }
 
 /**
+ * The size each agent's editor is made at, in CSS pixels, by its document's kind: a Word page fits whole at "fit to
+ * page", and a sheet shows about 23 columns by 41 rows of default cells at 100 %. Made at that size from the start: a
+ * spreadsheet editor resized after it was made draws no grid. The editors are stacked at the page's top left, inside
+ * the browser's window (container.ts `--window-size`), where none is drawn less often for being off screen.
+ */
+export const EDITOR_SIZE: Record<string, { width: number; height: number }> = { word: { width: 1100, height: 1400 }, cell: { width: 1600, height: 1000 } };
+
+/**
  * The seat page: it long-polls the listener (`poll`) for what to open and close, opens each editor in a frame of its
  * own (`new DocsAPI.DocEditor`, with the config the half minted and signed), and tells the listener what each editor
  * says of itself (`event`: ready; an error, which ends the wait for it; whether it holds changes it has not sent to
  * the Document Server yet, which an edit's save waits for).
  */
 export const SEAT_PAGE_JS = `(function () {
+  var sizes = ${JSON.stringify(EDITOR_SIZE)};
   var apis = {};
   var editors = {};
   // Editors closed before they were made (an order to close came while api.js still loaded): never made after.
@@ -944,6 +1196,10 @@ export const SEAT_PAGE_JS = `(function () {
     document.body.appendChild(box);
     // A copy for each try: the editor takes the config it is given as its own.
     var config = JSON.parse(JSON.stringify(order.config));
+    // Its size is the page's, not part of what the Document Server checks of the config.
+    var size = sizes[config.documentType] || sizes.word;
+    config.width = size.width + "px";
+    config.height = size.height + "px";
     var started = false;
     config.events = {
       onAppReady: function () { started = true; },
@@ -991,4 +1247,4 @@ export const SEAT_PAGE_JS = `(function () {
 })();
 `;
 
-export const SEAT_PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Office agents</title><style>body{margin:0}div[id^=editor-]{width:1280px;height:900px}</style></head><body><script src="page.js"></script></body></html>`;
+export const SEAT_PAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Office agents</title><style>body{margin:0}iframe{position:absolute;top:0;left:0}</style></head><body><script src="page.js"></script></body></html>`;

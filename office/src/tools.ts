@@ -40,8 +40,10 @@ import { canonical, createDoc, docSize, docsForHome, MAX_IMPORT_BYTES, readDoc, 
 import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
-import { editJob, OpError, type EditJob } from "./ops";
+import { editJob, OpError, viewJob, type EditJob } from "./ops";
 import * as seat from "./seat";
+import { MAX_SHOWN_TEXT } from "./seat-page";
+import { PICTURES_MS, type ShotPictures } from "./cdp";
 import * as docchat from "./docchat";
 
 /** Marks a text to be translated where it is shown: a label kept in a table (de.ts has its German). */
@@ -54,6 +56,7 @@ export const LABELS: Record<string, string> = {
   office_read: msg("Reading an office document"),
   office_edit: msg("Editing an office document"),
   office_comments: msg("Reading the comments of a document"),
+  office_screenshot: msg("Taking a picture of an office document"),
 };
 
 /**
@@ -61,7 +64,11 @@ export const LABELS: Record<string, string> = {
  * the agents' folders, written by anybody, and their titles (file names). None of them is the shape of one of the
  * guard's rules after a suspected prompt injection (`acts`): office_create makes a blank document in the agent's own
  * folder (its home, or its project's), where it writes anyway, and office_edit changes text in a document of the agent's own scope through its editor, which runs
- * nothing, carries nothing out and lands nowhere a later run reads as instructions.
+ * nothing, carries nothing out and lands nowhere a later run reads as instructions. office_screenshot's picture is the
+ * document too: its text part carries a Word page's body text and a sheet range's cells (20,000 characters at most),
+ * which the guard reads. Only in the picture, and not read by the guard: a page's header and footer, text boxes,
+ * shapes and charts, text inside the document's own pictures, and a long text that runs into the range from a cell
+ * outside it.
  */
 export const GUARDS: Record<string, { outside: boolean; acts: string[] }> = {
   office_list: { outside: true, acts: [] },
@@ -69,6 +76,7 @@ export const GUARDS: Record<string, { outside: boolean; acts: string[] }> = {
   office_read: { outside: true, acts: [] },
   office_edit: { outside: true, acts: [] },
   office_comments: { outside: true, acts: [] },
+  office_screenshot: { outside: true, acts: [] },
 };
 
 /** An audit line recorded after every mutating op. `subject` is the doc title, `chatId` the acting home chat. */
@@ -83,6 +91,7 @@ export type ToolsSeat = {
   run(home: string, docId: string, mode: seat.SeatMode, job: seat.SeatJob, options?: { signal?: AbortSignal; timeoutMs?: number; post?: boolean }): Promise<unknown>;
   keyOf(home: string, docId: string): string | undefined;
   closeDoc(docId: string, why?: string): void;
+  shot(home: string, docId: string, mode: seat.SeatMode, locate: seat.SeatJob, options?: { signal?: AbortSignal; large?: boolean }): Promise<{ located: Record<string, unknown>; image: { data: string; width: number; height: number; zoom?: number; pages?: number; pictures?: ShotPictures } }>;
 };
 
 /** Injection seams for registerTools. Every field is optional and LAZY -- defaults read portal() only when actually used, so unit tests pass plain values and never reach the real portal. */
@@ -284,6 +293,10 @@ function failed(e: unknown): unknown {
 const SHEET_OP_MS = 20_000;
 const MAX_EDIT_MS = 120_000;
 
+/** Of what pi hands a tool's execute last (its ExtensionContext), what office_screenshot reads: the chat's model, and
+ * whether it takes pictures (`input`). */
+type ToolContext = { model?: { id?: string; name?: string; input?: unknown } };
+
 /** `text` with a details side-channel (the same shape as the portal's document tools). */
 const text = (content: string, details?: unknown) => ({ content: [{ type: "text", text: content }], ...(details !== undefined ? { details } : {}) });
 
@@ -345,15 +358,28 @@ function assertMayRead(doc: DocMeta, chatId: string, home: string): void {
 /** "N people" for a count. */
 const people = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
 
-/** Word blocks as the agent reads them: `[n] text`, a style in brackets, a table as its rows. */
-type WordBlocks = { blocks: ({ p: string; style?: string } | { table: string[][] })[]; truncated?: boolean };
-function wordText(read: WordBlocks): string {
-  if (!read.blocks.length) return "(empty document)";
+/**
+ * What a Word page's picture says of the document's pictures where one may be missing from it: still loading after
+ * the wait, not loadable, or not known (the editor's image loader not found). Nothing where all of them are drawn.
+ */
+function picturesNote(p: ShotPictures | undefined): string {
+  if (p === undefined) return "";
+  if (p === null) return " Whether the document's pictures had all loaded could not be checked: one may be missing from the picture.";
+  const n = (k: number) => `${k} of the document's pictures`;
   return (
-    read.blocks
-      .map((b, i) => ("table" in b ? `[${i + 1}] table\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}` : `[${i + 1}]${b.style ? ` (${b.style})` : ""} ${b.p}`))
-      .join("\n") + (read.truncated ? "\n\n(the document goes on: only its first 200,000 characters were read)" : "")
+    (p.loading ? ` ${n(p.loading)} ${p.loading === 1 ? "was" : "were"} still loading after a wait of up to ${PICTURES_MS / 1000} s, so ${p.loading === 1 ? "it is" : "they are"} missing from the picture if on this page: take it again in a moment.` : "") +
+    (p.failed ? ` ${n(p.failed)} could not be loaded by the editor, so ${p.failed === 1 ? "it is" : "they are"} missing from the picture if on this page.` : "")
   );
+}
+
+/** Word blocks as the agent reads them: `[n] text`, a style in brackets, a table as its rows. */
+type WordBlocks = { blocks: ({ p: string; style?: string } | { table: string[][]; row?: number; of?: number })[]; truncated?: boolean };
+/** `first`: the number of the first block (a page's blocks are numbered as office_read numbers the document's). A
+ * table of which only some rows are given (a page's) says which. */
+function wordText(read: WordBlocks, first = 1): string {
+  if (!read.blocks.length) return "(empty document)";
+  const rows = (b: { table: string[][]; row?: number; of?: number }) => (b.row ? `, rows ${b.row}-${b.row + b.table.length - 1} of ${b.of}` : "");
+  return read.blocks.map((b, i) => ("table" in b ? `[${i + first}] table${rows(b)}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}` : `[${i + first}]${b.style ? ` (${b.style})` : ""} ${b.p}`)).join("\n");
 }
 
 /** A spreadsheet's cells as the agent reads them: every sheet of the workbook first, by its position (from 1) and
@@ -362,10 +388,14 @@ type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: s
 function sheetList(book: CellSheets["book"]): string {
   return `Sheets: ${book.map((s, i) => `${i + 1} ${JSON.stringify(s.name)}${s.hidden ? " (hidden)" : ""}`).join(", ")}`;
 }
-function cellText(read: CellSheets): string {
+/** Cells as office_read shows them, one a line. */
+function cellLines(cells: { a: string; v: unknown; f?: string }[]): string {
   const value = (v: unknown) => (typeof v === "string" ? JSON.stringify(v) : typeof v === "boolean" ? (v ? "TRUE" : "FALSE") : String(v));
+  return cells.map((c) => `${c.a}: ${value(c.v)}${c.f ? ` (${c.f})` : ""}`).join("\n");
+}
+function cellText(read: CellSheets): string {
   const sheets = read.sheets.map((s) => {
-    const cells = s.cells.map((c) => `${c.a}: ${value(c.v)}${c.f ? ` (${c.f})` : ""}`).join("\n");
+    const cells = cellLines(s.cells);
     if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
     return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}`;
   });
@@ -429,9 +459,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     return refresh(doc.docId, rootDir()) ?? doc;
   }
 
-  const guarded = (work: (params: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown> | unknown) => async (_callId: unknown, params: Record<string, unknown>, signal?: AbortSignal) => {
+  // pi hands execute the call's id, its parameters, the abort signal, an update callback and the context (`ctx`, with
+  // the chat's model), which office_screenshot reads.
+  const guarded = (work: (params: Record<string, unknown>, signal?: AbortSignal, ctx?: ToolContext) => Promise<unknown> | unknown) => async (_callId: unknown, params: Record<string, unknown>, signal?: AbortSignal, _onUpdate?: unknown, ctx?: unknown) => {
     try {
-      return await work(params ?? {}, signal instanceof AbortSignal ? signal : undefined);
+      return await work(params ?? {}, signal instanceof AbortSignal ? signal : undefined, ctx && typeof ctx === "object" ? (ctx as ToolContext) : undefined);
     } catch (e) {
       throw failed(e);
     }
@@ -516,7 +548,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const job = doc.ext === "docx" ? { kind: "word.read", args: {} } : { kind: "cell.read", args: sheet ? { sheet } : {} };
         try {
           const read = await oneAtATime(doc.docId, () => seats().run(home, doc.docId, mode, job, { signal }));
-          said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? wordText(read as WordBlocks) : cellText(read as CellSheets)}`;
+          said = `${readHeader(doc)}\n\n${doc.ext === "docx" ? wordText(read as WordBlocks) + ((read as WordBlocks).truncated ? "\n\n(the document goes on: only its first 200,000 characters were read)" : "") : cellText(read as CellSheets)}`;
           live = true;
         } catch (e) {
           // Without its editor the agent still reads the file; an edit waits until a Start downloads it. Office found stopped
@@ -672,6 +704,75 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       // (100 at 500 chars each, worst case ~50 KB); commentCount keeps the true total.
       const detailComments = shown.slice(0, 100).map((t) => ({ id: t.guid, author: t.author, text: t.text.slice(0, 500), solved: t.solved, replies: t.replies.length }));
       return text(said, { action: "comments", id: doc.docId, from, comments: detailComments, grants: doc.grants, commentCount: shown.length });
+    }),
+  });
+
+  p.registerTool({
+    name: "office_screenshot",
+    label: LABELS.office_screenshot,
+    guard: GUARDS.office_screenshot,
+    description:
+      "A picture (JPEG) of a document of your library as your editor shows it now, with the text it shows: a Word page, or a spreadsheet range with its column letters and row numbers. For how it looks (layout, formatting, tables); office_read is cheaper for text. Word: `page` (default 1) or the page holding `quote` (`nth` picks a repeat). Spreadsheet: `sheet` (default the first visible) and `range` (default the used range from A1, as much as fits), at 100 %, else 75 %; larger is refused with the part that fits. 1,024 px; `large` as large as the editor draws it, at most 1,568. A picture costs about 1,000-1,600 input tokens on every later turn.",
+    promptSnippet: "See a Word page or a spreadsheet range as your editor shows it",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The document's id." },
+        page: { type: "integer", minimum: 1 },
+        quote: { type: "string" },
+        nth: { type: "integer", minimum: 1 },
+        sheet: { type: "string" },
+        range: { type: "string" },
+        large: { type: "boolean" },
+      },
+      required: ["id"],
+    },
+    execute: guarded(async (params, signal, ctx) => {
+      // Before anything is done: a model that cannot see the picture gets none.
+      const input = ctx?.model?.input;
+      if (Array.isArray(input) && !input.includes("image")) throw new Refusal("no_images", `${ctx?.model?.name || ctx?.model?.id || "This model"} cannot see images; office_read gives the document's text`);
+      const doc = visibleDoc(params.id);
+      if (params.large !== undefined && typeof params.large !== "boolean") throw new Refusal("bad_op", "large is true or false");
+      const job = viewJob(doc.ext, params);
+      assertMayRead(doc, chatId, home);
+      const state = await officeState();
+      if (state === "stopped") throw new Refusal("office_stopped", `Office is stopped, so there is no editor to take a picture of "${doc.title}" in: ask the person to start it in Settings → Office. office_read reads the saved file meanwhile.`);
+      if (state === "starting") throw new Refusal("ds_starting", "Office is still starting (its Document Server sets itself up after its first start, about two minutes): try again in a moment.");
+      const mode = mayWrite(doc.path, chatId) ? "edit" : "view";
+      let taken: Awaited<ReturnType<ToolsSeat["shot"]>>;
+      try {
+        taken = await oneAtATime(doc.docId, () => seats().shot(home, doc.docId, mode, job, { signal, large: params.large === true }));
+      } catch (e) {
+        // A quote here changes nothing: the edit's advice is not this one's.
+        if (e instanceof seat.SeatError && (e.code === "quote_not_found" || e.code === "quote_ambiguous")) throw new Refusal(e.code, `${e.message}. Read the document with office_read and quote it as it stands.`);
+        throw e;
+      }
+      const { located, image } = taken;
+      const bytes = Buffer.byteLength(image.data, "base64");
+      let said: string;
+      let shown: Record<string, unknown>;
+      if (doc.ext === "docx") {
+        const page = Number(located.page);
+        const pages = image.pages ?? Number(located.pages);
+        const blocks = located as unknown as WordBlocks & { first?: number };
+        said = `Page ${page} of ${pages} of "${doc.title}" (id ${doc.docId}), as your editor shows it now.${picturesNote(image.pictures)} Its text:\n\n${wordText(blocks, blocks.first ?? 1)}${blocks.truncated ? `\n(the text is cut here: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives all of it)` : ""}`;
+        shown = { page, pages, ...(image.pictures === null ? { pictures: "unknown" } : image.pictures?.loading || image.pictures?.failed ? { picturesLoading: image.pictures.loading, picturesFailed: image.pictures.failed } : {}) };
+      } else {
+        const zoom = Math.round((image.zoom ?? Number(located.zoom)) * 100);
+        const cells = Array.isArray(located.cells) ? (located.cells as { a: string; v: unknown; f?: string }[]) : [];
+        const cut = located.cut === true ? ` The sheet's used range is ${located.used}: this is the part that fits from A1; take the rest with range.` : "";
+        const hidden = located.hidden === true ? " Its hidden rows and columns are not in the picture, and their cells are not listed." : "";
+        const more = located.truncated === true ? `\n(not all of the cells it shows are listed: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives them)` : "";
+        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${cut}${hidden} Its cells:\n\n${cellLines(cells) || "(empty)"}${more}`;
+        shown = { sheet: located.sheet, range: located.range, zoom };
+      }
+      return {
+        content: [
+          { type: "text", text: said },
+          { type: "image", data: image.data, mimeType: "image/jpeg" },
+        ],
+        details: { action: "screenshot", id: doc.docId, ...shown, width: image.width, height: image.height, bytes },
+      };
     }),
   });
 

@@ -23,7 +23,9 @@ import {
   BACK_PORT,
   agentImage,
   agentSpec,
+  CDP_INNER,
   ensureAgent,
+  execRelay,
   pullAgentImage,
   stopAgent,
   DS_NAME,
@@ -689,10 +691,17 @@ test("the agents' browser: on a network of its own alone, nothing published, har
   const spec = agentSpec(AGENTS, PAGE) as Record<string, any>;
   assert.equal(spec.Image, AGENT_IMAGE);
   assert.equal(spec.User, "1000:1000");
-  assert.deepEqual(spec.Entrypoint, ["/headless-shell/headless-shell"], "the image's own start script, which opens a debugging port, is not run");
   assert.equal(spec.Cmd.at(-1), PAGE);
   assert.ok(spec.Cmd.includes("--headless") && spec.Cmd.includes("--no-sandbox"));
-  assert.ok(!spec.Cmd.some((a: string) => /remote-debugging/.test(a)), "no debugging port");
+  // The window holds the editors whole: as wide as a spreadsheet's (1600), as high as a Word editor (1400).
+  assert.ok(spec.Cmd.includes("--window-size=1600,1400"));
+  // The debugging port, for pictures (cdp.ts): Chromium's own on its loopback, passed on by socat at 9222 on the
+  // agents' network, published nowhere, and never open to a page's origin.
+  assert.equal(CDP_INNER, 9223);
+  assert.deepEqual(spec.Entrypoint, ["/bin/bash", "-c", 'socat TCP4-LISTEN:9222,fork,reuseaddr TCP4:127.0.0.1:9223 & exec /headless-shell/headless-shell "$@"', "agent"], "not the image's own start script, which adds its own flags");
+  assert.ok(spec.Cmd.includes("--remote-debugging-port=9223"));
+  assert.ok(!spec.Cmd.some((a: string) => /remote-debugging-address|remote-allow-origins|remote-debugging-pipe/.test(a)), "no other address, no origin allowed");
+  assert.equal(spec.ExposedPorts, undefined);
   const host = spec.HostConfig;
   assert.equal(host.NetworkMode, AGENTS);
   assert.equal(spec.NetworkingConfig, undefined, "on that one network alone");
@@ -732,6 +741,36 @@ test("ensureAgent: made on the agents' network from the pinned image and started
   await ensureAgent(PAGE.replace("aaaa", "bbbb"), m.docker, root);
   assert.deepEqual(m.calls, [`start ${AGENT}`]);
   assert.ok(!(m.calls as string[]).some((c) => c.startsWith("pull")));
+});
+
+test("a browser made before it had its debugging port is made again: its spec is not what would be made now", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  m.state.images.add(AGENT_IMAGE);
+  await ensureContainer(m.docker, undefined, root);
+  await ensureAgent(PAGE, m.docker, root);
+  // As an install of #11 made it: the same page, no debugging port, no window size.
+  const old = { ...agentSpec(AGENTS, PAGE), Entrypoint: ["/headless-shell/headless-shell"], Cmd: ["--headless", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--disable-background-networking", "--user-data-dir=/tmp/profile", PAGE] };
+  const host = { ...((old as Record<string, unknown>).HostConfig as object), RestartPolicy: { Name: "no" } };
+  m.containers.get(AGENT)!.inspect.Config.Labels = stamped({ ...old, HostConfig: host }).Labels;
+  m.calls.length = 0;
+  await ensureAgent(PAGE, m.docker, root);
+  assert.deepEqual(m.calls, [`create ${AGENT}`, `start ${AGENT}`]);
+  assert.ok(made(m, AGENT).Cmd.includes("--remote-debugging-port=9223"));
+});
+
+test("execRelay runs a command in Office's relay, given up on at its time; not where the relay is not running", async () => {
+  const root = tmpRoot({ enabled: true });
+  const m = fresh();
+  m.state.exec = { output: "CDP 2 x {}", exitCode: 0, timedOut: false };
+  await assert.rejects(execRelay(["node", "-e", "1"], 15_000, m.docker), (e: Error & { code?: string }) => e.code === "office_stopped");
+  await ensureContainer(m.docker, undefined, root);
+  m.calls.length = 0;
+  assert.deepEqual(await execRelay(["node", "-e", "1"], 15_000, m.docker), { output: "CDP 2 x {}", exitCode: 0, timedOut: false });
+  assert.deepEqual(m.calls, [`exec ${RELAY} node -e 1`]);
+  assert.deepEqual(m.state.execs.at(-1), { name: RELAY, timeoutMs: 15_000 });
+  m.containers.get(RELAY)!.info.state = "exited";
+  await assert.rejects(execRelay(["node"], 15_000, m.docker), (e: Error & { code?: string }) => e.code === "office_stopped");
 });
 
 test("ensureAgent never downloads: without the image it is agent_editor_missing; with Office stopped office_stopped; without its network office_stopped", async () => {

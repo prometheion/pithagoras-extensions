@@ -27,6 +27,8 @@ export function fakeDocker(options: { sharedNetwork?: string; reach?: Reach; ava
     exec: { output: "", exitCode: 1, timedOut: false } as ExecResult,
     /** What a command run in a container comes to, where a test answers by the command; else `exec` for every one. */
     answer: undefined as ((cmd: string[]) => ExecResult | undefined) | undefined,
+    /** How each command was run: in which container, and how long it was given. */
+    execs: [] as { name: string; timeoutMs?: number }[],
     images: new Set<string>(),
   };
   let ids = 0;
@@ -105,8 +107,9 @@ export function fakeDocker(options: { sharedNetwork?: string; reach?: Reach; ava
       logs: async () => "",
       inspect: async (name: string) => containers.get(name)?.inspect,
       update: async () => {},
-      exec: async (name: string, cmd: string[]) => {
+      exec: async (name: string, cmd: string[], options?: { timeoutMs?: number }) => {
         calls.push(`exec ${name} ${cmd.join(" ")}`);
+        state.execs.push({ name, timeoutMs: options?.timeoutMs });
         return state.answer?.(cmd) ?? state.exec;
       },
       adopt: async (name: string) => {

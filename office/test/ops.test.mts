@@ -863,3 +863,77 @@ test("office_edit (spreadsheet): a named range made, changed or deleted, with ce
   assert.deepEqual(sheetRef("Data!$A$1:B2"), { sheet: "Data", address: "$A$1:$B$2" });
   assert.equal(sheetRef("Da[ta!A1"), null);
 });
+
+test("office_edit (Word): a picture op is a file of the agent's folder, placed like an insert, its sizes in EMU and its alt text checked; keys out of place, addresses and the caps are refused", () => {
+  const job = editJob("docx", [
+    { after: "the audit", nth: 2, picture: " charts/q3.png ", width: "6cm", alt: " Sales by region " },
+    { picture: "logo.jpg", height: 72 },
+    { picture: "a.gif", width: "1in", height: "2in", alt: "" },
+    { picture: "plain.png" },
+  ]);
+  assert.equal(job.kind, "word.edit");
+  assert.deepEqual(job.args.ops, [
+    { after: "the audit", nth: 2, picture: "charts/q3.png", width: 3402 * 635, alt: "Sales by region" },
+    { picture: "logo.jpg", height: 72 * 20 * 635 },
+    { picture: "a.gif", width: 1440 * 635, height: 2880 * 635, alt: "" },
+    { picture: "plain.png" },
+  ]);
+  const no = (ops: unknown[], message: RegExp, op = 0, code = "bad_op") => refusal(() => editJob("docx", ops), message, code, op);
+  no([{ paragraphs: ["x"] }, { picture: "a.png", paragraphs: ["x"] }], /^op 2 must be exactly one of .*picture, width\?, height\?, alt\?\}.* \(it has paragraphs and picture\)/, 1);
+  no([{ picture: "a.png", quote: "x", replacement: "y" }], /must be exactly one of/);
+  no([{ picture: "a.png", range: "A1" }], /is a spreadsheet edit/, 0, "unsupported_format");
+  no([{ picture: "a.png", style: "Heading 1" }], /"style" is not part of this op/);
+  no([{ picture: "a.png", at: "B2" }], /"at" is not part of this op/);
+  no([{ picture: "a.png", nth: 2 }], /nth picks among the places `after` is found: give after with it/);
+  for (const url of ["https://example.com/a.png", "http://x/a.png", "data:image/png;base64,AAAA", "file:///etc/passwd", "ftp://x/a.png"]) no([{ picture: url }], /picture is a file in your own folder \(your home or the project\), never an address/);
+  for (const bad of ["", "   ", 7, null, "a\nb.png", "a\0b.png", "x".repeat(1001)]) no([{ picture: bad }], /picture is the path of a PNG, JPEG or GIF file in your own folder/);
+  for (const bad of ["0cm", "0.1cm", "51cm", "wide", "-3cm", 5, 20000, true, {}]) no([{ picture: "a.png", width: bad }], /width is a length from 0\.2cm to 50cm/);
+  assert.equal((editJob("docx", [{ picture: "a.png", width: "0.2cm", height: "50cm" }]).args.ops[0] as { width: number }).width, 113 * 635, "both ends are taken");
+  for (const bad of [7, "two\nlines", "x".repeat(501)]) no([{ picture: "a.png", alt: bad }], /alt is the picture's alternative text/);
+  // The cap on the number of pictures a call carries.
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ picture: `p${i}.png` }));
+  assert.equal(editJob("docx", many(20)).args.ops.length, 20);
+  refusal(() => editJob("docx", many(21)), /^one call takes at most 20 pictures \(got 21\)/, "bad_op", null);
+  refusal(() => editJob("docx", [{ picture: "a.png" }, "text"]), /op 2 is not an object/, "bad_op", 1);
+});
+
+test("office_edit (spreadsheet): a picture op anchors a file of the agent's folder at a cell; the cell, sizes, sheet and alt text are checked, and it is no op of the other shapes", () => {
+  const job = editJob("xlsx", [{ sheet: "Data", picture: "logo.png", at: "b2", width: "4cm", alt: "Logo" }, { picture: "chart.jpg", at: "$D$5" }, { range: "A1", values: [[1]] }]);
+  assert.equal(job.kind, "cell.edit");
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", picture: "logo.png", at: "B2", cell: { col: 1, row: 1 }, width: 2268 * 635, alt: "Logo" },
+    { picture: "chart.jpg", at: "D5", cell: { col: 3, row: 4 } },
+    { range: "A1", values: [[1]] },
+  ]);
+  const no = (ops: unknown[], message: RegExp, op = 0, code = "bad_op") => refusal(() => editJob("xlsx", ops), message, code, op);
+  no([{ picture: "a.png" }], /at is the cell the picture's top left corner sits in, as "B2" \(got undefined\)/);
+  no([{ picture: "a.png", at: "B2:C3" }], /at is the cell the picture's top left corner sits in/);
+  no([{ picture: "a.png", at: "ZZZZ9" }], /at is the cell/);
+  no([{ picture: "a.png", at: "B2", sheet: "" }], /sheet is a sheet's name/);
+  no([{ picture: "a.png", at: "B2", after: "x" }], /"after" is not part of \{sheet\?, picture, at, width\?, height\?, alt\?\}/);
+  no([{ picture: "a.png", at: "B2", range: "A1", values: [[1]] }], /must be exactly one of/);
+  no([{ picture: "a.png", at: "B2", sort: "A2:D9", by: ["B"] }], /must be exactly one of/);
+  no([{ picture: "https://example.com/a.png", at: "B2" }], /never an address/);
+  no([{ picture: "a.png", at: "B2", height: "1mm" }], /height is a length from 0\.2cm to 50cm/);
+  no([{ picture: "a.png", at: "B2", alt: "a\nb" }], /alt is the picture's alternative text/);
+  // A picture can be taken back, so it needs no place at the end of a call (a delete of rows still does).
+  assert.doesNotThrow(() => editJob("xlsx", [{ picture: "a.png", at: "B2" }, { range: "A1", values: [[1]] }, { deleteRows: "9" }]));
+  assert.throws(() => editJob("xlsx", [{ deleteRows: "9" }, { picture: "a.png", at: "B2" }]), refused("bad_op", 0));
+  // The cap on pictures, and the other tool's ops are refused with its name.
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ picture: `p${i}.png`, at: "A1" }));
+  refusal(() => editJob("xlsx", many(21)), /^one call takes at most 20 pictures \(got 21\)/, "bad_op", null);
+  refusal(() => formatJob("xlsx", [{ picture: "a.png", at: "B2" }]), /`picture` is an office_edit op \(what the sheet holds\)/);
+  refusal(() => formatJob("docx", [{ picture: "a.png" }]), /`picture` is an office_edit op \(what the document says\)/);
+});
+
+test("the Word command's check counts a picture as a new paragraph with no text: a later op's `after` finds the paragraph that follows it, and a quote is never found in it", () => {
+  const model = ["One", "Two"];
+  assert.equal(simulateWord(model, [{ after: "One", picture: "a.png" } as WordOp, { after: "Two", paragraphs: ["Three"] }]), null);
+  // The picture's paragraph is empty: nothing of it can be quoted.
+  const failed = simulateWord(model, [{ after: "One", picture: "a.png" } as WordOp, { quote: "a.png", replacement: "x" }]);
+  assert.equal(failed?.code, "quote_not_found");
+  assert.equal(failed?.op, 1);
+  assert.equal(simulateWord(model, [{ after: "Nope", picture: "a.png" } as WordOp])?.code, "quote_not_found");
+  assert.equal(simulateWord(["x", "x"], [{ after: "x", picture: "a.png" } as WordOp])?.code, "quote_ambiguous");
+  assert.equal(simulateWord(["x", "x"], [{ after: "x", nth: 2, picture: "a.png" } as WordOp]), null);
+});

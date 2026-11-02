@@ -9,7 +9,9 @@
  * - `{after?, nth?, paragraphs, style?}`: new paragraphs after the paragraph that holds `after`, or at the end, in any
  *   paragraph style the document has (the command checks it);
  * - `{after?, nth?, table}`: a table (its first row the header) at the same place;
- * - `{remove, nth?}`: the paragraph that holds the quote goes.
+ * - `{remove, nth?}`: the paragraph that holds the quote goes;
+ * - `{after?, nth?, picture, width?, height?, alt?}`: a picture from a file of the agent's own folder, inline in a
+ *   paragraph of its own at the same place (PictureOp).
  * office_format's ops (how a Word document looks) are formatJob's, below; an op of the one tool given to the other is
  * refused with the other's name.
  * Excel ops: `{sheet?, range, values}`: the values into the range (A1 or A1:B2, on the first sheet where none is
@@ -21,15 +23,28 @@
  * And two that change what a sheet holds, taken back like a write: `{sheet?, sort: "A2:D9", by: ["B desc", "C"]}` (the
  * rows of the range in the order of its columns, up to three, ascending unless "desc") and `{name, refersTo}` (a named
  * range, made or changed; `{name, delete: true}` removes it).
+ * And a picture, from a file of the agent's own folder, anchored at a cell: `{sheet?, picture, at: "B2", width?, height?,
+ * alt?}` (PictureOp), taken back by deleting the drawing.
  * A new name must be one Excel takes (sheetNameProblem); whether the sheets named are there, a new name is free, a
  * position is inside the workbook and a visible sheet is left is checked by the command (seat-page.ts,
  * SHEET_MODEL_SRC), on the sheets as they stand when it runs.
  */
+import { MAX_PICTURES, type PictureFile } from "./pictures";
+
 export type WordOp =
   | { quote: string; replacement: string; nth?: number }
   | { after?: string; nth?: number; paragraphs: string[]; style?: string }
   | { after?: string; nth?: number; table: string[][] }
-  | { remove: string; nth?: number };
+  | { remove: string; nth?: number }
+  | ({ after?: string; nth?: number } & PictureOp);
+/**
+ * A picture op as the agent gives it, checked: `picture` is a file of its own folder (never an address), `width` and
+ * `height` EMU (the picture's own size at 96 dpi, fitted to the page or the sheet, where none is given; one given
+ * keeps the proportions), `alt` its alternative text (the file's name where none is given). tools.ts reads the file and
+ * adds `file` (pictures.ts) before the op goes to the editor, outside the ops' size cap.
+ */
+export type PictureOp = { picture: string; width?: number; height?: number; alt?: string; file?: PictureFile };
+export type SheetPictureOp = { sheet?: string; at: string; cell: { col: number; row: number } } & PictureOp;
 export type CellValue = string | number | boolean;
 export type CellOp = { sheet?: string; range: string; values: CellValue[][] };
 export type SheetOp =
@@ -50,7 +65,7 @@ export type LineOp =
 /** A sort of the rows of `area` by up to three of its columns (from 0, in the sheet), and a named range. */
 export type SortOp = { sheet?: string; sort: string; area: SheetArea; by: { col: number; desc: boolean }[] };
 export type NameOp = { name: string; refersTo: { sheet?: string; address: string } } | { name: string; delete: true };
-export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: (CellOp | SheetOp | LineOp | SortOp | NameOp)[] } };
+export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: (CellOp | SheetOp | LineOp | SortOp | NameOp | SheetPictureOp)[] } };
 /** The row and column ops of office_edit, by their key: rows or columns. */
 export const LINE_OPS: Record<string, "rows" | "columns"> = { insertRows: "rows", insertColumns: "columns", deleteRows: "rows", deleteColumns: "columns" };
 
@@ -91,8 +106,13 @@ const oneLine = (s: string) => !/[\r\n]/.test(s);
 /** The ops of a call for a document of `ext`, checked: the job the seat runs, or an OpError. */
 export function editJob(ext: "docx" | "xlsx", ops: unknown): EditJob {
   capped(ops);
-  if (ext === "docx") return { kind: "word.edit", args: { ops: (ops as unknown[]).map(wordOp) } };
+  if (ext === "docx") {
+    const words = (ops as unknown[]).map(wordOp);
+    picturesCapped(words);
+    return { kind: "word.edit", args: { ops: words } };
+  }
   const cells = (ops as unknown[]).map(cellOp);
+  picturesCapped(cells);
   const sheetOps = cells.filter(isSheetOp).length;
   if (sheetOps > MAX_SHEET_OPS) throw new OpError("bad_op", `one call takes at most ${MAX_SHEET_OPS} sheet ops (got ${sheetOps}); split the edit into several calls`);
   lastWithoutInverse(cells, (op) => "deleteRows" in op || "deleteColumns" in op);
@@ -104,6 +124,12 @@ export function editJob(ext: "docx" | "xlsx", ops: unknown): EditJob {
   const sorted = cells.reduce((n, op) => n + ("sort" in op ? op.area.cols * op.area.rows : 0), 0);
   if (sorted > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call sorts ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most (got ${sorted.toLocaleString("en")}): each one's content and formats are read first, so that the call can be taken back; split it into several calls`);
   return { kind: "cell.edit", args: { ops: cells } };
+}
+
+/** At most MAX_PICTURES picture ops a call: each is uploaded to the Document Server by the editor. */
+function picturesCapped(ops: object[]): void {
+  const n = ops.filter((op) => "picture" in op).length;
+  if (n > MAX_PICTURES) throw new OpError("bad_op", `one call takes at most ${MAX_PICTURES} pictures (got ${n}); split the edit into several calls`);
 }
 
 /** Whether an op of a spreadsheet edit makes, moves, hides or deletes a sheet: it waits for the Document Server. */
@@ -144,7 +170,7 @@ function nthOf(op: Record<string, unknown>, n: number, i: number): { nth?: numbe
   return { nth: op.nth };
 }
 
-const WORD_SHAPES = "{quote, replacement, nth?}, {after?, nth?, paragraphs, style?}, {after?, nth?, table} and {remove, nth?}";
+const WORD_SHAPES = "{quote, replacement, nth?}, {after?, nth?, paragraphs, style?}, {after?, nth?, table}, {after?, nth?, picture, width?, height?, alt?} and {remove, nth?}";
 
 function wordOp(op: unknown, i: number): WordOp {
   const n = i + 1;
@@ -152,7 +178,7 @@ function wordOp(op: unknown, i: number): WordOp {
   if ("range" in op || "values" in op) throw new OpError("unsupported_format", `op ${n} is a spreadsheet edit ({range, values}), and this is a Word document: its ops are ${WORD_SHAPES}`, i);
   const looks = FORMAT_SHAPES.find((k) => k in op);
   if (looks) throw new OpError("bad_op", `op ${n}: \`${looks}\` is an office_format op (how the document looks): make it with office_format`, i);
-  const shapes = ["quote", "paragraphs", "table", "remove"].filter((k) => k in op);
+  const shapes = ["quote", "paragraphs", "table", "remove", "picture"].filter((k) => k in op);
   if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${WORD_SHAPES} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})`, i);
   const text = (key: string, what: string, empty = false) => {
     const v = op[key];
@@ -178,6 +204,10 @@ function wordOp(op: unknown, i: number): WordOp {
     only(["remove", "nth"]);
     return { remove: text("remove", "text of the paragraph to remove (not empty)"), ...nth() };
   }
+  if ("picture" in op) {
+    only(["after", "nth", "picture", "width", "height", "alt"]);
+    return { ...after(), ...nth(), ...pictureOf(op, i) };
+  }
   if ("paragraphs" in op) {
     only(["after", "nth", "paragraphs", "style"]);
     const list = op.paragraphs;
@@ -192,6 +222,35 @@ function wordOp(op: unknown, i: number): WordOp {
   if (rows.some((r) => (r as unknown[]).length !== (rows[0] as unknown[]).length)) throw new OpError("bad_op", `op ${n}: every row of the table has the same number of cells (the first has ${(rows[0] as unknown[]).length})`, i);
   if (!rows.every((r) => (r as string[]).every(oneLine))) throw new OpError("bad_op", `op ${n}: a cell's text may not hold a line break`, i);
   return { ...after(), ...nth(), table: rows as string[][] };
+}
+
+/** The longest alt text, and the longest path, of a picture op. */
+const MAX_ALT = 500;
+const MAX_PICTURE_PATH = 1000;
+/** The smallest and largest a picture may be made, in twips (0.2 cm to 50 cm). */
+const PICTURE_MIN = 113;
+const PICTURE_MAX = 28_346;
+
+/** The keys every picture op has, checked: `picture` (a path in the agent's folder, never an address), the sizes in EMU
+ * (635 to the twip; a number is points, a text carries cm, mm, in or pt) and the alt text. */
+function pictureOf(op: Record<string, unknown>, i: number): PictureOp {
+  const n = i + 1;
+  const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
+  const path = op.picture;
+  if (typeof path !== "string" || path.trim() === "" || path.length > MAX_PICTURE_PATH || /[\u0000-\u001f]/.test(path)) throw bad(`picture is the path of a PNG, JPEG or GIF file in your own folder (one line, at most ${MAX_PICTURE_PATH} characters)`);
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path.trim())) throw bad("picture is a file in your own folder (your home or the project), never an address: save the picture there first");
+  const size = (key: "width" | "height") => {
+    if (op[key] === undefined) return {};
+    const t = length(op[key]);
+    if (t === null || t < PICTURE_MIN || t > PICTURE_MAX) throw bad(`${key} is a length from 0.2cm to 50cm ("6cm"; a number is points)`);
+    return { [key]: t * 635 };
+  };
+  let alt: { alt?: string } = {};
+  if (op.alt !== undefined) {
+    if (typeof op.alt !== "string" || op.alt.length > MAX_ALT || !oneLine(op.alt)) throw bad(`alt is the picture's alternative text (one line, at most ${MAX_ALT} characters)`);
+    alt = { alt: op.alt.trim() };
+  }
+  return { picture: path.trim(), ...size("width"), ...size("height"), ...alt };
 }
 
 /** What office_screenshot is to show, as the locate command takes it (seat-page.ts VIEW_LOCATE). */
@@ -264,7 +323,7 @@ export function sheetNameProblem(name: string): string | null {
   return null;
 }
 
-const SHEET_SHAPES = "{sheet?, range, values}, {sheet?, insertRows | insertColumns | deleteRows | deleteColumns}, {sheet?, sort, by}, {name, refersTo | delete}, {addSheet, position?}, {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?}, {hideSheet}, {showSheet} and {deleteSheet}";
+const SHEET_SHAPES = "{sheet?, range, values}, {sheet?, insertRows | insertColumns | deleteRows | deleteColumns}, {sheet?, sort, by}, {name, refersTo | delete}, {sheet?, picture, at, width?, height?, alt?}, {addSheet, position?}, {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?}, {hideSheet}, {showSheet} and {deleteSheet}";
 
 function sheetOp(op: Record<string, unknown>, key: string, i: number): SheetOp {
   const n = i + 1;
@@ -288,18 +347,19 @@ function sheetOp(op: Record<string, unknown>, key: string, i: number): SheetOp {
   return out as SheetOp;
 }
 
-function cellOp(op: unknown, i: number): CellOp | SheetOp | LineOp | SortOp | NameOp {
+function cellOp(op: unknown, i: number): CellOp | SheetOp | LineOp | SortOp | NameOp | SheetPictureOp {
   const n = i + 1;
   if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
   if (["quote", "paragraphs", "table", "remove", ...FORMAT_SHAPES.filter((k) => k !== "format" && k !== "set")].some((k) => k in op)) throw new OpError("unsupported_format", `op ${n} is a Word edit, and this is a spreadsheet: its ops are ${SHEET_SHAPES}`, i);
   const looks = SHEET_FORMAT_SHAPES.find((k) => k in op);
   if (looks) throw new OpError("bad_op", `op ${n}: \`${looks}\` is an office_format op (how the sheet looks): make it with office_format`, i);
   const sheetKeys = Object.keys(SHEET_OPS).filter((k) => k in op);
-  const lineKeys = [...Object.keys(LINE_OPS), "sort", "name"].filter((k) => k in op);
+  const lineKeys = [...Object.keys(LINE_OPS), "sort", "name", "picture"].filter((k) => k in op);
   if (sheetKeys.length + lineKeys.length > 1 || (sheetKeys.length && ("range" in op || "values" in op || "sheet" in op)) || (lineKeys.length && ("range" in op || "values" in op))) throw new OpError("bad_op", `op ${n} must be exactly one of ${SHEET_SHAPES} (it has ${[...sheetKeys, ...lineKeys, ...["sheet", "range", "values"].filter((k) => k in op)].join(" and ")})`, i);
   if (sheetKeys.length) return sheetOp(op, sheetKeys[0], i);
   if (lineKeys[0] === "sort") return sortOp(op, i);
   if (lineKeys[0] === "name") return nameOp(op, i);
+  if (lineKeys[0] === "picture") return sheetPictureOp(op, i);
   if (lineKeys.length) return lineOp(op, lineKeys[0], i);
   const extra = Object.keys(op).filter((k) => !["sheet", "range", "values"].includes(k));
   if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of a spreadsheet op (they are ${SHEET_SHAPES})`, i);
@@ -328,6 +388,17 @@ function lineOp(op: Record<string, unknown>, key: string, i: number): LineOp {
   const lines = typeof op[key] === "string" ? parseLines(op[key] as string, kind) : null;
   if (!lines) throw new OpError("bad_op", `op ${n}: ${key} is ${kind === "rows" ? 'rows by their numbers, "5" or "5:7"' : 'columns by their letters, "C" or "C:E"'} (got ${JSON.stringify(op[key])})`, i);
   return { ...(op.sheet !== undefined ? { sheet: op.sheet as string } : {}), [key]: lines.text, from: lines.from, count: lines.count } as LineOp;
+}
+
+/** `{sheet?, picture, at: "B2", width?, height?, alt?}`: a picture anchored with its top left corner at the cell. */
+function sheetPictureOp(op: Record<string, unknown>, i: number): SheetPictureOp {
+  const n = i + 1;
+  const extra = Object.keys(op).filter((k) => !["sheet", "picture", "at", "width", "height", "alt"].includes(k));
+  if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of {sheet?, picture, at, width?, height?, alt?}`, i);
+  if (op.sheet !== undefined && (typeof op.sheet !== "string" || op.sheet === "")) throw new OpError("bad_op", `op ${n}: sheet is a sheet's name`, i);
+  const cell = typeof op.at === "string" ? parseRange(op.at) : null;
+  if (!cell || cell.cols !== 1 || cell.rows !== 1) throw new OpError("bad_op", `op ${n}: at is the cell the picture's top left corner sits in, as "B2" (got ${JSON.stringify(op.at)})`, i);
+  return { ...(op.sheet !== undefined ? { sheet: op.sheet as string } : {}), at: (op.at as string).trim().toUpperCase().replace(/\$/g, ""), cell: { col: cell.col, row: cell.row }, ...pictureOf(op, i) };
 }
 
 /** Rows ("5", "5:7") or columns ("C", "C:E"), either end first, `$` anchors taken: the first (from 0), how many, and
@@ -509,7 +580,7 @@ function formatOp(op: unknown, i: number): FormatOp {
   const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
   if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
   if ("range" in op || "values" in op) throw new OpError("unsupported_format", `op ${n} is a spreadsheet edit ({range, values}), and this is a Word document`, i);
-  const content = ["quote", "replacement", "paragraphs", "table", "remove"].find((k) => k in op);
+  const content = ["quote", "replacement", "paragraphs", "table", "remove", "picture"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the document says): make it with office_edit, and its look here`);
   // (An op with a Word shape of its own is a Word op with a key out of place: the shape check below names the key.)
   const sheetOnly = FORMAT_SHAPES.some((k) => k !== "set" && k in op) ? undefined : SHEET_FORMAT_SHAPES.find((k) => k !== "format" && k !== "set" && k in op);
@@ -947,7 +1018,7 @@ function sheetFormatOp(op: unknown, i: number): SheetFormatOp {
   const n = i + 1;
   const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
   if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
-  const content = ["range", "values", ...Object.keys(SHEET_OPS), ...Object.keys(LINE_OPS), "sort", "name"].find((k) => k in op);
+  const content = ["range", "values", ...Object.keys(SHEET_OPS), ...Object.keys(LINE_OPS), "sort", "name", "picture"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the sheet holds): make it with office_edit, and its look here`);
   const word = ["quote", "paragraphs", "table", "remove", ...FORMAT_SHAPES.filter((k) => k !== "format" && k !== "set")].find((k) => k in op);
   if (word) throw new OpError("unsupported_format", `op ${n} is a Word op (\`${word}\`), and this is a spreadsheet: its office_format ops are ${SHEET_FORMAT_LIST}`, i);

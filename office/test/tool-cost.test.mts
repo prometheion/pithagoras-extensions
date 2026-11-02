@@ -32,12 +32,15 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * #13's PR 4, the sheet extras (plan: office_format ~1,050, office_edit ~1,090, office_read ~330): office_format 941 ->
  * 1,151 with a conditional format, validation, a link, a chart, a filter and a table (one example each; the refusals
  * name the keys and values the text leaves out), office_edit 1,061 -> 1,140 with sort and names (their five keys in
- * the schema among it), office_read 339 -> 355 with what it now lists of a sheet. */
+ * the schema among it), office_read 339 -> 355 with what it now lists of a sheet.
+ * #13's PR 5, pictures (plan: office_edit ~1,130): office_edit 1,140 -> 1,233 with the picture op for Word and for
+ * sheets (the Word op's keys, the limits and the defaults in one sentence, the sheet op's shape) and its five keys in the
+ * schema, untyped; office_read is unchanged (what it lists of pictures is in its output). */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 200,
   office_read: 355,
-  office_edit: 1140,
+  office_edit: 1233,
   office_format: 1151,
   office_comments: 181,
   office_screenshot: 254,
@@ -63,7 +66,7 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 3394);
+  assert.equal(agreed, 3487);
 });
 
 test("office_edit sends formatting to office_format once, for Word and sheets alike", () => {

@@ -1268,7 +1268,7 @@ test("office_read with formatting: the styles in use, the pages, headers, footer
         { p: "Quarterly report for Meridian Labs", look: { para: { align: "center", spaceBefore: 240 }, runs: [{ t: "Quarterly report", look: { font: "Arial", size: 28, bold: true, italic: true, underline: true, color: "#C81E1E", highlight: "yellow" } }, { t: "Meridian Labs", look: { link: "https://example.com/meridian", style: "Hyperlink" } }] } },
         { p: "first point", style: "List Paragraph", list: "bullet", level: 1 },
         { p: "sub point", list: "number", level: 2, format: "lowerLetter", label: "c.", look: { para: { indentLeft: 720, firstLine: -360, line: { multiple: 1.5 } } } },
-        { p: "There was a discrepancy here.", look: { notes: [{ at: "There was a discrepancy", note: " The audit of March." }], runs: [{ t: "x".repeat(100), look: { superscript: true } }], pictures: [[1800000, 1224000]] } },
+        { p: "There was a discrepancy here.", look: { notes: [{ at: "There was a discrepancy", note: " The audit of March." }], runs: [{ t: "x".repeat(100), look: { superscript: true } }] }, pics: [[1800000, 1224000, ""]] },
         { table: [["Item", "Amount"], ["Ledger", "42"]], look: { style: "Grid Table 4 - Accent 1", headerRows: 1, merged: [{ row: 0, cell: 1, across: 2 }] } },
       ],
       format: {
@@ -1358,7 +1358,7 @@ test("office_read with formatting: what a paragraph or run sets off or to zero i
       { p: "Indented list item", style: "List Paragraph", look: { para: { indentLeft: 0, firstLine: 0, keepWithNext: false, pageBreakBefore: false, line: { atLeast: 300 } } } },
       { p: "Heading words", style: "Heading 1", look: { runs: [{ t: "words", look: { bold: false, italic: false, underline: false, strike: false, color: "auto", highlight: "none" } }] } },
       { table: [["cellnote", "b"]], look: { notes: [{ at: "cellnote", note: "Note in the cell.", row: 0, cell: 0 }] } },
-      { p: "a picture here", look: { pictures: [[360000, 360000]] } },
+      { p: "a picture here", pics: [[360000, 360000, ""]] },
       { p: "Tail para", look: { notes: [{ at: "Tail para", note: "Note at the tail." }] } },
     ],
     format: {
@@ -1572,4 +1572,172 @@ test("office_read with formatting (spreadsheet): what the editor failed to give 
   s.seat.answer = () => ({ book: [{ name: "Data", hidden: false }], sheets: [{ name: "Data", range: "A1", cells: [], truncated: false, look: { font: { name: "Calibri", size: 11 }, formats: [], merged: [], cols: { usual: 8.43, own: [] }, rows: { usual: 15, own: [] }, frozen: { cols: 0, rows: 0 }, filter: "A1:D9", unread: ["charts (boom)"] } }] });
   const read = ((await tool(s, "office_read").execute("r1", { id: sheet.docId, formatting: true })) as ToolResult).content[0].text;
   assert.match(read, /\nFilter: A1:D9\.\n\(not read, the editor failed at them: charts \(boom\)\)$/);
+});
+
+/* ------------------------------------------------------------------ */
+/* pictures (#13 PR 5)                                                 */
+/* ------------------------------------------------------------------ */
+
+/** A PNG header for `w` x `h` pixels, padded with `extra` bytes (the module reads the header only). */
+function pngFile(w: number, h: number, extra = 0): Buffer {
+  const ihdr = Buffer.alloc(25);
+  ihdr.writeUInt32BE(13, 0);
+  ihdr.write("IHDR", 4, "latin1");
+  ihdr.writeUInt32BE(w, 8);
+  ihdr.writeUInt32BE(h, 12);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr, Buffer.alloc(extra)]);
+}
+
+/** A world in which the agent's folder "/f/atlas" has a real folder of files behind it, opened the way the portal opens
+ * them for the agent (`openPicture`, with the chat's id): what was asked of it is in `opened`. */
+function withFiles(files: Record<string, Buffer | "dir">) {
+  const s = setup();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "office-pics-"));
+  for (const [name, bytes] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    if (bytes === "dir") fs.mkdirSync(path.join(dir, name), { recursive: true });
+    else fs.writeFileSync(path.join(dir, name), bytes);
+  }
+  const opened: { folder: string; rel: string; chat: string }[] = [];
+  registerTools({
+    openPicture: (folder, rel, chat) => {
+      opened.push({ folder, rel, chat });
+      const full = path.join(dir, rel);
+      // (The portal refuses what the agent could not read, and a path that leaves its folder.)
+      if (rel.startsWith("secret")) throw Object.assign(new Error("the agent could not read it"), { code: "invalid" });
+      const fd = fs.openSync(full, "r");
+      if (fs.fstatSync(fd).isDirectory()) {
+        fs.closeSync(fd);
+        throw Object.assign(new Error("EISDIR"), { code: "EISDIR" });
+      }
+      return { fd, size: fs.fstatSync(fd).size };
+    },
+  });
+  return { s, opened, dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+const editRuns = (s: ReturnType<typeof setup>) => s.seat.runs.filter((r) => r.kind.endsWith(".edit"));
+
+test("office_edit pictures: the files are read as the agent, from its folder (a relative path or an absolute one below it), and go to the editor as data URLs with their pixels, outside the ops' size cap", async () => {
+  const photo = pngFile(640, 480, 4_000_000);
+  const { s, opened, cleanup } = withFiles({ "pics/q3.png": pngFile(300, 200), "photo.png": photo, "pics/sub/b.png": pngFile(8, 8) });
+  try {
+    const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+    const ops = [{ after: "New document", picture: "pics/q3.png", width: "6cm", alt: "Q3" }, { picture: "/f/atlas/photo.png" }, { picture: "./pics/sub/../sub/b.png", alt: "" }];
+    const ok = (await tool(s, "office_edit").execute("p1", { id: doc.docId, ops })) as ToolResult;
+    assert.match(ok.content[0].text, /^Edited "Report" \(3 ops\), saved as revision \d+/);
+    // The files are opened as the chat's agent, in its own folder, by a path below it.
+    assert.deepEqual(opened.map((o) => [o.folder, o.rel, o.chat]), [["/f/atlas", "pics/q3.png", "chat-atlas-home"], ["/f/atlas", "photo.png", "chat-atlas-home"], ["/f/atlas", "pics/sub/b.png", "chat-atlas-home"]]);
+    const run = editRuns(s)[0];
+    assert.equal(run.kind, "word.edit");
+    const sent = run.args.ops as { picture: string; file: { data: string; px: { w: number; h: number }; bytes: number; name: string } }[];
+    assert.deepEqual(sent.map((o) => [o.picture, o.file.name, o.file.px, o.file.bytes]), [
+      ["pics/q3.png", "q3.png", { w: 300, h: 200 }, pngFile(300, 200).length],
+      ["/f/atlas/photo.png", "photo.png", { w: 640, h: 480 }, photo.length],
+      ["./pics/sub/../sub/b.png", "b.png", { w: 8, h: 8 }, pngFile(8, 8).length],
+    ]);
+    assert.equal(sent[1].file.data, `data:image/png;base64,${photo.toString("base64")}`);
+    assert.ok(JSON.stringify(run.args).length > 5_000_000, "the data URL is more than the ops' own 1 MB cap");
+    const audit = s.seen.records.find((r) => r.reason.startsWith("office_edit"))!;
+    assert.match(audit.reason, /office_edit: 3 op\(s\) \(pictures\) on /);
+    assert.ok(!audit.reason.includes("base64"), "no data in the audit log");
+    assert.ok(!JSON.stringify(ok.details).includes("base64"), "none in the details either");
+    // The time allowance grows with the pictures.
+    assert.equal(run.timeoutMs, 20_000 + Math.ceil((30_000 * getDoc(doc.docId, s.root)!.sizeBytes) / 100_000) + 3 * 2_000, "the job's 20 s, the layout's room, and 2 s a picture");
+  } finally {
+    cleanup();
+  }
+});
+
+test("office_edit pictures in a spreadsheet: the file goes with its op, and the same file used twice is read once and counted twice", async () => {
+  const { s, opened, cleanup } = withFiles({ "logo.png": pngFile(120, 60) });
+  try {
+    const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
+    await tool(s, "office_edit").execute("p2", { id: sheet.docId, ops: [{ picture: "logo.png", at: "B2" }, { sheet: "Sheet1", picture: "logo.png", at: "E2", alt: "again" }, { range: "A1", values: [[1]] }] });
+    assert.equal(opened.length, 1, "read once");
+    const run = editRuns(s)[0];
+    assert.equal(run.kind, "cell.edit");
+    const ops = run.args.ops as { picture?: string; file?: { px: unknown; name: string }; at?: string }[];
+    assert.deepEqual(ops.map((o) => [o.picture, o.at, o.file?.name, o.file?.px]), [["logo.png", "B2", "logo.png", { w: 120, h: 60 }], ["logo.png", "E2", "logo.png", { w: 120, h: 60 }], [undefined, undefined, undefined, undefined]]);
+    assert.match(s.seen.records.find((r) => r.reason.startsWith("office_edit"))!.reason, /\(pictures, cells\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("office_edit pictures: a path outside the agent's folder, a folder, a missing file, one the agent could not read, and a file that is no PNG, JPEG or GIF are refused with the op's number, and the editor is never asked", async () => {
+  const { s, cleanup } = withFiles({ "ok.png": pngFile(10, 10), "pics": "dir", "page.html": Buffer.from("<html></html>"), "secret/key.png": pngFile(1, 1), "webp.png": Buffer.from("RIFF\0\0\0\0WEBPVP8 ") });
+  try {
+    const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+    const no = async (picture: string, pattern: RegExp, code: string, ops: unknown[] = [{ paragraphs: ["x"] }, { picture }]) => {
+      const msg = await refused(tool(s, "office_edit").execute("p3", { id: doc.docId, ops }), picture);
+      assert.match(msg, new RegExp(`^error:${code} op ${ops.length}: the picture ${JSON.stringify(picture).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} `));
+      assert.match(msg, pattern);
+    };
+    await no("../outside.png", /is not in your own folder: pictures come from files of your home or the project/, "bad_op");
+    await no("/etc/hostname", /is not in your own folder/, "bad_op");
+    await no("/f/atlas/../other/x.png", /is not in your own folder/, "bad_op");
+    await no("/f/atlas", /is not in your own folder/, "bad_op");
+    await no("pics/missing.png", /is not a file there/, "not_found");
+    await no("pics", /is a folder, not a picture file/, "bad_op");
+    await no("secret/key.png", /is not a file your agent can read \(the agent could not read it\)/, "not_found");
+    await no("page.html", /cannot be used: it is not a PNG, JPEG or GIF \(a file is told by its first bytes, not by its name\)/, "bad_op");
+    await no("webp.png", /cannot be used: it is not a PNG, JPEG or GIF/, "bad_op");
+    assert.deepEqual(editRuns(s), [], "no job ever reached the editor");
+    assert.deepEqual(s.seat.saves, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("office_edit pictures: 5 MB a picture, 40 megapixels and 100 GIF frames from the header, and 10 MB a call (each use of a file counted) are refused before anything is sent", async () => {
+  const gif = (frames: number) => {
+    const head = Buffer.alloc(13);
+    head.write("GIF89a", 0, "latin1");
+    head.writeUInt16LE(8, 6);
+    head.writeUInt16LE(8, 8);
+    const frame = Buffer.from([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00]);
+    return Buffer.concat([head, ...Array.from({ length: frames }, () => frame), Buffer.from([0x3b])]);
+  };
+  const { s, opened, cleanup } = withFiles({ "five.png": pngFile(10, 10, 5 * 1024 * 1024 - 33), "six.png": pngFile(10, 10, 5 * 1024 * 1024), "bomb.png": pngFile(100_000, 100_000), "forty.png": pngFile(8000, 5000), "many.gif": gif(101), "hundred.gif": gif(100), "four.png": pngFile(10, 10, 4 * 1024 * 1024) });
+  try {
+    const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+    const run = (ops: unknown[]) => tool(s, "office_edit").execute("p4", { id: doc.docId, ops });
+    // A file of exactly 5 MB, 40 megapixels and 100 frames are taken.
+    await run([{ picture: "five.png" }, { picture: "forty.png" }, { picture: "hundred.gif" }]);
+    assert.equal(editRuns(s).length, 1);
+    assert.equal((editRuns(s)[0].args.ops as { file: { bytes: number } }[])[0].file.bytes, 5 * 1024 * 1024);
+    s.seat.runs.length = 0;
+    assert.match(await refused(run([{ picture: "six.png" }]), "6 MB"), /^error:bad_op op 1: the picture "six\.png" cannot be used: it is 5\.0 MB, and a picture may take 5 MB at most|^error:bad_op op 1: the picture "six\.png" cannot be used: it is 5\.\d MB/);
+    assert.match(await refused(run([{ picture: "bomb.png" }]), "bomb"), /^error:bad_op op 1: the picture "bomb\.png" cannot be used: it is 100000 × 100000 pixels \(10,000 megapixels\), and a picture may have 40 megapixels at most: scale it down first/);
+    assert.match(await refused(run([{ picture: "many.gif" }]), "frames"), /^error:bad_op op 1: the picture "many\.gif" cannot be used: it has more than 100 frames/);
+    // The call's 10 MB: two 4 MB files are 8, the third (a use of the same file again) is past it, and the file is not read for it.
+    await run([{ picture: "four.png" }, { picture: "four.png" }]);
+    s.seat.runs.length = 0;
+    opened.length = 0;
+    const msg = await refused(run([{ picture: "four.png" }, { picture: "four.png" }, { picture: "four.png" }]), "12 MB");
+    assert.match(msg, /^error:bad_op op 3: the picture "four\.png" would take the call's pictures past 10 MB \(a call takes that many at most, each use of a file counted\)/);
+    assert.equal(opened.length, 1, "the file was read once");
+    assert.deepEqual(s.seat.runs, []);
+    // Exactly 10 MB is taken; one byte more is refused, a file of another name too.
+    await run([{ picture: "five.png" }, { picture: "five.png" }]);
+    s.seat.runs.length = 0;
+    assert.match(await refused(run([{ picture: "five.png" }, { picture: "five.png" }, { picture: "forty.png" }]), "past"), /^error:bad_op op 3: the picture "forty\.png" would take the call's pictures past 10 MB/);
+    assert.deepEqual(s.seat.runs, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("office_read shows a Word picture on its own line under its paragraph, with its size and alt text, with or without formatting; a sheet's pictures follow its cells", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ blocks: [{ p: "Intro" }, { p: "", pics: [[1800000, 1224000, "Sales by region"]] }, { p: "Two", pics: [[360000, 720000, ""], [3600000, 3600000, "Logo"]] }] });
+  const plain = ((await tool(s, "office_read").execute("r1", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.match(plain, /\[1\] Intro\n\[2\] \n    a picture 5 × 3\.4 cm, alt text "Sales by region"\n\[3\] Two\n    a picture 1 × 2 cm; a picture 10 × 10 cm, alt text "Logo"$/);
+  const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 53, items: [{ a: "B2", w: 1800000, h: 1224000, alt: "Logo" }, { a: "E10", w: 720000, h: 360000, alt: "" }] } }] });
+  const read = ((await tool(s, "office_read").execute("r2", { id: sheet.docId })) as ToolResult).content[0].text;
+  assert.match(read, /Sheet "Sheet1" \(A1\):\nA1: 1\nPictures: B2 5 × 3\.4 cm "Logo"; E10 2 × 1 cm \(and 51 more\)\.$/);
+  s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 0, items: [] } }] });
+  assert.doesNotMatch(((await tool(s, "office_read").execute("r3", { id: sheet.docId })) as ToolResult).content[0].text, /Pictures/);
 });

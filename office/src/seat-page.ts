@@ -103,7 +103,7 @@ function simulateWord(paras, ops) {
       if (l.error) return l.error;
       paras.splice(l.at, 1);
     } else {
-      var added = op.table ? [].concat.apply([], op.table) : op.paragraphs;
+      var added = op.picture !== undefined ? [""] : op.table ? [].concat.apply([], op.table) : op.paragraphs;
       if (typeof op.after === "string") {
         l = located(paras, op.after, i, "anchor", op.nth);
         if (l.error) return l.error;
@@ -335,6 +335,9 @@ function freshToc(doc, made, swapped, moved, last) {
  * the size a plugin's result may have (seat.LIMITS.maxDone) that a long document never fails its read. */
 export const MAX_READ_TEXT = 200_000;
 
+/** The most characters of a picture's alternative text a read gives. */
+export const MAX_ALT_READ = 200;
+
 /** The most formatting word.read gives with `formatting`, in characters of its JSON: a quarter of what office_read
  * shows at most (MAX_READ_TEXT), as the plan has it; past it the read says where it stopped (`formatCut`). */
 export const MAX_READ_FORMAT = 50_000;
@@ -449,7 +452,7 @@ function tableNotes(tj, out, where) {
   return out;
 }
 // A paragraph's look: its own formatting (pp), and its text in runs of the same direct formatting (only those that
-// set something), its footnotes' places (as the text before them) and its pictures' sizes (EMU).
+// set something) and its footnotes' places (as the text before them).
 function lookOf(p, names) {
   var drawings = 0;
   try { drawings = p.GetAllDrawingObjects().length; } catch (e) { drawings = 0; }
@@ -497,7 +500,6 @@ function lookOf(p, names) {
   var shown = runs.filter(function (r) { return Object.keys(r.look).length; }).map(function (r) { return { t: r.t, look: r.look }; });
   if (shown.length) out.runs = shown;
   if (notes.length) out.notes = notes;
-  if (drawings) out.pictures = p.GetAllDrawingObjects().map(function (d) { return [d.GetWidth(), d.GetHeight()]; });
   if (pPr && pPr.sectPr) out.sectionEnd = true;
   return out;
 }
@@ -566,7 +568,15 @@ const WORD_READ = `function () {
   try {
     var doc = Api.GetDocument(), blocks = [], size = 0, truncated = false, formatting = Boolean(Asc.scope.args && Asc.scope.args.formatting);
     var names = formatting ? styleNames(doc) : {}, used = {}, lookSize = 0, cut = 0, sections = [], pictured = {};
-    if (formatting) (doc.GetAllImages() || []).forEach(function (img) { try { var pt = img.GetParentTable(); if (pt) pictured[pt.GetInternalId()] = true; } catch (e) {} });
+    var images = [];
+    try { images = doc.GetAllImages() || []; } catch (e) { images = []; }
+    if (formatting) images.forEach(function (img) { try { var pt = img.GetParentTable(); if (pt) pictured[pt.GetInternalId()] = true; } catch (e) {} });
+    // A paragraph's pictures: size (EMU) and alternative text. A document with none (the usual one) is not asked paragraph by paragraph.
+    var picturesOf = function (p) {
+      var out = [];
+      try { p.GetAllDrawingObjects().forEach(function (d) { if (d.GetClassType() === "image") { var alt = d.GetDescription(); out.push([d.GetWidth(), d.GetHeight(), alt ? String(alt).slice(0, ${MAX_ALT_READ}) : ""]); } }); } catch (e) {}
+      return out;
+    };
     var looked = function (block, look) {
       if (cut) return;
       var n = JSON.stringify(look).length;
@@ -584,6 +594,7 @@ const WORD_READ = `function () {
           var text = textOf(el), list = listOf(el);
           size += text.length;
           var block = style && style !== "Normal" ? { p: text, style: style } : { p: text };
+          if (images.length) { var pics = picturesOf(el); if (pics.length) { block.pics = pics; size += pics.length * 40; } }
           if (list) { block.list = list.kind; block.level = list.level + 1; if (list.format !== "bullet" && list.format !== "decimal") block.format = list.format; }
           if (formatting) {
             if (style) used[style] = true;
@@ -739,10 +750,34 @@ function ownPoint(doc) {
 }
 `;
 
+/**
+ * A picture's size in EMU (914,400 to the inch, 9,525 to a pixel at 96 dpi): both sides as asked, one side as asked and the
+ * other in the picture's proportions, or its own size at 96 dpi made smaller to fit `room` ({w, h}, EMU) where it is
+ * larger. `op.file.px` is the size the picture's header says (pictures.ts).
+ */
+const PICTURE_SIZE_SRC = `
+function pictureSize(op, room) {
+  var px = op.file.px, w = op.width, h = op.height;
+  if (w && h) return { w: w, h: h };
+  if (w) return { w: w, h: Math.max(1, Math.round(w * px.h / px.w)) };
+  if (h) return { w: Math.max(1, Math.round(h * px.w / px.h)), h: h };
+  w = px.w * 9525;
+  h = px.h * 9525;
+  var k = Math.min(1, room.w / w, room.h / h);
+  return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
+}
+// The alternative text of a picture: the agent's, the file's name where it gave none, none for "".
+function pictureAlt(op) { return op.alt !== undefined ? op.alt : op.file.name; }
+`;
+
+/** What a picture without a size of its own may take in a sheet: 16 by 12 cm (EMU, 360,000 to the centimetre). */
+export const SHEET_PICTURE_ROOM = { w: 16 * 360_000, h: 12 * 360_000 };
+
 /** word.edit: every op checked on the text first (WORD_MODEL_SRC), then made, each found again in the document as it
  * stands then; anything that does not hold throws, and what was changed by then is taken back by the plugin. */
 const WORD_EDIT = `function () {
   ${OWN_POINT_SRC}
+  ${PICTURE_SIZE_SRC}
   ${WORD_COLLECT_SRC}
   ${WORD_QUOTE_SRC}
   ${WORD_TOC_SRC}
@@ -791,7 +826,18 @@ const WORD_EDIT = `function () {
       } else {
         var anchor = typeof op.after === "string" ? paragraphOf(one(op.after, op.nth, i)) : null;
         var made = [];
-        if (op.table) {
+        if (op.picture !== undefined) {
+          // Inline in a paragraph of its own; its room is the text area of the page (the anchor's section, else the last).
+          var sec = null;
+          try { sec = anchor ? anchor.GetSection() : null; } catch (e) { sec = null; }
+          sec = sec || doc.GetFinalSection();
+          var room = { w: Math.max(1, (sec.GetPageWidth() - sec.GetPageMarginLeft() - sec.GetPageMarginRight()) * 635), h: Math.max(1, (sec.GetPageHeight() - sec.GetPageMarginTop() - sec.GetPageMarginBottom()) * 635) };
+          var size = pictureSize(op, room), alt = pictureAlt(op), image = Api.CreateImage(op.file.data, size.w, size.h);
+          if (alt) image.SetDescription(alt);
+          var holder = Api.CreateParagraph();
+          holder.AddDrawing(image);
+          made.push(holder);
+        } else if (op.table) {
           // DS 10.0 takes the rows first (its own check names them so); the builder API's older documentation has the
           // columns first. Made again the other way round where the table did not come out as asked.
           var cols = op.table[0].length, rows = op.table.length, table = Api.CreateTable(rows, cols);
@@ -1904,6 +1950,31 @@ function sheetLook(ws, address, room) {
 }
 `;
 
+/** The most pictures of a sheet a read lists (the rest are counted). */
+export const MAX_READ_PICTURES = 50;
+
+/**
+ * A sheet's pictures (images, not charts or shapes): where each is anchored (the cell its top left corner is in), its size
+ * in EMU and its alternative text. `pictureNow` is also what a picture's step compares to see a person changed it.
+ */
+const CELL_PICTURES_SRC = `
+function pictureNow(d) {
+  var at = d.GetPosition(), alt = d.GetDescription();
+  return { col: at.fromCol, row: at.fromRow, w: d.GetWidth(), h: d.GetHeight(), alt: alt ? String(alt) : "" };
+}
+function picturesOf(ws) {
+  var all = [], out = [];
+  try { all = ws.GetAllImages() || []; } catch (e) { all = []; }
+  for (var k = 0; k < all.length && out.length < ${MAX_READ_PICTURES}; k++) {
+    try {
+      var n = pictureNow(all[k]);
+      out.push({ a: colName(n.col) + (n.row + 1), w: n.w, h: n.h, alt: n.alt.slice(0, ${MAX_ALT_READ}) });
+    } catch (e) {}
+  }
+  return { count: all.length, items: out };
+}
+`;
+
 /** cell.read: every sheet of the workbook in order, by name and whether it is hidden (`book`, also the empty ones), and
  * each sheet (or the one asked for, named case-insensitively): the cells of its used range that hold anything, by
  * address, with the value and, where the cell has one, the formula; up to MAX_READ_CELLS cells of a sheet, and
@@ -1914,6 +1985,7 @@ const CELL_READ = `function () {
   ${CELL_LOOK_SRC}
   ${CELL_EXTRAS_SRC}
   ${CELL_READ_LOOK_SRC}
+  ${CELL_PICTURES_SRC}
   try {
     var all = Api.GetSheets(), book = all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; });
     var want = Asc.scope.args.sheet, at = want ? sheetAt(book, want) : -1, sheets = want ? [all[at]] : all;
@@ -1937,6 +2009,8 @@ const CELL_READ = `function () {
         cells.push(cell);
       }
       var read = { name: sheet.GetName(), range: address, cells: cells, truncated: truncated };
+      var pics = picturesOf(sheet);
+      if (pics.count) read.pictures = pics;
       if (Asc.scope.args.formatting) {
         read.look = room > 0 ? sheetLook(sheet, truncated ? colName(col0) + (row0 + 1) + ":" + colName(col0 + cols - 1) + (row0 + rows) : address, room) : { cut: true };
         room -= read.look.size || 0;
@@ -2076,6 +2150,8 @@ const CELL_STEP = `function () {
   ${CELL_LOOK_SRC}
   ${CELL_PARTS_SRC}
   ${CELL_EXTRAS_SRC}
+  ${CELL_PICTURES_SRC}
+  ${PICTURE_SIZE_SRC}
   var args = Asc.scope.args, op = args.op, i = args.index, pending = args.pending || [];
   try {
     var all = Api.GetSheets(), realNames = all.map(function (s) { return s.GetName(); });
@@ -2564,6 +2640,30 @@ const CELL_STEP = `function () {
       } else if (rnNow === null) { Api.AddDefName(op.restoreName, op.was); rnMade = true; } else rnKept = rnNow !== op.was;
       // A name made shows a moment after its command: the inverses after this one (the call's own make of it) wait for it.
       return { result: rnKept ? { kept: { what: "name", sheet: "", cells: [op.restoreName] } } : rnMade ? { settle: { name: true } } : {} };
+    }
+    // A picture from the agent's file, anchored at a cell. The editor's API has no delete for a sheet's drawings: the
+    // plugin takes it back with its own method (dropPicture, BRIDGE_JS), which this step only checks for.
+    if (op.picture !== undefined) {
+      var pcws = sheetOf(op), pcSize = pictureSize(op, ${JSON.stringify(SHEET_PICTURE_ROOM)}), pcBefore = {}, pcAlt = pictureAlt(op);
+      pcws.GetAllImages().forEach(function (d) { pcBefore[d.GetInternalId()] = true; });
+      pcws.AddImage(op.file.data, pcSize.w, pcSize.h, op.cell.col, 0, op.cell.row, 0);
+      var pcNew = pcws.GetAllImages().filter(function (d) { return !pcBefore[d.GetInternalId()]; })[0];
+      if (!pcNew) return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not take the picture" } };
+      try {
+        if (pcAlt) pcNew.SetDescription(pcAlt);
+      } catch (e) {
+        return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": the picture is made, but " + String(e && e.message || e) }, irreversible: { op: i, what: "picture at " + op.at, sheet: pcws.GetName(), did: "made" } };
+      }
+      return { result: { inverse: { dropPicture: pcws.GetName(), id: pcNew.GetInternalId(), at: op.at, left: pictureNow(pcNew), real: true } } };
+    }
+    if (op.dropPicture !== undefined) {
+      var dpws = named(op.dropPicture), dpFound = dpws.GetAllImages().filter(function (d) { return d.GetInternalId() === op.id; })[0];
+      if (!dpFound) return { result: { gone: true } };
+      // A picture a person moved or sized or described after the step stays as they made it. Where rows or columns moved
+      // after it for good (\`moved\`), its place moved with them and is not compared.
+      var dpNow = pictureNow(dpFound), dpWas = op.left;
+      if (dpNow.w !== dpWas.w || dpNow.h !== dpWas.h || dpNow.alt !== dpWas.alt || (!op.moved && (dpNow.col !== dpWas.col || dpNow.row !== dpWas.row))) return { result: { kept: [{ what: "picture", sheet: dpws.GetName(), cells: [op.at] }] } };
+      return { result: { id: op.id } };
     }
     if (op.chart !== undefined) {
       var chws = sheetOf(op), chRefused = refuseExtra(chws, op, i), chMany = op.area.cols * op.area.rows;
@@ -3193,6 +3293,34 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
         });
       }
     }
+    // A picture this call made taken away: its step checks it is still the one the call made (a person's change to it, or
+    // its removal, is theirs), the editor deletes it by its internal id (the plugin method RemoveOleObject, which removes
+    // any drawing of a sheet in DS 10.0, not only an OLE object: the builder's API has no delete for them), and the step
+    // then looks until it is gone. A person's editor gets the deletion like any change.
+    function dropPicture(inverse, then) {
+      function check(after) {
+        call(cell.step, { op: inverse, index: -1, pending: pending }, false, function (out) {
+          if (out.error) {
+            if (!broken) broken = String(out.error.message || out.error.code || "a picture to take back failed").replace(/^op 0: /, "");
+            return then();
+          }
+          after(out.result || {});
+        });
+      }
+      check(function (r) {
+        if (r.kept) { kept = kept.concat(r.kept); return then(); }
+        if (r.gone) return then();
+        window.Asc.plugin.executeMethod("RemoveOleObject", [r.id], function () {});
+        (function look(tries) {
+          check(function (s) {
+            if (s.gone) return then();
+            if (tries < ${SETTLE.tries}) return setTimeout(function () { look(tries + 1); }, ${SETTLE.ms});
+            if (!broken) broken = "the picture at " + inverse.at + " of " + JSON.stringify(inverse.dropPicture) + " could not be taken away";
+            then();
+          });
+        })(0);
+      });
+    }
     // The sizes of the autofits whose sizes had not changed in their command, read until each differs from that or the
     // tries are out: then what reads is what the autofit left (it changed nothing, or lands later still), for its
     // inverse to compare with. All of them in one command a try, so a call of many autofits waits once.
@@ -3243,6 +3371,13 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
         if (inverse.renameSheet !== undefined && moved[inverse.renameSheet]) moved[inverse.to] = moved[inverse.renameSheet];
         // An inverse of cells that moved since: not run (see cellEdit). A line's size moves only with lines of its kind.
         var lines = function (kind, from, count) { return kind === "rows" ? { c2: -1, r2: from + count - 1 } : { c2: from + count - 1, r2: -1 }; };
+        // A picture is taken back by its id, wherever the rows and columns have moved it to: only its place is not compared then.
+        if (inverse.dropPicture !== undefined) {
+          var again = {};
+          for (var key in inverse) again[key] = inverse[key];
+          again.moved = stale(inverse.dropPicture, areaOf(inverse.at));
+          return dropPicture(again, one);
+        }
         if (inverse.restoreCells !== undefined) {
           var still = inverse.restoreCells.filter(function (c) { if (!stale(c.sheet, areaOf(c.range))) return true; notBack.push(c.index !== undefined ? c.index : at[0]); });
           if (!still.length) return one();

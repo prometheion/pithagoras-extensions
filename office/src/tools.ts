@@ -514,8 +514,8 @@ type WordFormat = {
 type WordBlocks = { blocks: WordBlock[]; truncated?: boolean; format?: WordFormat; formatCut?: number };
 
 const pt = (twips: number) => `${+(twips / 20).toFixed(1)}pt`;
-/** English Metric Units (360,000 to the centimetre) in cm, one decimal. */
-const emuCm = (emu: number) => +(emu / 360000).toFixed(1);
+/** English Metric Units (360,000 to the centimetre) in cm, one decimal (two under 1 cm, where a picture of a pixel would read 0). */
+const emuCm = (emu: number) => +(emu / 360000).toFixed(emu < 360000 ? 2 : 1);
 const cm = (twips: number) => `${+((twips / 1440) * 2.54).toFixed(2)}cm`;
 /** A list's words in a block's brackets: "bullet", "numbered", its numbering where it is not 1, 2, 3, its label (a
  * formatting read's: "3."), its level. */

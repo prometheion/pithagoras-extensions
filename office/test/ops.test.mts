@@ -974,8 +974,8 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
   no([{ editPicture: 2, move: true, after: "a\nb" }], /after may not hold a line break/);
   no([{ editPicture: 2, at: "B2", delete: true }], /"at" is not part of this op/);
   // What a real model wrote (case p5 of the real-portal file): a sheet's `at` for a Word move; it is told the Word key.
-  no([{ editPicture: 4, move: true, to: "Closing text" }], /^op 1: "to" is not part of this op \(a Word picture moves with move: true and after: /);
-  no([{ editPicture: 4, move: true, at: "Closing text" }], /^op 1: "at" is not part of this op \(a Word picture moves with move: true and after: the text of the paragraph it goes after, or no after for the end of the document; at is for a sheet's pictures\)$/);
+  no([{ editPicture: 4, move: true, position: 5 }], /^op 1: "position" is not part of this op \(a Word picture moves with move: true and after: /);
+  no([{ editPicture: 4, width: "3cm", at: "Closing text" }], /^op 1: "at" is not part of this op$/);
   no([{ alt: "Small logo", delete: false, n: 4 }], /\(it has none of them\): delete, move, n and cell belong to an edit of a picture, which starts with editPicture, the picture's number$/);
   no([{ editPicture: 2, picture: "a.png" }], /must be exactly one of .*editPicture/);
   no([{ editPicture: 2, quote: "a", replacement: "b" }], /must be exactly one of/);
@@ -1055,11 +1055,26 @@ test("an edit of a picture as a model fills it in: keys it has no use for given 
   const sheet = (op: Record<string, unknown>) => editJob("xlsx", [op]).args.ops[0];
   assert.deepEqual(sheet({ editPicture: "B2", at: "D9", delete: false, move: false, after: null, sheet: null, n: null }), { editPicture: "B2", from: { col: 1, row: 1 }, n: 1, at: "D9", to: { col: 3, row: 8 } });
   // Not tidied away: a value that says something is checked as before.
-  refusal(() => editJob("docx", [{ editPicture: 4, move: true, at: "x" }]), /"at" is not part of this op/);
+  refusal(() => editJob("docx", [{ editPicture: 4, width: "3cm", at: "x" }]), /"at" is not part of this op/);
   refusal(() => editJob("docx", [{ editPicture: 4, delete: true, move: true }]), /\(it has delete and move\)/);
   refusal(() => editJob("docx", [{ editPicture: 4, move: true, after: "" }]), /after is the text of the paragraph/);
   refusal(() => editJob("docx", [{ editPicture: null, delete: true }]), /editPicture is the number of the paragraph or table/);
   refusal(() => editJob("xlsx", [{ editPicture: "B2", delete: false, move: false }]), /an edit of a picture does one thing/);
   // Only an edit of a picture is tidied: nothing else loses a key.
   refusal(() => editJob("docx", [{ paragraphs: ["x"], style: null }]), /"style"|style is/);
+});
+
+test("a move of a picture takes its destination from `after` (Word, a paragraph's text) or `at` (a sheet, a cell), and from the other of the two or `to` where a model wrote that; an op with a picture's keys and no first key is told which it starts with", () => {
+  const word = (op: Record<string, unknown>) => editJob("docx", [op]).args.ops[0];
+  assert.deepEqual(word({ editPicture: 4, move: true, after: "Closing text" }), { editPicture: 4, n: 1, move: true, after: "Closing text" });
+  for (const key of ["to", "at"]) assert.deepEqual(word({ editPicture: 4, move: true, [key]: "Closing text" }), { editPicture: 4, n: 1, move: true, after: "Closing text" }, key);
+  refusal(() => editJob("docx", [{ editPicture: 4, move: true, after: "A", to: "B" }]), /"to" is not part of this op/);
+  const sheet = (op: Record<string, unknown>) => editJob("xlsx", [op]).args.ops[0];
+  assert.deepEqual(sheet({ editPicture: "B2", to: "d9" }), { editPicture: "B2", from: { col: 1, row: 1 }, n: 1, at: "D9", to: { col: 3, row: 8 } });
+  // An empty destination is none: the op is refused as it was.
+  refusal(() => editJob("docx", [{ editPicture: 4, move: true, to: "" }]), /"to" is not part of this op/);
+  refusal(() => editJob("xlsx", [{ editPicture: "B2", to: "" }]), /an edit of a picture does one thing/);
+  refusal(() => editJob("xlsx", [{ at: "F6", to: "", position: 5 }]), /"at", "to", "position" is not part of a spreadsheet op .*: at, delete and n belong to a picture op, which starts with picture \(a file\) or editPicture \(one the sheet has, the cell it is anchored at, "B2"\)$/);
+  refusal(() => editJob("xlsx", [{ delete: true, to: "" }]), /belong to a picture op/);
+  refusal(() => editJob("xlsx", [{ foo: 1 }]), /"foo" is not part of a spreadsheet op \(they are [^]*\)$/);
 });

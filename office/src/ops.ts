@@ -312,7 +312,13 @@ function pictureNumber(op: Record<string, unknown>, i: number): number {
  * for every key of the tool's schema) are left out, as if it had not written them.
  */
 function tidyPictureEdit(op: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(op).filter(([key, v]) => key === "editPicture" || (v !== null && !((key === "delete" || key === "move") && v === false))));
+  const out = Object.fromEntries(Object.entries(op).filter(([key, v]) => key === "editPicture" || (v !== null && !((key === "delete" || key === "move") && v === false))));
+  // Where a picture goes is `after` (Word, a paragraph's text) or `at` (a sheet, a cell): a model that wrote the other
+  // one of the two, or `to` (the key of a sheet's new name), meant that.
+  const where = (key: string) => typeof out[key] === "string" && out[key] !== "";
+  if (typeof out.editPicture === "number" && out.move === true && out.after === undefined) for (const alias of ["to", "at"]) if (where(alias)) { out.after = out[alias]; delete out[alias]; break; }
+  if (typeof out.editPicture === "string" && out.at === undefined && where("to")) { out.at = out.to; delete out.to; }
+  return out;
 }
 
 /** The keys of an edit of a picture besides its place: those of the one thing it does. */
@@ -469,7 +475,7 @@ function cellOp(given: unknown, i: number): CellOp | SheetOp | LineOp | SortOp |
   if (lineKeys[0] === "editPicture") return sheetPictureEditOp(op, i);
   if (lineKeys.length) return lineOp(op, lineKeys[0], i);
   const extra = Object.keys(op).filter((k) => !["sheet", "range", "values"].includes(k));
-  if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of a spreadsheet op (they are ${SHEET_SHAPES})`, i);
+  if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of a spreadsheet op (they are ${SHEET_SHAPES})${["at", "delete", "n"].some((k) => extra.includes(k)) ? `: at, delete and n belong to a picture op, which starts with picture (a file) or editPicture (one the sheet has, the cell it is anchored at, "B2")` : ""}`, i);
   if ("sheet" in op && op.sheet !== undefined && (typeof op.sheet !== "string" || op.sheet === "")) throw new OpError("bad_op", `op ${n}: sheet is a sheet's name`, i);
   const range = typeof op.range === "string" ? parseRange(op.range) : null;
   if (!range) throw new OpError("bad_op", `op ${n}: range is an A1 address or range like "B2" or "A1:C3" (got ${JSON.stringify(op.range)})`, i);

@@ -944,7 +944,7 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
     { editPicture: 5, cell: " b3 ", n: 2, move: true, after: "the audit", nth: 2 },
     { editPicture: 7, move: true },
     { editPicture: 3, width: "6cm", alt: " Logo " },
-    { editPicture: 4, height: 72, alt: "" },
+    { editPicture: 4, height: 72, alt: "Pixel" },
     { editPicture: 1, alt: "Only words" },
   ]);
   assert.equal(job.kind, "word.edit");
@@ -953,7 +953,7 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
     { editPicture: 5, cell: { row: 2, col: 1, text: "B3" }, n: 2, move: true, after: "the audit", nth: 2 },
     { editPicture: 7, n: 1, move: true },
     { editPicture: 3, n: 1, width: 3402 * 635, alt: "Logo" },
-    { editPicture: 4, n: 1, height: 72 * 20 * 635, alt: "" },
+    { editPicture: 4, n: 1, height: 72 * 20 * 635, alt: "Pixel" },
     { editPicture: 1, n: 1, alt: "Only words" },
   ]);
   const no = (ops: unknown[], message: RegExp, op = 0, code = "bad_op") => refusal(() => editJob("docx", ops), message, code, op);
@@ -977,6 +977,10 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
   for (const bad of ["0cm", "51cm", "wide", 5, 20000]) no([{ editPicture: 2, width: bad }], /width is a length from 0\.2cm to 50cm/);
   no([{ editPicture: 2, alt: "a\nb" }], /alt is the picture's alternative text/);
   no([{ editPicture: 2, alt: 7 }], /alt is the picture's alternative text/);
+  // A picture put in may have none (""); one the document has cannot be given none, as the editor leaves the old text where it is given "".
+  for (const empty of ["", "   "]) no([{ editPicture: 2, alt: empty }], /^op 1: alt is the picture's new alternative text: the editor cannot take a picture's alt text away, give a text/);
+  no([{ editPicture: 2, width: "3cm", alt: "" }], /the editor cannot take a picture's alt text away/);
+  assert.doesNotThrow(() => editJob("docx", [{ picture: "a.png", alt: "" }]));
   // office_format tells it is office_edit's; the shape list names it.
   refusal(() => formatJob("docx", [{ editPicture: 2, delete: true }]), /`editPicture` is an office_edit op \(what the document says\)/);
   no([{ range: "A1", editPicture: 1 }], /is a spreadsheet edit/, 0, "unsupported_format");
@@ -1005,6 +1009,7 @@ test("office_edit (spreadsheet): an edit of a picture names it by the cell it is
   no([{ editPicture: "B5" }], /^op 1: an edit of a picture does one thing: delete: true, at: "D9" \(the cell to move it to\) or a new width, height or alt \(it has none of them\)/);
   no([{ editPicture: "B5", delete: true, at: "D9" }], /\(it has delete and at\)/);
   no([{ editPicture: "B5", at: "D9", alt: "x" }], /\(it has at and width, height or alt\)/);
+  no([{ editPicture: "B5", alt: "" }], /the editor cannot take a picture's alt text away/);
   no([{ editPicture: "B5", delete: true, after: "x" }], /"after" is not part of this op/);
   no([{ editPicture: "B5", delete: true, cell: "A1" }], /"cell" is not part of this op/);
   no([{ editPicture: "B5", width: "3cm", at: undefined, nth: 1 }], /"nth" is not part of this op/);

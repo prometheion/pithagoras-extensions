@@ -268,8 +268,10 @@ function pictureOf(op: Record<string, unknown>, i: number): PictureOp {
   return { picture: path.trim(), ...pictureLook(op, i) };
 }
 
-/** A picture's `width` and `height` (EMU; 0.2 to 50 cm each) and `alt` (one line) where the op has them, checked. */
-function pictureLook(op: Record<string, unknown>, i: number): { width?: number; height?: number; alt?: string } {
+/** A picture's `width` and `height` (EMU; 0.2 to 50 cm each) and `alt` (one line) where the op has them, checked. A
+ * picture put in may be given no alt text (""); one the document has cannot be given none: the editor's SetDescription
+ * leaves the old text where it is given "" (DS 10.0.0.1, measured, Word and sheets). */
+function pictureLook(op: Record<string, unknown>, i: number, existing = false): { width?: number; height?: number; alt?: string } {
   const bad = (message: string) => new OpError("bad_op", `op ${i + 1}: ${message}`, i);
   const size = (key: "width" | "height") => {
     if (op[key] === undefined) return {};
@@ -280,6 +282,7 @@ function pictureLook(op: Record<string, unknown>, i: number): { width?: number; 
   let alt: { alt?: string } = {};
   if (op.alt !== undefined) {
     if (typeof op.alt !== "string" || op.alt.length > MAX_ALT || !oneLine(op.alt)) throw bad(`alt is the picture's alternative text (one line, at most ${MAX_ALT} characters)`);
+    if (existing && op.alt.trim() === "") throw bad("alt is the picture's new alternative text: the editor cannot take a picture's alt text away, give a text");
     alt = { alt: op.alt.trim() };
   }
   return { ...size("width"), ...size("height"), ...alt };
@@ -324,7 +327,7 @@ function pictureEditOf(op: Record<string, unknown>, i: number, after: () => { af
   pictureEditKeys(op, i, ["editPicture", "cell", "n"], kind, ["move", "after", "nth"]);
   const place = { editPicture: block, ...(cell ? { cell } : {}), n: pictureNumber(op, i) };
   if (kind === "delete") return { ...place, delete: true };
-  if (kind === "look") return { ...place, ...pictureLook(op, i) };
+  if (kind === "look") return { ...place, ...pictureLook(op, i, true) };
   return { ...place, move: true, ...after(), ...nth() };
 }
 
@@ -339,7 +342,7 @@ function sheetPictureEditOp(op: Record<string, unknown>, i: number): SheetPictur
   pictureEditKeys(op, i, ["sheet", "editPicture", "n"], kind, ["at"]);
   const place = { ...(op.sheet !== undefined ? { sheet: op.sheet as string } : {}), editPicture: (op.editPicture as string).trim().toUpperCase().replace(/\$/g, ""), from: { col: from.col, row: from.row }, n: pictureNumber(op, i) };
   if (kind === "delete") return { ...place, delete: true };
-  if (kind === "look") return { ...place, ...pictureLook(op, i) };
+  if (kind === "look") return { ...place, ...pictureLook(op, i, true) };
   const to = typeof op.at === "string" ? parseRange(op.at) : null;
   if (!to || to.cols !== 1 || to.rows !== 1) throw bad(`at is the cell to move the picture to, as "D9" (got ${JSON.stringify(op.at)})`);
   return { ...place, at: (op.at as string).trim().toUpperCase().replace(/\$/g, ""), to: { col: to.col, row: to.row } };

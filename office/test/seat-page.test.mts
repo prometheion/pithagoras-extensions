@@ -333,7 +333,7 @@ const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = 
  * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does. `nameLag`: the
  * commands a name made takes to show (1 by default).
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poisonImage?: boolean; poisonAlt?: boolean; poisonSize?: boolean; keepImages?: boolean; poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean; nameLag?: number } = {}) {
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poisonImage?: boolean; poisonAlt?: boolean; poisonSize?: boolean; keepImages?: boolean; onlyShown?: boolean; poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean; nameLag?: number } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
   const state = { sheets, ids: 0, methods: [] as string[], commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0, names: {} as Record<string, string> };
@@ -891,7 +891,8 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
   /** The editor's plugin methods: RemoveOleObject deletes a drawing by its internal id (DS 10.0.0.1, measured), a sheet's picture too. */
   const method = (name: string, args: unknown[]) => {
     state.methods.push(name);
-    if (name === "RemoveOleObject" && !options.keepImages) for (const sh of sheets) sh.images = sh.images.filter((img) => img.id !== args[0]);
+    // (DS 10.0.0.1: the method reaches the drawings of the sheet the editor shows; for another sheet's it never answered.)
+    if (name === "RemoveOleObject" && !options.keepImages) for (const sh of sheets) if (!options.onlyShown || sh === state.active) sh.images = sh.images.filter((img) => img.id !== args[0]);
   };
   return { state, run, method, view: () => sheets.map((s) => `${s.name}${s.hidden ? " (hidden)" : ""}`) };
 }
@@ -3699,11 +3700,11 @@ test("word.edit: a picture is sized with both sides as asked or one side and the
   assert.equal(out.error, undefined, JSON.stringify(out));
   assert.deepEqual(w.outline(), [`|${emu(6)}x${emu(6)} Wide`, `|${Math.round(emu(10) / 10)}x${emu(10)} Half`]);
   assert.deepEqual(out.result.pictures.map((p: { did: string; w: number; h: number }) => [p.did, p.w, p.h]), [["changed", cm(8), cm(4)], ["changed", cm(2), cm(20)], ["changed", emu(4), Math.round(emu(4) / 2)]], "the answers say what each picture was when its op came");
-  // The alt text alone, and cleared.
+  // The alt text alone: nothing else is set.
   const a = make();
-  assert.equal(pictureEdit(a, [{ editPicture: 1, alt: "" }]).error, undefined);
-  assert.deepEqual(a.outline()[0], `|${cm(8)}x${cm(4)} `);
-  assert.deepEqual(a.log, ["describe "], "no size set");
+  assert.equal(pictureEdit(a, [{ editPicture: 1, alt: "Only words" }]).error, undefined);
+  assert.deepEqual(a.outline()[0], `|${cm(8)}x${cm(4)} Only words`);
+  assert.deepEqual(a.log, ["describe Only words"], "no size set");
   // 50 cm: the side worked out from the other past it is refused, with the sides it would give; an earlier op's change is taken back by the plugin (touched).
   const big = make();
   const tall = pictureEdit(big, [{ editPicture: 1, alt: "First" }, { editPicture: 2, width: "30cm" }]);
@@ -3778,7 +3779,7 @@ test("a spreadsheet picture that is not there is refused at its op with where th
 test("a spreadsheet picture moved, sized and described is put back exactly (its place with the offsets it had, its size, its alt text) when a later op fails, in reverse order when the same picture is changed twice", async () => {
   const book = pictureBook([{ col: 1, row: 4, co: 12_345, ro: 6_789, w: 2_000_000, h: 1_000_000, alt: "Logo" }], { poison: "Z9" });
   const before = imagesOf(book);
-  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "New" }, { editPicture: "B5", at: "F20" }, { editPicture: "F20", alt: "" }, { range: "Z9", values: [[1]] }]));
+  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "New" }, { editPicture: "B5", at: "F20" }, { editPicture: "F20", alt: "Again" }, { range: "Z9", values: [[1]] }]));
   assert.equal(out.error?.code, "failed", JSON.stringify(out));
   assert.equal(out.undone, true);
   assert.deepEqual(imagesOf(book), before, "as it was, offsets and all");
@@ -3850,4 +3851,27 @@ test("cell.read numbers the pictures anchored at one cell (k, in the order the e
   const book = pictureBook([{ col: 1, row: 4, w: 360_000, h: 360_000, alt: "A" }, { col: 3, row: 2, w: 360_000, h: 360_000, alt: "B" }, { col: 1, row: 4, w: 720_000, h: 360_000, alt: "C" }]);
   const read = book.run(COMMANDS["cell.read"].source, {}) as { result: { sheets: { pictures: { count: number; items: { a: string; k?: number; alt: string }[] } }[] } };
   assert.deepEqual(read.result.sheets[0].pictures.items.map((p) => [p.a, p.k, p.alt]), [["B5", 1, "A"], ["D3", undefined, "B"], ["B5", 2, "C"]]);
+});
+
+test("a spreadsheet picture that had no alt text is given one for good: the editor's SetDescription leaves the old text where it is given \"\", so a later failure puts back its size and place and names the alt text as staying", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "" }], { poison: "Z9" });
+  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "Fresh" }, { range: "Z9", values: [[1]] }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the alt text of "Sheet1"!B5 \(op 1\), which stay as this call set them\./);
+  assert.deepEqual(imagesOf(book), [[1, 4, 0, 0, 2_000_000, 1_000_000, "Fresh"]]);
+});
+
+test("a picture of a sheet the editor is not showing is deleted with that sheet made the active one for it, and the sheet that was active is shown again", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 1_000_000, h: 500_000, alt: "Here" }], { onlyShown: true }, ["Sheet1", "More"]);
+  book.state.sheets[1].images.push({ id: "1_900", col: 1, row: 1, w: 720_000, h: 360_000, alt: "There", src: "" });
+  assert.equal(book.state.active.name, "Sheet1");
+  const out = await plugin(book, sheetEdit([{ sheet: "more", editPicture: "B2", delete: true }]));
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(book.state.sheets[1].images, []);
+  assert.deepEqual(book.state.sheets[0].images.map((i) => i.alt), ["Here"], "the other sheet's picture is not touched");
+  assert.equal(book.state.active.name, "Sheet1", "the sheet that was shown is shown again");
+  // On the sheet already shown nothing is switched.
+  const same = await plugin(book, sheetEdit([{ editPicture: "B5", delete: true }]));
+  assert.equal(same.error, undefined, JSON.stringify(same));
+  assert.deepEqual(book.state.sheets[0].images, []);
 });

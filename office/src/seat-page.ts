@@ -795,7 +795,11 @@ function pictureAlt(op) { return op.alt !== undefined ? op.alt : op.file.name; }
  * the paragraph then removes (one history point: the plugin's Undo takes both back); `SetSize(w, h)` (EMU) sizes it;
  * `Copy()` makes a drawing of the same media (the saved file keeps one media file, as it was: `ToJSON` and `FromJSON`
  * would make a PNG of it) that has lost its description, title and wrapping; `SetWrappingStyle("inline")` sets it
- * inline.
+ * inline. A picture of a paragraph that was deleted still answers that paragraph (and the document's `GetAllImages` no
+ * longer lists it), so whether it is still there is looked for by its paragraph's id among the body's paragraphs.
+ * `SetDescription("")` and `SetDescription(null)` leave the old description (Word and sheets): a description can be
+ * changed, not taken away. The editor's Undo takes back a whole command of these (one history point), a deleted
+ * picture and its paragraph, a copy made and the original deleted, a size.
  */
 const WORD_PICTURE_EDIT_SRC = `
 function blockAt(content, want, at) {
@@ -2844,7 +2848,9 @@ const CELL_STEP = `function () {
         return { error: { code: "failed", op: i, message: "op " + (i + 1) + ": " + String(e && e.message || e) } };
       }
       var epLeft = pictureNow(epPic);
-      return { result: { inverse: { restorePicture: epName, id: epPic.GetInternalId(), at: op.editPicture, nowAt: colName(epLeft.col) + (epLeft.row + 1), before: epBefore, left: epLeft, real: true }, picture: epNote(op.at !== undefined ? "moved" : "changed") } };
+      // (The editor's SetDescription leaves the old text where it is given "": a picture that had none cannot be given none again.)
+      var epLost = op.alt !== undefined && epBefore.alt === "" ? [{ op: i, what: ["alt text"], where: where(epws, op.editPicture) }] : undefined;
+      return { result: { inverse: { restorePicture: epName, id: epPic.GetInternalId(), at: op.editPicture, nowAt: colName(epLeft.col) + (epLeft.row + 1), before: epBefore, left: epLeft, real: true }, picture: epNote(op.at !== undefined ? "moved" : "changed"), unreadable: epLost } };
     }
     if (op.restorePicture !== undefined) {
       var rpws = named(op.restorePicture), rpPic = rpws.GetAllImages().filter(function (d) { return d.GetInternalId() === op.id; })[0];
@@ -2854,8 +2860,15 @@ const CELL_STEP = `function () {
       if (["col", "row", "co", "ro", "w", "h", "alt"].some(function (k) { return rpNow[k] !== rpLeft[k]; })) return { result: { kept: [{ what: "picture", sheet: rpws.GetName(), cells: [op.at] }] } };
       if (rpNow.w !== rpWas.w || rpNow.h !== rpWas.h) rpPic.SetSize(rpWas.w, rpWas.h);
       if (rpNow.col !== rpWas.col || rpNow.row !== rpWas.row || rpNow.co !== rpWas.co || rpNow.ro !== rpWas.ro) rpPic.SetPosition(rpWas.col, rpWas.co, rpWas.row, rpWas.ro);
-      if (rpNow.alt !== rpWas.alt) rpPic.SetDescription(rpWas.alt);
+      if (rpNow.alt !== rpWas.alt && rpWas.alt !== "") rpPic.SetDescription(rpWas.alt);
       return { result: {} };
+    }
+    // A sheet made the editor's active one, the name of the one that was answered: RemoveOleObject reaches a drawing of the
+    // sheet the editor shows only (on a sheet of a file the editor opened and never showed it never answered, DS 10.0.0.1).
+    if (op.activate !== undefined) {
+      var acws = named(op.activate), acWas = Api.GetActiveSheet();
+      if (acWas && acWas.GetName() !== acws.GetName()) acws.SetActive();
+      return { result: { was: acWas ? acWas.GetName() : "" } };
     }
     // Whether a picture (by its internal id) is gone from its sheet: what the plugin looks for after it deleted one.
     if (op.lookPicture !== undefined) {
@@ -3505,14 +3518,22 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
     // A picture the agent's op deletes: the editor deletes it by its internal id (the plugin method RemoveOleObject, see
     // dropPicture), and the step then looks until it is gone. Calls \`then\` with an error to fail the op with, or null.
     function removePicture(info, i, then) {
-      window.Asc.plugin.executeMethod("RemoveOleObject", [info.id], function () {});
-      (function look(tries) {
-        call(cell.step, { op: { lookPicture: info.sheet, id: info.id, real: true }, index: i, pending: pending }, false, function (s) {
-          if (s.result && s.result.gone) return then(null);
-          if (tries < ${SETTLE.tries}) return setTimeout(function () { look(tries + 1); }, ${SETTLE.ms});
-          then({ code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not delete the picture " + info.at + " of " + JSON.stringify(info.sheet) + " within " + (${SETTLE.tries * SETTLE.ms} / 1000) + " s: a person may be working in that sheet; try again later" });
-        });
-      })(0);
+      // On the sheet the editor shows, and the sheet it showed before shown again after.
+      call(cell.step, { op: { activate: info.sheet, real: true }, index: i, pending: pending }, true, function (shown) {
+        var was = shown.result && shown.result.was;
+        var end = function (error) {
+          if (!was) return then(error);
+          call(cell.step, { op: { activate: was, real: true }, index: i, pending: pending }, true, function () { then(error); });
+        };
+        window.Asc.plugin.executeMethod("RemoveOleObject", [info.id], function () {});
+        (function look(tries) {
+          call(cell.step, { op: { lookPicture: info.sheet, id: info.id, real: true }, index: i, pending: pending }, false, function (s) {
+            if (s.result && s.result.gone) return end(null);
+            if (tries < ${SETTLE.tries}) return setTimeout(function () { look(tries + 1); }, ${SETTLE.ms});
+            end({ code: "failed", op: i, message: "op " + (i + 1) + ": the editor did not delete the picture " + info.at + " of " + JSON.stringify(info.sheet) + " within " + (${SETTLE.tries * SETTLE.ms} / 1000) + " s: a person may be working in that sheet; try again later" });
+          });
+        })(0);
+      });
     }
     // A picture this call made taken away: its step checks it is still the one the call made (a person's change to it, or
     // its removal, is theirs), the editor deletes it by its internal id (the plugin method RemoveOleObject, which removes

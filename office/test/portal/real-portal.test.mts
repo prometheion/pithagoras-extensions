@@ -7,6 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
+import zlib from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -53,6 +54,11 @@ import { PI_TOOLS, portalEnv, realModelMay, realModelProxy } from "./real-model.
  * formats, validation and links, then a chart, a filter and a formatted table, seen live in a person's editor, in
  * office_read with formatting, in office_screenshot's pictures and in the saved file's parts; two calls failing at their
  * last revertible op leave the workbook as it was.
+ *
+ * Case s is pictures from a chat (#13 PR 5): a PNG, a JPEG and a GIF from the agent's home into a Word document and a
+ * spreadsheet it made, seen live in a person's editor, in office_read, in office_screenshot's pictures and in the save
+ * (the files as they are); paths out of its folder, addresses and files that are no pictures refused; a sheet call
+ * that fails deletes its pictures again.
  *
  * Case n is office_screenshot from a chat: a model that says it takes pictures (scripted-eye) gets a Word page and a
  * sheet range of its agent's documents, each one JPEG within the caps (the very bytes pi gave the model, which the
@@ -1930,6 +1936,164 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     return calls;
   }
 
+  /** The agent's files for case s and p4: a red PNG (made here), a green JPEG and a blue GIF in its home's `pics`, and a
+   * file there that is no picture. */
+  const homePictures = () => {
+    const homeDir = realpathSync(env.AGENT_HOME);
+    mkdirSync(path.join(homeDir, "pics"), { recursive: true });
+    const chunk = (type: string, body: Buffer) => {
+      const head = Buffer.alloc(8);
+      head.writeUInt32BE(body.length, 0);
+      head.write(type, 4, "latin1");
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(zlib.crc32(body, zlib.crc32(Buffer.from(type, "latin1"))) >>> 0);
+      return Buffer.concat([head, body, crc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(200, 0);
+    ihdr.writeUInt32BE(100, 4);
+    ihdr.set([8, 2, 0, 0, 0], 8);
+    const raw = Buffer.alloc((200 * 3 + 1) * 100);
+    for (let y = 0; y < 100; y++) for (let x = 0; x < 200; x++) raw[y * 601 + 1 + x * 3] = 255;
+    const redPng = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+    const greenJpeg = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAyAGQDAREAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAj/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCSJySYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//2Q==", "base64");
+    const blueGif = Buffer.from("R0lGODlhPAAeAPAAAAAA/wAAACH5BAAAAAAALAAAAAA8AB4AAAIqhI+py+0Po5y02ouz3rz7D4biSJbmiabqyrbuC8fyTNf2jef6zvf+LyoAADs=", "base64");
+    writeFileSync(path.join(homeDir, "pics", "red.png"), redPng);
+    writeFileSync(path.join(homeDir, "pics", "green.jpg"), greenJpeg);
+    writeFileSync(path.join(homeDir, "pics", "blue.gif"), blueGif);
+    writeFileSync(path.join(homeDir, "pics", "notes.png"), "this is text, not a picture");
+    return { redPng, greenJpeg, blueGif };
+  };
+
+  /**
+   * s: pictures from a chat (#13 PR 5). A scripted model that takes pictures puts a PNG, a JPEG and a GIF from the
+   * agent's home into a Word document and a spreadsheet it made, seen live in a person's editor, in office_read, in
+   * office_screenshot's pictures and in the saved file's media (the files as they are); paths that leave the agent's
+   * folder, addresses, missing files and files that are no pictures are refused with the op's number, and a call
+   * failing at its last op takes its pictures back in a sheet.
+   */
+  test("s: pictures from a chat: a PNG, a JPEG and a GIF from the agent's home into a Word document and a spreadsheet, seen in a person's editor, in office_read, in the picture and in the save; paths out of its folder, addresses and files that are no pictures are refused; a call that fails deletes a sheet's pictures again", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    const unwrap = (r: string) => r.replace(/^<<<untrusted:([0-9a-f]+)>>>[^\n]*\n([\s\S]*)\n<<<\/untrusted:\1>>>$/, "$2");
+    const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]) => (await ran(chatId, calls)).results.map(unwrap);
+    const { redPng, greenJpeg, blueGif } = homePictures();
+    const coloursOf = async (bytes: Buffer) => {
+      const probe = await browser.newPage();
+      try {
+        return (await probe.evaluate(`(async function () {
+          var img = new Image();
+          img.src = "data:image/jpeg;base64," + ${JSON.stringify(bytes.toString("base64"))};
+          await img.decode();
+          var c = document.createElement("canvas");
+          c.width = img.width; c.height = img.height;
+          var g = c.getContext("2d");
+          g.drawImage(img, 0, 0);
+          var d = g.getImageData(0, 0, c.width, c.height).data, out = { red: 0, green: 0, blue: 0 };
+          for (var k = 0; k < d.length; k += 4) {
+            if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
+            else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
+            else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
+          }
+          return out;
+        })()`)) as { red: number; green: number; blue: number };
+      } finally {
+        await probe.close();
+      }
+    };
+    const inEditor = (frame: Frame) =>
+      frame.evaluate(`(function () {
+        var out = { red: 0, green: 0, blue: 0 };
+        Array.prototype.forEach.call(document.querySelectorAll("canvas"), function (c) {
+          if (!c.width || !c.height) return;
+          var d;
+          try { d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; } catch (e) { return; }
+          for (var k = 0; k < d.length; k += 4) {
+            if (d[k + 3] < 200) continue;
+            if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
+            else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
+            else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
+          }
+        });
+        return out;
+      })()`) as Promise<{ red: number; green: number; blue: number }>;
+    const media = async (docId: string, folder: string) => {
+      const zip = await JSZip.loadAsync(readFileSync(await fileOf(docId)));
+      return Promise.all(zip.file(new RegExp(`^${folder}/media/`)).map((f) => f.async("nodebuffer")));
+    };
+
+    // A Word document: two pictures after its paragraphs, one at the end.
+    const [created] = await say(eye, [{ name: "office_create", arguments: { title: "Pictured from a chat", type: "word" } }]);
+    console.log(`s. ${created}`);
+    const word = (await state()).docs.find((d) => d.title === "Pictured from a chat")!.docId;
+    const person = await personOpens(word, "word");
+    await say(eye, [{ name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Logo below" }, { paragraphs: ["Chart below"] }] } }]);
+    const t0 = Date.now();
+    const [put] = await say(eye, [
+      { name: "office_edit", arguments: { id: word, ops: [{ after: "Logo below", picture: "pics/red.png", width: "5cm", alt: "Our logo" }, { after: "Chart below", picture: "pics/green.jpg" }, { picture: "pics/blue.gif", alt: "" }] } },
+    ]);
+    console.log(`s. office_edit (${Date.now() - t0} ms): ${put}`);
+    assert.match(put, /^Edited "Pictured from a chat" \(3 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\./);
+    const [read] = await say(eye, [{ name: "office_read", arguments: { id: word } }]);
+    console.log(`s. office_read:\n${read.split("\n").slice(3).join("\n")}`);
+    assert.match(read, /\[1\] Logo below\n\[2\] \n    a picture 5 × 2\.5 cm, alt text "Our logo"\n\[3\] Chart below\n\[4\] \n    a picture 2\.6 × 1\.3 cm, alt text "green\.jpg"\n\[5\] \n    a picture 1\.6 × 0\.8 cm$/);
+    assert.ok(await until(async () => { const c = await inEditor(person.frame); return c.red > 300 && c.green > 100 && c.blue > 30; }, 15_000, 500), `the person's editor draws the three: ${JSON.stringify(await inEditor(person.frame))}`);
+    const wordShot = await ran(eye, [{ name: "office_screenshot", arguments: { id: word } }]);
+    const wordColours = await coloursOf(pictureOf(wordShot, 0, "s-word").bytes);
+    console.log(`s. the page: ${JSON.stringify(wordColours)}`);
+    assert.ok(wordColours.red > 200 && wordColours.green > 80 && wordColours.blue > 30, `the picture of the page shows them: ${JSON.stringify(wordColours)}`);
+    const wordMedia = await media(word, "word");
+    assert.ok([redPng, greenJpeg, blueGif].every((f) => wordMedia.some((m) => m.equals(f))), "the files in the save are the files");
+
+    // What is refused, with the op's number, and changes nothing.
+    const refuse = async (picture: string, pattern: RegExp, ops: Record<string, unknown>[] = [{ picture }]) => {
+      const [said] = await say(eye, [{ name: "office_edit", arguments: { id: word, ops } }]);
+      assert.match(said, pattern, picture);
+      return said;
+    };
+    await refuse("../outside.png", /^error:bad_op op 1: the picture "\.\.\/outside\.png" is not in your own folder/);
+    await refuse("/etc/hostname", /^error:bad_op op 1: the picture "\/etc\/hostname" is not in your own folder/);
+    await refuse("https://example.com/a.png", /^error:bad_op op 1: picture is a file in your own folder .*never an address/);
+    await refuse("pics/missing.png", /^error:not_found op 1: the picture "pics\/missing\.png" is not a file there/);
+    await refuse("pics", /^error:bad_op op 1: the picture "pics" is a folder|^error:not_found op 1: the picture "pics" is not a file your agent can read/);
+    await refuse("pics/notes.png", /^error:bad_op op 1: the picture "pics\/notes\.png" cannot be used: it is not a PNG, JPEG or GIF/);
+    const [still] = await say(eye, [{ name: "office_read", arguments: { id: word } }]);
+    assert.equal(still, read, "none of them changed the document");
+
+    // A spreadsheet: the same files at their cells; then a call that fails at its last op.
+    const [madeSheet] = await say(eye, [{ name: "office_create", arguments: { title: "Pictured sheet from a chat", type: "cell" } }]);
+    console.log(`s. ${madeSheet}`);
+    const sheet = (await state()).docs.find((d) => d.title === "Pictured sheet from a chat")!.docId;
+    const grid = await personOpens(sheet, "cell");
+    await say(eye, [{ name: "office_edit", arguments: { id: sheet, ops: [{ range: "A1:B2", values: [["a", "b"], [1, 2]] }] } }]);
+    const t1 = Date.now();
+    const [cells] = await say(eye, [
+      { name: "office_edit", arguments: { id: sheet, ops: [{ picture: "pics/red.png", at: "B4", width: "4cm", alt: "Red box" }, { picture: "pics/green.jpg", at: "F4" }, { picture: "pics/blue.gif", at: "B12", alt: "" }] } },
+    ]);
+    console.log(`s. office_edit (${Date.now() - t1} ms): ${cells}`);
+    assert.match(cells, /^Edited "Pictured sheet from a chat" \(3 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\./);
+    const [sheetRead] = await say(eye, [{ name: "office_read", arguments: { id: sheet } }]);
+    console.log(`s. office_read:\n${sheetRead.split("\n").slice(3).join("\n")}`);
+    assert.match(sheetRead, /\nPictures: B4 4 × 2 cm "Red box"; F4 2\.6 × 1\.3 cm "green\.jpg"; B12 1\.6 × 0\.8 cm\.$/);
+    assert.ok(await until(async () => { const c = await inEditor(grid.frame); return c.red > 300 && c.green > 100 && c.blue > 30; }, 15_000, 500), `the person's editor draws the three: ${JSON.stringify(await inEditor(grid.frame))}`);
+    const cellShot = await ran(eye, [{ name: "office_screenshot", arguments: { id: sheet, range: "A1:L16" } }]);
+    const cellColours = await coloursOf(pictureOf(cellShot, 0, "s-range").bytes);
+    console.log(`s. the range: ${JSON.stringify(cellColours)}`);
+    assert.ok(cellColours.red > 200 && cellColours.green > 80 && cellColours.blue > 30, `the picture of the range shows them: ${JSON.stringify(cellColours)}`);
+    const sheetMedia = await media(sheet, "xl");
+    assert.ok([redPng, greenJpeg, blueGif].every((f) => sheetMedia.some((m) => m.equals(f))), "the files in the save are the files");
+    const before = await inEditor(grid.frame);
+    const [failed] = await say(eye, [
+      { name: "office_edit", arguments: { id: sheet, ops: [{ picture: "pics/red.png", at: "B20" }, { picture: "pics/green.jpg", at: "F20" }, { name: "NoSuchName", delete: true }] } },
+    ]);
+    console.log(`s. a failing call: ${failed}`);
+    assert.match(failed, /^error:not_found op 3: there is no name "NoSuchName"/);
+    const [after] = await say(eye, [{ name: "office_read", arguments: { id: sheet } }]);
+    assert.equal(after, sheetRead, "the sheet's pictures are as before");
+    assert.ok(await until(async () => JSON.stringify(await inEditor(grid.frame)) === JSON.stringify(before), 10_000, 500), "and the person's editor's");
+    await personCloses(person.page);
+    await personCloses(grid.page);
+  });
+
   test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
     const task = [
       'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
@@ -2010,6 +2174,31 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const first = /<c r="A2"[^>]*><v>(\d+)<\/v>/.exec(sheet)?.[1];
     const firstText = first === undefined ? "?" : [...strings.matchAll(/<si>[\s\S]*?<\/si>/g)].map((m) => m[0].replace(/<[^>]+>/g, ""))[Number(first)];
     console.log(`p3. the saved sheet: first item ${firstText}, cell rule ${/cfRule[^>]*type="cellIs"/.test(sheet)} (fill ${/FFC7CE/i.test(sheet)}), list ${/type="list"/.test(sheet)}, whole ${/type="whole"/.test(sheet)}, link ${/<hyperlink /.test(sheet)}, name ${/definedName name="Quantities"/.test(book)}, chart ${names.some((n) => /charts\/chart\d+\.xml$/.test(n))}, filter ${/<autoFilter /.test(sheet)}`);
+  });
+
+  /**
+   * p4: the same real model puts pictures from its home into a Word document and a spreadsheet (#13 PR 5): the logo into a
+   * report after its title, a product photo into a sheet at a cell, each with alt text. Counted as p is.
+   */
+  test("p4: a real model puts pictures from its home into a Word document and a spreadsheet through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
+    homePictures();
+    const task = [
+      "The files pics/red.png (the company logo) and pics/green.jpg (a product photo) are in your home folder. Without asking me anything:",
+      '1. Make a Word document titled "Brand report" with office_create. Its first paragraph is the title "Brand report"; put the logo right after it, 6 cm wide, with the alt text "Company logo". Then a paragraph "Our logo is shown above." after the logo.',
+      '2. Make a spreadsheet titled "Product photos" with the headers Product and Photo in A1:B1 and the product "Widget" in A2. Put the product photo in cell B2, 4 cm wide, with the alt text "Widget photo".',
+      "Then read both documents and check the pictures are where they should be. Answer with one line when done.",
+    ].join("\n");
+    const calls = await realRun("p4", task);
+    const word = (await state()).docs.find((d) => d.title === "Brand report" && d.ext === "docx");
+    const sheet = (await state()).docs.find((d) => d.title === "Product photos" && d.ext === "xlsx");
+    assert.ok(word && sheet, "the model made both documents");
+    const wordXml = await partOf(word!.docId, "word/document.xml");
+    const sheetZip = await JSZip.loadAsync(readFileSync(await fileOf(sheet!.docId)));
+    const drawing = (await sheetZip.file(/^xl\/drawings\/drawing\d+\.xml$/)[0]?.async("string")) ?? "";
+    console.log(`p4. the saved report: ${(wordXml.match(/<wp:inline /g) ?? []).length} picture(s), alt "${/descr="([^"]*)"/.exec(wordXml)?.[1] ?? ""}", width ${/<wp:extent cx="(\d+)"/.exec(wordXml)?.[1] ?? "?"} EMU; the saved sheet: ${(drawing.match(/<xdr:pic>/g) ?? []).length} picture(s), alt "${/descr="([^"]*)"/.exec(drawing)?.[1] ?? ""}", anchored at column ${/<xdr:from><xdr:col>(\d+)<\/xdr:col>/.exec(drawing)?.[1] ?? "?"} row ${/<xdr:row>(\d+)<\/xdr:row>/.exec(drawing)?.[1] ?? "?"}; calls ${calls.map((c) => c.name).join(", ")}`);
+    assert.ok(calls.some((c) => c.name === "office_edit" && /picture/.test(c.args)), "and used a picture op");
+    assert.equal((wordXml.match(/<wp:inline /g) ?? []).length, 1);
+    assert.equal((drawing.match(/<xdr:pic>/g) ?? []).length, 1);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

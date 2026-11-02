@@ -83,3 +83,12 @@ test("the sheet extras are named in the tools' texts: office_format's conditiona
   for (const word of ["sort:", "by:", "name:", "refersTo:", "{name, delete: true}"]) assert.ok(edit.includes(word), `office_edit names ${word}`);
   assert.match(all.find((t) => t.name === "office_read")!.description, /conditional formats, validation, links, filter, charts/);
 });
+
+test("the picture op is named in office_edit's text for Word and for sheets, with its limits and its default alt text; the schema has its keys", () => {
+  const edit = tools().find((t) => t.name === "office_edit")!;
+  assert.match(edit.description, /\{after\?, picture, width\?, height\?, alt\?\} adds a picture in a paragraph of its own \(a PNG, JPEG or GIF file below your folder, never an address: 5 MB, 20 a call\)/);
+  assert.match(edit.description, /alt text the file's name unless given/);
+  assert.match(edit.description, /\{sheet\?, picture, at: "B2", width\?, height\?, alt\?\} puts a picture at a cell/);
+  const keys = Object.keys(((edit.parameters as { properties: { ops: { items: { properties: Record<string, unknown> } } } }).properties.ops.items.properties));
+  for (const key of ["picture", "at", "width", "height", "alt"]) assert.ok(keys.includes(key), key);
+});

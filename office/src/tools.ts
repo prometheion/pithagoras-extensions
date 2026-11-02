@@ -578,13 +578,13 @@ function cellLookLines(cells: CellLook[]): string[] {
  * What a Word page's picture says of the document's pictures where one may be missing from it: still loading after
  * the wait, not loadable, or not known (the editor's image loader not found). Nothing where all of them are drawn.
  */
-function picturesNote(p: ShotPictures | undefined): string {
+function picturesNote(p: ShotPictures | undefined, where = "page"): string {
   if (p === undefined) return "";
   if (p === null) return " Whether the document's pictures had all loaded could not be checked: one may be missing from the picture.";
   const n = (k: number) => `${k} of the document's pictures`;
   return (
-    (p.loading ? ` ${n(p.loading)} ${p.loading === 1 ? "was" : "were"} still loading after a wait of up to ${PICTURES_MS / 1000} s, so ${p.loading === 1 ? "it is" : "they are"} missing from the picture if on this page: take it again in a moment.` : "") +
-    (p.failed ? ` ${n(p.failed)} could not be loaded by the editor, so ${p.failed === 1 ? "it is" : "they are"} missing from the picture if on this page.` : "")
+    (p.loading ? ` ${n(p.loading)} ${p.loading === 1 ? "was" : "were"} still loading after a wait of up to ${PICTURES_MS / 1000} s, so ${p.loading === 1 ? "it is" : "they are"} missing from the picture if on this ${where}: take it again in a moment.` : "") +
+    (p.failed ? ` ${n(p.failed)} could not be loaded by the editor, so ${p.failed === 1 ? "it is" : "they are"} missing from the picture if on this ${where}.` : "")
   );
 }
 
@@ -1193,8 +1193,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const cut = located.cut === true ? ` The sheet's used range is ${located.used}: this is the part that fits from A1; take the rest with range.` : "";
         const hidden = located.hidden === true ? " Its hidden rows and columns are not in the picture, and their cells are not listed." : "";
         const more = located.truncated === true ? `\n(not all of the cells it shows are listed: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives them)` : "";
-        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${cut}${hidden} Its cells:\n\n${cellLines(cells) || "(empty)"}${more}`;
-        shown = { sheet: located.sheet, range: located.range, zoom };
+        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${picturesNote(image.pictures, "range")}${cut}${hidden} Its cells:\n\n${cellLines(cells) || "(empty)"}${more}`;
+        shown = { sheet: located.sheet, range: located.range, zoom, ...(image.pictures === null ? { pictures: "unknown" } : image.pictures?.loading || image.pictures?.failed ? { picturesLoading: image.pictures.loading, picturesFailed: image.pictures.failed } : {}) };
       }
       return {
         content: [

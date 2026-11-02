@@ -1741,3 +1741,26 @@ test("office_read shows a Word picture on its own line under its paragraph, with
   s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 0, items: [] } }] });
   assert.doesNotMatch(((await tool(s, "office_read").execute("r3", { id: sheet.docId })) as ToolResult).content[0].text, /Pictures/);
 });
+
+test("office_screenshot: a sheet's range taken with its pictures still loading, not loadable or not known says so in its first line as a Word page does (this range for this page); all drawn says nothing", async () => {
+  const s = setup();
+  const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
+  const t = tool(s, "office_screenshot");
+  const take = async (pictures: unknown) => {
+    s.seat.shot = () => ({ located: { sheet: "Sheet1", range: "A1:B2", used: "A1:B2", cut: false, zoom: 1, cells: [{ a: "A1", v: "Item" }], view: { kind: "cell" } }, image: { data: "/9j/4AAQ", width: 218, height: 114, zoom: 1, ...(pictures === undefined ? {} : { pictures }) } });
+    return (await t.execute("c", { id: sheet.docId })) as { content: any[]; details: any };
+  };
+  const head = 'Sheet "Sheet1" A1:B2 at 100 %, as your editor shows it now.';
+  let out = await take({ loading: 0, failed: 0 });
+  assert.equal(out.content[0].text, `${head} Its cells:\n\nA1: "Item"`);
+  assert.deepEqual(out.details, { action: "screenshot", id: sheet.docId, sheet: "Sheet1", range: "A1:B2", zoom: 100, width: 218, height: 114, bytes: 6 });
+  out = await take({ loading: 1, failed: 0 });
+  assert.equal(out.content[0].text, `${head} 1 of the document's pictures was still loading after a wait of up to 6 s, so it is missing from the picture if on this range: take it again in a moment. Its cells:\n\nA1: "Item"`);
+  assert.deepEqual([out.details.picturesLoading, out.details.picturesFailed], [1, 0]);
+  out = await take({ loading: 0, failed: 2 });
+  assert.match(out.content[0].text, /now\. 2 of the document's pictures could not be loaded by the editor, so they are missing from the picture if on this range\. Its cells:/);
+  out = await take(null);
+  assert.match(out.content[0].text, /now\. Whether the document's pictures had all loaded could not be checked: one may be missing from the picture\. Its cells:/);
+  assert.equal(out.details.pictures, "unknown");
+  assert.equal((await take(undefined)).content[0].text, `${head} Its cells:\n\nA1: "Item"`, "a seat that says nothing of them says nothing");
+});

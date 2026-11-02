@@ -1737,7 +1737,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     const person = await personOpens(doc);
     const shown = await personCells(person.frame, ["A3", "C4", "B3"]);
     const ops = [
-      { format: "A1", set: { font: "Arial", fontSize: 16, bold: true, color: "#1F4E79" } },
+      { format: "A1", set: { font: "Georgia", fontSize: 16, bold: true, color: "#1F4E79" } },
       { format: "A3:D3", set: { bold: true, fill: "#1F4E79", color: "#FFFFFF", align: "center", valign: "center", borders: "all" } },
       { format: "C4:D7", set: { numberFormat: "#,##0.00" } },
       { format: "A7:D7", set: { bold: true, borders: { top: "double #000000" } } },
@@ -1763,9 +1763,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     const read = await readSheet(doc);
     console.log(`28. office_read with formatting:\n${read}`);
     for (const want of [
-      /\nFormatting: font Calibri 11 where no other is said; alignment, borders and tables are not read \(office_screenshot shows them\)\.\n/,
+      /\nFormatting: font Arial 11 where no other is said; alignment, borders and tables are not read \(office_screenshot shows them\)\.\n/,
       // A merge gives the merged cells the top-left one's formats.
-      /A1:D1 Arial 16, bold, #1F4E79/,
+      /A1:D1 Georgia 16, bold, #1F4E79/,
       /A3, C3:D3 bold, #FFFFFF, fill #1F4E79/,
       /B3 bold, #FFFFFF, fill #1F4E79, rotated 45°/,
       /"#,##0\.00"/,
@@ -1837,7 +1837,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     await tools.office_edit.execute("m-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
     const cells = ["A1", "B1", "C1", "A2", "B2", "C2", "A5", "A6"];
     const cases: { name: string; tool: "office_format" | "office_edit"; ops: unknown[]; partial?: RegExp }[] = [
-      { name: "readable keys", tool: "office_format", ops: [{ format: "A1:C2", set: { numberFormat: "0.00", font: "Arial", fontSize: 14, bold: true, italic: false, underline: true, strike: true, color: "#FF0000", fill: "#00FF00", wrap: true, rotation: 30 } }] },
+      { name: "readable keys", tool: "office_format", ops: [{ format: "A1:C2", set: { numberFormat: "0.00", font: "Georgia", fontSize: 14, bold: true, italic: false, underline: true, strike: true, color: "#FF0000", fill: "#00FF00", wrap: true, rotation: 30 } }] },
       { name: "superscript", tool: "office_format", ops: [{ format: "A5", set: { superscript: true } }] },
       { name: "merge", tool: "office_format", ops: [{ format: "A1:B2", set: { merge: true } }], partial: /The editor cannot read back the alignment and borders of "Sheet1"!A1:B2 \(op 1\), which stay as this call set them\.$/ },
       { name: "split", tool: "office_format", ops: [{ format: "A6:B6", set: { merge: false } }] },
@@ -1897,7 +1897,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`29. saved columns ${/<cols>[\s\S]*?<\/cols>/.exec(saved.sheet)?.[0] ?? "(none)"}; rows ${[...saved.sheet.matchAll(/<row [^>]*>/g)].map((m) => m[0]).join(" ")}`);
     assert.equal(saved.cell("C2").fill, "none");
     assert.equal(saved.cell("C2").numFmt, "General");
-    assert.doesNotMatch(saved.cell("A2").font, /<b\/>|Arial/);
+    assert.doesNotMatch(saved.cell("A2").font, /<b\/>|Georgia/);
     assert.match(saved.cell("B2").alignment, /horizontal="right"/, "the alignment the answer named stays");
     assert.equal(saved.cell("B2").borders, "left thin, right thin, top thin, bottom thin", "and the borders");
     assert.match(readFileSync(await fileOf(doc)).length ? (await readSheet(doc)) : "", /\nA2: "a2"\nB2: "b2"\nC2: 6\n/, "the values a merge took are back");
@@ -1985,8 +1985,8 @@ async function run(PITHAGORAS: string): Promise<void> {
     }
     const fitted = await readSheet(doc);
     console.log(`32. ${/\nColumns: .*/.exec(fitted)?.[0].trim()}`);
-    // (The read names the width most of them have as the usual one: "Columns: A 8.43, B-C 32.14, … (others 32.29).")
-    assert.ok(Number(/\nColumns: A 8\.43, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
+    // (The read names the width most of them have as the usual one: "Columns: A 8.38, B-C 32.14, … (others 32.29).")
+    assert.ok(Number(/\nColumns: A 8\.38, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
     // A person in the workbook: a freeze of no panes over frozen rows, and an autofit, each failed at a last op.
     await tools.office_format.execute("f-rows", { id: doc, ops: [{ freeze: "A3" }] });
     const person = await personOpens(doc);
@@ -2317,6 +2317,96 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`36. office_read with formatting: ${Date.now() - t0} ms, ${text.length} characters; its end: ${JSON.stringify(text.slice(-700))}`);
     assert.match(text, /\nValidation: E2:E769 list "a,b"\./, "the cells the read lists only (its first 769 rows): the validation below them is not read");
     assert.ok(read.ms > 0);
+  });
+
+  // ONLYOFFICE/DocumentServer#3870: in a workbook without xl/styles.xml, a table (FormatAsTable) over a cell whose font
+  // the session changed (a link set through the API, SetBold) breaks that cell's format getters. A workbook made here has
+  // the part; one from elsewhere may not.
+  const TABLE_ROWS = [["Name", "Link", "Count"], ["Alpha", "Home", 10], ["Beta", "Docs", 20], ["Gamma", "Blog", 30], ["Delta", "About", 40]];
+  const withoutStyles = async (docId: string) => {
+    const { templateXlsx } = await import("../../src/store.ts");
+    const zip = await JSZip.loadAsync(await templateXlsx());
+    zip.remove("xl/styles.xml");
+    zip.file("[Content_Types].xml", (await zip.file("[Content_Types].xml")!.async("string")).replace(/<Override PartName="\/xl\/styles\.xml"[^>]*\/>/, ""));
+    zip.file("xl/_rels/workbook.xml.rels", (await zip.file("xl/_rels/workbook.xml.rels")!.async("string")).replace(/<Relationship [^>]*relationships\/styles"[^>]*\/>/, ""));
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+  };
+
+  test("37. a new workbook has its styles part (Arial 11): a bold cell before a table and a link after it keep every format getter working, office_read reads them, and the save holds the styles", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Styled table", "cell");
+    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Arial"\/>/, "the new file has the part");
+    await tools.office_edit.execute("sx0", { id: doc, ops: [{ range: "A1:C5", values: TABLE_ROWS }] });
+    // A bold cell and the table over it (a table goes last in its call), then a link and a bold cell inside the table: each of them broke its cell's formats without the part.
+    const table = await tools.office_format.execute("sx1", { id: doc, ops: [{ format: "A4", set: { bold: true } }, { asTable: "A1:C5" }] });
+    const marks = await tools.office_format.execute("sx1b", { id: doc, ops: [{ link: "B3", set: { url: "https://example.com/docs", text: "Docs" } }, { format: "C2", set: { bold: true } }] });
+    console.log(`37. table: ${table.content[0].text}; link and bold: ${marks.content[0].text}`);
+    await delay(800);
+    const read = await readSheet(doc, "Sheet1");
+    console.log(`37. read:\n${read}`);
+    assert.doesNotMatch(read, /\(not read, the editor failed/, "every cell is read");
+    assert.match(read, /Formatting: font Arial 11 where no other is said/);
+    assert.match(read, /\nFormats: .*C2, A4 bold; B3 underline/);
+    assert.match(read, /Links: .*B3 https:\/\/example\.com\/docs/);
+    assert.match(read, /\nB3: "Docs"\n/);
+    // The save holds the table, the link and the styles, and a second look reads the same.
+    await tools.office_edit.execute("sx2", { id: doc, ops: [{ range: "E1", values: [["saved"]] }] });
+    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Arial"\/>/);
+    assert.match(await partOf(doc, "xl/worksheets/sheet1.xml"), /<hyperlink /);
+    assert.match(await readSheet(doc, "Sheet1"), /C2, A4 bold/);
+    // The guard stays: a table over a link set before it is refused (a workbook from elsewhere may lack the part).
+    await tools.office_format.execute("sx3", { id: doc, ops: [{ link: "E2", set: { url: "https://example.com/e", text: "E" } }] });
+    assert.match(await failing(tools.office_format.execute("sx4", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and E2 of "Sheet1" has one/);
+  });
+
+  test("38. a workbook from elsewhere without a styles part still breaks a table over a bold cell: office_read leaves the cell out and says so, and a table over a link is refused", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("No styles", "cell");
+    await withoutStyles(doc);
+    assert.equal(await partOf(doc, "xl/styles.xml").then(() => true, () => false), false, "the file has no styles part");
+    await tools.office_edit.execute("nx0", { id: doc, ops: [{ range: "A1:C5", values: TABLE_ROWS }, { range: "E1:E3", values: [["Tag"], ["x"], ["y"]] }] });
+    await tools.office_format.execute("nx2", { id: doc, ops: [{ link: "E2", set: { url: "https://example.com/e", text: "E" } }] });
+    const made = await failing(tools.office_format.execute("nx1", { id: doc, ops: [{ format: "A4", set: { bold: true } }, { asTable: "A1:C5" }] }));
+    console.log(`38. bold and table without styles: ${made}`);
+    await delay(800);
+    const read = await readSheet(doc, "Sheet1");
+    console.log(`38. read:\n${read}`);
+    assert.match(read, /not read, the editor failed at them: .*A4/, "the cell it cannot read is left out, and said");
+    assert.match(read, /\nA4: "Gamma"\n/, "its value is read all the same");
+    // A table over a link is refused there.
+    assert.match(await failing(tools.office_format.execute("nx3", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and E2 of "Sheet1" has one/);
+  });
+
+  test("39. DocumentBuilder, the Document Server's own: a link and a bold cell, then a table over them, in the workbook this extension makes, leave every format getter working", { timeout: 600_000 }, async () => {
+    const { templateXlsx } = await import("../../src/store.ts");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "office-xs-builder-"));
+    try {
+      writeFileSync(path.join(dir, "new.xlsx"), await templateXlsx());
+      const script = [
+        'builder.OpenFile("/work/new.xlsx", "");',
+        "var ws = Api.GetActiveSheet(), out = [];",
+        `var rows = ${JSON.stringify(TABLE_ROWS)};`,
+        "for (var r = 0; r < rows.length; r++) for (var c = 0; c < 3; c++) ws.GetRangeByNumber(r, c).SetValue(rows[r][c]);",
+        'ws.SetHyperlink("B3", "https://example.com/docs", "", "", "Docs");',
+        'ws.GetRange("A4").SetBold(true);',
+        'ws.FormatAsTable("A1:C5");',
+        'ws.SetHyperlink("B4", "https://example.com/blog", "", "", "Blog");',
+        'ws.GetRange("C2").SetBold(true);',
+        '["B3", "B4", "A4", "C2", "C3"].forEach(function (a) {',
+        "  var cell = ws.GetRange(a), f = cell.GetCharacters(1, 4).GetFont(), fill = cell.GetFillColor();",
+        '  out.push(a + " " + [cell.GetNumberFormat(), cell.GetWrapText(), cell.GetOrientation(), fill && fill.GetRGB ? "rgb" : fill, f.GetName(), f.GetSize(), f.GetBold()].join("|"));',
+        "});",
+        'console.log("RESULT " + out.join(";"));',
+        "builder.CloseFile();",
+      ].join("\n");
+      writeFileSync(path.join(dir, "repro.docbuilder"), script);
+      const out = execFileSync("docker", ["run", "--rm", "--name", `${PREFIX}-builder`, "--memory", "2g", "--entrypoint", "sh", "-v", `${dir}:/work`, IMAGE, "-c", "documentserver-generate-allfonts.sh true >/dev/null 2>&1; cd /var/www/onlyoffice/documentserver/server/FileConverter/bin && ./docbuilder /work/repro.docbuilder 2>&1"], { encoding: "utf8", timeout: 300_000 });
+      console.log(`39. ${out.trim()}`);
+      const result = /RESULT (.*)/.exec(out)?.[1];
+      assert.ok(result, `the script ran to its end (${out.trim()})`);
+      assert.deepEqual(result.split(";"), ["B3 General|false|0|No Fill|Arial|11|false", "B4 General|false|0|No Fill|Arial|11|false", "A4 General|false|0|No Fill|Arial|11|true", "C2 General|false|0|No Fill|Arial|11|true", "C3 General|false|0|No Fill|Arial|11|false"]);
+    } finally {
+      try { execFileSync("docker", ["rm", "-f", `${PREFIX}-builder`], { stdio: "ignore" }); } catch { /* it ended with --rm */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

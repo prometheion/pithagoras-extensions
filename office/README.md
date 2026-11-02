@@ -54,7 +54,7 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 ## What you get
 
 - **The library**, on the portal's Office tab: create blank Word documents (text in Arial 11, set in the document's own defaults, so a built-in table style
-  shows one font in every row; a document you add keeps its own) and spreadsheets, open one full screen in
+  shows one font in every row; a document you add keeps its own) and spreadsheets (Arial 11 too, with the workbook's styles part, which the editor needs for a table over a bold or linked cell; a workbook you add keeps its own), open one full screen in
   the embedded editor, sort the list by name, modified, size or type, and download a copy. Every document lives in an
   agent's home or a project's folder and belongs to that agent or project; there are no documents of nobody's. Every
   `.docx` and `.xlsx` in the agents' homes and the projects' folders (not the folders other chats work in, nor the rest
@@ -202,8 +202,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   cannot be read back, so the answer names them), a name to its old reference or none. OnlyOffice's API takes **no chart,
   no table away again, and a filter only whole** (`filter: "none"` takes the sheet's off), and a
   rule cleared cannot be made again: these go last in a call, and the answer names the ones made before the op that
-  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word, and a table over a cell with a link is refused (OnlyOffice 10.0 can no longer read that cell's formats afterwards,
-  [ONLYOFFICE/DocumentServer#3870](https://github.com/ONLYOFFICE/DocumentServer/issues/3870)). A sort moves the links of its cells with them, and where a later op fails the links stay where the sort put them (the answer names them). A sort re-orders the rows of its range: while you are in the workbook the agent's answer names the people in it, as it does after inserted or deleted rows (merging cells moves none, so it does not). A text in a rule or a list of a validation cannot hold a double quote (the file would hold a broken formula), a sheet with more than 2,000 conditional formats takes no new one (each is made by reading all of them).
+  failed, which stay. Whether a table overlaps another one is not known to the API, which ignores it without a word, and a table over a cell with a link is refused (in a workbook without a styles part, `xl/styles.xml`, OnlyOffice 10.0 can no longer read the formats of a linked or bold cell a table covers,
+  [ONLYOFFICE/DocumentServer#3870](https://github.com/ONLYOFFICE/DocumentServer/issues/3870); the workbooks Office makes have the part and do not break, but the editor's API cannot tell the two apart, so the refusal stays for all of them, and `office_read` leaves out a cell whose format it cannot read, and says so). A sort moves the links of its cells with them, and where a later op fails the links stay where the sort put them (the answer names them). A sort re-orders the rows of its range: while you are in the workbook the agent's answer names the people in it, as it does after inserted or deleted rows (merging cells moves none, so it does not). A text in a rule or a list of a validation cannot hold a double quote (the file would hold a broken formula), a sheet with more than 2,000 conditional formats takes no new one (each is made by reading all of them).
   A cell under a conditional format reads the rule's fill as its own in `office_read` (the API gives what is drawn);
   taking back a format of such a cell can then set that fill on it. `office_read` with `formatting: true` says how
   each sheet looks: the font most cells have, the cells that look otherwise (grouped into ranges), merged cells, the

@@ -2808,7 +2808,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     // A call that fails at its last op takes its moves, sizes and alt texts back, in both editors and in the save.
     const readBefore = await list("before the failing call");
     const colourBefore = await personColours(person.frame);
-    const failed = await failing(tools.office_edit.execute("v3", { id: doc, ops: [{ editPicture: "D9", at: "A1" }, { editPicture: "A1", width: "2cm", alt: "Moved and small" }, { editPicture: "H12", at: "J3" }, { name: "NoSuchName", delete: true }] }));
+    const failed = await failing(tools.office_edit.execute("v3", { id: doc, ops: [{ editPicture: "D9", width: "2cm", alt: "Moved and small" }, { editPicture: "D9", at: "A1" }, { editPicture: "H12", at: "J3" }, { name: "NoSuchName", delete: true }] }));
     console.log(`41. a failing call: ${failed}`);
     assert.match(failed, /^error:not_found op 4: there is no name "NoSuchName"/);
     assert.equal(await list("after the failing call"), readBefore, "office_read is as before");
@@ -2818,16 +2818,22 @@ async function run(PITHAGORAS: string): Promise<void> {
       [[{ editPicture: "C3", delete: true }], /^error:not_found op 1: there is no picture anchored at C3 of "Grid" \(its pictures are at D9, H12, B8, B14\)/],
       [[{ editPicture: "B8", n: 2, delete: true }], /^error:not_found op 1: office_read lists 1 picture at B8 of "Grid", not 2/],
       [[{ editPicture: "H12", height: "49cm" }], /^error:bad_op op 1: the picture would be 73\.5 cm wide at that height/],
-      [[{ editPicture: "D9", at: "B2" }, { editPicture: "B2", n: 3, alt: "x" }], /^error:not_found op 2: office_read lists 1 picture at B2 of "Grid", not 3/],
+      [[{ editPicture: "D9", at: "B2" }, { editPicture: "B8", n: 3, alt: "x" }], /^error:not_found op 2: office_read lists 1 picture at B8 of "Grid", not 3/],
     ] as const) assert.match(await failing(tools.office_edit.execute("v4", { id: doc, ops: ops as unknown as unknown[] })), pattern);
     assert.equal(await list("after the refusals"), readBefore, "none of them changed anything");
     // A delete not last is refused up front.
     assert.match(await failing(tools.office_edit.execute("v5", { id: doc, ops: [{ editPicture: "H12", delete: true }, { range: "E1", values: [["x"]] }] })), /^error:bad_op op 1 cannot be taken back once made \(a deleted picture, which the editor cannot make again as the file it was\), so it goes after every op that can/);
 
-    // Deleted: last in the call. The second delete is for a picture that is not there: the first stays deleted and is named.
-    const kept = await failing(tools.office_edit.execute("v6", { id: doc, ops: [{ editPicture: "B14", delete: true }, { editPicture: "Z99", delete: true }] }));
+    // Refused before the first op, as every picture is found before the call changes anything: a second delete of a picture that is not there changes nothing.
+    const none = await failing(tools.office_edit.execute("v6a", { id: doc, ops: [{ editPicture: "B14", delete: true }, { editPicture: "Z99", delete: true }] }));
+    assert.match(none, /^error:not_found op 2: there is no picture anchored at Z99 of "Grid"/);
+    assert.doesNotMatch(none, /Not taken back/);
+    assert.equal(await list("after the refused deletes"), readBefore, "the first delete was never made");
+    // Deleted: last in the call. A delete the editor refuses at its turn (the sheet is hidden by an op before it) leaves the one before it deleted, and says so.
+    const kept = await failing(tools.office_edit.execute("v6", { id: doc, ops: [{ hideSheet: "More" }, { editPicture: "B14", delete: true }, { sheet: "More", editPicture: "B2", delete: true }] }));
     console.log(`41. delete, then a delete that fails: ${kept}`);
-    assert.match(kept, /^error:partial op 2: there is no picture anchored at Z99 of "Grid"[^]* Not taken back: the picture B14 of "Grid" that op 1 deleted\./);
+    assert.match(kept, /^error:partial op 3: "More" is hidden, and the editor deletes a picture of a visible sheet only: show it first[^]* Not taken back: the picture B14 of "Grid" that op 2 deleted\./);
+    assert.doesNotMatch(await list("after the hidden sheet's refusal"), /\(hidden\)/, "the sheet hidden by the call is shown again");
     const t0 = Date.now();
     const deleted = (await tools.office_edit.execute("v7", { id: doc, ops: [{ editPicture: "H12", at: "K3" }, { editPicture: "D9", delete: true }, { sheet: "More", editPicture: "B2", delete: true }] })).content[0].text;
     console.log(`41. deleted (${Date.now() - t0} ms): ${deleted}`);

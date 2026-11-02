@@ -835,6 +835,16 @@ function findPicture(doc, op, i) {
   if (op.n > list.length) throw { code: "not_found", op: i, message: n + "office_read lists " + list.length + " picture" + (list.length === 1 ? "" : "s") + " under " + where + ", not " + op.n };
   return list[op.n - 1];
 }
+// A picture's paragraph goes with the picture where it holds nothing else. It stays where it is the only element of its cell
+// or the document, where it ends a section (the section's break is in it), and where the others would be left with a table
+// last in their container or two tables side by side (Word draws those as one table, and a container ends with a paragraph).
+function emptyGoes(par) {
+  if (textOf(par) || par.GetAllDrawingObjects().length) return false;
+  var parent = par.GetParent(), count = parent.GetElementsCount();
+  if (count <= 1 || (JSON.parse(par.ToJSON()).pPr || {}).sectPr) return false;
+  var at = par.GetPosInParent(), before = at > 0 ? parent.GetElement(at - 1) : null, after = at + 1 < count ? parent.GetElement(at + 1) : null;
+  return !(before && before.GetClassType() === "table" && (!after || after.GetClassType() === "table"));
+}
 // A picture as the op's answer names it: its size in EMU and its alt text, as office_read lists it.
 function pictureSaid(img, op) {
   var alt = img.GetDescription();
@@ -934,9 +944,8 @@ const WORD_EDIT = `function () {
           touched = true;
           gone[pictureKey(op)] = true;
           img.Delete();
-          // The paragraph that held nothing else goes with it (a cell or the document keeps its last paragraph, and a paragraph
-          // that ends a section stays: its section's break is in it).
-          if (!textOf(imgPar) && !imgPar.GetAllDrawingObjects().length && imgPar.GetParent().GetElementsCount() > 1 && !(JSON.parse(imgPar.ToJSON()).pPr || {}).sectPr) imgPar.Delete();
+          // The paragraph that held nothing else goes with it (emptyGoes).
+          if (emptyGoes(imgPar)) imgPar.Delete();
           note.did = "deleted";
         } else if (op.move) {
           // As an insert places a picture: inline, in a paragraph of its own, after the paragraph that holds \`after\` or at the end. The copy is the same media; it has to be given back what it lost.
@@ -951,7 +960,7 @@ const WORD_EDIT = `function () {
           holder0.AddDrawing(copy);
           if (target) target.GetParent().AddElement(target.GetPosInParent() + 1, holder0); else doc.Push(holder0);
           img.Delete();
-          if (!textOf(imgPar) && !imgPar.GetAllDrawingObjects().length && imgPar.GetParent().GetElementsCount() > 1 && !(JSON.parse(imgPar.ToJSON()).pPr || {}).sectPr) imgPar.Delete();
+          if (emptyGoes(imgPar)) imgPar.Delete();
           note.did = "moved";
         } else {
           var size = op.width || op.height ? resized(img, op, i) : null;
@@ -1764,6 +1773,7 @@ function partsOf(ws, op) {
 function tooMany(i) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": the call formats more than ${MAX_FORMAT_CELLS.toLocaleString("en")} cells (whole columns and rows count the cells of the used range among them; each one's formats are read first, so that the call can be taken back): split it into several calls" }; }
 function notText(i, vertAlign, at, formula) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": " + vertAlign + " takes text, and " + at + " holds " + (formula ? "a formula" : "a number") + " (the editor sets it on a text's characters): leave that cell out" }; }
 function hiddenFreeze(i, name) { return { code: "sheet_hidden", op: i, message: "op " + (i + 1) + ": " + JSON.stringify(name) + " is hidden, and the editor freezes panes of a visible sheet only: show it first" }; }
+function hiddenPicture(i, name) { return { code: "sheet_hidden", op: i, message: "op " + (i + 1) + ": " + JSON.stringify(name) + " is hidden, and the editor deletes a picture of a visible sheet only: show it first" }; }
 function pastEnd(i, rows) { return { code: "bad_op", op: i, message: "op " + (i + 1) + ": the sheet's cells would move past its last " + (rows ? "row" : "column") }; }
 // Whether the cells (rows and columns from 0) of a sheet's used range would move past its end with \`count\` more lines
 // from \`from\` on.
@@ -2102,14 +2112,41 @@ function pictureNow(d) {
   return { col: at.fromCol, row: at.fromRow, co: at.colOffset, ro: at.rowOffset, w: d.GetWidth(), h: d.GetHeight(), alt: alt ? String(alt) : "" };
 }
 // A picture of the sheet as op \`op\` (editPicture: the cell it is anchored at, n: which of those anchored there, in the
-// order the editor lists them) names it, or null.
+// order the editor lists them) names it, or null. An op that was found before the call (\`pictureId\`, see namedPictures)
+// is looked for by that id: its number was office_read's, and the pictures of the cell may have moved since.
 function pictureNamed(ws, op) {
   var there = [], all = ws.GetAllImages() || [];
+  if (op.pictureId !== undefined) {
+    var hit = all.filter(function (d) { return d.GetInternalId() === op.pictureId; })[0] || null;
+    return { list: hit ? [hit] : [], picture: hit, gone: !hit };
+  }
   for (var k = 0; k < all.length; k++) {
     var at = all[k].GetPosition();
     if (at.fromCol === op.from.col && at.fromRow === op.from.row) there.push(all[k]);
   }
   return { list: there, picture: there[op.n - 1] || null };
+}
+// The refusal of an op whose picture is not there (\`found\`: what pictureNamed answered), with where the sheet's pictures are.
+function pictureMissing(ws, op, i, found) {
+  var name = ws.GetName();
+  if (found.gone) return { code: "not_found", op: i, message: "op " + (i + 1) + ": the picture " + op.editPicture + " of " + JSON.stringify(name) + " is not there any more: a person may have deleted it since the call began" };
+  var all = (ws.GetAllImages() || []).map(function (d) { var at = d.GetPosition(); return colName(at.fromCol) + (at.fromRow + 1); });
+  return { code: "not_found", op: i, message: "op " + (i + 1) + ": " + (found.list.length ? "office_read lists " + found.list.length + " picture" + (found.list.length === 1 ? "" : "s") + " at " + op.editPicture + " of " + JSON.stringify(name) + ", not " + op.n : "there is no picture anchored at " + op.editPicture + " of " + JSON.stringify(name) + (all.length ? " (its pictures are at " + all.slice(0, 20).join(", ") + (all.length > 20 ? " and " + (all.length - 20) + " more" : "") + ")" : " (it has none)")) };
+}
+// The pictures the ops name (editPicture), found before any op changes the workbook, by their internal ids: the numbers
+// are those office_read showed before the call, and a call's own moves and deletes do not renumber them. A sheet that an
+// op of the call makes (or names otherwise than the workbook has it now) is left to the step, which looks at its turn.
+function namedPictures(all, ops) {
+  var list = all.map(function (s) { return { name: s.GetName() }; }), ids = {};
+  for (var i = 0; i < ops.length; i++) {
+    if (ops[i].editPicture === undefined) continue;
+    var at = ops[i].sheet !== undefined ? sheetAt(list, ops[i].sheet) : 0;
+    if (at === -1) continue;
+    var found = pictureNamed(all[at], ops[i]);
+    if (!found.picture) return { error: pictureMissing(all[at], ops[i], i, found) };
+    ids[i] = found.picture.GetInternalId();
+  }
+  return { ids: ids };
 }
 function picturesOf(ws) {
   var all = [], out = [], seen = {}, total = {};
@@ -2203,6 +2240,7 @@ const CELL_CHECK = `function () {
   ${CELL_LOOK_SRC}
   ${CELL_PARTS_SRC}
   ${CELL_EXTRAS_SRC}
+  ${CELL_PICTURES_SRC}
   function foresee(all, ops) {
     var budget = ${MAX_FORMAT_CELLS}, merged = {}, used = {}, ruled = {}, list = all.map(function (s) { return { name: s.GetName() }; });
     var where = function (ws, a) { return JSON.stringify(ws.GetName()) + "!" + a; };
@@ -2258,7 +2296,9 @@ const CELL_CHECK = `function () {
   try {
     var all = Api.GetSheets(), ops = Asc.scope.args.ops;
     var failed = simulateSheets(all.map(function (s) { return { name: s.GetName(), hidden: !s.GetVisible() }; }), ops) || foresee(all, ops);
-    return failed ? { error: failed } : { result: {} };
+    if (failed) return { error: failed };
+    var pictures = namedPictures(all, ops);
+    return pictures.error ? { error: pictures.error } : { result: { pictures: pictures.ids } };
   } catch (e) {
     return { error: { code: "failed", message: String(e && e.message || e) } };
   }
@@ -2830,12 +2870,11 @@ const CELL_STEP = `function () {
     // not as the file it was, so a deleted picture is not made again by an inverse.
     if (op.editPicture !== undefined) {
       var epws = sheetOf(op), epName = epws.GetName(), epFound = pictureNamed(epws, op), epPic = epFound.picture;
-      if (!epPic) {
-        var epAll = (epws.GetAllImages() || []).map(function (d) { var at = d.GetPosition(); return colName(at.fromCol) + (at.fromRow + 1); });
-        return { error: { code: "not_found", op: i, message: "op " + (i + 1) + ": " + (epFound.list.length ? "office_read lists " + epFound.list.length + " picture" + (epFound.list.length === 1 ? "" : "s") + " at " + op.editPicture + " of " + JSON.stringify(epName) + ", not " + op.n : "there is no picture anchored at " + op.editPicture + " of " + JSON.stringify(epName) + (epAll.length ? " (its pictures are at " + epAll.slice(0, 20).join(", ") + (epAll.length > 20 ? " and " + (epAll.length - 20) + " more" : "") + ")" : " (it has none)")) } };
-      }
+      if (!epPic) return { error: pictureMissing(epws, op, i, epFound) };
       var epBefore = pictureNow(epPic);
       var epNote = function (did) { return { did: did, at: op.editPicture, sheet: epName, n: op.n, w: epBefore.w, h: epBefore.h, alt: epBefore.alt.slice(0, ${MAX_ALT_READ}) }; };
+      // The plugin's method reaches the sheet the editor shows, and the editor may not show a hidden sheet for it.
+      if (op.delete && !epws.GetVisible()) return { error: hiddenPicture(i, epName) };
       if (op.delete) return { result: { removePicture: { sheet: epName, id: epPic.GetInternalId(), at: op.editPicture }, irreversible: { op: i, what: "picture " + op.editPicture, sheet: epName, did: "deleted" }, picture: epNote("deleted") } };
       var epSize = op.at === undefined && (op.width || op.height) ? resized(epPic, op, i) : null;
       try {
@@ -3401,8 +3440,12 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
     }
     // Whether cells of \`area\` on \`sheet\` moved after the op: rows from \`at\` on moved, or columns.
     function stale(sheet, area) { return (moved[sheet] || []).some(function (x) { return x.rows ? area.r2 >= x.at : area.c2 >= x.at; }); }
+    // The internal ids of the pictures the ops name, found by cell.check before any op changed the workbook (by op), and
+    // the ones an op has deleted or moved by now: a later op that names one is refused, as in Word.
+    var pictureIds = {}, spent = {};
     call(cell.check, { ops: ops }, false, function (out) {
       if (out.error) return done(job, { error: out.error });
+      pictureIds = out.result && out.result.pictures || {};
       next(0);
     });
     function next(i) {
@@ -3410,6 +3453,14 @@ ${Object.entries(CELL_EDIT_COMMANDS).map(([name, source]) => `    ${name}: ${sou
       // columns one by one waits once), before the next op and before the save, which would miss them.
       if (i >= ops.length) return settleAll(function () { drop(0); });
       if (unsettled.length && !ops[i].autofit) return settleAll(function () { next(i); });
+      if (ops[i].editPicture !== undefined && pictureIds[i] !== undefined) {
+        var id = pictureIds[i], named = {};
+        if (spent[id]) return back({ code: "not_found", op: i, message: "op " + (i + 1) + ": the picture is gone: an earlier op of this call took it away (deleted or moved it)" });
+        if (ops[i].delete || ops[i].at !== undefined) spent[id] = true;
+        for (var key in ops[i]) named[key] = ops[i][key];
+        named.pictureId = id;
+        return step(named, i, function () { next(i + 1); });
+      }
       if (typeof ops[i].range !== "string") return step(ops[i], i, function () { next(i + 1); });
       var writes = [], j = i;
       for (; j < ops.length && typeof ops[j].range === "string"; j++) writes.push({ sheet: ops[j].sheet, range: ops[j].range, values: ops[j].values, index: j });

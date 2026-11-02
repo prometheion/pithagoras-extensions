@@ -235,8 +235,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   cell's text), per sheet after its cells (`Pictures: B2 4 × 2 cm "Logo"`, 50 at most); several in one place carry
   `#1`, `#2`.
   **The pictures a document has**, a person's and the agent's own, are changed by `{editPicture, …}` ops of
-  `office_edit`: deleted, moved, sized or given new alt text. The agent names a picture by what `office_read` lists it
-  under, and the two sit side by side:
+  `office_edit`: deleted, moved, sized or given new alt text. No crop, rotation or wrapping.
+
+  *Naming a picture.* The agent names a picture by what `office_read` lists it under, and the two sit side by side:
 
   | `office_read` says | the op that changes that picture |
   |---|---|
@@ -247,31 +248,54 @@ It is pinned by its digest: a tag that came to name another build is refused, no
 
   In Word `editPicture` is the number in brackets that `office_read` gives the paragraph or the table (a content
   control's paragraphs are counted in reading order), `cell` is the table cell the picture is listed under, and `n`
-  (from 1) says which of several listed there: they carry `#1`, `#2` in the listing, and only where there are several. In
-  a sheet `editPicture` is the cell the picture is anchored at (its top left corner), and `n` which of the pictures
-  anchored there. The numbers are those `office_read` showed **before the call**: a call's own inserts and deletes do not
-  renumber them, and an op that names a picture an earlier op of the call has taken away (deleted or moved) is refused. The
-  answer repeats each changed picture with what it was (`Pictures: deleted the picture [2], which was 4 × 2 cm, alt text
-  "Their logo"`), so that a number that meant another picture (the document changed since it was read) shows. An op does
-  one thing: `delete: true`; a move (Word: `move: true` and `after`, `nth`, as an insert places a picture, in an inline
-  paragraph of its own after the paragraph that holds `after`, or at the end; a sheet: `at`, the cell its top left corner
-  moves to; a model that wrote the destination under the other of the two, or under `to`, is understood, and keys given as
-  `null` and `delete` or `move` as `false` are left out, as the model of the real-portal tests filled in every key of the schema); or a new `width`, `height` and `alt` (a length like `"6cm"`, 0.2 to 50 cm, one side keeps the picture's proportions as
-  it is now, and the other may not come out past 50 cm). A deleted picture takes its paragraph with it where it held
-  nothing else (not the last paragraph of a table cell or the document, and not one that ends a section); a picture inside
-  a paragraph with text leaves the text. A moved picture is the same file (a copy of its media: not made again as a PNG),
-  inline from then on, with its alt text and title. OnlyOffice cannot take a picture's alt text away, so `alt` is a text.
-  All or nothing as for the other ops: in Word by the editor's Undo, which takes back the whole call; in a sheet a move,
-  a size and an alt text are put back by the steps that made them, except where a person changed the picture since (theirs
-  stays and the answer names it), or where rows or columns were deleted for good after the move (then it stays where the
-  call put it and the answer names the op), or an alt text where the picture had none (the editor cannot put none back).
-  **A deleted sheet picture cannot be taken back**: OnlyOffice reads a picture's bytes back only as a PNG it draws of the
-  picture (a JPEG or GIF would not be the file it was), so a delete goes last in a call, as deleted rows do, and where a
-  later op of the call fails (a delete of another picture, say) the answer names what stays deleted. (The delete is done by the plugin method `RemoveOleObject`, as the
-  inverse of a picture put in is; it reaches the sheet the editor shows, so the agent's editor shows the picture's sheet
-  for a moment and the sheet it showed before again.) A cropped, rotated or wrapped picture is changed in its size and place only: cropping,
-  rotation and text wrapping are not set, a moved picture is inline, and the text inside a picture is not read (the guard
-  does not see it either).
+  (from 1) says which of several listed there: they carry `#1`, `#2` in the listing, and only where there are several.
+  In a sheet `editPicture` is the cell the picture is anchored at (its top left corner), and `n` which of the pictures
+  anchored there. The numbers are those `office_read` showed **before the call**, in Word and in a sheet: every picture
+  the ops name is found before the first op changes anything, so a call's own inserts, deletes and moves do not
+  renumber them (two deletes at one cell are `n: 1` and `n: 2`, and a picture moved to a cell is not the first there).
+  An op that names a picture an earlier op of the call has taken away (deleted or moved) is refused, as is a picture
+  that is not listed before the call (one the same call puts in cannot be edited by it, except on a sheet the call makes itself, where the op looks at its turn). The answer repeats each
+  changed picture with what it was (`Pictures: deleted the picture [2], which was 4 × 2 cm, alt text "Their logo"`), so
+  that a number that meant another picture (a person changed the document since it was read) shows; a sheet picture a
+  person deleted since the call began is told so, and is not swapped for another.
+
+  *What an op does.* An op does one thing:
+
+  - `delete: true`.
+  - A move. Word: `move: true` and `after`, `nth`, as an insert places a picture, in an inline paragraph of its own
+    after the paragraph that holds `after`, or at the end. A sheet: `at`, the cell its top left corner moves to. A
+    model that wrote the destination under the other of the two, or under `to`, is understood, and keys given as `null`
+    and `delete` or `move` as `false` are left out, as the model of the real-portal tests filled in every key of the
+    schema.
+  - A new `width`, `height` and `alt` (a length like `"6cm"`, 0.2 to 50 cm). One side keeps the picture's proportions as
+    it is now, and the other may not come out past 50 cm. OnlyOffice cannot take a picture's alt text away, so `alt` is
+    a text.
+
+  A deleted or moved picture takes its paragraph with it where that held nothing else. It stays where it is the only
+  paragraph of a table cell or the document, where it ends a section, and where removing it would leave a table last in
+  its cell or the document or join two tables (Word draws those as one table); a picture inside a paragraph with text
+  leaves the text. A moved picture is the same file (a copy of its media: not made again as a PNG), inline from then on,
+  with its alt text and title. A cropped, rotated or wrapped picture is changed in its size and place only, and the text
+  inside a picture is not read (the guard does not see it either).
+
+  *Undone, and a person's change.* All or nothing as for the other ops:
+
+  - Word: by the editor's Undo, which takes back the whole call. A person's change to the same picture between the
+    agent's read and its call is not guarded (the answer names what the picture was), and what the Undo does to a change
+    a person made to that picture between the call's first op and its failure was not measured: Word is not covered
+    there.
+  - A sheet: a move, a size and an alt text are put back by the steps that made them, except where a person changed the
+    picture since (theirs stays and the answer names it), or where rows or columns were deleted for good after the move
+    (then it stays where the call put it and the answer names the op), or an alt text where the picture had none (the
+    editor cannot put none back).
+  - **A deleted sheet picture cannot be taken back**: OnlyOffice reads a picture's bytes back only as a PNG it draws of
+    the picture (a JPEG or GIF would not be the file it was), so a delete goes last in a call, as deleted rows do, and
+    where a later op of the call fails (a delete of another picture, say) the answer names what stays deleted.
+  - The delete is done by the plugin method `RemoveOleObject`, as the inverse of a picture put in is. It reaches the
+    sheet the editor shows, so the agent's editor shows the picture's sheet for a moment and the sheet it showed before
+    again; a hidden sheet's picture is not deleted (the op is refused: show the sheet first, in the call before the
+    delete or in another).
+
   The agent cannot write comments or tracked
   changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
@@ -456,7 +480,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   the editor's chat that failed after the ones before it went.
 - **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
   document-changing call is recorded in the portal's audit log with the chat that made it, its ops (for pictures, each
-  file as the agent named it and its bytes, never its data) and the revision it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
+  file as the agent named it and its bytes, never its data; an edit of a picture is named `picture edits`, apart from
+  `pictures` put in) and the revision it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
   as such.
 
 ## Data

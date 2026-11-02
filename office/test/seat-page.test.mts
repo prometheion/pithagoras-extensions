@@ -3641,6 +3641,31 @@ test("word.edit: a picture is deleted with the paragraph that held only it, or a
   ], "each answer names the picture as it was");
 });
 
+test("word.edit: the paragraph of a deleted or moved picture stays where removing it would leave a table last in its container or two tables side by side, and goes where a paragraph or the start is next to it", () => {
+  const pic = { pics: [{ w: 5, h: 5, alt: "P" }] };
+  const tab = (t: string) => ({ table: [[[t]]] });
+  // A table before it and nothing after: the body would end in a table.
+  const last = pictureWord(["Text", tab("T"), pic]);
+  assert.equal(pictureEdit(last, [{ editPicture: 3, delete: true }]).error, undefined);
+  assert.deepEqual(last.outline(), ["Text|", { table: [[["T|"]]] }, "|"], "the empty paragraph ends the body");
+  // Tables on both sides: removing it would join them.
+  const between = () => pictureWord([tab("A"), pic, tab("B"), "End"]);
+  const joined = between();
+  assert.equal(pictureEdit(joined, [{ editPicture: 2, delete: true }]).error, undefined);
+  assert.deepEqual(joined.outline(), [{ table: [[["A|"]]] }, "|", { table: [[["B|"]]] }, "End|"]);
+  const moved = between();
+  assert.equal(pictureEdit(moved, [{ editPicture: 2, move: true, after: "End" }]).error, undefined);
+  assert.deepEqual(moved.outline(), [{ table: [[["A|"]]] }, "|", { table: [[["B|"]]] }, "End|", "|5x5 P"]);
+  // A paragraph or the start next to it, or a table on one side only: it goes.
+  const open = pictureWord([tab("A"), pic, "Text", pic, tab("B")]);
+  assert.equal(pictureEdit(open, [{ editPicture: 2, delete: true }, { editPicture: 4, delete: true }]).error, undefined);
+  assert.deepEqual(open.outline(), [{ table: [[["A|"]]] }, "Text|", { table: [[["B|"]]] }]);
+  // In a cell as in the body: a nested table before it makes it the cell's last paragraph.
+  const cell = pictureWord([{ table: [[[tab("In"), pic]]] }]);
+  assert.equal(pictureEdit(cell, [{ editPicture: 1, cell: "A1", delete: true }]).error, undefined);
+  assert.deepEqual(cell.outline(), [{ table: [[[{ table: [[["In|"]]] }, "|"]]] }]);
+});
+
 test("word.edit: a picture is named by the number office_read gives its paragraph or table (a content control's paragraphs counted in reading order), its cell and its number there; what is not there is refused before anything changes", () => {
   const spec: WSpec[] = ["One", { sdt: ["In control", { pics: [{ w: 3, h: 3, alt: "In sdt" }] }] }, { table: [[[{ pics: [{ w: 4, h: 4, alt: "T1" }, { w: 5, h: 5, alt: "T2" }] }]]] }, "Last"];
   const w = pictureWord(spec);
@@ -3755,14 +3780,15 @@ test("a spreadsheet picture is moved, sized and described by the cell it is anch
   assert.ok(book.state.saves >= 1);
 });
 
-test("a spreadsheet picture that is not there is refused at its op with where the sheet's pictures are, and the ops before it are taken back; a size past 50 cm is refused with its sides", async () => {
+test("a spreadsheet picture that is not there is refused at its op with where the sheet's pictures are, and nothing is changed; a size past 50 cm is refused with its sides", async () => {
   const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }, { col: 3, row: 2, w: 100, h: 1_000_000, alt: "Thin" }]);
   const wrote = { range: "A1", values: [["x"]] };
   const none = await plugin(book, sheetEdit([wrote, { editPicture: "C3", delete: true }]));
   assert.equal(none.error?.code, "not_found", JSON.stringify(none));
   assert.match(none.error.message, /^op 2: there is no picture anchored at C3 of "Sheet1" \(its pictures are at B5, D3\)$/);
-  assert.equal(none.undone, true);
-  assert.equal(book.state.sheets[0].cells.A1, undefined, "the write before it is taken back");
+  assert.equal(none.undone, undefined, "found before the first op: nothing was changed, so nothing is taken back");
+  assert.equal(book.state.sheets[0].cells.A1, undefined, "the write before it is never made");
+  assert.equal(book.state.commands, 1, "only the check ran");
   const second = await plugin(book, sheetEdit([{ editPicture: "B5", n: 2, alt: "x" }]));
   assert.match(second.error.message, /^op 1: office_read lists 1 picture at B5 of "Sheet1", not 2$/);
   const wide = await plugin(book, sheetEdit([{ editPicture: "D3", width: "30cm" }]));
@@ -3779,7 +3805,7 @@ test("a spreadsheet picture that is not there is refused at its op with where th
 test("a spreadsheet picture moved, sized and described is put back exactly (its place with the offsets it had, its size, its alt text) when a later op fails, in reverse order when the same picture is changed twice", async () => {
   const book = pictureBook([{ col: 1, row: 4, co: 12_345, ro: 6_789, w: 2_000_000, h: 1_000_000, alt: "Logo" }], { poison: "Z9" });
   const before = imagesOf(book);
-  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "New" }, { editPicture: "B5", at: "F20" }, { editPicture: "F20", alt: "Again" }, { range: "Z9", values: [[1]] }]));
+  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "New" }, { editPicture: "B5", alt: "Again" }, { editPicture: "B5", at: "F20" }, { range: "Z9", values: [[1]] }]));
   assert.equal(out.error?.code, "failed", JSON.stringify(out));
   assert.equal(out.undone, true);
   assert.deepEqual(imagesOf(book), before, "as it was, offsets and all");
@@ -3789,6 +3815,58 @@ test("a spreadsheet picture moved, sized and described is put back exactly (its 
   assert.equal(refused.error?.code, "failed");
   assert.match(refused.error.message, /^op 1: the editor refused the size/);
   assert.deepEqual(imagesOf(refusing), [[1, 4, 0, 0, 2_000_000, 1_000_000, "Logo"]]);
+});
+
+test("a spreadsheet picture is named as office_read numbered it before the call: two deletes at one cell, a number whose picture an earlier op moved, and a move into a cell do not renumber anything", async () => {
+  const first = { col: 1, row: 7, w: 100, h: 100, alt: "First" };
+  const second = { col: 1, row: 7, w: 200, h: 100, alt: "Second" };
+  // office_read: B8 #1 "First", B8 #2 "Second": both are deleted by the numbers it gave.
+  const both = pictureBook([first, second]);
+  const out = await plugin(both, sheetEdit([{ editPicture: "B8", n: 1, delete: true }, { editPicture: "B8", n: 2, delete: true }]));
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(imagesOf(both), []);
+  assert.deepEqual(out.result.pictures.map((p: { n: number; alt: string }) => [p.n, p.alt]), [[1, "First"], [2, "Second"]], "each answer names the picture the number meant before the call");
+  // The editor's order: F2 "Moved in", then B8 #1, B8 #2. The move to B8 does not make "Moved in" the first one there.
+  const moved = pictureBook([{ col: 5, row: 1, w: 50, h: 50, alt: "Moved in" }, first, second]);
+  const into = await plugin(moved, sheetEdit([{ editPicture: "F2", at: "B8" }, { editPicture: "B8", n: 2, alt: "Meant Second" }]));
+  assert.equal(into.error, undefined, JSON.stringify(into));
+  assert.deepEqual(imagesOf(moved).map((i) => [i[0], i[1], i[6]]), [[1, 7, "Moved in"], [1, 7, "First"], [1, 7, "Meant Second"]]);
+  // A picture an earlier op moved away is gone for a later op that names it, whatever now stands at the cell; the call is taken back.
+  const away = pictureBook([first, second, { col: 5, row: 1, w: 50, h: 50, alt: "Other" }]);
+  const gone = await plugin(away, sheetEdit([{ editPicture: "B8", n: 1, at: "D9" }, { editPicture: "B8", n: 1, alt: "Again" }]));
+  assert.equal(gone.error?.code, "not_found", JSON.stringify(gone));
+  assert.match(gone.error.message, /^op 2: the picture is gone: an earlier op of this call took it away \(deleted or moved it\)$/);
+  assert.equal(gone.undone, true);
+  assert.deepEqual(imagesOf(away).map((i) => [i[0], i[1], i[6]]), [[1, 7, "First"], [1, 7, "Second"], [5, 1, "Other"]], "the move is taken back");
+});
+
+test("a spreadsheet picture an op names is looked for by the id found before the call: one a person deleted in between is told so, not swapped for another", async () => {
+  let acted = false;
+  const book = pictureBook([{ col: 1, row: 7, w: 100, h: 100, alt: "First" }, { col: 1, row: 7, w: 200, h: 100, alt: "Second" }, { col: 3, row: 3, w: 50, h: 50, alt: "Other" }], {
+    before: (commands, sheets) => { if (!acted && commands === 2) { acted = true; sheets[0].images.splice(0, 1); } },
+  });
+  const out = await plugin(book, sheetEdit([{ editPicture: "D4", alt: "x" }, { editPicture: "B8", n: 1, alt: "Meant First" }]));
+  assert.equal(out.error?.code, "not_found", JSON.stringify(out));
+  assert.match(out.error.message, /^op 2: the picture B8 of "Sheet1" is not there any more: a person may have deleted it since the call began$/);
+  assert.deepEqual(imagesOf(book).map((i) => i[6]), ["Second", "Other"], "the second picture at B8 is not renamed in its place; the first op is taken back");
+});
+
+test("a picture of a hidden sheet is not deleted (the editor shows the sheet for the plugin's method, if it can at all): the op is refused with the sheet's name; a size or a move needs no shown sheet", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 100, h: 100, alt: "Here" }], {}, ["Sheet1", "Data"]);
+  book.state.sheets[1].hidden = true;
+  book.state.sheets[1].images.push({ id: "1_900", col: 1, row: 1, w: 720_000, h: 360_000, alt: "There", src: "" });
+  const out = await plugin(book, sheetEdit([{ sheet: "Data", editPicture: "B2", delete: true }]));
+  assert.equal(out.error?.code, "sheet_hidden", JSON.stringify(out));
+  assert.match(out.error.message, /^op 1: "Data" is hidden, and the editor deletes a picture of a visible sheet only: show it first$/);
+  assert.deepEqual(book.state.methods, [], "the plugin's method was not called");
+  assert.equal(book.state.sheets[1].hidden, true, "the sheet stays hidden");
+  assert.equal(book.state.sheets[1].images.length, 1);
+  const sized = await plugin(book, sheetEdit([{ sheet: "Data", editPicture: "B2", alt: "Still described" }]));
+  assert.equal(sized.error, undefined, JSON.stringify(sized));
+  // Shown by an op of the call first, it can be deleted.
+  const shown = await plugin(book, sheetEdit([{ showSheet: "Data" }, { sheet: "Data", editPicture: "B2", delete: true }]));
+  assert.equal(shown.error, undefined, JSON.stringify(shown));
+  assert.deepEqual(book.state.sheets[1].images, []);
 });
 
 test("a person's change to a picture wins over the inverse: one they moved, sized or described after the call's step stays as they made it and is named, one they deleted needs nothing", async () => {

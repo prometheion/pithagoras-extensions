@@ -1898,8 +1898,9 @@ test("office_edit says which picture each edit of a picture changed, as office_r
   const cells = (await tool(s, "office_edit").execute("e2", { id: sheet.docId, ops: [{ editPicture: "B5", at: "D9" }] })) as ToolResult;
   assert.match(cells.content[0].text, /Pictures: moved the picture B5 of "Sheet1", which was 5 × 3\.4 cm, alt text "Logo"\.$/);
   const audit = s.seen.records.filter((r) => r.reason.startsWith("office_edit"));
-  assert.match(audit[0].reason, /office_edit: 3 op\(s\) \(pictures\) on /);
-  assert.match(audit[1].reason, /office_edit: 1 op\(s\) \(pictures\) on /);
+  // A deleted, moved or sized picture is not the kind an inserted one is: the audit tells them apart.
+  assert.match(audit[0].reason, /office_edit: 3 op\(s\) \(picture edits\) on /);
+  assert.match(audit[1].reason, /office_edit: 1 op\(s\) \(picture edits\) on /);
   // The call's time allowance grows with them, as with a picture put in (the editor looks for a deleted one for a while).
   assert.equal(editRuns(s)[1].timeoutMs, 20_000 + 2_000);
 });

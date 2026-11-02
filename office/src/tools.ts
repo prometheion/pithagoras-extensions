@@ -1021,7 +1021,7 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
     execute: guarded(async ({ id, ops }, signal) => {
       const doc = visibleDoc(id);
       const job: EditJob = editJob(doc.ext, ops);
-      const kinds = [...new Set(job.args.ops.map((op) => ("picture" in op || "editPicture" in op ? "pictures" : "quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "sort" in op ? "sort" : "name" in op ? "names" : "rows and columns")))].join(", ");
+      const kinds = [...new Set(job.args.ops.map((op) => ("editPicture" in op ? "picture edits" : "picture" in op ? "pictures" : "quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "sort" in op ? "sort" : "name" in op ? "names" : "rows and columns")))].join(", ");
       return change(doc, job, "office_edit", "Edited", kinds, signal);
     }),
   });

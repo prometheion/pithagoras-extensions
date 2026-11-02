@@ -1763,7 +1763,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     const read = await readSheet(doc);
     console.log(`28. office_read with formatting:\n${read}`);
     for (const want of [
-      /\nFormatting: font Calibri 11 where no other is said; alignment and borders are not read \(office_screenshot shows them\)\.\n/,
+      /\nFormatting: font Calibri 11 where no other is said; alignment, borders and tables are not read \(office_screenshot shows them\)\.\n/,
       // A merge gives the merged cells the top-left one's formats.
       /A1:D1 Arial 16, bold, #1F4E79/,
       /A3, C3:D3 bold, #FFFFFF, fill #1F4E79/,
@@ -2003,6 +2003,320 @@ async function run(PITHAGORAS: string): Promise<void> {
     }
     assert.match(await readSheet(doc, "Sheet1"), /\nFrozen: rows 1-2\.$/);
     await person.page.context().close();
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* conditional formats, validation, links, charts, filters, tables, sort and names (#13 PR 4) */
+  /* ------------------------------------------------------------------ */
+
+  const salesRows = [["Item", "Qty", "Region", "Due"], ["Pear", 3, "N", 45000], ["Apple", 10, "S", 45010], ["Fig", 700, "N", 45020], ["Kiwi", 7, "E", 45030], ["Date", 1200, "S", 45040], ["Plum", 7, "E", 45050]];
+  /** The text a person's editor shows in a cell. */
+  const personCellText = async (frame: import("@playwright/test").Frame, a: string) => (JSON.parse(await personCell(frame, a)) as { text?: string }).text;
+  /** What the person's editor says of a cell besides its formats: its data validation, link and filter (its own API). */
+  const personExtras = (frame: import("@playwright/test").Frame, a: string) =>
+    frame.evaluate(`(function (a) {
+      var e = window.Asc.editor;
+      e.asc_findCell(a);
+      var info = e.asc_getCellInfo(), out = {};
+      var pick = function (o, names) { var r = {}; names.forEach(function (n) { try { var v = o[n](); r[n.slice(7)] = v && typeof v === "object" ? "(object)" : v; } catch (x) {} }); return r; };
+      var v = info.asc_getDataValidation && info.asc_getDataValidation();
+      if (v) out.validation = pick(v, ["asc_getType", "asc_getError", "asc_getOperator"]);
+      var h = info.asc_getHyperlink && info.asc_getHyperlink();
+      if (h) out.link = pick(h, ["asc_getHyperlinkUrl", "asc_getText"]);
+      var f = info.asc_getAutoFilterInfo && info.asc_getAutoFilterInfo();
+      if (f) out.filter = pick(f, ["asc_getIsAutoFilter", "asc_getIsApplyAutoFilter"]);
+      return JSON.stringify(out);
+    })(${JSON.stringify(a)})`) as Promise<string>;
+
+  test("33. conditional formats, validation, links, a chart, a filter and a table in a real spreadsheet, and a sort and a named range: office_read says each, the person's editor shows them, the picture draws the rule's fill and the chart, and the save holds them all", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Sales", "cell");
+    await tools.office_edit.execute("x0", { id: doc, ops: [{ range: "A1:D7", values: salesRows }, { range: "J1:K4", values: [["Tag", "Weight"], ["a", 1], ["b", 2], ["c", 3]] }] });
+    const person = await personOpens(doc);
+
+    // A sort and a named range, in the agent's editor and the person's.
+    const t0 = Date.now();
+    const sorted = (await tools.office_edit.execute("x1", { id: doc, ops: [{ sort: "A2:D7", by: ["B desc"] }, { name: "Quantities", refersTo: "Sheet1!B2:B7" }] })).content[0].text;
+    console.log(`33. ${sorted} (${Date.now() - t0} ms)`);
+    const order = (await readSheet(doc)).split("\n").filter((l) => /^A[2-7]: /.test(l)).map((l) => l.slice(4));
+    assert.deepEqual(order.slice(0, 3), ['"Date"', '"Fig"', '"Apple"'], "Qty 1200, 700, 10 first");
+    assert.equal(order[5], '"Pear"', "Qty 3 last");
+    assert.ok(await until(async () => (await personCellText(person.frame, "A2")) === "Date" && (await personCellText(person.frame, "A7")) === "Pear", 5000), "the person's editor shows the sort");
+    assert.match(await readSheet(doc), /\nD2: 45040\n/, "the rows moved whole: Date's due date with it");
+
+    // Rules, validation and links first: the picture shows the rule's fill before a filter hides rows.
+    const first = [
+      { format: "A1:D1", set: { bold: true } },
+      { conditional: "B2:B7", set: { rule: "cell", operator: ">", value: 100, fill: "#FF0000" } },
+      { conditional: "C2:C7", set: { rule: "formula", formula: '=$C2="N"', color: "#0000FF", bold: true } },
+      { conditional: "D2:D7", set: { rule: "colorScale" } },
+      { conditional: "D2:D7", set: { rule: "top", rank: 2, italic: true } },
+      { conditional: "A2:A7", set: { rule: "duplicates", fill: "#FFEB9C" } },
+      { conditional: "K2:K4", set: { rule: "dataBar", color: "#638EC6" } },
+      { validate: "C2:C7", set: { list: ["N", "S", "E"] } },
+      { validate: "B2:B7", set: { whole: ">= 0" } },
+      { link: "A2", set: { url: "https://example.com/date" } },
+      { link: "F1", set: { url: "mailto:sales@example.com", text: "Mail us" } },
+    ];
+    const t1 = Date.now();
+    const made = (await tools.office_format.execute("x2", { id: doc, ops: first })).content[0].text;
+    console.log(`33. ${made} (${Date.now() - t1} ms)`);
+    const read = await readSheet(doc);
+    console.log(`33. read:\n${read.split("\n").slice(-8).join("\n")}`);
+    assert.match(read, /\nConditional: B2:B7 cell > 100 → fill #FF0000; C2:C7 formula =\$C2="N" → #0000FF, bold; D2:D7 colour scale; D2:D7 top 2; A2:A7 duplicate values → fill #FFEB9C; K2:K4 data bar\. \(Cells under a rule show what it draws: their fills and fonts are not listed under Formats\.\)/);
+    assert.match(read, /\nFormats: A1:D1 bold; F1 underline, #0000FF\.\n/, "what the rules draw is not listed as the cells' own look: the header's bold and the link's look are");
+    assert.match(read, /\nValidation: B2:B7 whole >= 0; C2:C7 list "N,S,E"\./);
+    assert.match(read, /\nLinks: .*A2 https:\/\/example\.com\/date \("Date"\)/);
+    assert.match(read, /F1 mailto:sales@example\.com \("Mail us"\)/);
+    const extras = JSON.parse(await personExtras(person.frame, "C3"));
+    assert.equal(extras.validation?.Type, 4, "the person's editor has the list");
+    assert.equal(JSON.parse(await personExtras(person.frame, "A2")).link?.HyperlinkUrl, "https://example.com/date");
+    assert.equal(JSON.parse(await personExtras(person.frame, "F1")).link?.Text, "Mail us");
+    // The picture: B2 (1200) and B3 (700) take the rule's fill, B4 (10) does not.
+    const shot = await shoot("33. A1:F7", { id: doc, range: "A1:F7" });
+    const [b2, b3, b4] = await pixels(shot.image, [[26 + 64 + 40, 19 + 19 * 1 + 9], [26 + 64 + 40, 19 + 19 * 2 + 9], [26 + 64 + 40, 19 + 19 * 3 + 9]]);
+    console.log(`33. B2 ${b2}, B3 ${b3}, B4 ${b4}`);
+    assert.ok(red(b2) && red(b3), `B2 and B3 are red: ${b2} ${b3}`);
+    assert.ok(!red(b4), `B4 is not: ${b4}`);
+
+    // A chart, a filter and a table: not taken back, so last in a call.
+    const second = [
+      { chart: "A1:B7", set: { type: "column", title: "Quantity by item", xTitle: "Item", yTitle: "Qty", legend: "bottom", at: "H2", width: "12cm", height: "7cm" } },
+      { filter: "A1:D7", set: { column: "B", criteria: ">5" } },
+      { asTable: "J1:K4" },
+    ];
+    const t2 = Date.now();
+    const rest = (await tools.office_format.execute("x3", { id: doc, ops: second })).content[0].text;
+    console.log(`33. ${rest} (${Date.now() - t2} ms)`);
+    const after = await readSheet(doc);
+    assert.match(after, /\nFilter: A1:D7\./);
+    assert.match(after, /\nCharts: column "Quantity by item" at H2\./);
+    assert.match(after, /\nRows: 7 hidden \(others [\d.]+pt\)\./, "the filter hid Pear (Qty 3), the only row at 5 or less");
+    assert.equal(JSON.parse(await personExtras(person.frame, "B1")).filter?.IsAutoFilter, true, "the person's editor has the filter");
+    // The chart is drawn: its bars and text are not blank paper.
+    const chartShot = await shoot("33. H1:Q18", { id: doc, range: "H1:Q18" });
+    const points: [number, number][] = [];
+    for (let x = 30; x < 600; x += 12) for (let y = 40; y < 330; y += 12) points.push([x, y]);
+    const drawn = (await pixels(chartShot.image, points)).filter((p) => p.some((v) => v < 235)).length;
+    console.log(`33. the chart's region: ${drawn} of ${points.length} sampled points are not paper`);
+    assert.ok(drawn > 25, `the chart is drawn (${drawn})`);
+
+    // The save holds all of it.
+    await tools.office_edit.execute("x4", { id: doc, ops: [{ range: "Z50", values: [["saved"]] }] });
+    const sheet1 = await partOf(doc, "xl/worksheets/sheet1.xml");
+    console.log(`33. saved: ${(await JSZip.loadAsync(readFileSync(await fileOf(doc)))).file(/./).map((f) => f.name).filter((n) => /chart|table|drawing|rels/.test(n)).join(", ")}`);
+    const styles = await partOf(doc, "xl/styles.xml");
+    console.log(`33. saved rules: ${(sheet1.match(/<(?:x14:)?cfRule .*?<\/(?:x14:)?cfRule>/g) ?? []).map((r) => r.slice(0, 220)).join(" | ")}; dxfs ${/<dxfs.*?<\/dxfs>/s.exec(styles)?.[0].slice(0, 300)}`);
+    assert.match(sheet1, /cfRule type="cellIs"[^>]*operator="greaterThan"/, "the cell rule");
+    assert.match(sheet1, /type="cellIs"[^>]*operator="greaterThan"><xm:f>100<\/xm:f><x14:dxf><fill>/, "and its fill (red is a palette colour in the file)");
+    assert.match(sheet1, /type="colorScale"/);
+    assert.match(sheet1, /type="duplicateValues"/);
+    assert.match(sheet1, /dataValidation [^>]*type="list"/);
+    assert.match(sheet1, /type="whole"/);
+    assert.equal((sheet1.match(/<hyperlink /g) ?? []).length, 2);
+    assert.match(await partOf(doc, "xl/worksheets/_rels/sheet1.xml.rels"), /mailto:sales@example\.com/);
+    assert.match(sheet1, /<autoFilter ref="A1:D7"[\s\S]*?<filterColumn colId="1"/);
+    assert.match(await partOf(doc, "xl/charts/chart1.xml"), /Quantity by item/);
+    assert.match(await partOf(doc, "xl/tables/table1.xml"), /ref="J1:K4"/);
+    assert.match(await partOf(doc, "xl/workbook.xml"), /<definedName name="Quantities"[^>]*>Sheet1!\$B\$2:\$B\$7</);
+    // The filter taken off again: the sheet has none, the rows it hid show, the person's editor has none.
+    const off = (await tools.office_format.execute("x3b", { id: doc, ops: [{ filter: "none" }] })).content[0].text;
+    console.log(`33. ${off}`);
+    const unfiltered = await readSheet(doc);
+    assert.doesNotMatch(unfiltered, /\nFilter: /);
+    assert.doesNotMatch(unfiltered, /\nRows: 7 hidden/, "the row the filter hid is shown again");
+    assert.ok(await until(async () => JSON.parse(await personExtras(person.frame, "B1")).filter?.IsAutoFilter === false, 5000), "the person's editor has no filter");
+    assert.doesNotMatch(await partOf(doc, "xl/worksheets/sheet1.xml"), /<autoFilter ref="A1:D7"/);
+    // A name changed and deleted, and the same name made again, each in one call.
+    await tools.office_edit.execute("x5", { id: doc, ops: [{ name: "Quantities", refersTo: "Sheet1!B2:B3" }] });
+    assert.match(await partOf(doc, "xl/workbook.xml"), /<definedName name="Quantities"[^>]*>Sheet1!\$B\$2:\$B\$3</);
+    await tools.office_edit.execute("x6", { id: doc, ops: [{ name: "Quantities", delete: true }] });
+    assert.doesNotMatch(await partOf(doc, "xl/workbook.xml"), /definedName name="Quantities"/);
+    assert.match(await failing(tools.office_edit.execute("x7", { id: doc, ops: [{ name: "Quantities", delete: true }] })), /^error:not_found op 1: there is no name "Quantities"/);
+    await person.page.context().close();
+  });
+
+  test("34. the inverse matrix of the extras: a conditional format, a validation over another and a cleared one, links, a sort, names, each made and then failed at a last op, is taken back in the agent's editor, the person's and the save; a chart, a table and cleared rules are named as not taken back", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Extras matrix", "cell");
+    await tools.office_edit.execute("y0", { id: doc, ops: [{ range: "A1:C5", values: [["Item", "Qty", "Region"], ["Pear", 3, "N"], ["Apple", 10, "S"], ["Fig", 700, "N"], ["Kiwi", 7, "E"]] }, { range: "D1", values: [["=SUM(B2:B5)"]] }] });
+    // What stays: a rule, a validation, a link and two names the cases change.
+    await tools.office_format.execute("y1", { id: doc, ops: [
+      { conditional: "B2:B3", set: { rule: "cell", operator: "<", value: 5, italic: true } },
+      { validate: "B2:B5", set: { whole: ">= 0" } },
+      { validate: "C3:C4", set: { list: ["N", "S", "E"] } },
+      { link: "A5", set: { url: "https://example.com/old", text: "Kiwi" } },
+    ] });
+    await tools.office_edit.execute("y2", { id: doc, ops: [{ name: "Old", refersTo: "Sheet1!B2:B5" }, { name: "Gone", refersTo: "Sheet1!C2:C5" }] });
+    const person = await personOpens(doc);
+    const cells = ["A1", "A2", "A5", "B2", "B3", "C2", "C3", "C4", "D1"];
+    const extrasOf = async () => {
+      const out: Record<string, string> = {};
+      for (const a of cells) out[a] = await personExtras(person.frame, a);
+      return out;
+    };
+    const noFilter = /^error:bad_op op \d+: "Sheet1" has no filter to take off/;
+    const cases: { name: string; tool: "office_format" | "office_edit"; ops: unknown[]; said: RegExp }[] = [
+      { name: "conditional formats", tool: "office_format", said: noFilter, ops: [
+        { conditional: "B2:B5", set: { rule: "cell", operator: ">", value: 100, fill: "#FF0000" } },
+        { conditional: "B2:B5", set: { rule: "colorScale", colors: ["#FF0000", "#00FF00"] } },
+        { conditional: "A2:A5", set: { rule: "duplicates", unique: true, bold: true } },
+        { conditional: "C2:C5", set: { rule: "top", rank: 2, bottom: true, fill: "#FFFF00" } },
+        { conditional: "C2:C5", set: { rule: "formula", formula: '=$C2="N"', color: "#0000FF" } },
+      ] },
+      { name: "validation over validation", tool: "office_format", said: noFilter, ops: [{ validate: "C2:C5", set: { list: ["x", "y"] } }, { validate: "B2:B3", set: { decimal: "> 0" } }, { validate: "D1:D3", set: { length: "<= 5" } }] },
+      { name: "validation cleared", tool: "office_format", said: noFilter, ops: [{ validate: "B2:C5", set: { clear: true } }] },
+      { name: "links", tool: "office_format", said: noFilter, ops: [
+        { link: "A2", set: { url: "https://example.com/pear" } },
+        { link: "E1", set: { url: "mailto:a@example.com", text: "Mail" } },
+        { link: "B2", set: { url: "https://example.com/n", text: "three" } },
+        { link: "A5", set: { url: "https://example.com/new", text: "Kiwi again" } },
+      ] },
+      { name: "sort and names", tool: "office_edit", said: /^error:partial op 5: .* cannot read back the alignment and borders of "Sheet1"!A2:C4 \(op 1\), which stay as this call set them\./, ops: [
+        { sort: "A2:C4", by: ["B desc"] },
+        { name: "Fresh", refersTo: "Sheet1!A1:B2" },
+        { name: "Old", refersTo: "Sheet1!C2" },
+        { name: "Gone", delete: true },
+        { range: "Z9", values: [["=SUM("]] },
+      ] },
+    ];
+    const timings: string[] = [];
+    for (const c of cases) {
+      const before = { read: await readSheet(doc, "Sheet1"), person: await personCells(person.frame, cells), extras: await extrasOf() };
+      const t0 = Date.now();
+      const ops = c.tool === "office_format" ? [...c.ops, { filter: "none" }] : c.ops;
+      const said = await failing(tools[c.tool].execute(`y-${c.name}`, { id: doc, ops }));
+      timings.push(`${c.name} ${Date.now() - t0} ms`);
+      console.log(`34. ${c.name}: ${said}`);
+      assert.match(said, c.said, c.name);
+      if (c.tool === "office_format") assert.doesNotMatch(said, /taken back|stay/, `${c.name}: whole, nothing named as staying`);
+      else assert.doesNotMatch(said, /Kept|Not taken back/, `${c.name}: only what a sort cannot read back stays`);
+      await delay(800);
+      const used = (t: string) => t.replace(/^(Sheet "Sheet1") \([A-Z]+\d+(:[A-Z]+\d+)?\):$/m, "$1 (…):");
+      assert.equal(used(await readSheet(doc, "Sheet1")), used(before.read), `${c.name}: the agent's editor reads as before`);
+      let seen: Record<string, string> = {};
+      const same = await until(async () => JSON.stringify(await personCells(person.frame, cells)) === JSON.stringify(before.person) && JSON.stringify((seen = await extrasOf())) === JSON.stringify(before.extras), 5000);
+      assert.ok(same, `${c.name}: the person's editor is as it was (${Object.keys(seen).filter((a) => seen[a] !== before.extras[a]).map((a) => `${a} ${before.extras[a]} -> ${seen[a]}`).join("; ")})`);
+    }
+    console.log(`34. failing calls: ${timings.join(", ")}`);
+    // The save: only what stayed.
+    await tools.office_edit.execute("y-save", { id: doc, ops: [{ range: "Z50", values: [["saved"]] }] });
+    const sheet1 = await partOf(doc, "xl/worksheets/sheet1.xml");
+    assert.equal((sheet1.match(/cfRule /g) ?? []).length, 1, "the one rule that was there");
+    assert.equal((sheet1.match(/<(?:x14:)?dataValidation /g) ?? []).length, 2, "the two validations that were there");
+    assert.equal((sheet1.match(/<hyperlink /g) ?? []).length, 1);
+    assert.match(await partOf(doc, "xl/worksheets/_rels/sheet1.xml.rels"), /https:\/\/example\.com\/old/);
+    const book = await partOf(doc, "xl/workbook.xml");
+    assert.match(book, /definedName name="Old"[^>]*>Sheet1!\$B\$2:\$B\$5</);
+    assert.match(book, /definedName name="Gone"/);
+    assert.doesNotMatch(book, /definedName name="Fresh"/);
+    assert.match(await readSheet(doc, "Sheet1"), /\nA2: "Pear"\n/, "the sort is taken back");
+    // A sort moves the links of its cells with them; taken back, they stay where it put them, and the answer says so.
+    const linked = await failing(tools.office_edit.execute("y-linked", { id: doc, ops: [{ sort: "A2:C5", by: ["B desc"] }, { range: "Z9", values: [["=SUM("]] }] }));
+    console.log(`34. a sort over a link: ${linked}`);
+    assert.match(linked, /cannot read back the alignment and borders of "Sheet1"!A2:C5 \(op 1\); the links of "Sheet1"!A4 \(op 1\), which stay as this call set them\./);
+    assert.match(await readSheet(doc, "Sheet1"), /\nA2: "Pear"\n/, "the values are back all the same");
+
+    // What cannot be taken back is named when a later op fails: a chart, a table, cleared rules.
+    // (A table over a linked cell breaks that cell's formats in the editor: refused, so the table goes elsewhere.)
+    assert.match(await failing(tools.office_format.execute("y-linked-table", { id: doc, ops: [{ asTable: "A1:C5" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and A\d of "Sheet1" has one/);
+    await tools.office_edit.execute("y-tag", { id: doc, ops: [{ range: "F1:G3", values: [["Tag", "Weight"], ["a", 1], ["b", 2]] }] });
+    // A link's look replaces the cell's font: a bold link replaced by another and taken back comes back with its link, and
+    // the answer names the font it could not put back. (The sort above moved the old link to A4.)
+    await tools.office_format.execute("y-bold", { id: doc, ops: [{ format: "A4", set: { bold: true } }] });
+    const boldLink = await failing(tools.office_format.execute("y-bold-link", { id: doc, ops: [{ link: "A4", set: { url: "https://example.com/new", text: "Fig again" } }, { filter: "none" }] }));
+    console.log(`34. a bold link replaced and taken back: ${boldLink}`);
+    await delay(800);
+    assert.match(boldLink, /^error:partial op 2: .* cannot read back the font of "Sheet1"!A4 \(op 1\), which stay as this call set them\./);
+    assert.match(await readSheet(doc, "Sheet1"), /\nA4: "Fig"\n/, "the text is back");
+    assert.match(await readSheet(doc, "Sheet1"), /Links: .*A4 https:\/\/example\.com\/old/, "and the old link");
+    // A clear of formats takes the rules of its cells off with it (DS 10.0): the answer says they are not back.
+    assert.match(await readSheet(doc, "Sheet1"), /\nConditional: /, "a rule is there");
+    const cleared = await failing(tools.office_format.execute("y-clear-rules", { id: doc, ops: [{ format: "A1:D9", set: { clear: true } }, { filter: "none" }] }));
+    console.log(`34. a clear over a rule, taken back: ${cleared}`);
+    assert.match(cleared, /Not taken back: the conditional formats of A1:D9 of "Sheet1" that op 1 cleared\./);
+    assert.doesNotMatch(await readSheet(doc, "Sheet1"), /\nConditional: /, "the clear took the rule with it, as the answer said");
+    const stays: [string, unknown[], RegExp][] = [
+      ["a chart", [{ chart: "A1:B5", set: { title: "Qty" } }, { filter: "none" }], /^error:partial op 2: "Sheet1" has no filter to take off\. The ops before it are taken back, but not all of them whole\. Not taken back: the chart of A1:B5 of "Sheet1" that op 1 made\./],
+      ["a table", [{ asTable: "F1:G3" }, { filter: "none" }], /Not taken back: the table F1:G3 of "Sheet1" that op 1 made\./],
+      ["cleared rules", [{ conditional: "A1:D9", set: { clear: true } }, { filter: "none" }], /Not taken back: the conditional formats of A1:D9 of "Sheet1" that op 1 cleared\./],
+    ];
+    for (const [name, ops, said] of stays) {
+      const out = await failing(tools.office_format.execute(`y-${name}`, { id: doc, ops }));
+      console.log(`34. ${name}: ${out}`);
+      assert.match(out, said, name);
+    }
+    const after = await readSheet(doc, "Sheet1");
+    assert.match(after, /\nCharts: column "Qty" at D1\./, "the chart is there");
+    assert.doesNotMatch(after, /\nConditional:/, "and the rules are gone");
+    await person.page.context().close();
+  });
+
+  test("35. a person's change wins over the inverse: what they typed into a sorted cell and into a cell the call linked, after the call's step, stays, and the answer names it; the rest is back", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Kept extras", "cell");
+    await tools.office_edit.execute("z0", { id: doc, ops: [{ range: "A1:B5", values: [["pear", 3], ["apple", 10], ["fig", 7], ["kiwi", 9], ["plum", 1]] }, { range: "D1", values: [["note"]] }] });
+    const person = await personOpens(doc);
+    // A sort and a link, then sheet ops each waiting for the Document Server (time for the person), then a write that fails.
+    const writing = failing(tools.office_edit.execute("z1", { id: doc, ops: [{ sort: "A1:B5", by: ["B desc"] }, ...Array.from({ length: 6 }, (_, k) => ({ addSheet: `Wait ${k}` })), { range: "Z9", values: [["=SUM("]] }] }));
+    assert.ok(await until(async () => (await personCellText(person.frame, "A1")) === "apple", 10_000), "the person sees the sort");
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("A1")`);
+    await person.page.keyboard.type("person\n", { delay: 20 });
+    const said = await writing;
+    console.log(`35. the sort taken back around the person's: ${said}`);
+    assert.match(said, /^error:partial op 8: .* Kept as a person changed them after this call: A1 of "Sheet1"\./);
+    await delay(1500);
+    const read = await readSheet(doc);
+    assert.match(read, /\nA1: "person"\nB1: 3\nD1: "note"\nA2: "apple"\nB2: 10\nA3: "fig"\nB3: 7\nA4: "kiwi"\nB4: 9\nA5: "plum"\nB5: 1\n/, "A1 is the person's, everything else as before the sort");
+
+    // A link with its text, then a format of many steps (time for the person), then one that fails: the person types
+    // into the linked cell after the link showed. The text is theirs, the link goes.
+    await tools.office_edit.execute("z-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
+    const steps = Array.from({ length: 150 }, (_, k) => ({ format: "H1:H100", set: { italic: k % 2 === 0 } }));
+    const linking = failing(tools.office_format.execute("z2", { id: doc, ops: [{ link: "D1", set: { url: "https://example.com/x", text: "agent text" } }, ...steps, ...failOps(0)] }));
+    assert.ok(await until(async () => (await personCellText(person.frame, "D1")) === "agent text", 10_000), "the person sees the link's text");
+    await person.frame.evaluate(`window.Asc.editor.asc_findCell("D1")`);
+    await person.page.keyboard.type("typed\n", { delay: 20 });
+    const said2 = await linking;
+    console.log(`35. the link taken back around the person's: ${said2}`);
+    assert.match(said2, /^error:partial op 153: .* Kept as a person changed them after this call: D1 of "Sheet1"\./);
+    await delay(1500);
+    const after = await readSheet(doc, "Sheet1");
+    assert.match(after, /\nD1: "typed"\n/, "D1 is the person's");
+    assert.doesNotMatch(after, /\nLinks: /, "the link is gone");
+    await person.page.context().close();
+  });
+
+  test("36. how long the extras take in the real editor: a sort of 2,000 rows and a validation of 5,000 cells, made, and made then taken back; rules and a chart on a sheet of that size", { timeout: 900_000 }, async () => {
+    const doc = await agentDoc("Big extras", "cell");
+    const rows = Array.from({ length: 2000 }, (_, k) => [`item ${k}`, (k * 7919) % 1000, k % 3 ? "N" : "S", `=B${k + 2}*2`]);
+    await tools.office_edit.execute("t0", { id: doc, ops: [{ range: "A1:D1", values: [["Item", "Qty", "Region", "Twice"]] }, { range: "A2:D2001", values: rows }] });
+    const timed = async (label: string, tool: "office_edit" | "office_format", ops: unknown[]) => {
+      const t0 = Date.now();
+      const said = await failing(tools[tool].execute(`t-${label}`, { id: doc, ops }));
+      const ms = Date.now() - t0;
+      console.log(`36. ${label}: ${ms} ms: ${said.slice(0, 160)}`);
+      return { said, ms };
+    };
+    const sort = await timed("sort of 2,000 rows by two columns", "office_edit", [{ sort: "A2:D2001", by: ["B desc", "A"] }]);
+    assert.match(sort.said, /^answered: Edited /);
+    assert.match(await readSheet(doc, "Sheet1"), /\nA2: "item 1321"\nB2: 999\n/, "the largest Qty first, the items of a Qty in the order of their names");
+    const sortBack = await timed("sort of 2,000 rows taken back", "office_edit", [{ sort: "A2:D2001", by: ["B"] }, { range: "Z9", values: [["=SUM("]] }]);
+    assert.match(sortBack.said, /^error:partial op 2: .* cannot read back the alignment and borders of "Sheet1"!A2:D2001 \(op 1\)/);
+    assert.match(await readSheet(doc, "Sheet1"), /\nA2: "item 1321"\nB2: 999\n/, "as the first sort left it");
+    const validation = await timed("validation of 5,000 cells", "office_format", [{ validate: "E2:E5001", set: { list: ["a", "b"] } }]);
+    assert.match(validation.said, /^answered: Formatted /);
+    const validationBack = await timed("validation of 5,000 cells over another, taken back", "office_format", [{ validate: "E2:E5001", set: { whole: ">= 0" } }, { filter: "none" }]);
+    assert.match(validationBack.said, /^error:bad_op op 2: "Sheet1" has no filter to take off/);
+    const rules = await timed("rules on whole columns and a chart of 2,000 rows", "office_format", [
+      { conditional: "B:B", set: { rule: "cell", operator: ">", value: 500, fill: "#FF0000" } },
+      { conditional: "A2:A2001", set: { rule: "duplicates", bold: true } },
+      { chart: "A1:B2001", set: { type: "line", title: "All" } },
+    ]);
+    assert.match(rules.said, /^answered: Formatted /);
+    const read = await timed("office_read with formatting of that sheet", "office_edit", [{ range: "Z1", values: [["x"]] }]);
+    const t0 = Date.now();
+    const text = (await tools.office_read.execute("t-read", { id: doc, sheet: "Sheet1", formatting: true })).content[0].text;
+    console.log(`36. office_read with formatting: ${Date.now() - t0} ms, ${text.length} characters; its end: ${JSON.stringify(text.slice(-700))}`);
+    assert.match(text, /\nValidation: E2:E769 list "a,b"\./, "the cells the read lists only (its first 769 rows): the validation below them is not read");
+    assert.ok(read.ms > 0);
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

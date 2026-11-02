@@ -114,7 +114,7 @@ async function run(PITHAGORAS: string): Promise<void> {
   test("the Document Server, its relay and its network come up", { timeout: 600_000 }, async () => {
     await host.syncServerHalves([half(path.join(PITHAGORAS, "extensions/docker"), "src/server.ts"), half(PACKAGE, "src/server.ts")]);
     assert.equal(host.serverFailure("@pithagoras/office"), undefined);
-    assert.match(seat.pageUrl(), /^http:\/\/office-spike-ds-relay:3891\/seat\/[0-9a-f]{64}\/$/, "the test reaches the half's own seat module");
+    assert.match(seat.pageUrl(), new RegExp(`^http://${PREFIX}-relay:3891/seat/[0-9a-f]{64}/$`), "the test reaches the half's own seat module");
     let state = "";
     for (let i = 0; i < 300 && state !== "running"; i++) {
       state = (await json(`${at}/container/status`)).body.state;

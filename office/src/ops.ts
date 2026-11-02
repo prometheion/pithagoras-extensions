@@ -18,6 +18,9 @@
  * - `{addSheet, position?}`: a new empty sheet of that name, at the position or after the last sheet;
  * - `{renameSheet, to}`, `{moveSheet, position}` (a visible sheet), `{copySheet, to, position?}` (the copy right after
  *   its sheet where no position is given), `{hideSheet}`, `{showSheet}`, `{deleteSheet}`; MAX_SHEET_OPS of them a call.
+ * And two that change what a sheet holds, taken back like a write: `{sheet?, sort: "A2:D9", by: ["B desc", "C"]}` (the
+ * rows of the range in the order of its columns, up to three, ascending unless "desc") and `{name, refersTo}` (a named
+ * range, made or changed; `{name, delete: true}` removes it).
  * A new name must be one Excel takes (sheetNameProblem); whether the sheets named are there, a new name is free, a
  * position is inside the workbook and a visible sheet is left is checked by the command (seat-page.ts,
  * SHEET_MODEL_SRC), on the sheets as they stand when it runs.
@@ -44,7 +47,10 @@ export type LineOp =
   | { sheet?: string; insertColumns: string; from: number; count: number }
   | { sheet?: string; deleteRows: string; from: number; count: number }
   | { sheet?: string; deleteColumns: string; from: number; count: number };
-export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: (CellOp | SheetOp | LineOp)[] } };
+/** A sort of the rows of `area` by up to three of its columns (from 0, in the sheet), and a named range. */
+export type SortOp = { sheet?: string; sort: string; area: SheetArea; by: { col: number; desc: boolean }[] };
+export type NameOp = { name: string; refersTo: { sheet?: string; address: string } } | { name: string; delete: true };
+export type EditJob = { kind: "word.edit"; args: { ops: WordOp[] } } | { kind: "cell.edit"; args: { ops: (CellOp | SheetOp | LineOp | SortOp | NameOp)[] } };
 /** The row and column ops of office_edit, by their key: rows or columns. */
 export const LINE_OPS: Record<string, "rows" | "columns"> = { insertRows: "rows", insertColumns: "columns", deleteRows: "rows", deleteColumns: "columns" };
 
@@ -94,6 +100,9 @@ export function editJob(ext: "docx" | "xlsx", ops: unknown): EditJob {
   // call as a format reads cells.
   const lines = cells.reduce((n, op) => n + ("count" in op ? op.count : 0), 0);
   if (lines > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call inserts and deletes ${MAX_FORMAT_CELLS.toLocaleString("en")} rows and columns at most (got ${lines.toLocaleString("en")}); split it into several calls`);
+  // A sort reads its cells to be taken back, as a format does.
+  const sorted = cells.reduce((n, op) => n + ("sort" in op ? op.area.cols * op.area.rows : 0), 0);
+  if (sorted > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call sorts ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most (got ${sorted.toLocaleString("en")}): each one's content and formats are read first, so that the call can be taken back; split it into several calls`);
   return { kind: "cell.edit", args: { ops: cells } };
 }
 
@@ -112,7 +121,14 @@ function lastWithoutInverse<T>(ops: T[], none: (op: T) => boolean): void {
   const later = ops.findIndex((op, k) => k > first && !none(op));
   if (later !== -1) throw new OpError("bad_op", `op ${first + 1} cannot be taken back once made (${describeNone(ops[first] as object)}), so it goes after every op that can: put it last in the call (op ${later + 1} comes after it), or make it in a call of its own`, first);
 }
-const describeNone = (op: object) => ("deleteRows" in op ? "deleted rows" : "deleteColumns" in op ? "deleted columns" : "it has no inverse");
+const describeNone = (op: object) =>
+  "deleteRows" in op ? "deleted rows"
+  : "deleteColumns" in op ? "deleted columns"
+  : "chart" in op ? "a chart, which the editor's API cannot remove"
+  : "filter" in op ? "a filter, which the editor's API cannot take off again"
+  : "asTable" in op ? "a formatted table, which the editor's API cannot turn back"
+  : "conditional" in op ? "cleared conditional formats, which cannot be made again"
+  : "it has no inverse";
 
 /** The list of ops is one, of MAX_OPS at most, and its JSON within MAX_ARGS_BYTES. */
 function capped(ops: unknown): void {
@@ -248,7 +264,7 @@ export function sheetNameProblem(name: string): string | null {
   return null;
 }
 
-const SHEET_SHAPES = "{sheet?, range, values}, {sheet?, insertRows | insertColumns | deleteRows | deleteColumns}, {addSheet, position?}, {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?}, {hideSheet}, {showSheet} and {deleteSheet}";
+const SHEET_SHAPES = "{sheet?, range, values}, {sheet?, insertRows | insertColumns | deleteRows | deleteColumns}, {sheet?, sort, by}, {name, refersTo | delete}, {addSheet, position?}, {renameSheet, to}, {moveSheet, position}, {copySheet, to, position?}, {hideSheet}, {showSheet} and {deleteSheet}";
 
 function sheetOp(op: Record<string, unknown>, key: string, i: number): SheetOp {
   const n = i + 1;
@@ -272,16 +288,18 @@ function sheetOp(op: Record<string, unknown>, key: string, i: number): SheetOp {
   return out as SheetOp;
 }
 
-function cellOp(op: unknown, i: number): CellOp | SheetOp | LineOp {
+function cellOp(op: unknown, i: number): CellOp | SheetOp | LineOp | SortOp | NameOp {
   const n = i + 1;
   if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
   if (["quote", "paragraphs", "table", "remove", ...FORMAT_SHAPES.filter((k) => k !== "format" && k !== "set")].some((k) => k in op)) throw new OpError("unsupported_format", `op ${n} is a Word edit, and this is a spreadsheet: its ops are ${SHEET_SHAPES}`, i);
   const looks = SHEET_FORMAT_SHAPES.find((k) => k in op);
   if (looks) throw new OpError("bad_op", `op ${n}: \`${looks}\` is an office_format op (how the sheet looks): make it with office_format`, i);
   const sheetKeys = Object.keys(SHEET_OPS).filter((k) => k in op);
-  const lineKeys = Object.keys(LINE_OPS).filter((k) => k in op);
+  const lineKeys = [...Object.keys(LINE_OPS), "sort", "name"].filter((k) => k in op);
   if (sheetKeys.length + lineKeys.length > 1 || (sheetKeys.length && ("range" in op || "values" in op || "sheet" in op)) || (lineKeys.length && ("range" in op || "values" in op))) throw new OpError("bad_op", `op ${n} must be exactly one of ${SHEET_SHAPES} (it has ${[...sheetKeys, ...lineKeys, ...["sheet", "range", "values"].filter((k) => k in op)].join(" and ")})`, i);
   if (sheetKeys.length) return sheetOp(op, sheetKeys[0], i);
+  if (lineKeys[0] === "sort") return sortOp(op, i);
+  if (lineKeys[0] === "name") return nameOp(op, i);
   if (lineKeys.length) return lineOp(op, lineKeys[0], i);
   const extra = Object.keys(op).filter((k) => !["sheet", "range", "values"].includes(k));
   if (extra.length) throw new OpError("bad_op", `op ${n}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of a spreadsheet op (they are ${SHEET_SHAPES})`, i);
@@ -493,6 +511,9 @@ function formatOp(op: unknown, i: number): FormatOp {
   if ("range" in op || "values" in op) throw new OpError("unsupported_format", `op ${n} is a spreadsheet edit ({range, values}), and this is a Word document`, i);
   const content = ["quote", "replacement", "paragraphs", "table", "remove"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the document says): make it with office_edit, and its look here`);
+  // (An op with a Word shape of its own is a Word op with a key out of place: the shape check below names the key.)
+  const sheetOnly = FORMAT_SHAPES.some((k) => k !== "set" && k in op) ? undefined : SHEET_FORMAT_SHAPES.find((k) => k !== "format" && k !== "set" && k in op);
+  if (sheetOnly) throw new OpError("unsupported_format", `op ${n} is a spreadsheet op (\`${sheetOnly}\`), and this is a Word document`, i);
   const shapes = FORMAT_SHAPES.filter((k) => k !== "set" && k in op);
   if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its quote the value of its first key ({${shapes[1]}: "<quote>", …})` : missingFirstKey(op)}`, i);
   const shape = shapes[0];
@@ -870,11 +891,18 @@ export type SheetFormatOp =
   | { sheet?: string; format: string; area: SheetArea; looks: SheetLooks }
   | { sheet?: string; columns: string; from: number; count: number; width?: number; hidden?: boolean; autofit?: true }
   | { sheet?: string; rows: string; from: number; count: number; height?: number; hidden?: boolean; autofit?: true }
-  | { sheet?: string; freeze: string; cols: number; rows: number };
+  | { sheet?: string; freeze: string; cols: number; rows: number }
+  | { sheet?: string; conditional: string; area: SheetArea; rule: CfRule }
+  | { sheet?: string; conditional: string; area: SheetArea; clear: true }
+  | { sheet?: string; validate: string; area: SheetArea; check: Validation | null }
+  | { sheet?: string; link: string; at: { col: number; row: number }; url: string; text?: string }
+  | { sheet?: string; chart: string; area: SheetArea; chartType: string; title?: string; xTitle?: string; yTitle?: string; legend?: string; at: { col: number; row: number }; width: number; height: number; inRows: boolean }
+  | { sheet?: string; filter: string; area?: SheetArea; column?: number; criteria?: string; and?: string; or?: string }
+  | { sheet?: string; asTable: string; area: SheetArea };
 export type SheetFormatJob = { kind: "cell.format"; args: { ops: SheetFormatOp[] } };
 
 /** The keys that name a spreadsheet's office_format op (`set` alone too: a format given to office_edit). */
-export const SHEET_FORMAT_SHAPES = ["format", "columns", "rows", "freeze", "set"];
+export const SHEET_FORMAT_SHAPES = ["format", "columns", "rows", "freeze", "conditional", "validate", "link", "chart", "filter", "asTable", "set"];
 /** The most cells one call formats by their addresses (each one's state is read first, to take the call back), and the
  * most columns and rows its columns and rows ops take; whole columns and rows count the cells of the sheet's used range
  * among them, which the command counts (seat-page.ts, CELL_STEP). */
@@ -885,7 +913,7 @@ const MAX_HEIGHT = 409;
 
 const SHEET_TEXT_KEYS = ["numberFormat", "font", "fontSize", "bold", "italic", "underline", "strike", "superscript", "subscript", "color"];
 const SHEET_CELL_KEYS = ["fill", "align", "valign", "wrap", "rotation", "borders", "merge", "clear"];
-const SHEET_FORMAT_LIST = "{sheet?, format, set}, {sheet?, columns, width? | hide? | show? | autofit?}, {sheet?, rows, height? | hide? | show? | autofit?} and {sheet?, freeze}";
+const SHEET_FORMAT_LIST = "{sheet?, format, set}, {sheet?, columns, width? | hide? | show? | autofit?}, {sheet?, rows, height? | hide? | show? | autofit?}, {sheet?, freeze}, {sheet?, conditional, set}, {sheet?, validate, set}, {sheet?, link, set}, {sheet?, chart, set}, {sheet?, filter, set?} and {sheet?, asTable}";
 
 /** A sheet's cells ("A1", "A1:D9"), whole columns ("C:D") or whole rows ("5:6") as office_format takes them. */
 export function parseArea(v: string): { area: SheetArea; text: string } | null {
@@ -905,9 +933,10 @@ export function parseArea(v: string): { area: SheetArea; text: string } | null {
 
 function sheetFormatJob(ops: unknown[]): SheetFormatJob {
   const out = ops.map(sheetFormatOp);
+  lastWithoutInverse(out, (op) => "chart" in op || "filter" in op || "asTable" in op || ("conditional" in op && "clear" in op));
   // Whole columns and rows count one each here (the command counts the used cells among them besides): "1:1048576"
   // never gets as far as the agents' browser.
-  const cells = out.reduce((n, op) => n + ("format" in op ? (op.area.whole === "columns" ? op.area.cols : op.area.whole === "rows" ? op.area.rows : op.area.cols * op.area.rows) : 0), 0);
+  const cells = out.reduce((n, op) => n + ("format" in op ? (op.area.whole === "columns" ? op.area.cols : op.area.whole === "rows" ? op.area.rows : op.area.cols * op.area.rows) : "validate" in op || "asTable" in op || "chart" in op ? op.area.cols * op.area.rows : 0), 0);
   if (cells > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call formats ${MAX_FORMAT_CELLS.toLocaleString("en")} cells at most (got ${cells.toLocaleString("en")}, a whole column or row counting one): each one's formats are read first, so that the call can be taken back; split it into several calls, or format whole columns ("C:D") or rows ("5:6")`);
   const lines = out.reduce((n, op) => n + ("count" in op ? op.count : 0), 0);
   if (lines > MAX_FORMAT_CELLS) throw new OpError("bad_op", `one call's columns and rows ops take ${MAX_FORMAT_CELLS.toLocaleString("en")} columns and rows at most (got ${lines.toLocaleString("en")}); split it into several calls`);
@@ -918,11 +947,11 @@ function sheetFormatOp(op: unknown, i: number): SheetFormatOp {
   const n = i + 1;
   const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
   if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
-  const content = ["range", "values", ...Object.keys(SHEET_OPS), ...Object.keys(LINE_OPS)].find((k) => k in op);
+  const content = ["range", "values", ...Object.keys(SHEET_OPS), ...Object.keys(LINE_OPS), "sort", "name"].find((k) => k in op);
   if (content) throw bad(`\`${content}\` is an office_edit op (what the sheet holds): make it with office_edit, and its look here`);
   const word = ["quote", "paragraphs", "table", "remove", ...FORMAT_SHAPES.filter((k) => k !== "format" && k !== "set")].find((k) => k in op);
   if (word) throw new OpError("unsupported_format", `op ${n} is a Word op (\`${word}\`), and this is a spreadsheet: its office_format ops are ${SHEET_FORMAT_LIST}`, i);
-  const shapes = ["format", "columns", "rows", "freeze"].filter((k) => k in op);
+  const shapes = SHEET_FORMAT_SHAPES.filter((k) => k !== "set" && k in op);
   if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${SHEET_FORMAT_LIST} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length > 1 ? `: each is an op of its own, its cells the value of its first key ({${shapes[1]}: "…", …})` : ""}`, i);
   const shape = shapes[0];
   if (op.sheet !== undefined && (typeof op.sheet !== "string" || op.sheet === "")) throw bad("sheet is a sheet's name (the first sheet where none is given)");
@@ -947,6 +976,7 @@ function sheetFormatOp(op: unknown, i: number): SheetFormatOp {
     if (looks.merge !== undefined && where.area.whole) throw bad("merge takes cells (\"A1:D1\"), not whole columns or rows");
     return { ...sheet, format: where.text, area: where.area, looks };
   }
+  if (EXTRA_SHAPES.includes(shape)) return extraOp(op, shape, i, sheet);
   if (shape === "freeze") {
     const extra = Object.keys(op).filter((k) => !["sheet", "freeze"].includes(k));
     if (extra.length) throw bad(`${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of {sheet?, freeze}`);
@@ -1065,4 +1095,329 @@ function sheetLooks(set: Record<string, unknown>, bad: Bad): SheetLooks {
     out.clear = true;
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* office_format (spreadsheets): rules, validation, links, charts, ...  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The spreadsheet ops that need more than cells and a `set` of looks. Each names its place by its first key and carries
+ * what it makes in `set` (flat, like `format`'s; the keys may stand beside the op's first key too):
+ * - `{sheet?, conditional: "B2:B9" | "C:C", set}`: a conditional format (`rule`: cell, formula, colorScale, dataBar, top,
+ *   duplicates), or `set: {clear: true}` for every rule that touches the range;
+ * - `{sheet?, validate: "E2:E9", set}`: data validation (`list`, `whole`, `decimal`, `date` or `length`), or
+ *   `clear: true`; no error message: the editor's setters for it (SetErrorMessage and the like) change the agent's own
+ *   copy and send nothing (measured in the editor, DS 10.0.0.1: the save and a person's editor have none);
+ * - `{sheet?, link: "A2", set: {url, text?}}`: a link in a cell;
+ * - `{sheet?, chart: "A1:C5", set}`: a chart of the range (`type`, `title`, `xTitle`, `yTitle`, `legend`, `at`, `width`,
+ *   `height`, `rows`);
+ * - `{sheet?, filter: "A1:D9" | "none", set?}`: filter buttons on the range, with one column's criteria;
+ * - `{sheet?, asTable: "A1:C5"}`: the range as a formatted table in the editor's default style.
+ * The builder (DS 10.0, docbuilder and the editor) takes none of a chart, a filter and a table back, and a cleared rule
+ * cannot be made again: they go last in a call (lastWithoutInverse).
+ */
+export type RuleStyle = { fill?: Rgb; color?: Rgb; bold?: boolean; italic?: boolean; underline?: boolean; strike?: boolean };
+export type CfRule =
+  | ({ rule: "cell"; operator: string; value: string; value2?: string } & RuleStyle)
+  | ({ rule: "formula"; formula: string } & RuleStyle)
+  | { rule: "colorScale"; colors?: Rgb[] }
+  | { rule: "dataBar"; color?: Rgb }
+  | ({ rule: "top"; rank: number; bottom: boolean; percent: boolean } & RuleStyle)
+  | ({ rule: "duplicates"; unique: boolean } & RuleStyle);
+/** A validation as the builder adds it (ApiValidation.Add): its type, operator and formulas (a list's items joined by
+ * commas, or a range as "=$A$1:$A$9"; dates as the serial day number). */
+export type Validation = { type: "xlValidateList" | "xlValidateWholeNumber" | "xlValidateDecimal" | "xlValidateDate" | "xlValidateTextLength"; operator: string; f1: string; f2?: string };
+
+export const EXTRA_SHAPES = ["conditional", "validate", "link", "chart", "filter", "asTable"];
+const STYLE_KEYS = ["fill", "color", "bold", "italic", "underline", "strike"];
+const EXTRA_KEYS: Record<string, string[]> = {
+  conditional: ["rule", "operator", "value", "value2", "formula", "colors", "rank", "bottom", "percent", "unique", "clear", ...STYLE_KEYS],
+  validate: ["list", "whole", "decimal", "date", "length", "clear"],
+  link: ["url", "text"],
+  chart: ["type", "title", "xTitle", "yTitle", "legend", "at", "width", "height", "rows"],
+  filter: ["column", "criteria", "and", "or"],
+  asTable: [],
+};
+/** The rules, and the keys each takes besides the style keys (a dataBar's `color` is its bar's). */
+const RULE_KEYS: Record<string, string[]> = {
+  cell: ["operator", "value", "value2", ...STYLE_KEYS],
+  formula: ["formula", ...STYLE_KEYS],
+  colorScale: ["colors"],
+  dataBar: ["color"],
+  top: ["rank", "bottom", "percent", ...STYLE_KEYS],
+  duplicates: ["unique", ...STYLE_KEYS],
+};
+const CF_OPERATORS: Record<string, string> = { ">": "xlGreater", ">=": "xlGreaterEqual", "<": "xlLess", "<=": "xlLessEqual", "=": "xlEqual", "<>": "xlNotEqual", between: "xlBetween", notBetween: "xlNotBetween" };
+/** The chart types the agent names, and the builder's name for each. */
+export const CHART_TYPES: Record<string, string> = { column: "bar", columnStacked: "barStacked", bar: "horizontalBar", barStacked: "horizontalBarStacked", line: "lineNormal", pie: "pie", doughnut: "doughnut", area: "area", scatter: "scatter" };
+const LEGENDS = ["right", "bottom", "top", "left", "none"];
+const DEFAULT_CHART = { width: 6803, height: 4252 };
+
+/** A cell's, or a rule's, text: one line of at most `most` characters. */
+const lineOf = (v: unknown, most: number) => typeof v === "string" && v.trim() !== "" && oneLine(v) && v.length <= most;
+
+function extraOp(op: Record<string, unknown>, shape: string, i: number, sheet: { sheet?: string }): SheetFormatOp {
+  const n = i + 1;
+  const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
+  const keys = EXTRA_KEYS[shape];
+  if (op.set !== undefined && !isObject(op.set)) throw bad(`set is an object of ${shape}'s keys (${keys.join(", ")})`);
+  if (shape === "asTable" && (op.set !== undefined || Object.keys(op).some((k) => !["sheet", "asTable"].includes(k)))) throw bad(`${Object.keys(op).filter((k) => !["sheet", "asTable"].includes(k)).map((k) => JSON.stringify(k)).join(", ") || '"set"'} is not part of {sheet?, asTable}: the table gets the editor's default style`);
+  // Its keys in `set` or beside the shape's key (a model's habit); the same key twice is the one beside.
+  const beside = Object.fromEntries(Object.entries(op).filter(([k]) => !["sheet", shape, "set"].includes(k)));
+  const given: Record<string, unknown> = { ...(isObject(op.set) ? op.set : {}), ...beside };
+  if (Object.keys(given).length > MAX_SET_KEYS) throw bad(`set holds at most ${MAX_SET_KEYS} keys`);
+  const unknown = Object.keys(given).filter((k) => !keys.includes(k));
+  if (unknown.length) {
+    const grouped = unknown.some((k) => isObject(given[k])) ? "; set is flat" : "";
+    throw bad(`${unknown.map((k) => JSON.stringify(k)).join(", ")} ${unknown.length === 1 ? "is not a key" : "are not keys"} of ${shape} (they are ${keys.join(", ")})${grouped}`);
+  }
+  const place = typeof op[shape] === "string" ? (op[shape] as string).trim() : "";
+  // Cells: not whole columns or rows (a rule takes those, and says so).
+  const where = shape === "filter" && place.toLowerCase() === "none" ? null : parseArea(place);
+  if (!where && !(shape === "filter" && place.toLowerCase() === "none")) throw bad(`${shape} is ${shape === "conditional" ? 'the cells, as "B2:B9" or a whole column "C:C"' : shape === "link" ? 'one cell, as "A2"' : shape === "filter" ? 'the range with its header row, as "A1:D9", or "none"' : 'the cells, as "A1:D9"'} (got ${JSON.stringify(op[shape])})`);
+  if (where?.area.whole && shape !== "conditional") throw bad(`${shape} takes cells ("A1:D9"), not whole columns or rows`);
+  const sheetPart = sheet.sheet !== undefined ? sheet : {};
+  switch (shape) {
+    case "conditional": {
+      if (given.clear !== undefined) {
+        if (given.clear !== true || Object.keys(given).length > 1) throw bad("clear is true, and the only key then: every conditional format that touches the cells goes (it cannot be made again)");
+        return { ...sheetPart, conditional: where!.text, area: where!.area, clear: true };
+      }
+      return { ...sheetPart, conditional: where!.text, area: where!.area, rule: cfRule(given, bad) };
+    }
+    case "validate": {
+      return { ...sheetPart, validate: where!.text, area: where!.area, check: validation(given, bad) };
+    }
+    case "link": {
+      if (where!.area.cols !== 1 || where!.area.rows !== 1) throw bad('link is one cell, as "A2"');
+      const url = given.url;
+      if (typeof url !== "string" || !linkable(url)) throw bad("set.url is the link's address (http, https or mailto)");
+      if (given.text !== undefined && !lineOf(given.text, 255)) throw bad("set.text is the cell's text (one line, at most 255 characters)");
+      return { ...sheetPart, link: where!.text, at: { col: where!.area.col, row: where!.area.row }, url, ...(given.text !== undefined ? { text: given.text as string } : {}) };
+    }
+    case "chart": return chartOp(sheetPart, where!, given, bad);
+    case "filter": {
+      if (!where) {
+        if (Object.keys(given).length) throw bad('filter "none" takes no other key');
+        return { ...sheetPart, filter: "none" } as SheetFormatOp;
+      }
+      if (where.area.rows < 2) throw bad("a filter needs the header row and at least one row of data");
+      const out: SheetFormatOp = { ...sheetPart, filter: where.text, area: where.area };
+      if (given.column === undefined) {
+        if (given.criteria !== undefined || given.and !== undefined || given.or !== undefined) throw bad("criteria go with column: the column (a letter inside the range) they filter");
+        return out;
+      }
+      const col = typeof given.column === "string" ? parseLines(given.column, "columns") : null;
+      if (!col || col.count !== 1 || col.from < where.area.col || col.from >= where.area.col + where.area.cols) throw bad(`set.column is one column of the range, as a letter between ${colLetters(where.area.col)} and ${colLetters(where.area.col + where.area.cols - 1)}`);
+      if (!lineOf(given.criteria, 255)) throw bad('set.criteria is what the column shows: ">500", "<=10", "<>x", or a text (equal)');
+      if (given.and !== undefined && given.or !== undefined) throw bad("and or or, not both");
+      for (const k of ["and", "or"]) if (given[k] !== undefined && !lineOf(given[k], 255)) throw bad(`set.${k} is a second criterion, as set.criteria`);
+      return { ...out, column: col.from - where.area.col + 1, criteria: (given.criteria as string).trim(), ...(given.and !== undefined ? { and: (given.and as string).trim() } : {}), ...(given.or !== undefined ? { or: (given.or as string).trim() } : {}) };
+    }
+    default: {
+      if (where!.area.rows < 2) throw bad("a table needs a header row with its column names and at least one row of data");
+      return { ...sheetPart, asTable: where!.text, area: where!.area };
+    }
+  }
+}
+
+/** A colour list or one colour of a rule, or null where it is none. */
+function cfColour(v: unknown, what: string, bad: Bad): Rgb {
+  const c = colour(v);
+  if (!c) throw bad(`set.${what} is "#RRGGBB"`);
+  return c;
+}
+
+function cfRule(g: Record<string, unknown>, bad: Bad): CfRule {
+  const rule = g.rule;
+  if (typeof rule !== "string" || !RULE_KEYS[rule]) throw bad(`set.rule is one of ${Object.keys(RULE_KEYS).join(", ")}${rule === undefined ? ", or clear: true to take rules off" : ""}`);
+  const extra = Object.keys(g).filter((k) => k !== "rule" && !RULE_KEYS[rule].includes(k));
+  if (extra.length) throw bad(`${extra.map((k) => JSON.stringify(k)).join(", ")} ${extra.length === 1 ? "is not a key" : "are not keys"} of a "${rule}" rule (it takes ${RULE_KEYS[rule].join(", ")})`);
+  const style: RuleStyle = {};
+  if (g.fill !== undefined) style.fill = cfColour(g.fill, "fill", bad);
+  if (g.color !== undefined && rule !== "dataBar") style.color = cfColour(g.color, "color", bad);
+  for (const k of ["bold", "italic", "underline", "strike"] as const) if (g[k] !== undefined) style[k] = bool(g, k, bad);
+  const styled = () => {
+    if (!Object.keys(style).length) throw bad(`a "${rule}" rule changes how cells look: give ${STYLE_KEYS.join(", ")} (set.fill: "#C6EFCE" fills them)`);
+    return style;
+  };
+  switch (rule) {
+    case "cell": {
+      const op = typeof g.operator === "string" ? Object.keys(CF_OPERATORS).find((k) => k.toLowerCase() === g.operator!.toString().replace(/\s+/g, "").toLowerCase()) : undefined;
+      if (!op) throw bad(`set.operator is one of ${Object.keys(CF_OPERATORS).join(" ")}`);
+      const between = op === "between" || op === "notBetween";
+      const text = (v: unknown, key: string) => {
+        if (typeof v === "number" && Number.isFinite(v)) return String(v);
+        if (!lineOf(v, 255)) throw bad(`set.${key} is a number or a text (a text starting with "=" is a formula or a cell: "=$F$1")`);
+        // The builder wraps a text in quotes without doubling the ones inside it: the file would hold a broken formula.
+        if (!(v as string).startsWith("=") && (v as string).includes('"')) throw bad(`set.${key} holds a double quote, which the file cannot hold in a rule's text (it would break the rule): leave it out`);
+        return v as string;
+      };
+      if (g.value === undefined) throw bad("set.value is what the cells are compared with");
+      if (between !== (g.value2 !== undefined)) throw bad(between ? `${op} takes set.value and set.value2` : `${op} takes set.value alone`);
+      return { rule, operator: CF_OPERATORS[op], value: text(g.value, "value"), ...(between ? { value2: text(g.value2, "value2") } : {}), ...styled() };
+    }
+    case "formula": {
+      if (typeof g.formula !== "string" || !g.formula.startsWith("=") || g.formula.length < 2 || !lineOf(g.formula, 255)) throw bad('set.formula is a formula starting with "=" that is true for the cells to format, written for the range\'s first cell ("=$B2>100", "=ISBLANK(A1)")');
+      return { rule, formula: g.formula, ...styled() };
+    }
+    case "colorScale": {
+      if (g.colors === undefined) return { rule };
+      if (!Array.isArray(g.colors) || g.colors.length < 2 || g.colors.length > 3) throw bad('set.colors is two or three colours from the lowest value to the highest, as ["#F8696B", "#FFEB84", "#63BE7B"]');
+      return { rule, colors: g.colors.map((c) => cfColour(c, "colors", bad)) };
+    }
+    case "dataBar": return { rule, ...(g.color !== undefined ? { color: cfColour(g.color, "color", bad) } : {}) };
+    case "top": {
+      const rank = g.rank === undefined ? 10 : g.rank;
+      if (typeof rank !== "number" || !Number.isInteger(rank) || rank < 1 || rank > 1000) throw bad("set.rank is how many cells (10 by default; with percent: how many percent), a whole number from 1 to 1000");
+      return { rule, rank, bottom: g.bottom === undefined ? false : bool(g, "bottom", bad), percent: g.percent === undefined ? false : bool(g, "percent", bad), ...styled() };
+    }
+    default: return { rule: "duplicates", unique: g.unique === undefined ? false : bool(g, "unique", bad), ...styled() };
+  }
+}
+
+/** The condition of a validation, as ">= 0", "= 5" or "between 1 and 10" (also "notBetween"): its operator and values. */
+function condition(v: unknown, kind: string, bad: Bad): { operator: string; f1: string; f2?: string } {
+  const text = typeof v === "string" ? v.trim() : "";
+  const m = /^(>=|<=|<>|>|<|=)\s*(\S.*)$/.exec(text);
+  const b = /^(not\s*between|between)\s+(\S+)\s+and\s+(\S+)$/i.exec(text);
+  const how = `set.${kind} is a condition on the cells' ${kind === "length" ? "text length" : kind === "date" ? "date" : "number"}: ">= 0", "= 5", "between 1 and 10"${kind === "date" ? ' (dates as 2026-01-31)' : ""}`;
+  if (!m && !b) throw bad(how);
+  const value = (x: string) => {
+    if (kind === "date") {
+      const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(x);
+      const t = d ? Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3])) : NaN;
+      if (!d || new Date(t).getUTCMonth() !== Number(d[2]) - 1) throw bad(how);
+      return String(Math.round((t - Date.UTC(1899, 11, 30)) / 86_400_000));
+    }
+    if (!(kind === "decimal" ? /^-?\d+(\.\d+)?$/ : kind === "length" ? /^\d+$/ : /^-?\d+$/).test(x)) throw bad(how);
+    return x;
+  };
+  if (b) return { operator: /^not/i.test(b[1]) ? "xlNotBetween" : "xlBetween", f1: value(b[2]), f2: value(b[3]) };
+  return { operator: CF_OPERATORS[m![1]], f1: value(m![2].trim()) };
+}
+
+function validation(g: Record<string, unknown>, bad: Bad): Validation | null {
+  const kinds = ["list", "whole", "decimal", "date", "length", "clear"].filter((k) => g[k] !== undefined);
+  if (kinds.length !== 1) throw bad(`give exactly one of list, whole, decimal, date, length or clear (it has ${kinds.length ? kinds.join(" and ") : "none"})`);
+  const kind = kinds[0];
+  if (kind === "clear") {
+    if (g.clear !== true || Object.keys(g).length > 1) throw bad("clear is true, and the only key then: the cells' validation goes");
+    return null;
+  }
+  if (kind === "list") {
+    const v = g.list;
+    const ref = typeof v === "string" ? sheetRef(v.replace(/^=/, "")) : null;
+    if (ref) return { type: "xlValidateList", operator: "xlBetween", f1: `=${ref.sheet !== undefined ? `${quoteSheet(ref.sheet)}!` : ""}${ref.address}` };
+    const items = Array.isArray(v) ? v.map((x) => (typeof x === "number" && Number.isFinite(x) ? String(x) : x)) : null;
+    if (!items || items.length === 0 || items.length > 100 || !items.every((x) => lineOf(x, 255) && !/[,"]/.test(x as string))) throw bad('set.list is the allowed entries, as ["Open", "Done"] (no commas or double quotes in an entry, which the file cannot hold there; 255 characters in all), or the cells that hold them, as "Data!$A$2:$A$9"');
+    const joined = (items as string[]).map((x) => x.trim()).join(",");
+    if (joined.length > 255) throw bad("set.list holds at most 255 characters in all; put longer lists in cells and give their range");
+    return { type: "xlValidateList", operator: "xlBetween", f1: joined };
+  }
+  const type = { whole: "xlValidateWholeNumber", decimal: "xlValidateDecimal", date: "xlValidateDate", length: "xlValidateTextLength" }[kind] as Validation["type"];
+  return { type, ...condition(g[kind], kind, bad) };
+}
+
+/** A sheet's name as a reference quotes it: in apostrophes, doubled inside. */
+const quoteSheet = (name: string) => `'${name.replace(/'/g, "''")}'`;
+
+/** A reference to cells: an optional sheet ("Data!", "'My data'!") and cells (B6, B6:C9, C:D, 5:6, with `$` or not), the
+ * cells normalized to their absolute form ("$B$6:$C$9"); null where it is none. */
+export function sheetRef(v: string): { sheet?: string; address: string } | null {
+  const m = /^(?:(?:'((?:[^']|'')+)'|([^'!:\s][^'!:]*?))!)?(.+)$/.exec(v.trim());
+  if (!m) return null;
+  const sheet = m[1] !== undefined ? m[1].replace(/''/g, "'") : m[2];
+  const part = m[3].replace(/\$/g, "").toUpperCase();
+  const cells = parseRange(part);
+  let address: string | null = null;
+  if (cells) address = `$${colLetters(cells.col)}$${cells.row + 1}${cells.cols * cells.rows > 1 ? `:$${colLetters(cells.col + cells.cols - 1)}$${cells.row + cells.rows}` : ""}`;
+  else if (/:/.test(part)) {
+    const c = parseLines(part, "columns");
+    const r = parseLines(part, "rows");
+    if (c) address = `$${colLetters(c.from)}:$${colLetters(c.from + c.count - 1)}`;
+    else if (r) address = `$${r.from + 1}:$${r.from + r.count}`;
+  }
+  if (!address) return null;
+  if (sheet !== undefined && (sheetNameProblem(sheet) !== null)) return null;
+  return { ...(sheet !== undefined ? { sheet } : {}), address };
+}
+
+function chartOp(sheet: { sheet?: string }, where: { area: SheetArea; text: string }, g: Record<string, unknown>, bad: Bad): SheetFormatOp {
+  const { area } = where;
+  if (area.rows < 2) throw bad("a chart takes the data with its header row: at least two rows (the first names the series, or the categories)");
+  const type = g.type === undefined ? "column" : g.type;
+  if (typeof type !== "string" || !CHART_TYPES[type]) throw bad(`set.type is one of ${Object.keys(CHART_TYPES).join(", ")} (column by default)`);
+  for (const k of ["title", "xTitle", "yTitle"]) if (g[k] !== undefined && !lineOf(g[k], 255)) throw bad(`set.${k} is a text (one line, at most 255 characters)`);
+  if (g.legend !== undefined && !LEGENDS.includes(g.legend as string)) throw bad(`set.legend is ${LEGENDS.join(", ")}`);
+  let at = { col: area.col + area.cols + 1, row: area.row };
+  if (g.at !== undefined) {
+    const cell = typeof g.at === "string" ? parseRange(g.at) : null;
+    if (!cell || cell.cols !== 1 || cell.rows !== 1) throw bad('set.at is the cell the chart\'s top left corner sits in, as "H2" (right of the data by default)');
+    at = { col: cell.col, row: cell.row };
+  }
+  if (at.col >= MAX_COLS - 1) throw bad("set.at: there is no room for the chart right of the data; give set.at");
+  const size = (key: "width" | "height") => {
+    if (g[key] === undefined) return DEFAULT_CHART[key] * 635;
+    const t = length(g[key]);
+    if (t === null || t < 1134 || t > 28_346) throw bad(`set.${key} is a length from 2cm to 50cm ("12cm"; a number is points)`);
+    return t * 635;
+  };
+  if (g.rows !== undefined) bool(g, "rows", bad);
+  return {
+    ...sheet, chart: where.text, area, chartType: CHART_TYPES[type],
+    ...(g.title !== undefined ? { title: (g.title as string).trim() } : {}), ...(g.xTitle !== undefined ? { xTitle: (g.xTitle as string).trim() } : {}), ...(g.yTitle !== undefined ? { yTitle: (g.yTitle as string).trim() } : {}),
+    ...(g.legend !== undefined ? { legend: g.legend as string } : {}), at, width: size("width"), height: size("height"), inRows: g.rows === true,
+  };
+}
+
+/** `{sheet?, sort: "A2:D9", by: ["B desc", "C"]}`: the rows of the cells ordered by up to three of their columns. */
+function sortOp(op: Record<string, unknown>, i: number): SortOp {
+  const n = i + 1;
+  const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
+  const extra = Object.keys(op).filter((k) => !["sheet", "sort", "by"].includes(k));
+  if (extra.length) throw bad(`${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of {sheet?, sort, by}`);
+  if (op.sheet !== undefined && (typeof op.sheet !== "string" || op.sheet === "")) throw bad("sheet is a sheet's name");
+  const where = typeof op.sort === "string" ? parseArea(op.sort.trim()) : null;
+  if (!where || where.area.whole) throw bad(`sort is the cells whose rows are sorted, without a header row, as "A2:D9" (got ${JSON.stringify(op.sort)})`);
+  if (where.area.rows < 2) throw bad("a sort needs two rows at least");
+  const list = typeof op.by === "string" ? [op.by] : op.by;
+  if (!Array.isArray(list) || list.length < 1 || list.length > 3) throw bad('by is one to three columns of the range to sort by, as ["B desc", "C"] (ascending unless "desc")');
+  const by = list.map((item) => {
+    const m = typeof item === "string" ? /^\s*([A-Za-z]{1,3})(?:\s+(asc|ascending|desc|descending))?\s*$/i.exec(item) : null;
+    const col = m ? parseLines(m[1], "columns") : null;
+    if (!m || !col) throw bad(`by holds columns as "B" or "B desc" (got ${JSON.stringify(item)})`);
+    if (col.from < where.area.col || col.from >= where.area.col + where.area.cols) throw bad(`by names column ${m[1].toUpperCase()}, which is outside ${where.text}`);
+    return { col: col.from, desc: /^desc/i.test(m[2] ?? "") };
+  });
+  if (new Set(by.map((b) => b.col)).size !== by.length) throw bad("by names a column twice");
+  return { ...(op.sheet !== undefined ? { sheet: op.sheet as string } : {}), sort: where.text, area: where.area, by };
+}
+
+/** The longest name, in characters, and what Excel's cell addresses are among them ("A1", "XFD1048576", "R1C1"). */
+const NAME_OK = /^[\p{L}_][\p{L}\p{N}_]*$/u;
+export function nameProblem(name: string): string | null {
+  if (name.length === 0 || name.length > 255) return "a name has 1 to 255 characters";
+  if (!NAME_OK.test(name)) return `a name starts with a letter or _ and holds letters, digits and _ only (got ${JSON.stringify(name)})`;
+  if (/^[A-Za-z]{1,3}\d+$/.test(name) || /^[rRcC]\d*([rRcC]\d*)?$/.test(name) || /^(true|false)$/i.test(name)) return `${JSON.stringify(name)} reads as a cell address or a value`;
+  return null;
+}
+
+/** `{name, refersTo}` makes or changes a named range, `{name, delete: true}` removes it. */
+function nameOp(op: Record<string, unknown>, i: number): NameOp {
+  const n = i + 1;
+  const bad = (message: string) => new OpError("bad_op", `op ${n}: ${message}`, i);
+  const extra = Object.keys(op).filter((k) => !["name", "refersTo", "delete"].includes(k));
+  if (extra.length) throw bad(`${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of {name, refersTo | delete}`);
+  const problem = typeof op.name === "string" ? nameProblem(op.name) : "name is the range's name";
+  if (problem) throw bad(problem);
+  if ((op.refersTo === undefined) === (op.delete === undefined)) throw bad("give refersTo (the cells it names) or delete: true");
+  if (op.delete !== undefined) {
+    if (op.delete !== true) throw bad("delete is true");
+    return { name: op.name as string, delete: true };
+  }
+  const ref = typeof op.refersTo === "string" ? sheetRef(op.refersTo) : null;
+  if (!ref) throw bad(`refersTo is cells with their sheet, as "Data!$B$6:$C$9" (the first sheet where none is given; got ${JSON.stringify(op.refersTo)})`);
+  return { name: op.name as string, refersTo: ref };
 }

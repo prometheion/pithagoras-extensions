@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import net from "node:net";
@@ -2043,6 +2043,15 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.ok(wordColours.red > 200 && wordColours.green > 80 && wordColours.blue > 30, `the picture of the page shows them: ${JSON.stringify(wordColours)}`);
     const wordMedia = await media(word, "word");
     assert.ok([redPng, greenJpeg, blueGif].every((f) => wordMedia.some((m) => m.equals(f))), "the files in the save are the files");
+    const wordXml = await partOf(word, "word/document.xml");
+    const inlines = [...wordXml.matchAll(/<wp:inline\b[\s\S]*?<\/wp:inline>/g)].map((m) => m[0]);
+    assert.equal(inlines.length, 3, "three inline pictures in word/document.xml");
+    const logo = inlines.find((x) => /descr="Our logo"/.test(x))!;
+    assert.ok(logo, "the logo with its alt text");
+    // The editor keeps a picture's size in whole pixels (9,525 EMU): 5 cm is 1,800,000 EMU asked and 189 px given.
+    const [, logoCx, logoCy] = /<wp:extent cx="(\d+)" cy="(\d+)"\/>/.exec(logo)!.map(Number);
+    assert.ok(Math.abs(logoCx - 1_800_000) <= 9525 && Math.abs(logoCy - 900_000) <= 9525, `5 cm wide, half as high: ${logoCx} x ${logoCy} EMU`);
+    console.log(`s. word/document.xml: ${inlines.length} wp:inline; logo ${/<wp:extent[^>]*>/.exec(logo)![0]}; media ${wordMedia.map((m) => m.length).join(", ")} B`);
 
     // What is refused, with the op's number, and changes nothing.
     const refuse = async (picture: string, pattern: RegExp, ops: Record<string, unknown>[] = [{ picture }]) => {
@@ -2058,6 +2067,54 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     await refuse("pics/notes.png", /^error:bad_op op 1: the picture "pics\/notes\.png" cannot be used: it is not a PNG, JPEG or GIF/);
     const [still] = await say(eye, [{ name: "office_read", arguments: { id: word } }]);
     assert.equal(still, read, "none of them changed the document");
+
+    // Past the caps and out by a link, refused before the editor is asked (the document is as it was after each): a link in
+    // the agent's folder to a picture outside it, to a folder outside it, a PNG of 5.1 MB, a PNG whose header says 100,000
+    // x 100,000 pixels in a file of 70 bytes, one of 40 megapixels and a pixel over, and a GIF whose frame says 65,535 x 65,535.
+    const outside = mkdtempSync(path.join(os.tmpdir(), "office-s-outside-"));
+    writeFileSync(path.join(outside, "secret.png"), redPng);
+    const homeDir = realpathSync(env.AGENT_HOME);
+    symlinkSync(path.join(outside, "secret.png"), path.join(homeDir, "pics", "leak.png"));
+    symlinkSync(outside, path.join(homeDir, "pics", "out"));
+    const pngChunk = (type: string, body: Buffer) => {
+      const head = Buffer.alloc(8);
+      head.writeUInt32BE(body.length, 0);
+      head.write(type, 4, "latin1");
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(zlib.crc32(body, zlib.crc32(Buffer.from(type, "latin1"))) >>> 0);
+      return Buffer.concat([head, body, crc]);
+    };
+    const pngWith = (width: number, height: number, idat: Buffer) => {
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(width, 0);
+      ihdr.writeUInt32BE(height, 4);
+      ihdr.set([8, 2, 0, 0, 0], 8);
+      return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", ihdr), pngChunk("IDAT", idat), pngChunk("IEND", Buffer.alloc(0))]);
+    };
+    writeFileSync(path.join(homeDir, "pics", "too-big.png"), pngWith(100, 100, Buffer.alloc(5_100_000, 7)));
+    writeFileSync(path.join(homeDir, "pics", "huge-header.png"), pngWith(100_000, 100_000, zlib.deflateSync(Buffer.alloc(10))));
+    writeFileSync(path.join(homeDir, "pics", "mp40.png"), pngWith(8000, 5001, zlib.deflateSync(Buffer.alloc(10))));
+    const gifScreen = Buffer.from([...Buffer.from("GIF89a", "latin1"), 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0, 0x3b]);
+    writeFileSync(path.join(homeDir, "pics", "huge.gif"), gifScreen);
+    const refusedNotSent: [string, RegExp][] = [
+      ["pics/leak.png", /^error:(bad_op|not_found) op 1: the picture "pics\/leak\.png"/],
+      ["pics/out/secret.png", /^error:(bad_op|not_found) op 1: the picture "pics\/out\/secret\.png"/],
+      ["pics/too-big.png", /^error:bad_op op 1: the picture "pics\/too-big\.png" cannot be used: it is 5\.2 MB, and a picture may take 5 MB at most/],
+      ["pics/huge-header.png", /^error:bad_op op 1: the picture "pics\/huge-header\.png" cannot be used: it is 100000 × 100000 pixels/],
+      ["pics/mp40.png", /^error:bad_op op 1: the picture "pics\/mp40\.png" cannot be used: it is 8000 × 5001 pixels/],
+    ];
+    for (const [picture, pattern] of refusedNotSent) {
+      const said = await refuse(picture, pattern);
+      console.log(`s. refused before the editor: ${picture}: ${said}`);
+    }
+    const gifSaid = await refuse("pics/huge.gif", /^error:bad_op op 1: the picture "pics\/huge\.gif" cannot be used: /);
+    console.log(`s. refused before the editor: pics/huge.gif: ${gifSaid}`);
+    // A Word call whose last op fails leaves no picture behind (this one is found out before the editor is asked; e2e 37 takes a picture back with the plugin's Undo).
+    const [wordFailed] = await say(eye, [{ name: "office_edit", arguments: { id: word, ops: [{ paragraphs: ["Gone"] }, { picture: "pics/red.png", width: "3cm" }, { quote: "No such text anywhere", replacement: "x" }] } }]);
+    console.log(`s. a failing Word call: ${wordFailed}`);
+    assert.match(wordFailed, /^error:\w+ op 3: /);
+    const [afterWordFail] = await say(eye, [{ name: "office_read", arguments: { id: word } }]);
+    assert.equal(afterWordFail, read, "the failing Word call left neither its paragraph nor its picture");
 
     // A spreadsheet: the same files at their cells; then a call that fails at its last op.
     const [madeSheet] = await say(eye, [{ name: "office_create", arguments: { title: "Pictured sheet from a chat", type: "cell" } }]);
@@ -2081,6 +2138,13 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.ok(cellColours.red > 200 && cellColours.green > 80 && cellColours.blue > 30, `the picture of the range shows them: ${JSON.stringify(cellColours)}`);
     const sheetMedia = await media(sheet, "xl");
     assert.ok([redPng, greenJpeg, blueGif].every((f) => sheetMedia.some((m) => m.equals(f))), "the files in the save are the files");
+    const drawingZip = await JSZip.loadAsync(readFileSync(await fileOf(sheet)));
+    const drawingXml = (await Promise.all(drawingZip.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")))).join("\n");
+    const anchors = [...drawingXml.matchAll(/<xdr:from><xdr:col>(\d+)<\/xdr:col>[\s\S]*?<xdr:row>(\d+)<\/xdr:row>/g)].map((m) => `${m[1]},${m[2]}`).sort();
+    assert.deepEqual(anchors, ["1,11", "1,3", "5,3"], "B4, F4 and B12 (0-based column,row)");
+    assert.equal((drawingXml.match(/<xdr:pic>/g) ?? []).length, 3);
+    assert.match(drawingXml, /descr="Red box"/);
+    console.log(`s. xl/drawings: anchors ${anchors.join(" ")}; media ${sheetMedia.map((m) => m.length).join(", ")} B`);
     const before = await inEditor(grid.frame);
     const [failed] = await say(eye, [
       { name: "office_edit", arguments: { id: sheet, ops: [{ picture: "pics/red.png", at: "B20" }, { picture: "pics/green.jpg", at: "F20" }, { name: "NoSuchName", delete: true }] } },
@@ -2092,6 +2156,7 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.ok(await until(async () => JSON.stringify(await inEditor(grid.frame)) === JSON.stringify(before), 10_000, 500), "and the person's editor's");
     await personCloses(person.page);
     await personCloses(grid.page);
+    rmSync(outside, { recursive: true, force: true });
   });
 
   test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {

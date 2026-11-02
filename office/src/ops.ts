@@ -196,9 +196,10 @@ function nthOf(op: Record<string, unknown>, n: number, i: number): { nth?: numbe
 
 const WORD_SHAPES = "{quote, replacement, nth?}, {after?, nth?, paragraphs, style?}, {after?, nth?, table}, {after?, nth?, picture, width?, height?, alt?}, {editPicture, cell?, n?, delete | move, after?, nth? | width?, height?, alt?} and {remove, nth?}";
 
-function wordOp(op: unknown, i: number): WordOp {
+function wordOp(given: unknown, i: number): WordOp {
   const n = i + 1;
-  if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
+  if (!isObject(given)) throw new OpError("bad_op", `op ${n} is not an object`, i);
+  const op = "editPicture" in given ? tidyPictureEdit(given) : given;
   if ("range" in op || "values" in op) throw new OpError("unsupported_format", `op ${n} is a spreadsheet edit ({range, values}), and this is a Word document: its ops are ${WORD_SHAPES}`, i);
   const looks = FORMAT_SHAPES.find((k) => k in op);
   if (looks) throw new OpError("bad_op", `op ${n}: \`${looks}\` is an office_format op (how the document looks): make it with office_format`, i);
@@ -305,11 +306,20 @@ function pictureNumber(op: Record<string, unknown>, i: number): number {
   return op.n;
 }
 
+/**
+ * An edit of a picture as a model fills it in: the keys it has no use for given as `null`, `delete` and `move` as `false`
+ * (the real model of case p5 wrote {"editPicture": 4, "move": true, "at": null, "delete": false} again and again, a value
+ * for every key of the tool's schema) are left out, as if it had not written them.
+ */
+function tidyPictureEdit(op: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(op).filter(([key, v]) => key === "editPicture" || (v !== null && !((key === "delete" || key === "move") && v === false))));
+}
+
 /** The keys of an edit of a picture besides its place: those of the one thing it does. */
 function pictureEditKeys(op: Record<string, unknown>, i: number, base: string[], kind: "delete" | "move" | "look", move: string[], hint = ""): void {
   const keys = [...base, ...(kind === "delete" ? ["delete"] : kind === "move" ? move : ["width", "height", "alt"])];
   const extra = Object.keys(op).filter((k) => !keys.includes(k));
-  if (extra.length) throw new OpError("bad_op", `op ${i + 1}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of this op${extra.some((k) => k === "at" || k === "after") ? hint : ""}`, i);
+  if (extra.length) throw new OpError("bad_op", `op ${i + 1}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of this op${kind === "move" ? hint : ""}`, i);
 }
 
 /** `{editPicture: 2, cell?: "A2", n?, delete | move, after?, nth? | width?, height?, alt?}`: a picture of a Word document. */
@@ -442,9 +452,10 @@ function sheetOp(op: Record<string, unknown>, key: string, i: number): SheetOp {
   return out as SheetOp;
 }
 
-function cellOp(op: unknown, i: number): CellOp | SheetOp | LineOp | SortOp | NameOp | SheetPictureOp | SheetPictureEditOp {
+function cellOp(given: unknown, i: number): CellOp | SheetOp | LineOp | SortOp | NameOp | SheetPictureOp | SheetPictureEditOp {
   const n = i + 1;
-  if (!isObject(op)) throw new OpError("bad_op", `op ${n} is not an object`, i);
+  if (!isObject(given)) throw new OpError("bad_op", `op ${n} is not an object`, i);
+  const op = "editPicture" in given ? tidyPictureEdit(given) : given;
   if (["quote", "paragraphs", "table", "remove", ...FORMAT_SHAPES.filter((k) => k !== "format" && k !== "set")].some((k) => k in op)) throw new OpError("unsupported_format", `op ${n} is a Word edit, and this is a spreadsheet: its ops are ${SHEET_SHAPES}`, i);
   const looks = SHEET_FORMAT_SHAPES.find((k) => k in op);
   if (looks) throw new OpError("bad_op", `op ${n}: \`${looks}\` is an office_format op (how the sheet looks): make it with office_format`, i);

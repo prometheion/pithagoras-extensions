@@ -964,7 +964,8 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
   no([{ editPicture: 2, delete: true, move: true }], /\(it has delete and move\)/);
   no([{ editPicture: 2, delete: true, width: "3cm" }], /\(it has delete and width, height or alt\)/);
   no([{ editPicture: 2, move: true, alt: "x" }], /\(it has move and width, height or alt\)/);
-  no([{ editPicture: 2, delete: false }], /^op 1: delete is true/);
+  no([{ editPicture: 2, delete: false }], /\(it has none of them\)/);
+  no([{ editPicture: 2, delete: "yes" }], /^op 1: delete is true/);
   no([{ editPicture: 2, move: "yes" }], /^op 1: move is true/);
   no([{ editPicture: 2, delete: true, after: "x" }], /"after" is not part of this op/);
   no([{ editPicture: 2, width: "3cm", nth: 2 }], /"nth" is not part of this op/);
@@ -973,6 +974,7 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
   no([{ editPicture: 2, move: true, after: "a\nb" }], /after may not hold a line break/);
   no([{ editPicture: 2, at: "B2", delete: true }], /"at" is not part of this op/);
   // What a real model wrote (case p5 of the real-portal file): a sheet's `at` for a Word move; it is told the Word key.
+  no([{ editPicture: 4, move: true, to: "Closing text" }], /^op 1: "to" is not part of this op \(a Word picture moves with move: true and after: /);
   no([{ editPicture: 4, move: true, at: "Closing text" }], /^op 1: "at" is not part of this op \(a Word picture moves with move: true and after: the text of the paragraph it goes after, or no after for the end of the document; at is for a sheet's pictures\)$/);
   no([{ alt: "Small logo", delete: false, n: 4 }], /\(it has none of them\): delete, move, n and cell belong to an edit of a picture, which starts with editPicture, the picture's number$/);
   no([{ editPicture: 2, picture: "a.png" }], /must be exactly one of .*editPicture/);
@@ -1015,7 +1017,8 @@ test("office_edit (spreadsheet): an edit of a picture names it by the cell it is
   no([{ editPicture: "B5", alt: "" }], /the editor cannot take a picture's alt text away/);
   no([{ editPicture: "B5", delete: true, after: "x" }], /"after" is not part of this op/);
   no([{ editPicture: "B5", after: "x" }], /^op 1: an edit of a picture does one thing/);
-  no([{ editPicture: "B5", width: "3cm", after: "x" }], /^op 1: "after" is not part of this op \(a sheet's picture moves to a cell with at: "D9"; after is for Word documents\)$/);
+  no([{ editPicture: "B5", at: "D9", after: "x" }], /^op 1: "after" is not part of this op \(a sheet's picture moves to a cell with at: "D9"; after is for Word documents\)$/);
+  no([{ editPicture: "B5", width: "3cm", after: "x" }], /^op 1: "after" is not part of this op$/);
   no([{ editPicture: "B5", delete: true, cell: "A1" }], /"cell" is not part of this op/);
   no([{ editPicture: "B5", width: "3cm", at: undefined, nth: 1 }], /"nth" is not part of this op/);
   no([{ editPicture: "B5", picture: "a.png", at: "D9" }], /must be exactly one of/);
@@ -1041,4 +1044,22 @@ test("the Word command's check lets a picture be moved after a paragraph: the `a
   const later = simulateWord(model, [{ remove: "One" } as WordOp, op({ move: true, after: "One" })]);
   assert.equal(later?.code, "quote_not_found");
   assert.equal(later?.op, 1);
+});
+
+test("an edit of a picture as a model fills it in: keys it has no use for given as null, and delete or move given as false, are left out as if they were not written; other values are kept and checked", () => {
+  const word = (op: Record<string, unknown>) => editJob("docx", [op]).args.ops[0];
+  // What the real model wrote (case p5 of the real-portal file), again and again.
+  assert.deepEqual(word({ editPicture: 4, move: true, at: null, delete: false, after: null, nth: null, cell: null, n: null, width: null, alt: null }), { editPicture: 4, n: 1, move: true });
+  assert.deepEqual(word({ editPicture: 4, delete: true, move: false, after: null }), { editPicture: 4, n: 1, delete: true });
+  assert.deepEqual(word({ editPicture: 2, width: "3cm", alt: "Small logo", delete: false, move: false, at: null }), { editPicture: 2, n: 1, width: 1701 * 635, alt: "Small logo" });
+  const sheet = (op: Record<string, unknown>) => editJob("xlsx", [op]).args.ops[0];
+  assert.deepEqual(sheet({ editPicture: "B2", at: "D9", delete: false, move: false, after: null, sheet: null, n: null }), { editPicture: "B2", from: { col: 1, row: 1 }, n: 1, at: "D9", to: { col: 3, row: 8 } });
+  // Not tidied away: a value that says something is checked as before.
+  refusal(() => editJob("docx", [{ editPicture: 4, move: true, at: "x" }]), /"at" is not part of this op/);
+  refusal(() => editJob("docx", [{ editPicture: 4, delete: true, move: true }]), /\(it has delete and move\)/);
+  refusal(() => editJob("docx", [{ editPicture: 4, move: true, after: "" }]), /after is the text of the paragraph/);
+  refusal(() => editJob("docx", [{ editPicture: null, delete: true }]), /editPicture is the number of the paragraph or table/);
+  refusal(() => editJob("xlsx", [{ editPicture: "B2", delete: false, move: false }]), /an edit of a picture does one thing/);
+  // Only an edit of a picture is tidied: nothing else loses a key.
+  refusal(() => editJob("docx", [{ paragraphs: ["x"], style: null }]), /"style"|style is/);
 });

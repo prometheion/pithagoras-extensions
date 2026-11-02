@@ -418,8 +418,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   was posted again, a post whose outcome is not known (its editor closed or timed out while it ran), and a message of
   the editor's chat that failed after the ones before it went.
 - **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
-  document-changing call is recorded in the portal's audit log with the chat that made it, its ops and the revision
-  it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
+  document-changing call is recorded in the portal's audit log with the chat that made it, its ops (for pictures, each
+  file as the agent named it and its bytes, never its data) and the revision it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
   as such.
 
 ## Data

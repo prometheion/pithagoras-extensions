@@ -2341,12 +2341,31 @@ async function run(PITHAGORAS: string): Promise<void> {
     for (let y = 0; y < height; y++) raw.set(crypto.randomBytes(width * 3), y * (width * 3 + 1) + 1);
     return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw, { level: 1 })), chunk("IEND", Buffer.alloc(0))]);
   };
-  /** The agent's folder gets the test's picture files: a red PNG (200 x 100), a green JPEG, a blue GIF. */
+  /** The green JPEG (100 x 50 as stored) with an EXIF orientation of 6, as a phone saves a portrait photo: shown 50 x 100. */
+  const turnedJpeg = (() => {
+    const tiff = Buffer.alloc(26);
+    tiff.write("MM", 0, "latin1");
+    tiff.writeUInt16BE(42, 2);
+    tiff.writeUInt32BE(8, 4);
+    tiff.writeUInt16BE(1, 8);
+    tiff.writeUInt16BE(0x0112, 10);
+    tiff.writeUInt16BE(3, 12);
+    tiff.writeUInt32BE(1, 14);
+    tiff.writeUInt16BE(6, 18);
+    const body = Buffer.concat([Buffer.from("Exif\0\0", "latin1"), tiff]);
+    const head = Buffer.from([0xff, 0xe1, 0, 0]);
+    head.writeUInt16BE(body.length + 2, 2);
+    return Buffer.concat([jpegFile.subarray(0, 2), head, body, jpegFile.subarray(2)]);
+  })();
+  /** The agent's folder gets the test's picture files: a red PNG (200 x 100), a green JPEG, a blue GIF; the JPEG turned by
+   * its EXIF, and the red PNG with text after its end. */
   const pictureFiles = () => {
     mkdirSync(path.join(project, "pics"), { recursive: true });
     writeFileSync(path.join(project, "pics", "red.png"), png(200, 100, [255, 0, 0]));
     writeFileSync(path.join(project, "pics", "green.jpg"), jpegFile);
     writeFileSync(path.join(project, "pics", "blue.gif"), gifFile);
+    writeFileSync(path.join(project, "pics", "turned.jpg"), turnedJpeg);
+    writeFileSync(path.join(project, "pics", "tail.png"), Buffer.concat([png(200, 100, [255, 0, 0]), Buffer.from("SECRET-TAIL ".repeat(100))]));
   };
   /** How many pixels of an image (a JPEG, base64) are strongly red, green and blue, as a page of Chromium decodes it. */
   const colours = async (data: string) => {
@@ -2462,18 +2481,18 @@ async function run(PITHAGORAS: string): Promise<void> {
 
     // Two pictures of about 5 MB each in one call (the largest a call takes): the job channel, the editor's upload and the
     // save take them, and the files in the save are the files.
-    const big1 = noisePng(1270, 1270);
-    const big2 = noisePng(1270, 1270);
-    assert.ok(big1.length < 5 * 1024 * 1024 && big1.length > 4.5 * 1024 * 1024, `${big1.length}`);
+    const big1 = noisePng(1250, 1250);
+    const big2 = noisePng(1250, 1250);
+    assert.ok(big1.length < 5_000_000 && big1.length > 4_500_000, `${big1.length}`);
     writeFileSync(path.join(project, "pics", "big1.png"), big1);
     writeFileSync(path.join(project, "pics", "big2.png"), big2);
     const t2 = Date.now();
     const bigSaid = (await tools.office_edit.execute("q7", { id: doc, ops: [{ picture: "pics/big1.png", width: "8cm" }, { picture: "pics/big2.png", width: "8cm" }] })).content[0].text;
-    console.log(`37. two ${(big1.length / 1048576).toFixed(2)} MB pictures in one call: ${Date.now() - t2} ms: ${bigSaid}`);
+    console.log(`37. two ${(big1.length / 1_000_000).toFixed(2)} MB pictures in one call: ${Date.now() - t2} ms: ${bigSaid}`);
     const bigMedia = Object.values(await savedMedia(doc, "word"));
     assert.ok(bigMedia.some((b) => b.equals(big1)) && bigMedia.some((b) => b.equals(big2)), "both large files are in the save as they were");
     // One more past the call's 10 MB is refused before the editor is asked.
-    writeFileSync(path.join(project, "pics", "big3.png"), noisePng(1270, 1270));
+    writeFileSync(path.join(project, "pics", "big3.png"), noisePng(1250, 1250));
     assert.match(await failing(tools.office_edit.execute("q8", { id: doc, ops: [{ picture: "pics/big1.png" }, { picture: "pics/big2.png" }, { picture: "pics/big3.png" }] })), /^error:bad_op op 3: the picture "pics\/big3\.png" would take the call's pictures past 10 MB/);
     // A link in the agent's folder that leads out of it is not followed, whatever it leads to, and a path that leaves the folder is not one.
     symlinkSync("/etc/hostname", path.join(project, "pics", "leak.png"));
@@ -2481,6 +2500,21 @@ async function run(PITHAGORAS: string): Promise<void> {
     for (const leak of ["pics/leak.png", "pics/etc/hostname", path.join(project, "pics", "leak.png"), "../../../../etc/hostname", "/etc/hostname"]) {
       assert.match(await failing(tools.office_edit.execute("q9", { id: doc, ops: [{ picture: leak }] })), /^error:(bad_op|not_found) op 1: the picture /, leak);
     }
+
+    // A picture in a table's cell (after its text) is listed under the table by its cell; a JPEG turned by its EXIF (a
+    // portrait photo) keeps the proportions it is shown in; the text after a PNG's end does not go into the document.
+    const said = (await tools.office_edit.execute("q10", { id: doc, ops: [{ table: [["Item", "Logo"], ["Total", ""]] }, { after: "Total", picture: "pics/turned.jpg", width: "2cm", alt: "Turned" }, { picture: "pics/tail.png", alt: "Tail" }] })).content[0].text;
+    console.log(`37. a table cell's picture: ${said}`);
+    const withTable = (await tools.office_read.execute("q11", { id: doc })).content[0].text;
+    console.log(`37. office_read with it:\n${withTable.split("\n").slice(-6).join("\n")}`);
+    assert.match(withTable, /\] table\n\| Item \| Logo \|\n\| Total \/ {2}\| {2}\|\n {4}A2: a picture 2 × 4 cm, alt text "Turned"\n(?:\[\d+\] \n)+ {4}a picture 5\.3 × 2\.6 cm, alt text "Tail"$/);
+    const tableXml = await partOf(doc, "word/document.xml");
+    const turned = /<wp:extent cx="(\d+)" cy="(\d+)"\/>(?:(?!<wp:inline)[\s\S])*?descr="Turned"/.exec(tableXml);
+    assert.ok(turned, "the turned picture is in the save");
+    assert.equal(Math.round(Number(turned![2]) / Number(turned![1])), 2, `upright, twice as high as wide: ${turned![0].slice(0, 60)}`);
+    const tableMedia = await savedMedia(doc, "word");
+    assert.ok(!Object.values(tableMedia).some((b) => b.includes("SECRET-TAIL")), "nothing after the PNG's end is in the save");
+    console.log(`37. the turned JPEG in the save: ${Object.values(tableMedia).some((b) => b.equals(turnedJpeg)) ? "the file as it is (not turned by the Document Server)" : "not the file as it is (turned by the Document Server?)"}`);
     await person.page.context().close();
   });
 
@@ -2544,6 +2578,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     const after = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
     const drawingsAfter = await Promise.all(after.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")));
     assert.equal(drawingsAfter.join("").match(/<xdr:pic>/g)?.length, 3, "the save has the three pictures of the first call, and no others");
+    // A JPEG turned by its EXIF keeps the proportions it is shown in at a cell too.
+    await tools.office_edit.execute("r7", { id: doc, ops: [{ picture: "pics/turned.jpg", at: "J2", width: "2cm" }] });
+    assert.match((await tools.office_read.execute("r8", { id: doc, sheet: "Sheet1" })).content[0].text, /; J2 2 × 4 cm "turned\.jpg"\.$/m);
     await person.page.context().close();
   });
 

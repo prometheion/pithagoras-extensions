@@ -937,3 +937,98 @@ test("the Word command's check counts a picture as a new paragraph with no text:
   assert.equal(simulateWord(["x", "x"], [{ after: "x", picture: "a.png" } as WordOp])?.code, "quote_ambiguous");
   assert.equal(simulateWord(["x", "x"], [{ after: "x", nth: 2, picture: "a.png" } as WordOp]), null);
 });
+
+test("office_edit (Word): an edit of a picture the document has names it as office_read lists it (block, cell, number), then does one thing: delete, move like an insert, or size and describe it; keys of another thing, a table without its cell and bad numbers are refused", () => {
+  const job = editJob("docx", [
+    { editPicture: 2, delete: true },
+    { editPicture: 5, cell: " b3 ", n: 2, move: true, after: "the audit", nth: 2 },
+    { editPicture: 7, move: true },
+    { editPicture: 3, width: "6cm", alt: " Logo " },
+    { editPicture: 4, height: 72, alt: "" },
+    { editPicture: 1, alt: "Only words" },
+  ]);
+  assert.equal(job.kind, "word.edit");
+  assert.deepEqual(job.args.ops, [
+    { editPicture: 2, n: 1, delete: true },
+    { editPicture: 5, cell: { row: 2, col: 1, text: "B3" }, n: 2, move: true, after: "the audit", nth: 2 },
+    { editPicture: 7, n: 1, move: true },
+    { editPicture: 3, n: 1, width: 3402 * 635, alt: "Logo" },
+    { editPicture: 4, n: 1, height: 72 * 20 * 635, alt: "" },
+    { editPicture: 1, n: 1, alt: "Only words" },
+  ]);
+  const no = (ops: unknown[], message: RegExp, op = 0, code = "bad_op") => refusal(() => editJob("docx", ops), message, code, op);
+  for (const bad of [0, -1, 1.5, "2", "[2]", null, true]) no([{ editPicture: bad, delete: true }], /editPicture is the number of the paragraph or table office_read lists the picture under, as in \[2\]/);
+  for (const bad of ["", "A", "A1:B2", "1", 3, true]) no([{ editPicture: 2, cell: bad, delete: true }], /cell is the table cell office_read lists the picture under, as "A2"/);
+  for (const bad of [0, -2, 1.5, "1", true]) no([{ editPicture: 2, n: bad, delete: true }], /n is which of the pictures office_read lists at that place you mean, from 1/);
+  no([{ editPicture: 2 }], /^op 1: an edit of a picture does one thing: delete: true, move: true \(with after, as an insert places a picture\) or a new width, height or alt \(it has none of them\)/);
+  no([{ editPicture: 2, delete: true, move: true }], /\(it has delete and move\)/);
+  no([{ editPicture: 2, delete: true, width: "3cm" }], /\(it has delete and width, height or alt\)/);
+  no([{ editPicture: 2, move: true, alt: "x" }], /\(it has move and width, height or alt\)/);
+  no([{ editPicture: 2, delete: false }], /^op 1: delete is true/);
+  no([{ editPicture: 2, move: "yes" }], /^op 1: move is true/);
+  no([{ editPicture: 2, delete: true, after: "x" }], /"after" is not part of this op/);
+  no([{ editPicture: 2, width: "3cm", nth: 2 }], /"nth" is not part of this op/);
+  no([{ editPicture: 2, move: true, nth: 2 }], /nth picks among the places `after` is found: give after with it/);
+  no([{ editPicture: 2, move: true, after: "" }], /after is the text of the paragraph to insert after \(not empty\)/);
+  no([{ editPicture: 2, move: true, after: "a\nb" }], /after may not hold a line break/);
+  no([{ editPicture: 2, at: "B2", delete: true }], /"at" is not part of this op/);
+  no([{ editPicture: 2, picture: "a.png" }], /must be exactly one of .*editPicture/);
+  no([{ editPicture: 2, quote: "a", replacement: "b" }], /must be exactly one of/);
+  for (const bad of ["0cm", "51cm", "wide", 5, 20000]) no([{ editPicture: 2, width: bad }], /width is a length from 0\.2cm to 50cm/);
+  no([{ editPicture: 2, alt: "a\nb" }], /alt is the picture's alternative text/);
+  no([{ editPicture: 2, alt: 7 }], /alt is the picture's alternative text/);
+  // office_format tells it is office_edit's; the shape list names it.
+  refusal(() => formatJob("docx", [{ editPicture: 2, delete: true }]), /`editPicture` is an office_edit op \(what the document says\)/);
+  no([{ range: "A1", editPicture: 1 }], /is a spreadsheet edit/, 0, "unsupported_format");
+});
+
+test("office_edit (spreadsheet): an edit of a picture names it by the cell it is anchored at and its number there, then deletes, moves it to a cell (at) or sizes and describes it; a delete has no inverse, so it goes after every op that has one", () => {
+  const job = editJob("xlsx", [
+    { sheet: "Data", editPicture: "b5", n: 2, at: "$D$9" },
+    { editPicture: "A1", width: "4cm", alt: "Logo" },
+    { editPicture: "C3", height: 20 },
+    { sheet: "Data", editPicture: "B5", delete: true },
+  ]);
+  assert.equal(job.kind, "cell.edit");
+  assert.deepEqual(job.args.ops, [
+    { sheet: "Data", editPicture: "B5", from: { col: 1, row: 4 }, n: 2, at: "D9", to: { col: 3, row: 8 } },
+    { editPicture: "A1", from: { col: 0, row: 0 }, n: 1, width: 2268 * 635, alt: "Logo" },
+    { editPicture: "C3", from: { col: 2, row: 2 }, n: 1, height: 400 * 635 },
+    { sheet: "Data", editPicture: "B5", from: { col: 1, row: 4 }, n: 1, delete: true },
+  ]);
+  const no = (ops: unknown[], message: RegExp, op = 0, code = "bad_op") => refusal(() => editJob("xlsx", ops), message, code, op);
+  for (const bad of ["", "B", "B5:C6", "5", 5, null, "ZZZZ9"]) no([{ editPicture: bad, delete: true }], /editPicture is the cell office_read lists the picture at, as "B5"/);
+  no([{ editPicture: "B5", delete: true, sheet: "" }], /sheet is a sheet's name/);
+  no([{ editPicture: "B5", at: "B2:C3" }], /at is the cell to move the picture to, as "D9"/);
+  no([{ editPicture: "B5", at: 7 }], /at is the cell to move the picture to/);
+  no([{ editPicture: "B5", move: true, at: "D9" }], /move is for Word documents: a sheet's picture moves to the cell given as at/);
+  no([{ editPicture: "B5" }], /^op 1: an edit of a picture does one thing: delete: true, at: "D9" \(the cell to move it to\) or a new width, height or alt \(it has none of them\)/);
+  no([{ editPicture: "B5", delete: true, at: "D9" }], /\(it has delete and at\)/);
+  no([{ editPicture: "B5", at: "D9", alt: "x" }], /\(it has at and width, height or alt\)/);
+  no([{ editPicture: "B5", delete: true, after: "x" }], /"after" is not part of this op/);
+  no([{ editPicture: "B5", delete: true, cell: "A1" }], /"cell" is not part of this op/);
+  no([{ editPicture: "B5", width: "3cm", at: undefined, nth: 1 }], /"nth" is not part of this op/);
+  no([{ editPicture: "B5", picture: "a.png", at: "D9" }], /must be exactly one of/);
+  no([{ editPicture: "B5", range: "A1", values: [[1]], delete: true }], /must be exactly one of/);
+  no([{ editPicture: "B5", width: "99cm" }], /width is a length from 0\.2cm to 50cm/);
+  // A delete cannot be made again, as deleted rows cannot: after every op that can be taken back (another delete may follow it).
+  assert.doesNotThrow(() => editJob("xlsx", [{ editPicture: "B5", at: "C5" }, { range: "A1", values: [[1]] }, { editPicture: "A1", delete: true }, { deleteRows: "9" }, { editPicture: "C5", delete: true }]));
+  no([{ editPicture: "B5", delete: true }, { range: "A1", values: [[1]] }], /^op 1 cannot be taken back once made \(a deleted picture, which the editor cannot make again as the file it was\), so it goes after every op that can: put it last in the call \(op 2 comes after it\)/);
+  no([{ deleteRows: "9" }, { editPicture: "B5", at: "C5" }], /^op 1 cannot be taken back once made \(deleted rows\)/);
+  refusal(() => formatJob("xlsx", [{ editPicture: "B5", delete: true }]), /`editPicture` is an office_edit op \(what the sheet holds\)/);
+  no([{ quote: "a", editPicture: "B5", delete: true }], /is a Word edit/, 0, "unsupported_format");
+});
+
+test("the Word command's check lets a picture be moved after a paragraph: the `after` is found as an insert's, once or by nth, and deletes and resizes add nothing to what is quoted", () => {
+  const model = ["One", "Two", "Two"];
+  const op = (extra: Record<string, unknown>) => ({ editPicture: 1, n: 1, ...extra }) as unknown as WordOp;
+  assert.equal(simulateWord(model, [op({ move: true, after: "One" })]), null);
+  assert.equal(simulateWord(model, [op({ move: true })]), null);
+  assert.equal(simulateWord(model, [op({ delete: true }), op({ width: 5 })]), null);
+  assert.equal(simulateWord(model, [op({ move: true, after: "Nope" })])?.code, "quote_not_found");
+  assert.equal(simulateWord(model, [op({ move: true, after: "Two" })])?.code, "quote_ambiguous");
+  assert.equal(simulateWord(model, [op({ move: true, after: "Two", nth: 2 })]), null);
+  const later = simulateWord(model, [{ remove: "One" } as WordOp, op({ move: true, after: "One" })]);
+  assert.equal(later?.code, "quote_not_found");
+  assert.equal(later?.op, 1);
+});

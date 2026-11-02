@@ -431,6 +431,16 @@ function formatSaid(made: unknown): string {
   return `${styles.join("")}${r.reflowed ? " The document reflowed; office_screenshot shows the pages." : ""}`;
 }
 
+/** What an edit of a picture the document has says of it: which one (as office_read listed it) and what it was, before the
+ * edit, so that an agent that named the wrong one (the document changed since it read) sees that in the answer. */
+type PictureNote = { did: "deleted" | "moved" | "changed"; block?: number; cell?: string; at?: string; sheet?: string; n: number; w: number; h: number; alt: string };
+function picturesSaid(made: unknown): string {
+  const list = (made as { pictures?: PictureNote[] } | null)?.pictures;
+  if (!Array.isArray(list) || !list.length) return "";
+  const one = (p: PictureNote) => `${p.did} the picture ${p.block !== undefined ? `[${p.block}]${p.cell ? ` ${p.cell}` : ""}` : `${p.at} of ${JSON.stringify(p.sheet)}`}${p.n > 1 ? ` #${p.n}` : ""}, which was ${emuCm(p.w)} × ${emuCm(p.h)} cm${p.alt ? `, alt text ${JSON.stringify(p.alt)}` : ""}`;
+  return ` Pictures: ${list.map(one).join("; ")}.`;
+}
+
 /** What a spreadsheet edit's answer says where it moved cells (rows or columns inserted or deleted, a range sorted) while people are
  * in the workbook (owner's answer 6 of #13: allowed, and they are named): a person mid-entry there may find their cell
  * elsewhere, or see it empty until they reload (DS 10.0). Nothing where nobody is in it. */
@@ -540,7 +550,9 @@ const pt = (twips: number) => `${+(twips / 20).toFixed(1)}pt`;
 /** English Metric Units (360,000 to the centimetre) in cm, one decimal (two where that reads 0: a picture of a pixel). */
 const emuCm = (emu: number) => (+(emu / 360000).toFixed(1) === 0 && emu > 0 ? +(emu / 360000).toFixed(2) : +(emu / 360000).toFixed(1));
 /** A Word picture as office_read says it. */
-const pictureWords = (w: number, h: number, alt: string) => `a picture ${emuCm(w)} × ${emuCm(h)} cm${alt ? `, alt text ${JSON.stringify(alt)}` : ""}`;
+const pictureWords = (w: number, h: number, alt: string, k?: number) => `${k ? `#${k} ` : ""}a picture ${emuCm(w)} × ${emuCm(h)} cm${alt ? `, alt text ${JSON.stringify(alt)}` : ""}`;
+/** The pictures listed at one place, each numbered (`#2`, the `n` of an edit) where there are several. */
+const numbered = <T,>(list: T[], words: (item: T, k?: number) => string) => list.map((item, k) => words(item, list.length > 1 ? k + 1 : undefined));
 const cm = (twips: number) => `${+((twips / 1440) * 2.54).toFixed(2)}cm`;
 /** A list's words in a block's brackets: "bullet", "numbered", its numbering where it is not 1, 2, 3, its label (a
  * formatting read's: "3."), its level. */
@@ -625,12 +637,15 @@ function wordText(read: WordBlocks, first = 1): string {
         const words = l ? [l.style ? `style ${JSON.stringify(l.style)}` : "", l.headerRows ? `header row${l.headerRows === 1 ? "" : "s"} ${l.headerRows}` : "", ...(l.merged ?? []).map((m) => `${colName(m.cell)}${m.row + 1} ${m.above ? "merged with the cell above" : `spans ${m.across} columns`}`), l.borders ? bordersWords(l.borders) : "", l.pictures ? "its look not read: it holds pictures" : ""].filter(Boolean) : [];
         // A page's rows of a table (b.row) are numbered from the table's first row, as its cells' looks are.
         const cells = cellLookLines((l?.cells ?? []).filter((c) => !b.row || (c.row >= b.row - 1 && c.row < b.row - 1 + b.table.length))).map((line) => `\n    ${line}`);
-        const pics = (b.pics ?? []).map(([row, cell, w, h, alt]) => `\n    ${colName(cell)}${row + 1}: ${pictureWords(w, h, alt)}`);
+        // (Pictures of one cell follow each other, numbered where there are several.)
+        const byCell = new Map<string, [number, number, ...PictureRead][]>();
+        for (const pic of b.pics ?? []) byCell.set(`${pic[0]},${pic[1]}`, [...(byCell.get(`${pic[0]},${pic[1]}`) ?? []), pic]);
+        const pics = [...byCell.values()].flatMap((cellPics) => numbered(cellPics, ([row, cell, w, h, alt], k) => `\n    ${colName(cell)}${row + 1}: ${pictureWords(w, h, alt, k)}`));
         return `[${i + first}] table${rows(b)}${words.length ? ` (${words.join(", ")})` : ""}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}${cells.join("")}${pics.join("")}`;
       }
       const look = b.look;
       const bracket = [b.style, listWords(b), look?.para ? paraWords(look.para) : ""].filter(Boolean).join(", ");
-      const under = [...(look?.runs ?? []).map((r) => `${quoted(r.t)}: ${runWords(r.look)}`), ...(b.pics ?? []).map(([w, h, alt]) => pictureWords(w, h, alt))];
+      const under = [...(look?.runs ?? []).map((r) => `${quoted(r.t)}: ${runWords(r.look)}`), ...numbered(b.pics ?? [], ([w, h, alt], k) => pictureWords(w, h, alt, k))];
       return `[${i + first}]${bracket ? ` (${bracket})` : ""} ${b.p}${under.length ? `\n    ${under.join("; ")}` : ""}`;
     })
     .join("\n");
@@ -678,7 +693,7 @@ function formatHead(read: WordBlocks): string {
 
 /** A spreadsheet's cells as the agent reads them: every sheet of the workbook first, by its position (from 1) and
  * whether it is hidden, then the cells of each sheet read, `A1: value`, a text in quotes, a formula after its value. */
-type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean; pictures?: { count: number; items: { a: string; w: number; h: number; alt: string }[] }; look?: SheetLook }[] };
+type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean; pictures?: { count: number; items: { a: string; w: number; h: number; alt: string; k?: number }[] }; look?: SheetLook }[] };
 function sheetList(book: CellSheets["book"]): string {
   return `Sheets: ${book.map((s, i) => `${i + 1} ${JSON.stringify(s.name)}${s.hidden ? " (hidden)" : ""}`).join(", ")}`;
 }
@@ -691,7 +706,7 @@ function cellText(read: CellSheets): string {
   const sheets = read.sheets.map((s) => {
     const cells = cellLines(s.cells);
     if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
-    const pics = s.pictures?.count ? `\nPictures: ${s.pictures.items.map((p) => `${p.a} ${emuCm(p.w)} × ${emuCm(p.h)} cm${p.alt ? ` ${JSON.stringify(p.alt)}` : ""}`).join("; ")}${s.pictures.count > s.pictures.items.length ? ` (and ${s.pictures.count - s.pictures.items.length} more)` : ""}.` : "";
+    const pics = s.pictures?.count ? `\nPictures: ${s.pictures.items.map((p) => `${p.a}${p.k ? ` #${p.k}` : ""} ${emuCm(p.w)} × ${emuCm(p.h)} cm${p.alt ? ` ${JSON.stringify(p.alt)}` : ""}`).join("; ")}${s.pictures.count > s.pictures.items.length ? ` (and ${s.pictures.count - s.pictures.items.length} more)` : ""}.` : "";
     return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}${pics}${s.look ? `\n${sheetLookText(s.look)}` : ""}`;
   });
   return [sheetList(read.book), ...sheets].join("\n\n");
@@ -944,7 +959,7 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
     name: "office_edit",
     label: LABELS.office_edit,
     guard: GUARDS.office_edit,
-    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops (a quote is the body's text inside one paragraph, as office_read shows it; \`nth\` picks a repeat, from 1): {quote, replacement} replaces text (an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: a paragraph style of the document, "Heading 1"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote; {after?, picture, width?, height?, alt?} adds a picture in a paragraph of its own (a PNG, JPEG or GIF file below your folder, never an address: 5 MB, 20 a call), at its own size or the size given ("6cm"; one side keeps its proportions), alt text the file's name unless given. Formatting: office_format. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; values, formulas, number formats and column widths only), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. Rows and columns: {sheet?, insertRows: "5:6"} (new rows 5 and 6), {sheet?, insertColumns: "C"}, {sheet?, deleteRows}, {sheet?, deleteColumns} (last in a call: they cannot be taken back; formulas into them turn #REF!). {sheet?, sort: "A2:D9", by: ["B desc", "C"]} sorts the range's rows (leave the header row out); {name: "Sales", refersTo: "Data!B6:C9"} makes or changes a named range, {name, delete: true} removes it. {sheet?, picture, at: "B2", width?, height?, alt?} puts a picture at a cell. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more, or give nth.`,
+    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops (a quote is the body's text inside one paragraph, as office_read shows it; \`nth\` picks a repeat, from 1): {quote, replacement} replaces text (an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: a paragraph style of the document, "Heading 1"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote; {after?, picture, width?, height?, alt?} adds a picture in a paragraph of its own (a PNG, JPEG or GIF file below your folder, never an address: 5 MB, 20 a call), at its own size or the size given ("6cm"; one side keeps its proportions), alt text the file's name unless given. Formatting: office_format. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; values, formulas, number formats and column widths only), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. Rows and columns: {sheet?, insertRows: "5:6"} (new rows 5 and 6), {sheet?, insertColumns: "C"}, {sheet?, deleteRows}, {sheet?, deleteColumns} (last in a call: they cannot be taken back; formulas into them turn #REF!). {sheet?, sort: "A2:D9", by: ["B desc", "C"]} sorts the range's rows (leave the header row out); {name: "Sales", refersTo: "Data!B6:C9"} makes or changes a named range, {name, delete: true} removes it. {sheet?, picture, at: "B2", width?, height?, alt?} puts a picture at a cell. Change a picture office_read lists: {editPicture, n?, delete: true | width?, height?, alt?} (Word: editPicture is its paragraph's or table's number, cell "A2" in a table, move: true with after? moves it; sheet: editPicture is its anchor "B2", at: "D9" moves it, and a delete goes last: it cannot be undone; n picks #2 of several). After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more, or give nth.`,
     promptSnippet: "Edit a Word or spreadsheet document live, through your own editor",
     executionMode: "sequential",
     parameters: {
@@ -986,6 +1001,10 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
               name: { type: "string" },
               refersTo: { type: "string" },
               picture: {},
+              editPicture: {},
+              cell: {},
+              n: {},
+              move: {},
               at: {},
               width: {},
               height: {},
@@ -1002,7 +1021,7 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
     execute: guarded(async ({ id, ops }, signal) => {
       const doc = visibleDoc(id);
       const job: EditJob = editJob(doc.ext, ops);
-      const kinds = [...new Set(job.args.ops.map((op) => ("picture" in op ? "pictures" : "quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "sort" in op ? "sort" : "name" in op ? "names" : "rows and columns")))].join(", ");
+      const kinds = [...new Set(job.args.ops.map((op) => ("picture" in op || "editPicture" in op ? "pictures" : "quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "sort" in op ? "sort" : "name" in op ? "names" : "rows and columns")))].join(", ");
       return change(doc, job, "office_edit", "Edited", kinds, signal);
     }),
   });
@@ -1067,7 +1086,7 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
       // (A name made shows a moment after its command, as a link does.)
       const names = job.kind === "cell.edit" ? job.args.ops.filter((op) => "name" in op).length : 0;
       // (A picture is uploaded to the Document Server by the editor, and again where the call is taken back.)
-      const pictures = job.kind === "word.edit" || job.kind === "cell.edit" ? (job.args.ops as object[]).filter((op) => "picture" in op).length : 0;
+      const pictures = job.kind === "word.edit" || job.kind === "cell.edit" ? (job.args.ops as object[]).filter((op) => "picture" in op || "editPicture" in op).length : 0;
       const extraMs = (job.kind === "cell.edit" ? SHEET_OP_MS * sheetOps + SETTLE_MS * names : job.kind === "cell.format" ? SETTLE_MS * settles : Math.ceil((WORD_LAYOUT_MS * bytes) / 100_000)) + PICTURE_MS * pictures;
       const what = `${tool}: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}${job.kind === "word.edit" || job.kind === "cell.edit" ? picturesAudit(sent as EditJob) : ""}`;
       let made: unknown;
@@ -1101,6 +1120,7 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
       const tocSaid = (made as { toc?: unknown } | null)?.toc === true || tocMoved ? ` Updated the table of contents${tocMoved ? ` (${tocMoved === 1 ? "1 comment on its entries was" : `${tocMoved} comments on its entries were`} moved onto the new entries)` : ""}.` : "";
       const watching = usersOf(doc.docId).length;
       const movedLines = movesSaid(made, usersOf(doc.docId).map((u) => u.name || "someone"));
+      const picsSaid = picturesSaid(made);
       const key = seats().keyOf(home, doc.docId);
       const outcome: SaveAfterEdit = key ? await (cfg.save ?? ((k: string) => saveNow(k)))(key) : "failed";
       const now = refresh(doc.docId, rootDir());
@@ -1118,7 +1138,7 @@ function installTools(pi: unknown, home: string, chatId: string, spelled = home)
         throw new Refusal("editor_not_saved", `your ${action} of "${doc.title}" (${n} op${n === 1 ? "" : "s"}) is made and live in the document, but the Document Server did not save it ${outcome === "timeout" ? "in time" : "now"}: it reaches the file with the editor's next save or when the document closes. Do not make it again.`);
       }
       const seen = watching ? ` ${people(watching)} in the document saw it live.` : "";
-      return text(`${did} "${doc.title}" (${n} op${n === 1 ? "" : "s"}), saved as revision ${to}.${seen}${movedSaid}${looks}${tocSaid}${movedLines}`, { action, id: doc.docId, ops: n, from, to, live: watching, ...(movedComments.length ? { moved: movedComments } : {}) });
+      return text(`${did} "${doc.title}" (${n} op${n === 1 ? "" : "s"}), saved as revision ${to}.${seen}${movedSaid}${looks}${tocSaid}${picsSaid}${movedLines}`, { action, id: doc.docId, ops: n, from, to, live: watching, ...(movedComments.length ? { moved: movedComments } : {}) });
     });
   }
 

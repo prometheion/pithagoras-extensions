@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import https from "node:https";
@@ -2475,6 +2475,12 @@ async function run(PITHAGORAS: string): Promise<void> {
     // One more past the call's 10 MB is refused before the editor is asked.
     writeFileSync(path.join(project, "pics", "big3.png"), noisePng(1270, 1270));
     assert.match(await failing(tools.office_edit.execute("q8", { id: doc, ops: [{ picture: "pics/big1.png" }, { picture: "pics/big2.png" }, { picture: "pics/big3.png" }] })), /^error:bad_op op 3: the picture "pics\/big3\.png" would take the call's pictures past 10 MB/);
+    // A link in the agent's folder that leads out of it is not followed, whatever it leads to, and a path that leaves the folder is not one.
+    symlinkSync("/etc/hostname", path.join(project, "pics", "leak.png"));
+    symlinkSync("/etc", path.join(project, "pics", "etc"));
+    for (const leak of ["pics/leak.png", "pics/etc/hostname", path.join(project, "pics", "leak.png"), "../../../../etc/hostname", "/etc/hostname"]) {
+      assert.match(await failing(tools.office_edit.execute("q9", { id: doc, ops: [{ picture: leak }] })), /^error:(bad_op|not_found) op 1: the picture /, leak);
+    }
     await person.page.context().close();
   });
 

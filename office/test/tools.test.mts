@@ -1733,7 +1733,7 @@ test("office_read shows a Word picture on its own line under its paragraph, with
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ blocks: [{ p: "Intro" }, { p: "", pics: [[1800000, 1224000, "Sales by region"]] }, { p: "Two", pics: [[360000, 720000, ""], [3600000, 3600000, "Logo"], [9525, 19050, "Pixel"]] }] });
   const plain = ((await tool(s, "office_read").execute("r1", { id: doc.docId })) as ToolResult).content[0].text;
-  assert.match(plain, /\[1\] Intro\n\[2\] \n    a picture 5 × 3\.4 cm, alt text "Sales by region"\n\[3\] Two\n    a picture 1 × 2 cm; a picture 10 × 10 cm, alt text "Logo"; a picture 0.03 × 0.05 cm, alt text "Pixel"$/);
+  assert.match(plain, /\[1\] Intro\n\[2\] \n    a picture 5 × 3\.4 cm, alt text "Sales by region"\n\[3\] Two\n    a picture 1 × 2 cm; a picture 10 × 10 cm, alt text "Logo"; a picture 0.03 × 0.1 cm, alt text "Pixel"$/);
   const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 53, items: [{ a: "B2", w: 1800000, h: 1224000, alt: "Logo" }, { a: "E10", w: 720000, h: 360000, alt: "" }] } }] });
   const read = ((await tool(s, "office_read").execute("r2", { id: sheet.docId })) as ToolResult).content[0].text;

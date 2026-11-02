@@ -58,7 +58,7 @@ test("templateXlsx: minimal xlsx parses with ooxml.parseXlsx as one empty Sheet1
   for (const name of ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/styles.xml", "xl/worksheets/sheet1.xml"]) assert.ok(zip.file(name), `missing ${name}`);
 });
 
-test("templateXlsx: the styles part is declared and related, and gives the workbook Arial 11, the two required fills and the style Normal (a workbook without it breaks a table over a bold or linked cell, ONLYOFFICE/DocumentServer#3870)", async () => {
+test("templateXlsx: the styles part is declared and related, and gives the workbook Calibri 11, the two required fills and the style Normal (a workbook without it breaks a table over a bold or linked cell, ONLYOFFICE/DocumentServer#3870)", async () => {
   const zip = await JSZip.loadAsync(await templateXlsx());
   const styles = await zip.file("xl/styles.xml")?.async("string");
   assert.ok(styles, "xl/styles.xml is there");
@@ -68,9 +68,9 @@ test("templateXlsx: the styles part is declared and related, and gives the workb
   const ids = [...rels.matchAll(/Id="(rId\d+)"/g)].map((m) => m[1]);
   assert.equal(new Set(ids).size, ids.length, "the relationship ids are all different");
   const font = /<fonts count="1"><font>([\s\S]*?)<\/font><\/fonts>/.exec(styles)?.[1] ?? "";
-  assert.match(font, /<name val="Arial"\/>/);
+  assert.match(font, /<name val="Calibri"\/>/);
   assert.match(font, /<sz val="11"\/>/);
-  assert.doesNotMatch(styles, /Calibri/);
+  assert.doesNotMatch(styles, /Arial/);
   assert.match(styles, /<fills count="2"><fill><patternFill patternType="none"\/><\/fill><fill><patternFill patternType="gray125"\/><\/fill><\/fills>/, "the two fills every file starts with");
   assert.match(styles, /<borders count="1">/);
   assert.match(styles, /<cellStyleXfs count="1"><xf [^>]*\/><\/cellStyleXfs>/);

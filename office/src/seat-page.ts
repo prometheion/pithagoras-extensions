@@ -1744,9 +1744,13 @@ function refuseExtra(ws, op, i) {
       if (seen[text]) return bad("the column names of a table are all different, and " + JSON.stringify(head.GetValue()) + " is in " + cells[c] + " of " + JSON.stringify(name) + " twice");
       seen[text] = true;
     }
-    // OnlyOffice 10.0 breaks the format of a linked cell a table covers: its number format, font and the rest then throw.
+    // In a workbook without xl/styles.xml (ONLYOFFICE/DocumentServer#3870), OnlyOffice 10.0 breaks the formats of a linked
+    // (or bold) cell a table covers: its number format, font and the rest then throw. The workbooks made here have the
+    // part and do not break, but this check cannot be narrowed to the others: the plugin cannot reach Asc.editor, the API
+    // has no accessor for the styles, and the file on disk is not the session's model (a session opened from a styles-less
+    // file stays broken after the editor saves it). So a table over a link is refused everywhere.
     var tlinked = linksIn(ws, op.asTable).map(function (l) { return l[4]; }).filter(Boolean);
-    if (tlinked.length) return bad("a table over a cell with a link breaks that cell in the editor (its formats can no longer be read), and " + tlinked[0] + " of " + JSON.stringify(name) + " has one (put the table where no cell has a link)");
+    if (tlinked.length) return bad("a table over a cell with a link can break that cell in the editor (in a workbook without a styles part its formats can no longer be read), and " + tlinked[0] + " of " + JSON.stringify(name) + " has one (put the table where no cell has a link)");
     var tmerged = mergesIn(ws, op.asTable);
     if (tmerged.length) return bad("a table needs cells that are not merged, and " + tmerged[0] + " of " + JSON.stringify(name) + " is merged (split it first)");
   }

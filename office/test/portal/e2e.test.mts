@@ -1737,7 +1737,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     const person = await personOpens(doc);
     const shown = await personCells(person.frame, ["A3", "C4", "B3"]);
     const ops = [
-      { format: "A1", set: { font: "Georgia", fontSize: 16, bold: true, color: "#1F4E79" } },
+      { format: "A1", set: { font: "Arial", fontSize: 16, bold: true, color: "#1F4E79" } },
       { format: "A3:D3", set: { bold: true, fill: "#1F4E79", color: "#FFFFFF", align: "center", valign: "center", borders: "all" } },
       { format: "C4:D7", set: { numberFormat: "#,##0.00" } },
       { format: "A7:D7", set: { bold: true, borders: { top: "double #000000" } } },
@@ -1763,9 +1763,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     const read = await readSheet(doc);
     console.log(`28. office_read with formatting:\n${read}`);
     for (const want of [
-      /\nFormatting: font Arial 11 where no other is said; alignment, borders and tables are not read \(office_screenshot shows them\)\.\n/,
+      /\nFormatting: font Calibri 11 where no other is said; alignment, borders and tables are not read \(office_screenshot shows them\)\.\n/,
       // A merge gives the merged cells the top-left one's formats.
-      /A1:D1 Georgia 16, bold, #1F4E79/,
+      /A1:D1 Arial 16, bold, #1F4E79/,
       /A3, C3:D3 bold, #FFFFFF, fill #1F4E79/,
       /B3 bold, #FFFFFF, fill #1F4E79, rotated 45°/,
       /"#,##0\.00"/,
@@ -1837,7 +1837,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     await tools.office_edit.execute("m-fail", { id: doc, ops: [{ addSheet: "Fail" }, { sheet: "Fail", range: "A1", values: [[1]] }] });
     const cells = ["A1", "B1", "C1", "A2", "B2", "C2", "A5", "A6"];
     const cases: { name: string; tool: "office_format" | "office_edit"; ops: unknown[]; partial?: RegExp }[] = [
-      { name: "readable keys", tool: "office_format", ops: [{ format: "A1:C2", set: { numberFormat: "0.00", font: "Georgia", fontSize: 14, bold: true, italic: false, underline: true, strike: true, color: "#FF0000", fill: "#00FF00", wrap: true, rotation: 30 } }] },
+      { name: "readable keys", tool: "office_format", ops: [{ format: "A1:C2", set: { numberFormat: "0.00", font: "Arial", fontSize: 14, bold: true, italic: false, underline: true, strike: true, color: "#FF0000", fill: "#00FF00", wrap: true, rotation: 30 } }] },
       { name: "superscript", tool: "office_format", ops: [{ format: "A5", set: { superscript: true } }] },
       { name: "merge", tool: "office_format", ops: [{ format: "A1:B2", set: { merge: true } }], partial: /The editor cannot read back the alignment and borders of "Sheet1"!A1:B2 \(op 1\), which stay as this call set them\.$/ },
       { name: "split", tool: "office_format", ops: [{ format: "A6:B6", set: { merge: false } }] },
@@ -1897,7 +1897,7 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`29. saved columns ${/<cols>[\s\S]*?<\/cols>/.exec(saved.sheet)?.[0] ?? "(none)"}; rows ${[...saved.sheet.matchAll(/<row [^>]*>/g)].map((m) => m[0]).join(" ")}`);
     assert.equal(saved.cell("C2").fill, "none");
     assert.equal(saved.cell("C2").numFmt, "General");
-    assert.doesNotMatch(saved.cell("A2").font, /<b\/>|Georgia/);
+    assert.doesNotMatch(saved.cell("A2").font, /<b\/>|Arial/);
     assert.match(saved.cell("B2").alignment, /horizontal="right"/, "the alignment the answer named stays");
     assert.equal(saved.cell("B2").borders, "left thin, right thin, top thin, bottom thin", "and the borders");
     assert.match(readFileSync(await fileOf(doc)).length ? (await readSheet(doc)) : "", /\nA2: "a2"\nB2: "b2"\nC2: 6\n/, "the values a merge took are back");
@@ -1985,8 +1985,8 @@ async function run(PITHAGORAS: string): Promise<void> {
     }
     const fitted = await readSheet(doc);
     console.log(`32. ${/\nColumns: .*/.exec(fitted)?.[0].trim()}`);
-    // (The read names the width most of them have as the usual one: "Columns: A 8.38, B-C 32.14, … (others 32.29).")
-    assert.ok(Number(/\nColumns: A 8\.38, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
+    // (The read names the width most of them have as the usual one: "Columns: A 8.43, B-C 32.14, … (others 32.29).")
+    assert.ok(Number(/\nColumns: A 8\.43, .*\(others ([\d.]+)\)\./.exec(fitted)?.[1]) > 20, "the columns are fitted");
     // A person in the workbook: a freeze of no panes over frozen rows, and an autofit, each failed at a last op.
     await tools.office_format.execute("f-rows", { id: doc, ops: [{ freeze: "A3" }] });
     const person = await personOpens(doc);
@@ -2217,7 +2217,7 @@ async function run(PITHAGORAS: string): Promise<void> {
 
     // What cannot be taken back is named when a later op fails: a chart, a table, cleared rules.
     // (A table over a linked cell breaks that cell's formats in the editor: refused, so the table goes elsewhere.)
-    assert.match(await failing(tools.office_format.execute("y-linked-table", { id: doc, ops: [{ asTable: "A1:C5" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and A\d of "Sheet1" has one/);
+    assert.match(await failing(tools.office_format.execute("y-linked-table", { id: doc, ops: [{ asTable: "A1:C5" }] })), /^error:bad_op op 1: a table over a cell with a link can break that cell in the editor .* and A\d of "Sheet1" has one/);
     await tools.office_edit.execute("y-tag", { id: doc, ops: [{ range: "F1:G3", values: [["Tag", "Weight"], ["a", 1], ["b", 2]] }] });
     // A link's look replaces the cell's font: a bold link replaced by another and taken back comes back with its link, and
     // the answer names the font it could not put back. (The sort above moved the old link to A4.)
@@ -2332,9 +2332,9 @@ async function run(PITHAGORAS: string): Promise<void> {
     writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
   };
 
-  test("37. a new workbook has its styles part (Arial 11): a bold cell before a table and a link after it keep every format getter working, office_read reads them, and the save holds the styles", { timeout: 600_000 }, async () => {
+  test("37. a new workbook has its styles part (Calibri 11): a bold cell before a table and a link after it keep every format getter working, office_read reads them, and the save holds the styles", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Styled table", "cell");
-    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Arial"\/>/, "the new file has the part");
+    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Calibri"\/>/, "the new file has the part");
     await tools.office_edit.execute("sx0", { id: doc, ops: [{ range: "A1:C5", values: TABLE_ROWS }] });
     // A bold cell and the table over it (a table goes last in its call), then a link and a bold cell inside the table: each of them broke its cell's formats without the part.
     const table = await tools.office_format.execute("sx1", { id: doc, ops: [{ format: "A4", set: { bold: true } }, { asTable: "A1:C5" }] });
@@ -2344,18 +2344,29 @@ async function run(PITHAGORAS: string): Promise<void> {
     const read = await readSheet(doc, "Sheet1");
     console.log(`37. read:\n${read}`);
     assert.doesNotMatch(read, /\(not read, the editor failed/, "every cell is read");
-    assert.match(read, /Formatting: font Arial 11 where no other is said/);
+    assert.match(read, /Formatting: font Calibri 11 where no other is said/);
     assert.match(read, /\nFormats: .*C2, A4 bold; B3 underline/);
     assert.match(read, /Links: .*B3 https:\/\/example\.com\/docs/);
     assert.match(read, /\nB3: "Docs"\n/);
     // The save holds the table, the link and the styles, and a second look reads the same.
     await tools.office_edit.execute("sx2", { id: doc, ops: [{ range: "E1", values: [["saved"]] }] });
-    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Arial"\/>/);
+    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Calibri"\/>/);
     assert.match(await partOf(doc, "xl/worksheets/sheet1.xml"), /<hyperlink /);
     assert.match(await readSheet(doc, "Sheet1"), /C2, A4 bold/);
     // The guard stays: a table over a link set before it is refused (a workbook from elsewhere may lack the part).
     await tools.office_format.execute("sx3", { id: doc, ops: [{ link: "E2", set: { url: "https://example.com/e", text: "E" } }] });
-    assert.match(await failing(tools.office_format.execute("sx4", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and E2 of "Sheet1" has one/);
+    assert.match(await failing(tools.office_format.execute("sx4", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link can break that cell in the editor .* and E2 of "Sheet1" has one/);
+  });
+
+  test("40. office_screenshot of a wide range in a workbook office_create made: 22 default columns fit at 100 % (the columns are 64 px, as the fit reckons), as in one from elsewhere", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Wide new", "cell");
+    const row = Array.from({ length: 22 }, (_, k) => k + 1);
+    await tools.office_edit.execute("wd0", { id: doc, ops: [{ range: "A1:V3", values: [row, row, row] }] });
+    const wide = await shoot("40. Sheet1!A1:V3", { id: doc, range: "A1:V3" });
+    assert.match(wide.text, /^Sheet "Sheet1" A1:V3 at 100 %, as your editor shows it now\./);
+    // 22 columns of 64 px come to 1,408 px, which fit the grid at 100 %; with a wider default font the columns would be
+    // 72 px, the range would not fit, and the picture would fail (or need 75 %).
+    assert.equal(wide.out.details.zoom, 100);
   });
 
   test("38. a workbook from elsewhere without a styles part still breaks a table over a bold cell: office_read leaves the cell out and says so, and a table over a link is refused", { timeout: 600_000 }, async () => {
@@ -2366,13 +2377,16 @@ async function run(PITHAGORAS: string): Promise<void> {
     await tools.office_format.execute("nx2", { id: doc, ops: [{ link: "E2", set: { url: "https://example.com/e", text: "E" } }] });
     const made = await failing(tools.office_format.execute("nx1", { id: doc, ops: [{ format: "A4", set: { bold: true } }, { asTable: "A1:C5" }] }));
     console.log(`38. bold and table without styles: ${made}`);
+    // The call itself is taken: the breakage shows when the cells are read afterwards (below). A later editor that fixed
+    // DocumentServer#3870 makes that read assertion fail, and the guard can go.
+    assert.match(made, /^answered: Formatted "No styles" \(2 ops\)/);
     await delay(800);
     const read = await readSheet(doc, "Sheet1");
     console.log(`38. read:\n${read}`);
     assert.match(read, /not read, the editor failed at them: .*A4/, "the cell it cannot read is left out, and said");
     assert.match(read, /\nA4: "Gamma"\n/, "its value is read all the same");
     // A table over a link is refused there.
-    assert.match(await failing(tools.office_format.execute("nx3", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and E2 of "Sheet1" has one/);
+    assert.match(await failing(tools.office_format.execute("nx3", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link can break that cell in the editor .* and E2 of "Sheet1" has one/);
   });
 
   test("39. DocumentBuilder, the Document Server's own: a link and a bold cell, then a table over them, in the workbook this extension makes, leave every format getter working", { timeout: 600_000 }, async () => {
@@ -2402,7 +2416,7 @@ async function run(PITHAGORAS: string): Promise<void> {
       console.log(`39. ${out.trim()}`);
       const result = /RESULT (.*)/.exec(out)?.[1];
       assert.ok(result, `the script ran to its end (${out.trim()})`);
-      assert.deepEqual(result.split(";"), ["B3 General|false|0|No Fill|Arial|11|false", "B4 General|false|0|No Fill|Arial|11|false", "A4 General|false|0|No Fill|Arial|11|true", "C2 General|false|0|No Fill|Arial|11|true", "C3 General|false|0|No Fill|Arial|11|false"]);
+      assert.deepEqual(result.split(";"), ["B3 General|false|0|No Fill|Calibri|11|false", "B4 General|false|0|No Fill|Calibri|11|false", "A4 General|false|0|No Fill|Calibri|11|true", "C2 General|false|0|No Fill|Calibri|11|true", "C3 General|false|0|No Fill|Calibri|11|false"]);
     } finally {
       try { execFileSync("docker", ["rm", "-f", `${PREFIX}-builder`], { stdio: "ignore" }); } catch { /* it ended with --rm */ }
       rmSync(dir, { recursive: true, force: true });

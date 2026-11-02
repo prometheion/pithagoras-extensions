@@ -3149,9 +3149,9 @@ test("a table, a filter: the builder's calls; a table needs text headers, all di
   s1.cells.B1 = "Name";
   assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /the column names of a table are all different, and "Name" is in B1 of "Sheet1" twice/);
   s1.cells.B1 = "Qty";
-  // OnlyOffice 10.0 breaks the format of a linked cell a table covers (measured in the editor): refused.
+  // OnlyOffice 10.0 can break the format of a linked cell a table covers (measured in the editor): refused.
   s1.links.A2 = { address: "https://example.com", sub: "", tip: "" };
-  assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /a table over a cell with a link breaks that cell in the editor \(its formats can no longer be read\), and A2 of "Sheet1" has one/);
+  assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /a table over a cell with a link can break that cell in the editor \(in a workbook without a styles part its formats can no longer be read\), and A2 of "Sheet1" has one/);
   delete s1.links.A2;
   s1.merges.push("A3:B3");
   assert.match((await plugin(book, formatting([{ asTable: "A1:B3" }]))).error.message, /a table needs cells that are not merged, and A3:B3 of "Sheet1" is merged/);

@@ -238,14 +238,15 @@ const XLSX_SHEET1 =
   `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`;
 
 // The workbook's styles, as Excel and the Document Server write them for a blank one (one font, the two fills a file
-// must start with, one border, one cell format, the style "Normal"), with Arial 11 as the font, like the Word template.
+// must start with, one border, one cell format, the style "Normal"), with Calibri 11 as the font, what a styles-less workbook
+// has by default (the editor's column widths, 7 px a digit, and office_screenshot's fit are reckoned on it).
 // Without this part the editor has no cell formats to start from, and a table (FormatAsTable) over a cell whose font
 // the session changed (a link set through the API, SetBold) then breaks that cell's format getters
 // (ONLYOFFICE/DocumentServer#3870). Only a workbook made here gets this: an uploaded one has its own.
 const XLSX_STYLES =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
   `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
-  `<fonts count="1"><font><sz val="11"/><name val="Arial"/><family val="2"/></font></fonts>` +
+  `<fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>` +
   `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>` +
   `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
   `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
@@ -255,7 +256,7 @@ const XLSX_STYLES =
   `</styleSheet>`;
 
 /** A minimal valid xlsx (jszip, DEFLATE): [Content_Types].xml, _rels/.rels, xl/workbook.xml, xl/_rels/workbook.xml.rels,
- * xl/styles.xml (Arial 11) and an empty xl/worksheets/sheet1.xml named "Sheet1". Opens cleanly in Excel/OnlyOffice and
+ * xl/styles.xml (Calibri 11) and an empty xl/worksheets/sheet1.xml named "Sheet1". Opens cleanly in Excel/OnlyOffice and
  * parses with ooxml.parseXlsx (one sheet, zero rows). Async for the same jszip reason as templateDocx. */
 export async function templateXlsx(): Promise<Buffer> {
   const zip = new (await jsZip())();

@@ -255,7 +255,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   "Their logo"`), so that a number that meant another picture (the document changed since it was read) shows. An op does
   one thing: `delete: true`; a move (Word: `move: true` and `after`, `nth`, as an insert places a picture, in an inline
   paragraph of its own after the paragraph that holds `after`, or at the end; a sheet: `at`, the cell its top left corner
-  moves to); or a new `width`, `height` and `alt` (a length like `"6cm"`, 0.2 to 50 cm, one side keeps the picture's proportions as
+  moves to; a model that wrote the destination under the other of the two, or under `to`, is understood, and keys given as
+  `null` and `delete` or `move` as `false` are left out, as the model of the real-portal tests filled in every key of the schema); or a new `width`, `height` and `alt` (a length like `"6cm"`, 0.2 to 50 cm, one side keeps the picture's proportions as
   it is now, and the other may not come out past 50 cm). A deleted picture takes its paragraph with it where it held
   nothing else (not the last paragraph of a table cell or the document, and not one that ends a section); a picture inside
   a paragraph with text leaves the text. A moved picture is the same file (a copy of its media: not made again as a PNG),

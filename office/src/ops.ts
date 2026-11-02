@@ -230,6 +230,8 @@ const MAX_PICTURE_PATH = 1000;
 /** The smallest and largest a picture may be made, in twips (0.2 cm to 50 cm). */
 const PICTURE_MIN = 113;
 const PICTURE_MAX = 28_346;
+/** The largest a picture's side may be made, in EMU (50 cm): also the side worked out from the other (tools.ts). */
+export const PICTURE_SIDE_MAX = PICTURE_MAX * 635;
 
 /** The keys every picture op has, checked: `picture` (a path in the agent's folder, never an address), the sizes in EMU
  * (635 to the twip; a number is points, a text carries cm, mm, in or pt) and the alt text. */

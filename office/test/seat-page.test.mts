@@ -3451,3 +3451,23 @@ test("a picture anchored below rows this call made, which a person wrote into an
   assert.doesNotMatch(out.error.message, /the picture B2/, "the picture itself is taken back, wherever the rows put it");
   assert.deepEqual(book.state.sheets[0].images, []);
 });
+
+test("word.read gives the pictures in a table's cells (of the rows it reads) on the table, each with its cell's row and place in the row; a table without any carries none", () => {
+  const image = (w: number, alt: string | null) => ({ GetClassType: () => "image", GetWidth: () => w, GetHeight: () => 360_000, GetDescription: () => alt });
+  const cellPara = (text: string, drawings: unknown[] = []) => ({ ...paragraph(text), GetAllDrawingObjects: () => drawings });
+  const table = (cells: unknown[][][]) => ({
+    GetClassType: () => "table",
+    GetInternalId: () => "t1",
+    GetRowsCount: () => cells.length,
+    GetRow: (r: number) => ({ GetCellsCount: () => cells[r].length, GetCell: (c: number) => ({ GetContent: () => contentOf(cells[r][c]) }) }),
+  });
+  const pictured = table([[[cellPara("Item")], [cellPara("Logo")]], [[cellPara("Total"), cellPara("", [image(720_000, "Sum")])], [cellPara("", [image(360_000, null)])]]]);
+  const plain = table([[[cellPara("a")]]]);
+  const logo = image(1, "x");
+  const doc = { ...contentOf([pictured, plain]), GetAllImages: () => [logo], GetStyle: () => null };
+  const out = command("word.read", { GetDocument: () => doc });
+  assert.deepEqual(out.result.blocks, [
+    { table: [["Item", "Logo"], ["Total / ", ""]], pics: [[1, 0, 720_000, 360_000, "Sum"], [1, 1, 360_000, 360_000, ""]] },
+    { table: [["a"]] },
+  ]);
+});

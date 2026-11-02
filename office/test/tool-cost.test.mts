@@ -35,12 +35,13 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * the schema among it), office_read 339 -> 355 with what it now lists of a sheet.
  * #13's PR 5, pictures (plan: office_edit ~1,130): office_edit 1,140 -> 1,233 with the picture op for Word and for
  * sheets (the Word op's keys, the limits and the defaults in one sentence, the sheet op's shape) and its five keys in the
- * schema, untyped; office_read is unchanged (what it lists of pictures is in its output). */
+ * schema, untyped; office_read is unchanged (what it lists of pictures is in its output); 1,241 since its first review
+ * (one side given keeps the proportions: an agent that gives both "to be safe" would distort the picture). */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 200,
   office_read: 355,
-  office_edit: 1233,
+  office_edit: 1241,
   office_format: 1151,
   office_comments: 181,
   office_screenshot: 254,
@@ -66,7 +67,7 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 3487);
+  assert.equal(agreed, 3495);
 });
 
 test("office_edit sends formatting to office_format once, for Word and sheets alike", () => {
@@ -88,6 +89,7 @@ test("the picture op is named in office_edit's text for Word and for sheets, wit
   const edit = tools().find((t) => t.name === "office_edit")!;
   assert.match(edit.description, /\{after\?, picture, width\?, height\?, alt\?\} adds a picture in a paragraph of its own \(a PNG, JPEG or GIF file below your folder, never an address: 5 MB, 20 a call\)/);
   assert.match(edit.description, /alt text the file's name unless given/);
+  assert.match(edit.description, /the size given \("6cm"; one side keeps its proportions\)/);
   assert.match(edit.description, /\{sheet\?, picture, at: "B2", width\?, height\?, alt\?\} puts a picture at a cell/);
   const keys = Object.keys(((edit.parameters as { properties: { ops: { items: { properties: Record<string, unknown> } } } }).properties.ops.items.properties));
   for (const key of ["picture", "at", "width", "height", "alt"]) assert.ok(keys.includes(key), key);

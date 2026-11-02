@@ -218,17 +218,21 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   cell). `picture` is a path below the agent's home or the project's folder, never an address; the file is opened
   through the portal as the agent itself would read it (with the sandbox on, one it could not read is refused, and a
   link that leads out of the folder is not followed), told by its first bytes and not by its name, and checked by its
-  header before anything goes to the editor: 5 MB a picture, 10 MB and 20 pictures a call (a file used twice counts
-  twice), 40 megapixels (a small PNG can unpack to gigabytes) and 100 frames of a GIF (the editor shows its first). The
-  picture goes to the editor as it is, so the saved file holds the file's own bytes; its data is outside the ops' own 1 MB
-  limit. Its size is its own at 96 dpi, made smaller to fit the page's text area (Word) or 16 × 12 cm (a sheet), or the
-  `width` and `height` given (a length like `"6cm"`, a number is points, 0.2 to 50 cm; one given keeps the proportions);
+  header before anything goes to the editor: 5 MB a picture, 10 MB and 20 pictures a call (MB of 1,000,000 bytes; a
+  file used twice counts twice), 40 megapixels (a small PNG can unpack to gigabytes; a GIF's frames count where they
+  reach past its screen) and 100 frames of a GIF (the editor shows its first). The picture goes to the editor as it is,
+  up to its end marker (bytes after it are left out), so the saved file holds the file's own bytes, **its metadata
+  too**: a photo's EXIF (where it was taken, the camera) goes into the document with it. Its data is outside the ops'
+  own 1 MB limit. Its size is its own at 96 dpi (a JPEG turned by its EXIF orientation as it is shown), made smaller to
+  fit the page's text area (Word) or 16 × 12 cm (a sheet), or the `width` and `height` given (a length like `"6cm"`, a
+  number is points, 0.2 to 50 cm; one given keeps the proportions, and the other side may not come out past 50 cm);
   its alt text is the file's name unless `alt` is given (`""` gives none). A call that fails after its pictures is taken
   back like the other ops: in Word by the editor's Undo, in a sheet by deleting each picture the call made, except one
   you moved, resized or described meanwhile, which stays as you made it and which the answer names. (OnlyOffice's builder
   API has no way to delete a sheet's drawing; Office does it with the plugin method `RemoveOleObject`, which in 10.0.0.1
   deletes any drawing of a sheet by its id.) `office_read` lists the pictures, with or without `formatting`: under a
-  Word paragraph with their size and alt text, per sheet after its cells (`Pictures: B2 4 × 2 cm "Logo"`, 50 at most).
+  Word paragraph with their size and alt text (under a table by their cell, `A2: a picture …`, for one put `after` a
+  cell's text), per sheet after its cells (`Pictures: B2 4 × 2 cm "Logo"`, 50 at most).
   The agent cannot yet remove, move or resize a picture, or crop it, give it a border or set how text wraps around
   it, and the text inside a picture is not read (the guard does not see it either).
   The agent cannot write comments or tracked

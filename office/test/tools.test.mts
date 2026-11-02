@@ -24,6 +24,7 @@ import { parseDocx, readPart, rewriteZip } from "../src/ooxml";
 import * as docchat from "../src/docchat";
 import { resetLive, setUser, setSession, nameAgent } from "../src/live";
 import { SeatError } from "../src/seat";
+import { setPortal } from "../src/host";
 import type { SaveAfterEdit } from "../src/editing";
 
 /* ------------------------------------------------------------------ */
@@ -1639,6 +1640,8 @@ test("office_edit pictures: the files are read as the agent, from its folder (a 
     assert.ok(JSON.stringify(run.args).length > 5_000_000, "the data URL is more than the ops' own 1 MB cap");
     const audit = s.seen.records.find((r) => r.reason.startsWith("office_edit"))!;
     assert.match(audit.reason, /office_edit: 3 op\(s\) \(pictures\) on /);
+    // Which files went into the document, as the agent named them, and how many bytes of each.
+    assert.match(audit.reason, new RegExp(` by /f/atlas; pictures "pics/q3\\.png" ${pngFile(300, 200).length} B, "/f/atlas/photo\\.png" ${photo.length} B, "\\./pics/sub/\\.\\./sub/b\\.png" ${pngFile(8, 8).length} B; saved as revision `));
     assert.ok(!audit.reason.includes("base64"), "no data in the audit log");
     assert.ok(!JSON.stringify(ok.details).includes("base64"), "none in the details either");
     // The time allowance grows with the pictures.
@@ -1698,15 +1701,19 @@ test("office_edit pictures: 5 MB a picture, 40 megapixels and 100 GIF frames fro
     const frame = Buffer.from([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00]);
     return Buffer.concat([head, ...Array.from({ length: frames }, () => frame), Buffer.from([0x3b])]);
   };
-  const { s, opened, cleanup } = withFiles({ "five.png": pngFile(10, 10, 5 * 1024 * 1024 - 33), "six.png": pngFile(10, 10, 5 * 1024 * 1024), "bomb.png": pngFile(100_000, 100_000), "forty.png": pngFile(8000, 5000), "many.gif": gif(101), "hundred.gif": gif(100), "four.png": pngFile(10, 10, 4 * 1024 * 1024) });
+  const { s, opened, cleanup } = withFiles({ "five.png": pngFile(10, 10, 5_000_000 - 33), "over.png": pngFile(10, 10, 5_000_000 - 32), "six.png": pngFile(10, 10, 5 * 1024 * 1024), "eleven.png": pngFile(10, 10, 11_000_000), "bomb.png": pngFile(100_000, 100_000), "forty.png": pngFile(8000, 5000), "many.gif": gif(101), "hundred.gif": gif(100), "four.png": pngFile(10, 10, 4 * 1024 * 1024) });
   try {
     const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
     const run = (ops: unknown[]) => tool(s, "office_edit").execute("p4", { id: doc.docId, ops });
     // A file of exactly 5 MB, 40 megapixels and 100 frames are taken.
     await run([{ picture: "five.png" }, { picture: "forty.png" }, { picture: "hundred.gif" }]);
     assert.equal(editRuns(s).length, 1);
-    assert.equal((editRuns(s)[0].args.ops as { file: { bytes: number } }[])[0].file.bytes, 5 * 1024 * 1024);
+    assert.equal((editRuns(s)[0].args.ops as { file: { bytes: number } }[])[0].file.bytes, 5_000_000);
     s.seat.runs.length = 0;
+    // MB of 1,000,000 bytes, as the owner gave them: one byte more is refused.
+    assert.match(await refused(run([{ picture: "over.png" }]), "over"), /^error:bad_op op 1: the picture "over\.png" cannot be used: it is 5\.1 MB, and a picture may take 5 MB at most/);
+    // A file past a picture's cap is refused for that, alone or not: no split of the call would take it.
+    assert.match(await refused(run([{ picture: "eleven.png" }]), "eleven"), /^error:bad_op op 1: the picture "eleven\.png" cannot be used: it is 11\.1 MB, and a picture may take 5 MB at most/);
     assert.match(await refused(run([{ picture: "six.png" }]), "6 MB"), /^error:bad_op op 1: the picture "six\.png" cannot be used: it is 5\.0 MB, and a picture may take 5 MB at most|^error:bad_op op 1: the picture "six\.png" cannot be used: it is 5\.\d MB/);
     assert.match(await refused(run([{ picture: "bomb.png" }]), "bomb"), /^error:bad_op op 1: the picture "bomb\.png" cannot be used: it is 100000 × 100000 pixels \(10,000 megapixels\), and a picture may have 40 megapixels at most: scale it down first/);
     assert.match(await refused(run([{ picture: "many.gif" }]), "frames"), /^error:bad_op op 1: the picture "many\.gif" cannot be used: it has more than 100 frames/);
@@ -1726,6 +1733,102 @@ test("office_edit pictures: 5 MB a picture, 40 megapixels and 100 GIF frames fro
   } finally {
     cleanup();
   }
+});
+
+test("office_edit pictures: one side given keeps the proportions, and the other side may not come out past 50 cm; both sides, or none, are taken", async () => {
+  const { s, cleanup } = withFiles({ "wide.png": pngFile(4000, 1), "tall.png": pngFile(1, 4000), "square.png": pngFile(100, 100) });
+  try {
+    const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+    const run = (ops: unknown[]) => tool(s, "office_edit").execute("p5", { id: doc.docId, ops });
+    assert.match(await refused(run([{ picture: "wide.png", height: "1cm" }]), "wide"), /^error:bad_op op 1: the picture "wide\.png" would be 4,001 cm wide at that height \(its proportions: 4000 × 1 pixels\), and a side may be 50cm at most: give a smaller height, or both$/);
+    assert.match(await refused(run([{ paragraphs: ["x"] }, { picture: "tall.png", width: "50cm" }]), "tall"), /^error:bad_op op 2: the picture "tall\.png" would be 199,997 cm high at that width/);
+    assert.deepEqual(editRuns(s), [], "the editor was never asked");
+    // Within 50 cm, both sides given, none given, and a side that comes out small are taken.
+    await run([{ picture: "wide.png", width: "50cm" }, { picture: "tall.png", width: "1cm", height: "1cm" }, { picture: "wide.png" }, { picture: "square.png", height: "50cm" }]);
+    assert.equal(editRuns(s).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("office_edit pictures: an absolute path counts where it is written below the agent's folder, by its own spelling or the one before a link; one that only a link elsewhere leads into it is refused and not resolved by the portal", async () => {
+  __resetToolsForTests();
+  resetLive();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "office-tools-"));
+  const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-ws-")));
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "office-pics-out-")));
+  // The agent's folder as its owner names it is a link (the spelling the agent sees); the portal works in the real one.
+  const link = path.join(outside, "home-link");
+  fs.symlinkSync(real, link);
+  fs.writeFileSync(path.join(real, "pic.png"), pngFile(4, 4));
+  // A second link outside, that leads into the folder too: no spelling of the agent's folder.
+  fs.mkdirSync(path.join(outside, "elsewhere"));
+  fs.symlinkSync(real, path.join(outside, "elsewhere", "into"));
+  const opened: string[] = [];
+  const pi = makePi();
+  const fake = fakeSeat(() => root);
+  registerTools({
+    extend: (f) => f(pi, { id: "chat-a" }),
+    owner: () => link,
+    root,
+    record: () => {},
+    log: () => {},
+    seat: fake.seat,
+    save: fake.save,
+    officeState: () => "running",
+    mayWrite: () => {},
+    openFile: (file) => ({ fd: fs.openSync(file, "r"), size: fs.statSync(file).size }),
+    openPicture: (folder, rel) => {
+      opened.push(`${folder} ${rel}`);
+      const fd = fs.openSync(path.join(folder, rel), "r");
+      return { fd, size: fs.fstatSync(fd).size };
+    },
+  });
+  try {
+    const doc = await createDoc({ title: "Report", type: "word", folder: real }, root);
+    const edit = (picture: string) => pi.registered.find((t) => t.name === "office_edit")!.execute("p6", { id: doc.docId, ops: [{ picture }] });
+    await edit(path.join(real, "pic.png"));
+    await edit(path.join(link, "pic.png"));
+    assert.deepEqual(opened, [`${real} pic.png`, `${real} pic.png`], "both read in the folder, by the path below it");
+    const msg = await refused(edit(path.join(outside, "elsewhere", "into", "pic.png")), "elsewhere");
+    assert.match(msg, /^error:bad_op op 1: the picture ".*" is not in your own folder/);
+    assert.equal(opened.length, 2, "not opened");
+  } finally {
+    for (const d of [root, real, outside]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("office_edit pictures: by default the file is opened through the portal's files.open, in the agent's folder by its path there, as the chat's agent (likeParent, the chat)", async () => {
+  const s = setup();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "office-pics-"));
+  const asked: unknown[][] = [];
+  setPortal({
+    files: {
+      open: (folder: string, rel: string, options: unknown) => {
+        asked.push([folder, rel, options]);
+        fs.writeFileSync(path.join(dir, "f.png"), pngFile(5, 5));
+        const fd = fs.openSync(path.join(dir, "f.png"), "r");
+        return { fd, size: fs.fstatSync(fd).size };
+      },
+    },
+  } as never);
+  try {
+    const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+    await tool(s, "office_edit").execute("p7", { id: doc.docId, ops: [{ picture: "pics/f.png" }] });
+    assert.deepEqual(asked, [["/f/atlas", "pics/f.png", { likeParent: true, chats: ["chat-atlas-home"] }]]);
+    assert.equal((editRuns(s)[0].args.ops as { file: { px: { w: number } } }[])[0].file.px.w, 5);
+  } finally {
+    setPortal(undefined as never);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("office_read shows a picture in a Word table's cell under the table, by its cell", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ blocks: [{ table: [["Item", "Logo"], ["Total", ""]], pics: [[1, 0, 720000, 360000, "Sum"], [0, 1, 360000, 360000, ""]] }] });
+  const t = ((await tool(s, "office_read").execute("r4", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.match(t, /\[1\] table\n\| Item \| Logo \|\n\| Total \|  \|\n    A2: a picture 2 × 1 cm, alt text "Sum"\n    B1: a picture 1 × 1 cm$/);
 });
 
 test("office_read shows a Word picture on its own line under its paragraph, with its size and alt text, with or without formatting; a sheet's pictures follow its cells", async () => {

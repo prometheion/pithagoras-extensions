@@ -620,6 +620,15 @@ const WORD_READ = `function () {
             if (size > ${MAX_READ_TEXT}) { truncated = true; break; }
           }
           var tb = { table: rows };
+          // The pictures in its cells (of the rows read), each with its cell's row and place in the row (from 0).
+          if (images.length) {
+            var tpics = [];
+            for (var pr = 0; pr < rows.length; pr++) {
+              var prow = el.GetRow(pr);
+              for (var pc = 0; pc < prow.GetCellsCount(); pc++) collect(prow.GetCell(pc).GetContent(), []).forEach(function (x) { picturesOf(x.p).forEach(function (pic) { tpics.push([pr, pc].concat(pic)); }); });
+            }
+            if (tpics.length) { tb.pics = tpics; size += tpics.length * 40; }
+          }
           // A table's style, header rows, merged cells and cells' looks from its JSON, which carries its cells' content: not taken
           // of a table that holds pictures (their data would be in it).
           if (formatting && pictured[el.GetInternalId()]) looked(tb, { pictures: true });

@@ -1965,6 +1965,51 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     return { redPng, greenJpeg, blueGif };
   };
 
+  /* The pictures' colours: in a JPEG (a picture of the editor), in a person's editor, and the media a saved file holds. */
+  const coloursOf = async (bytes: Buffer) => {
+    const probe = await browser.newPage();
+    try {
+      return (await probe.evaluate(`(async function () {
+        var img = new Image();
+        img.src = "data:image/jpeg;base64," + ${JSON.stringify(bytes.toString("base64"))};
+        await img.decode();
+        var c = document.createElement("canvas");
+        c.width = img.width; c.height = img.height;
+        var g = c.getContext("2d");
+        g.drawImage(img, 0, 0);
+        var d = g.getImageData(0, 0, c.width, c.height).data, out = { red: 0, green: 0, blue: 0 };
+        for (var k = 0; k < d.length; k += 4) {
+          if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
+          else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
+          else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
+        }
+        return out;
+      })()`)) as { red: number; green: number; blue: number };
+    } finally {
+      await probe.close();
+    }
+  };
+  const inEditor = (frame: Frame) =>
+    frame.evaluate(`(function () {
+      var out = { red: 0, green: 0, blue: 0 };
+      Array.prototype.forEach.call(document.querySelectorAll("canvas"), function (c) {
+        if (!c.width || !c.height) return;
+        var d;
+        try { d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; } catch (e) { return; }
+        for (var k = 0; k < d.length; k += 4) {
+          if (d[k + 3] < 200) continue;
+          if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
+          else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
+          else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
+        }
+      });
+      return out;
+    })()`) as Promise<{ red: number; green: number; blue: number }>;
+  const media = async (docId: string, folder: string) => {
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(docId)));
+    return Promise.all(zip.file(new RegExp(`^${folder}/media/`)).map((f) => f.async("nodebuffer")));
+  };
+
   /**
    * s: pictures from a chat (#13 PR 5). A scripted model that takes pictures puts a PNG, a JPEG and a GIF from the
    * agent's home into a Word document and a spreadsheet it made, seen live in a person's editor, in office_read, in
@@ -1977,50 +2022,6 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     const unwrap = (r: string) => r.replace(/^<<<untrusted:([0-9a-f]+)>>>[^\n]*\n([\s\S]*)\n<<<\/untrusted:\1>>>$/, "$2");
     const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]) => (await ran(chatId, calls)).results.map(unwrap);
     const { redPng, greenJpeg, blueGif } = homePictures();
-    const coloursOf = async (bytes: Buffer) => {
-      const probe = await browser.newPage();
-      try {
-        return (await probe.evaluate(`(async function () {
-          var img = new Image();
-          img.src = "data:image/jpeg;base64," + ${JSON.stringify(bytes.toString("base64"))};
-          await img.decode();
-          var c = document.createElement("canvas");
-          c.width = img.width; c.height = img.height;
-          var g = c.getContext("2d");
-          g.drawImage(img, 0, 0);
-          var d = g.getImageData(0, 0, c.width, c.height).data, out = { red: 0, green: 0, blue: 0 };
-          for (var k = 0; k < d.length; k += 4) {
-            if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
-            else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
-            else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
-          }
-          return out;
-        })()`)) as { red: number; green: number; blue: number };
-      } finally {
-        await probe.close();
-      }
-    };
-    const inEditor = (frame: Frame) =>
-      frame.evaluate(`(function () {
-        var out = { red: 0, green: 0, blue: 0 };
-        Array.prototype.forEach.call(document.querySelectorAll("canvas"), function (c) {
-          if (!c.width || !c.height) return;
-          var d;
-          try { d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; } catch (e) { return; }
-          for (var k = 0; k < d.length; k += 4) {
-            if (d[k + 3] < 200) continue;
-            if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
-            else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
-            else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
-          }
-        });
-        return out;
-      })()`) as Promise<{ red: number; green: number; blue: number }>;
-    const media = async (docId: string, folder: string) => {
-      const zip = await JSZip.loadAsync(readFileSync(await fileOf(docId)));
-      return Promise.all(zip.file(new RegExp(`^${folder}/media/`)).map((f) => f.async("nodebuffer")));
-    };
-
     // A Word document: two pictures after its paragraphs, one at the end.
     const [created] = await say(eye, [{ name: "office_create", arguments: { title: "Pictured from a chat", type: "word" } }]);
     console.log(`s. ${created}`);
@@ -2159,6 +2160,97 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     rmSync(outside, { recursive: true, force: true });
   });
 
+  /**
+   * t: the pictures a document has, from a chat (#13 PR 6). The same scripted model sizes, describes, moves and deletes the
+   * pictures it put into a Word document and a spreadsheet, through the tools as the portal registers them (the schema
+   * passes `editPicture`, `cell`, `n` and `move`); a person's editor shows each change, the save keeps the files, a
+   * number the document does not have is refused with the op's number, and a call that fails takes its moves back.
+   */
+  test("t: the pictures a document has, from a chat: a scripted model sizes, describes, moves and deletes the pictures of a Word document and a spreadsheet; the person's editor, office_read and the save show each, a refused number changes nothing, and a failing call takes its moves back", { timeout: 900_000 }, async () => {
+    const eye = await eyeChat();
+    const unwrap = (r: string) => r.replace(/^<<<untrusted:([0-9a-f]+)>>>[^\n]*\n([\s\S]*)\n<<<\/untrusted:\1>>>$/, "$2");
+    const say = async (chatId: string, calls: { name: string; arguments: Record<string, unknown> }[]) => (await ran(chatId, calls)).results.map(unwrap);
+    const { redPng, greenJpeg } = homePictures();
+    const read = async (doc: string, label: string) => {
+      const [text] = await say(eye, [{ name: "office_read", arguments: { id: doc } }]);
+      const body = text.split("\n").slice(3).join("\n");
+      console.log(`t. ${label}:\n${body}`);
+      return body;
+    };
+    const [created] = await say(eye, [{ name: "office_create", arguments: { title: "Pictures edited from a chat", type: "word" } }]);
+    console.log(`t. ${created}`);
+    const word = (await state()).docs.find((d) => d.title === "Pictures edited from a chat")!.docId;
+    const person = await personOpens(word, "word");
+    await say(eye, [{ name: "office_edit", arguments: { id: word, ops: [{ quote: "New document", replacement: "Title" }, { paragraphs: ["Middle", "End"] }] } }]);
+    await say(eye, [{ name: "office_edit", arguments: { id: word, ops: [{ after: "Title", picture: "pics/red.png", width: "6cm", alt: "Logo" }, { after: "Middle", picture: "pics/green.jpg", width: "3cm", alt: "Photo" }] } }]);
+    assert.match(await read(word, "office_read"), /^\[1\] Title\n\[2\] \n    a picture 6 × 3 cm, alt text "Logo"\n\[3\] Middle\n\[4\] \n    a picture 3 × 1\.5 cm, alt text "Photo"\n\[5\] End$/);
+    assert.ok(await until(async () => { const c = await inEditor(person.frame); return c.red > 500 && c.green > 100; }, 15_000, 500), `the person's editor draws both: ${JSON.stringify(await inEditor(person.frame))}`);
+    const big = (await inEditor(person.frame)).red;
+
+    // Sized and described, then the photo moved to the end (its media is the file still).
+    const [edited] = await say(eye, [{ name: "office_edit", arguments: { id: word, ops: [{ editPicture: 2, width: "3cm", alt: "Small logo" }, { editPicture: 4, move: true, after: "End" }] } }]);
+    console.log(`t. ${edited}`);
+    assert.match(edited, /^Edited "Pictures edited from a chat" \(2 ops\), saved as revision [\d.]+\. 1 person in the document saw it live\. Pictures: changed the picture \[2\], which was 6 × 3 cm, alt text "Logo"; moved the picture \[4\], which was 3 × 1\.5 cm, alt text "Photo"\.$/);
+    assert.match(await read(word, "after sizing and moving"), /^\[1\] Title\n\[2\] \n    a picture 3 × 1\.5 cm, alt text "Small logo"\n\[3\] Middle\n\[4\] End\n\[5\] \n    a picture 3 × 1\.5 cm, alt text "Photo"$/);
+    assert.ok(await until(async () => { const c = await inEditor(person.frame); return c.red > 100 && c.red < big * 0.6; }, 15_000, 500), `the person's editor draws the smaller logo: ${JSON.stringify(await inEditor(person.frame))} (it was ${big})`);
+    const wordMedia = await media(word, "word");
+    assert.ok([redPng, greenJpeg].every((f) => wordMedia.some((m) => m.equals(f))), "the files in the save are the files, the moved one too");
+    assert.equal(wordMedia.length, 2);
+
+    // A number the document does not have, a table's cell on a paragraph: refused with the op's number, the document as it was.
+    const as = await read(word, "before the refusals");
+    for (const [ops, pattern] of [
+      [[{ editPicture: 9, delete: true }], /^error:not_found op 1: the document has no \[9\]/],
+      [[{ editPicture: 1, delete: true }], /^error:not_found op 1: office_read lists no picture under \[1\]/],
+      [[{ editPicture: 2, cell: "A1", delete: true }], /^error:bad_op op 1: \[2\] is a paragraph: cell is for a picture in a table/],
+      [[{ editPicture: 2, delete: true, move: true }], /^error:bad_op op 1: an edit of a picture does one thing/],
+    ] as const) {
+      const [said] = await say(eye, [{ name: "office_edit", arguments: { id: word, ops: ops as unknown as Record<string, unknown>[] } }]);
+      assert.match(said, pattern);
+    }
+    assert.equal(await read(word, "after the refusals"), as);
+    // Deleted: the logo with its paragraph, then the photo.
+    const [gone] = await say(eye, [{ name: "office_edit", arguments: { id: word, ops: [{ editPicture: 2, delete: true }, { editPicture: 5, delete: true }] } }]);
+    console.log(`t. ${gone}`);
+    assert.match(await read(word, "after deleting"), /^\[1\] Title\n\[2\] Middle\n\[3\] End$/);
+    assert.ok(await until(async () => { const c = await inEditor(person.frame); return c.red === 0 && c.green === 0; }, 15_000, 500), `the person's editor drew both away: ${JSON.stringify(await inEditor(person.frame))}`);
+    assert.equal((await partOf(word, "word/document.xml")).match(/<wp:inline /g), null);
+    await personCloses(person.page);
+
+    // A spreadsheet: two pictures at one cell (listed #1 and #2), one sized, one moved, one deleted at the end of a call.
+    await say(eye, [{ name: "office_create", arguments: { title: "Sheet pictures edited from a chat", type: "cell" } }]);
+    const sheet = (await state()).docs.find((d) => d.title === "Sheet pictures edited from a chat")!.docId;
+    const grid = await personOpens(sheet, "cell");
+    await say(eye, [{ name: "office_edit", arguments: { id: sheet, ops: [{ picture: "pics/red.png", at: "B2", width: "4cm", alt: "Red box" }, { picture: "pics/green.jpg", at: "B2", alt: "Photo" }] } }]);
+    assert.match(await read(sheet, "the sheet's pictures"), /\nPictures: B2 #1 4 × 2 cm "Red box"; B2 #2 2\.6 × 1\.3 cm "Photo"\.$/);
+    const [moved] = await say(eye, [{ name: "office_edit", arguments: { id: sheet, ops: [{ editPicture: "B2", n: 2, at: "F6" }, { editPicture: "b2", height: "1cm" }] } }]);
+    console.log(`t. ${moved}`);
+    assert.match(moved, /Pictures: moved the picture B2 of "Sheet1" #2, which was 2\.6 × 1\.3 cm, alt text "Photo"; changed the picture B2 of "Sheet1", which was 4 × 2 cm, alt text "Red box"\.$/);
+    const placed = await read(sheet, "after moving and sizing");
+    assert.match(placed, /\nPictures: B2 2 × 1 cm "Red box"; F6 2\.6 × 1\.3 cm "Photo"\.$/);
+    assert.ok(await until(async () => { const c = await inEditor(grid.frame); return c.red > 100 && c.green > 100; }, 15_000, 500), `the person's editor draws both: ${JSON.stringify(await inEditor(grid.frame))}`);
+    // A call that fails after its moves: back as it was, in the person's editor too.
+    const colourBefore = await inEditor(grid.frame);
+    const [failed] = await say(eye, [{ name: "office_edit", arguments: { id: sheet, ops: [{ editPicture: "F6", at: "A12" }, { editPicture: "B2", width: "6cm", alt: "Large" }, { name: "NoSuchName", delete: true }] } }]);
+    console.log(`t. a failing call: ${failed}`);
+    assert.match(failed, /^error:not_found op 3: there is no name "NoSuchName"/);
+    assert.equal(await read(sheet, "after the failing call"), placed);
+    assert.ok(await until(async () => JSON.stringify(await inEditor(grid.frame)) === JSON.stringify(colourBefore), 10_000, 500), "the person's editor is as before");
+    // A delete not last is refused; at the end it works, and the person's editor and the save lose the picture.
+    const [early] = await say(eye, [{ name: "office_edit", arguments: { id: sheet, ops: [{ editPicture: "F6", delete: true }, { range: "A1", values: [["x"]] }] } }]);
+    assert.match(early, /^error:bad_op op 1 cannot be taken back once made \(a deleted picture/);
+    const [deleted] = await say(eye, [{ name: "office_edit", arguments: { id: sheet, ops: [{ range: "A1", values: [["x"]] }, { editPicture: "F6", delete: true }] } }]);
+    console.log(`t. ${deleted}`);
+    assert.match(deleted, /Pictures: deleted the picture F6 of "Sheet1", which was 2\.6 × 1\.3 cm, alt text "Photo"\.$/);
+    assert.match(await read(sheet, "after deleting"), /\nPictures: B2 2 × 1 cm "Red box"\.$/);
+    assert.ok(await until(async () => (await inEditor(grid.frame)).green === 0, 15_000, 500), `the person's editor drew the photo away: ${JSON.stringify(await inEditor(grid.frame))}`);
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(sheet)));
+    const drawing = (await Promise.all(zip.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")))).join("");
+    assert.equal(drawing.match(/<xdr:pic>/g)?.length, 1);
+    assert.match(drawing, /descr="Red box"/);
+    await personCloses(grid.page);
+  });
+
   test("p: a real model writes and formats a report through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
     const task = [
       'Make a Word document titled "Quarterly report" with office_create, and write and format it with the office tools, without asking me anything:',
@@ -2264,6 +2356,37 @@ async function run(PITHAGORAS: string, mode: "host" | "container"): Promise<void
     assert.ok(calls.some((c) => c.name === "office_edit" && /picture/.test(c.args)), "and used a picture op");
     assert.equal((wordXml.match(/<wp:inline /g) ?? []).length, 1);
     assert.equal((drawing.match(/<xdr:pic>/g) ?? []).length, 1);
+  });
+
+  /**
+   * p5: the same real model changes the pictures it put into a Word document and a spreadsheet (#13 PR 6): it sizes and
+   * describes one, moves another to the end, moves one of the sheet and deletes the other. Counted as p is.
+   */
+  test("p5: a real model sizes, describes, moves and deletes pictures of a Word document and a spreadsheet through the office tools; its calls and refusals are counted", { timeout: 1_800_000, skip: realSkip }, async () => {
+    homePictures();
+    const task = [
+      "The files pics/red.png (the company logo) and pics/green.jpg (a product photo) are in your home folder. Without asking me anything:",
+      '1. Make a Word document titled "Picture changes" with office_create. Its paragraphs: the title "Picture changes", then "Intro text", then "Closing text". Put the logo right after the title, 6 cm wide, with the alt text "Logo", and the photo right after "Intro text", 4 cm wide, with the alt text "Photo".',
+      '2. Then change that document with office_read and office_edit (do not make the pictures again): the logo becomes 3 cm wide and gets the alt text "Small logo", and the photo moves to the end, after "Closing text".',
+      '3. Make a spreadsheet titled "Picture sheet" with the logo at B2 and the photo at D2, each 3 cm wide with the alt texts "Logo" and "Photo". Then move the photo to F6 and delete the logo.',
+      "Read both documents at the end and check them. Answer with one line when done.",
+    ].join("\n");
+    const calls = await realRun("p5", task);
+    const word = (await state()).docs.find((d) => d.title === "Picture changes" && d.ext === "docx");
+    const sheet = (await state()).docs.find((d) => d.title === "Picture sheet" && d.ext === "xlsx");
+    assert.ok(word && sheet, "the model made both documents");
+    const wordXml = await partOf(word!.docId, "word/document.xml");
+    const drawingZip = await JSZip.loadAsync(readFileSync(await fileOf(sheet!.docId)));
+    const drawing = (await Promise.all(drawingZip.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")))).join("");
+    const inlines = [...wordXml.matchAll(/<wp:inline\b[\s\S]*?<\/wp:inline>/g)].map((m) => m[0]);
+    console.log(`p5. the saved report: ${inlines.length} picture(s): ${inlines.map((x) => `"${/descr="([^"]*)"/.exec(x)?.[1]}" ${/<wp:extent cx="(\d+)"/.exec(x)?.[1]} EMU`).join(", ")}; the photo comes ${wordXml.indexOf("Closing text") < wordXml.indexOf(`descr="Photo"`) ? "after" : "before"} "Closing text"; the saved sheet: ${(drawing.match(/<xdr:pic>/g) ?? []).length} picture(s), alt "${/descr="([^"]*)"/.exec(drawing)?.[1] ?? ""}", anchored at column ${/<xdr:from><xdr:col>(\d+)<\/xdr:col>/.exec(drawing)?.[1]} row ${/<xdr:row>(\d+)<\/xdr:row>/.exec(drawing)?.[1]}`);
+    assert.ok(calls.some((c) => c.name === "office_edit" && /editPicture/.test(c.args)), "and used an editPicture op");
+    assert.equal(inlines.length, 2);
+    assert.ok(inlines.some((x) => /descr="Small logo"/.test(x) && Math.abs(Number(/<wp:extent cx="(\d+)"/.exec(x)![1]) - 1_080_000) < 20_000), "the logo is 3 cm wide with its new alt text");
+    assert.ok(wordXml.indexOf("Closing text") < wordXml.indexOf(`descr="Photo"`), "the photo is after the closing text");
+    assert.equal((drawing.match(/<xdr:pic>/g) ?? []).length, 1);
+    assert.match(drawing, /descr="Photo"/);
+    assert.match(drawing, /<xdr:from><xdr:col>5<\/xdr:col>[\s\S]*?<xdr:row>5<\/xdr:row>/);
   });
 
   test("d: Office stopped: office_edit is refused with office_stopped, office_read reads the saved file", { timeout: 900_000 }, async () => {

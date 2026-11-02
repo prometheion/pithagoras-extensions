@@ -203,7 +203,7 @@ function wordOp(op: unknown, i: number): WordOp {
   const looks = FORMAT_SHAPES.find((k) => k in op);
   if (looks) throw new OpError("bad_op", `op ${n}: \`${looks}\` is an office_format op (how the document looks): make it with office_format`, i);
   const shapes = ["quote", "paragraphs", "table", "remove", "picture", "editPicture"].filter((k) => k in op);
-  if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${WORD_SHAPES} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})`, i);
+  if (shapes.length !== 1) throw new OpError("bad_op", `op ${n} must be exactly one of ${WORD_SHAPES} (it has ${shapes.length ? shapes.join(" and ") : "none of them"})${shapes.length === 0 && ["delete", "move", "n", "cell"].some((k) => k in op) ? ": delete, move, n and cell belong to an edit of a picture, which starts with editPicture, the picture's number" : ""}`, i);
   const text = (key: string, what: string, empty = false) => {
     const v = op[key];
     if (typeof v !== "string" || (!empty && v === "")) throw new OpError("bad_op", `op ${n}: ${key} is ${what}`, i);
@@ -306,10 +306,10 @@ function pictureNumber(op: Record<string, unknown>, i: number): number {
 }
 
 /** The keys of an edit of a picture besides its place: those of the one thing it does. */
-function pictureEditKeys(op: Record<string, unknown>, i: number, base: string[], kind: "delete" | "move" | "look", move: string[]): void {
+function pictureEditKeys(op: Record<string, unknown>, i: number, base: string[], kind: "delete" | "move" | "look", move: string[], hint = ""): void {
   const keys = [...base, ...(kind === "delete" ? ["delete"] : kind === "move" ? move : ["width", "height", "alt"])];
   const extra = Object.keys(op).filter((k) => !keys.includes(k));
-  if (extra.length) throw new OpError("bad_op", `op ${i + 1}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of this op`, i);
+  if (extra.length) throw new OpError("bad_op", `op ${i + 1}: ${extra.map((k) => JSON.stringify(k)).join(", ")} is not part of this op${extra.some((k) => k === "at" || k === "after") ? hint : ""}`, i);
 }
 
 /** `{editPicture: 2, cell?: "A2", n?, delete | move, after?, nth? | width?, height?, alt?}`: a picture of a Word document. */
@@ -324,7 +324,7 @@ function pictureEditOf(op: Record<string, unknown>, i: number, after: () => { af
     cell = { row: at.row, col: at.col, text: (op.cell as string).trim().toUpperCase().replace(/\$/g, "") };
   }
   const kind = pictureEditKind(op, i, "move");
-  pictureEditKeys(op, i, ["editPicture", "cell", "n"], kind, ["move", "after", "nth"]);
+  pictureEditKeys(op, i, ["editPicture", "cell", "n"], kind, ["move", "after", "nth"], " (a Word picture moves with move: true and after: the text of the paragraph it goes after, or no after for the end of the document; at is for a sheet's pictures)");
   const place = { editPicture: block, ...(cell ? { cell } : {}), n: pictureNumber(op, i) };
   if (kind === "delete") return { ...place, delete: true };
   if (kind === "look") return { ...place, ...pictureLook(op, i, true) };
@@ -339,7 +339,7 @@ function sheetPictureEditOp(op: Record<string, unknown>, i: number): SheetPictur
   if (!from || from.cols !== 1 || from.rows !== 1) throw bad(`editPicture is the cell office_read lists the picture at, as "B5" (got ${JSON.stringify(op.editPicture)})`);
   if (op.move !== undefined) throw bad("move is for Word documents: a sheet's picture moves to the cell given as at");
   const kind = pictureEditKind(op, i, "at");
-  pictureEditKeys(op, i, ["sheet", "editPicture", "n"], kind, ["at"]);
+  pictureEditKeys(op, i, ["sheet", "editPicture", "n"], kind, ["at"], ` (a sheet's picture moves to a cell with at: "D9"; after is for Word documents)`);
   const place = { ...(op.sheet !== undefined ? { sheet: op.sheet as string } : {}), editPicture: (op.editPicture as string).trim().toUpperCase().replace(/\$/g, ""), from: { col: from.col, row: from.row }, n: pictureNumber(op, i) };
   if (kind === "delete") return { ...place, delete: true };
   if (kind === "look") return { ...place, ...pictureLook(op, i, true) };

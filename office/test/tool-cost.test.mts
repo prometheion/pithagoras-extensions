@@ -38,13 +38,14 @@ const cost = (tool: Registered) => tokens(tool.description) + tokens(JSON.string
  * schema, untyped; office_read is unchanged (what it lists of pictures is in its output); 1,241 since its first review
  * (one side given keeps the proportions: an agent that gives both "to be safe" would distort the picture).
  * #13's PR 6, pictures the document has can be deleted, moved and sized (the owner took PR 5's +101, and asked for this one
- * to be small): office_edit 1,241 -> 1,335 with one sentence for both formats (its keys, the numbers office_read lists a
- * picture by, and that a sheet's delete goes last) and four more untyped keys in the schema; office_read is unchanged. */
+ * to be small): office_edit 1,241 -> 1,339 with one sentence for both formats (its keys, the numbers office_read lists a
+ * picture by, and that a sheet's delete goes last) and four more untyped keys in the schema; office_read is unchanged. The first real-model run
+ * (case p5) gave a Word move `at` (a sheet's key): the sentence now says `after: "text"` for Word. */
 const AGREED: Record<string, number> = {
   office_list: 113,
   office_create: 200,
   office_read: 355,
-  office_edit: 1335,
+  office_edit: 1339,
   office_format: 1151,
   office_comments: 181,
   office_screenshot: 254,
@@ -70,7 +71,7 @@ test("all office tools together cost what their caps add up to", () => {
   const total = tools().reduce((n, t) => n + cost(t), 0);
   const agreed = Object.values(AGREED).reduce((n, c) => n + c, 0);
   assert.ok(total <= Math.ceil(agreed * ROOM), `${total} tokens, agreed ${agreed}`);
-  assert.equal(agreed, 3589);
+  assert.equal(agreed, 3593);
 });
 
 test("office_edit sends formatting to office_format once, for Word and sheets alike", () => {

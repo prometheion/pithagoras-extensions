@@ -972,6 +972,9 @@ test("office_edit (Word): an edit of a picture the document has names it as offi
   no([{ editPicture: 2, move: true, after: "" }], /after is the text of the paragraph to insert after \(not empty\)/);
   no([{ editPicture: 2, move: true, after: "a\nb" }], /after may not hold a line break/);
   no([{ editPicture: 2, at: "B2", delete: true }], /"at" is not part of this op/);
+  // What a real model wrote (case p5 of the real-portal file): a sheet's `at` for a Word move; it is told the Word key.
+  no([{ editPicture: 4, move: true, at: "Closing text" }], /^op 1: "at" is not part of this op \(a Word picture moves with move: true and after: the text of the paragraph it goes after, or no after for the end of the document; at is for a sheet's pictures\)$/);
+  no([{ alt: "Small logo", delete: false, n: 4 }], /\(it has none of them\): delete, move, n and cell belong to an edit of a picture, which starts with editPicture, the picture's number$/);
   no([{ editPicture: 2, picture: "a.png" }], /must be exactly one of .*editPicture/);
   no([{ editPicture: 2, quote: "a", replacement: "b" }], /must be exactly one of/);
   for (const bad of ["0cm", "51cm", "wide", 5, 20000]) no([{ editPicture: 2, width: bad }], /width is a length from 0\.2cm to 50cm/);
@@ -1011,6 +1014,8 @@ test("office_edit (spreadsheet): an edit of a picture names it by the cell it is
   no([{ editPicture: "B5", at: "D9", alt: "x" }], /\(it has at and width, height or alt\)/);
   no([{ editPicture: "B5", alt: "" }], /the editor cannot take a picture's alt text away/);
   no([{ editPicture: "B5", delete: true, after: "x" }], /"after" is not part of this op/);
+  no([{ editPicture: "B5", after: "x" }], /^op 1: an edit of a picture does one thing/);
+  no([{ editPicture: "B5", width: "3cm", after: "x" }], /^op 1: "after" is not part of this op \(a sheet's picture moves to a cell with at: "D9"; after is for Word documents\)$/);
   no([{ editPicture: "B5", delete: true, cell: "A1" }], /"cell" is not part of this op/);
   no([{ editPicture: "B5", width: "3cm", at: undefined, nth: 1 }], /"nth" is not part of this op/);
   no([{ editPicture: "B5", picture: "a.png", at: "D9" }], /must be exactly one of/);

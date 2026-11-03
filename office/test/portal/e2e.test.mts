@@ -2611,6 +2611,245 @@ async function run(PITHAGORAS: string): Promise<void> {
     }
   });
 
+  /* ---- #13 PR 6: removing, moving and resizing pictures ---- */
+  const emuCm = (n: number) => Math.round(n * 360_000);
+  /**
+   * A Word document made outside the editor (a person's, or Word's), written over `docId`'s file: an inline picture in a text
+   * paragraph (red, 4 x 2 cm), a floating one in another (green, 3 x 3 cm, square wrapping), and a table whose cell B2
+   * holds two inline pictures (blue, 2 x 1 cm and 1 x 1 cm); the table's cell A1 holds text. Its blocks as office_read
+   * numbers them: [1] Heading text, [2] Their text, [3] Floating text, [4] the table, [5] Closing paragraph.
+   */
+  async function personsWord(docId: string): Promise<Record<string, Buffer>> {
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+    const files: Record<string, Buffer> = { "p1.png": png(400, 200, [230, 30, 30]), "p2.png": png(300, 300, [30, 230, 30]), "p3.png": png(200, 100, [30, 30, 230]), "p4.png": png(100, 100, [30, 30, 230]) };
+    const graphic = (n: number, cx: number, cy: number) => `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${n}" name="p${n}.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdP${n}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
+    const inline = (n: number, cx: number, cy: number, descr: string) => `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${n}" name="Picture ${n}" descr="${descr}"/>${graphic(n, cx, cy)}</wp:inline></w:drawing></w:r>`;
+    const floating = (n: number, cx: number, cy: number, descr: string) => `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>3000000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="${n}" name="Picture ${n}" descr="${descr}"/><wp:cNvGraphicFramePr/>${graphic(n, cx, cy)}</wp:anchor></w:drawing></w:r>`;
+    const cell = (inner: string) => `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${inner}</w:tc>`;
+    const para = (text: string, extra = "") => `<w:p>${text ? `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>` : ""}${extra}</w:p>`;
+    const body = [
+      para("Heading text"),
+      para("Their text ", inline(1, emuCm(4), emuCm(2), "Their logo")),
+      para("Floating text", floating(2, emuCm(3), emuCm(3), "Their floating")),
+      `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${cell(para("Cell"))}${cell(para(""))}</w:tr><w:tr>${cell(para("Below"))}${cell(para("", inline(3, emuCm(2), emuCm(1), "Cell one") + inline(4, emuCm(1), emuCm(1), "Cell two")))}</w:tr></w:tbl>`,
+      para("Closing paragraph"),
+    ].join("");
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file("word/_rels/document.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + [1, 2, 3, 4].map((n) => `<Relationship Id="rIdP${n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/p${n}.png"/>`).join("") + "</Relationships>");
+    for (const [name, data] of Object.entries(files)) zip.file(`word/media/${name}`, data);
+    zip.file("word/document.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${ns}><w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+    return files;
+  }
+  /** The pictures office_read lists in a document's text, one line each (the lines under a paragraph and a table). */
+  const pictureLines = (text: string) => text.split("\n").filter((l) => /^ {4}.*a picture/.test(l)).map((l) => l.trim());
+
+  test("40. the pictures a Word document has, a person's and the agent's: office_read lists them by paragraph, table cell and number, and office_edit sizes, describes, moves and deletes them; the person's editor and the agent's own page show each at once, the save keeps the media as it was, and a call that fails takes its changes back", { timeout: 900_000 }, async () => {
+    pictureFiles();
+    const doc = await agentDoc("Pictures to edit", "word");
+    await personsWord(doc);
+    // One the agent puts in itself, in a paragraph of its own: it is listed like the others.
+    await tools.office_edit.execute("u0", { id: doc, ops: [{ after: "Closing paragraph", picture: "pics/red.png", width: "2cm", alt: "Agent's red" }] });
+    const person = await personOpens(doc);
+    const list = async (label: string) => {
+      const text = (await tools.office_read.execute(`u-${label}`, { id: doc })).content[0].text.split("\n\n").slice(1).join("\n\n");
+      console.log(`40. ${label}:\n${text}`);
+      return text;
+    };
+    const first = await list("office_read before");
+    assert.match(first, /^\[1\] Heading text\n\[2\] Their text \n    a picture 4 × 2 cm, alt text "Their logo"\n\[3\] Floating text\n    a picture 3 × 3 cm, alt text "Their floating"\n\[4\] table\n\| Cell \|  \|\n\| Below \|  \|\n    B2: #1 a picture 2 × 1 cm, alt text "Cell one"\n    B2: #2 a picture 1 × 1 cm, alt text "Cell two"\n\[5\] Closing paragraph\n\[6\] \n    a picture 2 × 1 cm, alt text "Agent's red"$/);
+    const mediaBefore = Object.values(await savedMedia(doc, "word")).length;
+    const startShot = await colours((await shoot("40. page before", { id: doc })).image);
+    assert.ok(startShot.red > 300 && startShot.green > 300 && startShot.blue > 100, JSON.stringify(startShot));
+    const person0 = await personColours(person.frame);
+
+    // Sized: a person's inline picture to 8 cm wide (the other side in proportion), a floating one by height, a cell's second one described.
+    const sized = (await tools.office_edit.execute("u1", { id: doc, ops: [{ editPicture: 2, width: "8cm" }, { editPicture: 3, height: "6cm", alt: "Bigger" }, { editPicture: 4, cell: "b2", n: 2, alt: "Renamed" }] })).content[0].text;
+    console.log(`40. sized: ${sized}`);
+    assert.match(sized, /Pictures: changed the picture \[2\], which was 4 × 2 cm, alt text "Their logo"; changed the picture \[3\], which was 3 × 3 cm, alt text "Their floating"; changed the picture \[4\] B2 #2, which was 1 × 1 cm, alt text "Cell two"\.$/);
+    assert.deepEqual(pictureLines(await list("after sizing")), ['a picture 8 × 4 cm, alt text "Their logo"', 'a picture 6 × 6 cm, alt text "Bigger"', 'B2: #1 a picture 2 × 1 cm, alt text "Cell one"', 'B2: #2 a picture 1 × 1 cm, alt text "Renamed"', 'a picture 2 × 1 cm, alt text "Agent\'s red"']);
+    assert.ok(await until(async () => (await personColours(person.frame)).red > person0.red * 1.5, 8000), `the person's editor draws the larger red: ${JSON.stringify(await personColours(person.frame))} (${JSON.stringify(person0)})`);
+    const bigShot = await colours((await shoot("40. page after sizing", { id: doc })).image);
+    assert.ok(bigShot.red > startShot.red * 1.5, `the agent's own page too: ${JSON.stringify(bigShot)} (${JSON.stringify(startShot)})`);
+
+    // Moved: the floating one (inline from now on) after "Closing paragraph", the agent's red one after the heading, the cell's first to the end.
+    const moved = (await tools.office_edit.execute("u2", { id: doc, ops: [{ editPicture: 3, move: true, after: "Closing paragraph" }, { editPicture: 6, move: true, after: "Heading text" }, { editPicture: 4, cell: "B2", move: true }] })).content[0].text;
+    console.log(`40. moved: ${moved}`);
+    assert.match(moved, /Pictures: moved the picture \[3\], which was 6 × 6 cm, alt text "Bigger"; moved the picture \[6\], which was 2 × 1 cm, alt text "Agent's red"; moved the picture \[4\] B2, which was 2 × 1 cm, alt text "Cell one"\.$/);
+    const afterMove = await list("after moving");
+    console.log(`40. blocks after moving: ${afterMove.split("\n").filter((l) => /^\[/.test(l)).join(" | ")}`);
+    assert.match(afterMove, /^\[1\] Heading text\n\[2\] \n    a picture 2 × 1 cm, alt text "Agent's red"\n\[3\] Their text \n    a picture 8 × 4 cm, alt text "Their logo"\n\[4\] Floating text\n\[5\] table\n\| Cell \|  \|\n\| Below \|  \|\n    B2: a picture 1 × 1 cm, alt text "Renamed"\n\[6\] Closing paragraph\n\[7\] \n    a picture 6 × 6 cm, alt text "Bigger"\n\[8\] \n    a picture 2 × 1 cm, alt text "Cell one"$/, "no empty paragraph is left where a picture was, and a text paragraph keeps its text");
+    // The save: the media as it was (a moved picture is the same file, not a copy or a PNG made of it), and every picture inline now.
+    const xml1 = await partOf(doc, "word/document.xml");
+    assert.equal((xml1.match(/<wp:inline /g) ?? []).length, 5, "five pictures");
+    assert.equal((xml1.match(/<wp:anchor /g) ?? []).length, 0, "the floating one is inline since it moved");
+    for (const d of ["Agent's red", "Their logo", "Renamed", "Bigger", "Cell one"]) assert.match(xml1, new RegExp(`descr="${d.replace("'", "(?:'|&apos;|&#39;)")}"`), d);
+    assert.equal(Object.values(await savedMedia(doc, "word")).length, mediaBefore, "the same media files");
+    const mediaMoved = Object.values(await savedMedia(doc, "word"));
+    assert.ok(mediaMoved.some((b) => b.equals(readFileSync(path.join(project, "pics", "red.png")))), "the agent's file as it was");
+
+    // A call that fails after its first op: the plugin's Undo takes the whole call back (the document, the person's editor, the save).
+    const readBefore = await list("before the failing call");
+    const colourBefore = await personColours(person.frame);
+    const failed = await failing(tools.office_edit.execute("u3", { id: doc, ops: [{ editPicture: 3, delete: true }, { editPicture: 7, move: true, after: "Heading text" }, { editPicture: 3, alt: "Again" }] }));
+    console.log(`40. a failing call: ${failed}`);
+    assert.match(failed, /^error:not_found op 3: the picture is gone: an earlier op of this call took it away/);
+    assert.equal(await list("after the failing call"), readBefore, "office_read is as before");
+    await delay(800);
+    assert.deepEqual(await personColours(person.frame), colourBefore, "the person's editor is as before");
+    // A side worked out past 50 cm fails at its op, after the first op changed the document: the same.
+    const tall = await failing(tools.office_edit.execute("u3b", { id: doc, ops: [{ editPicture: 7, delete: true }, { editPicture: 3, height: "49cm" }] }));
+    console.log(`40. too wide: ${tall}`);
+    assert.match(tall, /^error:bad_op op 2: the picture would be 98 cm wide at that height/);
+    assert.equal(await list("after the too wide call"), readBefore, "and again");
+
+    // Refused before anything: a number the document does not have, a table without its cell, a paragraph with one, a picture not listed there.
+    for (const [ops, pattern] of [
+      [[{ editPicture: 40, delete: true }], /^error:not_found op 1: the document has no \[40\]/],
+      [[{ editPicture: 5, delete: true }], /^error:bad_op op 1: \[5\] is a table: give the cell/],
+      [[{ editPicture: 3, cell: "A1", delete: true }], /^error:bad_op op 1: \[3\] is a paragraph: cell is for a picture in a table/],
+      [[{ editPicture: 1, delete: true }], /^error:not_found op 1: office_read lists no picture under \[1\]/],
+      [[{ editPicture: 5, cell: "B2", n: 2, delete: true }], /^error:not_found op 1: office_read lists 1 picture under \[5\] B2, not 2/],
+    ] as const) assert.match(await failing(tools.office_edit.execute("u4", { id: doc, ops: ops as unknown as unknown[] })), pattern);
+
+    // Deleted: the agent's own picture with its paragraph, a person's inline picture out of its text paragraph (the text stays), the cell's last one.
+    const deleted = (await tools.office_edit.execute("u5", { id: doc, ops: [{ editPicture: 2, delete: true }, { editPicture: 3, delete: true }, { editPicture: 5, cell: "B2", delete: true }, { editPicture: 7, delete: true }] })).content[0].text;
+    console.log(`40. deleted: ${deleted}`);
+    assert.match(deleted, /Pictures: deleted the picture \[2\], which was 2 × 1 cm, alt text "Agent's red"; deleted the picture \[3\], which was 8 × 4 cm, alt text "Their logo"; deleted the picture \[5\] B2, which was 1 × 1 cm, alt text "Renamed"; deleted the picture \[7\], which was 6 × 6 cm, alt text "Bigger"\.$/);
+    const gone = await list("after deleting");
+    assert.match(gone, /^\[1\] Heading text\n\[2\] Their text \n\[3\] Floating text\n\[4\] table\n\| Cell \|  \|\n\| Below \|  \|\n\[5\] Closing paragraph\n\[6\] \n    a picture 2 × 1 cm, alt text "Cell one"$/);
+    assert.ok(await until(async () => { const c = await personColours(person.frame); return c.red === 0 && c.green === 0; }, 8000), `the person's editor drew them away: ${JSON.stringify(await personColours(person.frame))}`);
+    const xml2 = await partOf(doc, "word/document.xml");
+    assert.equal((xml2.match(/<wp:inline /g) ?? []).length, 1);
+    assert.equal(Object.values(await savedMedia(doc, "word")).length, 1, "the media of the deleted ones is out of the save");
+    // A stale number: a picture that is no more.
+    assert.match(await failing(tools.office_edit.execute("u6", { id: doc, ops: [{ editPicture: 2, delete: true }] })), /^error:not_found op 1: office_read lists no picture under \[2\]/);
+    await person.page.context().close();
+  });
+
+  /**
+   * A workbook made outside the editor (a person's, or Excel's), written over `docId`'s file: the sheet "Grid" with a few
+   * cells and two pictures (red, in two cells' anchors from B2 to D5 as Excel anchors one it sized by hand; green, 3 x 2 cm
+   * at F2), and the sheet "More" with one (blue, 2 x 1 cm at B2).
+   */
+  async function personsSheet(docId: string): Promise<void> {
+    const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const xdr = 'xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const pic = (id: number, name: string, descr: string, rid: string, cx: number, cy: number) => `<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${id}" name="${name}" descr="${descr}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/>`;
+    const from = (col: number, row: number) => `<xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`;
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>');
+    zip.file("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?><workbook ${ns}><sheets><sheet name="Grid" sheetId="1" r:id="rId1"/><sheet name="More" sheetId="2" r:id="rId2"/></sheets></workbook>`);
+    zip.file("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>');
+    zip.file("xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c></row><row r="2"><c r="A2"><v>3</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>`);
+    zip.file("xl/worksheets/sheet2.xml", `<?xml version="1.0" encoding="UTF-8"?><worksheet ${ns}><sheetData><row r="1"><c r="A1"><v>9</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>`);
+    for (const n of [1, 2]) zip.file(`xl/worksheets/_rels/sheet${n}.xml.rels`, `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${n}.xml"/></Relationships>`);
+    zip.file("xl/drawings/drawing1.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr ${xdr}><xdr:twoCellAnchor>${from(1, 1)}<xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>${pic(2, "Picture 1", "Their red", "rId1", 1_219_200, 1_000_000)}</xdr:twoCellAnchor><xdr:oneCellAnchor>${from(5, 1)}<xdr:ext cx="${emuCm(3)}" cy="${emuCm(2)}"/>${pic(3, "Picture 2", "Their green", "rId2", emuCm(3), emuCm(2))}</xdr:oneCellAnchor></xdr:wsDr>`);
+    zip.file("xl/drawings/drawing2.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr ${xdr}><xdr:oneCellAnchor>${from(1, 1)}<xdr:ext cx="${emuCm(2)}" cy="${emuCm(1)}"/>${pic(2, "Picture 1", "More blue", "rId1", emuCm(2), emuCm(1))}</xdr:oneCellAnchor></xdr:wsDr>`);
+    const rel = (target: string) => `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${target}"/>${target === "p1.png" ? '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/p2.png"/>' : ""}</Relationships>`;
+    zip.file("xl/drawings/_rels/drawing1.xml.rels", rel("p1.png"));
+    zip.file("xl/drawings/_rels/drawing2.xml.rels", rel("p3.png"));
+    zip.file("xl/media/p1.png", png(400, 200, [230, 30, 30]));
+    zip.file("xl/media/p2.png", png(300, 200, [30, 230, 30]));
+    zip.file("xl/media/p3.png", png(200, 100, [30, 30, 230]));
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+  }
+  const drawingPictures = async (doc: string) => {
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    const xml = (await Promise.all(zip.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")))).join("");
+    return { pics: xml.match(/<xdr:pic>/g)?.length ?? 0, xml };
+  };
+
+  test("41. the pictures a spreadsheet has, a person's and the agent's: office_read lists them by anchor cell and number, and office_edit sizes, describes, moves and deletes them; the person's editor and the agent's own picture show each at once, a delete goes last and stays when a later op fails, and a call that fails takes its moves and sizes back", { timeout: 900_000 }, async () => {
+    pictureFiles();
+    const doc = await agentDoc("Sheet pictures to edit", "cell");
+    await personsSheet(doc);
+    // Two of the agent's own at one cell (listed #1 and #2 there).
+    await tools.office_edit.execute("v0", { id: doc, ops: [{ picture: "pics/blue.gif", at: "B8", alt: "First blue" }, { picture: "pics/green.jpg", at: "B8", alt: "Second green" }] });
+    const person = await personOpens(doc);
+    const list = async (label: string, sheet?: string) => {
+      const text = (await tools.office_read.execute(`v-${label}`, { id: doc, ...(sheet ? { sheet } : {}) })).content[0].text.split("\n\n").slice(1).join("\n\n");
+      console.log(`41. ${label}:\n${text}`);
+      return text;
+    };
+    const pictureList = (text: string, sheet = "Grid") => new RegExp(`Sheet "${sheet}"[^]*?\\nPictures: ([^\\n]*)`).exec(text)?.[1];
+    const first = await list("office_read before");
+    const grid0 = pictureList(first)!;
+    assert.match(grid0, /^B2 \d+(\.\d+)? × \d+(\.\d+)? cm "Their red"; F2 3 × 2 cm "Their green"; B8 #1 1\.6 × 0\.8 cm "First blue"; B8 #2 2\.6 × 1\.3 cm "Second green"\.$/);
+    assert.equal(pictureList(first, "More"), 'B2 2 × 1 cm "More blue".');
+    const showSheet = async (k: number) => { await person.frame.evaluate(`window.Asc.editor.asc_showWorksheet(${k})`); await delay(700); };
+    await showSheet(0);
+    const person0 = await personColours(person.frame);
+    assert.ok(person0.red > 300 && person0.green > 100, JSON.stringify(person0));
+    const redBox = async () => (await colours((await shoot("41. A1:L16", { id: doc, range: "A1:L16" })).image)).red;
+    const red0 = await redBox();
+
+    // Sized (the two-cell anchor's picture too), described, and one of two at a cell named by its number.
+    const sized = (await tools.office_edit.execute("v1", { id: doc, ops: [{ editPicture: "B2", width: "7cm", alt: "Wider red" }, { editPicture: "F2", height: "1cm" }, { editPicture: "b8", n: 2, width: "4cm" }, { sheet: "More", editPicture: "B2", alt: "Blue again" }] })).content[0].text;
+    console.log(`41. sized: ${sized}`);
+    assert.match(sized, /Pictures: changed the picture B2 of "Grid", which was \d+(\.\d+)? × \d+(\.\d+)? cm, alt text "Their red"; changed the picture F2 of "Grid", which was 3 × 2 cm, alt text "Their green"; changed the picture B8 of "Grid" #2, which was 2\.6 × 1\.3 cm, alt text "Second green"; changed the picture B2 of "More", which was 2 × 1 cm, alt text "More blue"\.$/);
+    const sizedList = pictureList(await list("after sizing"))!;
+    assert.match(sizedList, /^B2 7 × (\d+(\.\d+)?) cm "Wider red"; F2 1\.5 × 1 cm "Their green"; B8 #1 1\.6 × 0\.8 cm "First blue"; B8 #2 4 × 2 cm "Second green"\.$/);
+    assert.equal(pictureList(await list("More", "More"), "More"), 'B2 2 × 1 cm "Blue again".');
+    assert.ok(await until(async () => (await personColours(person.frame)).red > person0.red * 1.4, 8000), `the person's editor draws the wider red: ${JSON.stringify(await personColours(person.frame))} (${JSON.stringify(person0)})`);
+    const red1 = await redBox();
+    assert.ok(red1 > red0 * 1.4, `the agent's own picture too (${red0} -> ${red1})`);
+
+    // Moved: the green and the red to other cells; the one at B8 #1 stays; read lists them where they are.
+    const moved = (await tools.office_edit.execute("v2", { id: doc, ops: [{ editPicture: "F2", at: "h12" }, { editPicture: "B2", at: "D9" }, { editPicture: "B8", n: 2, at: "B14" }] })).content[0].text;
+    console.log(`41. moved: ${moved}`);
+    assert.equal(pictureList(await list("after moving")), 'D9 7 × 4.2 cm "Wider red"; H12 1.5 × 1 cm "Their green"; B8 1.6 × 0.8 cm "First blue"; B14 4 × 2 cm "Second green".');
+    const zip1 = await drawingPictures(doc);
+    assert.equal(zip1.pics, 5, "five pictures in the save");
+
+    // A call that fails at its last op takes its moves, sizes and alt texts back, in both editors and in the save.
+    const readBefore = await list("before the failing call");
+    const colourBefore = await personColours(person.frame);
+    const failed = await failing(tools.office_edit.execute("v3", { id: doc, ops: [{ editPicture: "D9", width: "2cm", alt: "Moved and small" }, { editPicture: "D9", at: "A1" }, { editPicture: "H12", at: "J3" }, { name: "NoSuchName", delete: true }] }));
+    console.log(`41. a failing call: ${failed}`);
+    assert.match(failed, /^error:not_found op 4: there is no name "NoSuchName"/);
+    assert.equal(await list("after the failing call"), readBefore, "office_read is as before");
+    assert.ok(await until(async () => JSON.stringify(await personColours(person.frame)) === JSON.stringify(colourBefore), 6000), "the person's editor is as before");
+    // Refused at their op: no picture there, not that many there, a side past 50 cm.
+    for (const [ops, pattern] of [
+      [[{ editPicture: "C3", delete: true }], /^error:not_found op 1: there is no picture anchored at C3 of "Grid" \(its pictures are at D9, H12, B8, B14\)/],
+      [[{ editPicture: "B8", n: 2, delete: true }], /^error:not_found op 1: office_read lists 1 picture at B8 of "Grid", not 2/],
+      [[{ editPicture: "H12", height: "49cm" }], /^error:bad_op op 1: the picture would be 73\.5 cm wide at that height/],
+      [[{ editPicture: "D9", at: "B2" }, { editPicture: "B8", n: 3, alt: "x" }], /^error:not_found op 2: office_read lists 1 picture at B8 of "Grid", not 3/],
+    ] as const) assert.match(await failing(tools.office_edit.execute("v4", { id: doc, ops: ops as unknown as unknown[] })), pattern);
+    assert.equal(await list("after the refusals"), readBefore, "none of them changed anything");
+    // A delete not last is refused up front.
+    assert.match(await failing(tools.office_edit.execute("v5", { id: doc, ops: [{ editPicture: "H12", delete: true }, { range: "E1", values: [["x"]] }] })), /^error:bad_op op 1 cannot be taken back once made \(a deleted picture, which the editor cannot make again as the file it was\), so it goes after every op that can/);
+
+    // Refused before the first op, as every picture is found before the call changes anything: a second delete of a picture that is not there changes nothing.
+    const none = await failing(tools.office_edit.execute("v6a", { id: doc, ops: [{ editPicture: "B14", delete: true }, { editPicture: "Z99", delete: true }] }));
+    assert.match(none, /^error:not_found op 2: there is no picture anchored at Z99 of "Grid"/);
+    assert.doesNotMatch(none, /Not taken back/);
+    assert.equal(await list("after the refused deletes"), readBefore, "the first delete was never made");
+    // Deleted: last in the call. A delete the editor refuses at its turn (the sheet is hidden by an op before it) leaves the one before it deleted, and says so.
+    const kept = await failing(tools.office_edit.execute("v6", { id: doc, ops: [{ hideSheet: "More" }, { editPicture: "B14", delete: true }, { sheet: "More", editPicture: "B2", delete: true }] }));
+    console.log(`41. delete, then a delete that fails: ${kept}`);
+    assert.match(kept, /^error:partial op 3: "More" is hidden, and the editor deletes a picture of a visible sheet only: show it first[^]* Not taken back: the picture B14 of "Grid" that op 2 deleted\./);
+    assert.doesNotMatch(await list("after the hidden sheet's refusal"), /\(hidden\)/, "the sheet hidden by the call is shown again");
+    const t0 = Date.now();
+    const deleted = (await tools.office_edit.execute("v7", { id: doc, ops: [{ editPicture: "H12", at: "K3" }, { editPicture: "D9", delete: true }, { sheet: "More", editPicture: "B2", delete: true }] })).content[0].text;
+    console.log(`41. deleted (${Date.now() - t0} ms): ${deleted}`);
+    assert.match(deleted, /Pictures: moved the picture H12 of "Grid"[^]*; deleted the picture D9 of "Grid", which was 7 ×[^]*; deleted the picture B2 of "More", which was 2 × 1 cm, alt text "Blue again"\.$/);
+    const end = await list("after deleting");
+    assert.equal(pictureList(end), 'K3 1.5 × 1 cm "Their green"; B8 1.6 × 0.8 cm "First blue".');
+    assert.doesNotMatch(end, /Sheet "More"[^]*Pictures/);
+    assert.ok(await until(async () => { const c = await personColours(person.frame); return c.red === 0; }, 8000), `the person's editor drew the red away: ${JSON.stringify(await personColours(person.frame))}`);
+    const after = await drawingPictures(doc);
+    console.log(`41. the save has ${after.pics} pictures`);
+    assert.equal(after.pics, 2);
+    assert.match(after.xml, /descr="First blue"/);
+    assert.match(after.xml, /descr="Their green"/);
+    await person.page.context().close();
+  });
+
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {
     const doc = await agentDoc("Stopped", "word");
     await tools.office_edit.execute("s1", { id: doc, ops: [{ paragraphs: ["Saved before the stop"] }] });

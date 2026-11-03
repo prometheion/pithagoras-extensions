@@ -1829,6 +1829,10 @@ test("office_read shows a picture in a Word table's cell under the table, by its
   s.seat.answer = () => ({ blocks: [{ table: [["Item", "Logo"], ["Total", ""]], pics: [[1, 0, 720000, 360000, "Sum"], [0, 1, 360000, 360000, ""]] }] });
   const t = ((await tool(s, "office_read").execute("r4", { id: doc.docId })) as ToolResult).content[0].text;
   assert.match(t, /\[1\] table\n\| Item \| Logo \|\n\| Total \|  \|\n    A2: a picture 2 × 1 cm, alt text "Sum"\n    B1: a picture 1 × 1 cm$/);
+  // Several in one cell are numbered there, the ones of other cells are not.
+  s.seat.answer = () => ({ blocks: [{ table: [["Item", "Logo"], ["Total", ""]], pics: [[1, 0, 720000, 360000, "Sum"], [1, 0, 360000, 360000, ""], [0, 1, 360000, 360000, ""]] }] });
+  const many = ((await tool(s, "office_read").execute("r5", { id: doc.docId })) as ToolResult).content[0].text;
+  assert.match(many, /\n    A2: #1 a picture 2 × 1 cm, alt text "Sum"\n    A2: #2 a picture 1 × 1 cm\n    B1: a picture 1 × 1 cm$/);
 });
 
 test("office_read shows a Word picture on its own line under its paragraph, with its size and alt text, with or without formatting; a sheet's pictures follow its cells", async () => {
@@ -1836,11 +1840,11 @@ test("office_read shows a Word picture on its own line under its paragraph, with
   const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
   s.seat.answer = () => ({ blocks: [{ p: "Intro" }, { p: "", pics: [[1800000, 1224000, "Sales by region"]] }, { p: "Two", pics: [[360000, 720000, ""], [3600000, 3600000, "Logo"], [9525, 19050, "Pixel"]] }] });
   const plain = ((await tool(s, "office_read").execute("r1", { id: doc.docId })) as ToolResult).content[0].text;
-  assert.match(plain, /\[1\] Intro\n\[2\] \n    a picture 5 × 3\.4 cm, alt text "Sales by region"\n\[3\] Two\n    a picture 1 × 2 cm; a picture 10 × 10 cm, alt text "Logo"; a picture 0.03 × 0.1 cm, alt text "Pixel"$/);
+  assert.match(plain, /\[1\] Intro\n\[2\] \n    a picture 5 × 3\.4 cm, alt text "Sales by region"\n\[3\] Two\n    #1 a picture 1 × 2 cm; #2 a picture 10 × 10 cm, alt text "Logo"; #3 a picture 0.03 × 0.1 cm, alt text "Pixel"$/);
   const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
-  s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 53, items: [{ a: "B2", w: 1800000, h: 1224000, alt: "Logo" }, { a: "E10", w: 720000, h: 360000, alt: "" }] } }] });
+  s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 53, items: [{ a: "B2", w: 1800000, h: 1224000, alt: "Logo", k: 1 }, { a: "B2", w: 360000, h: 360000, alt: "", k: 2 }, { a: "E10", w: 720000, h: 360000, alt: "" }] } }] });
   const read = ((await tool(s, "office_read").execute("r2", { id: sheet.docId })) as ToolResult).content[0].text;
-  assert.match(read, /Sheet "Sheet1" \(A1\):\nA1: 1\nPictures: B2 5 × 3\.4 cm "Logo"; E10 2 × 1 cm \(and 51 more\)\.$/);
+  assert.match(read, /Sheet "Sheet1" \(A1\):\nA1: 1\nPictures: B2 #1 5 × 3\.4 cm "Logo"; B2 #2 1 × 1 cm; E10 2 × 1 cm \(and 50 more\)\.$/);
   s.seat.answer = () => ({ book: [{ name: "Sheet1", hidden: false }], sheets: [{ name: "Sheet1", range: "A1", cells: [{ a: "A1", v: 1 }], truncated: false, pictures: { count: 0, items: [] } }] });
   assert.doesNotMatch(((await tool(s, "office_read").execute("r3", { id: sheet.docId })) as ToolResult).content[0].text, /Pictures/);
 });
@@ -1866,4 +1870,37 @@ test("office_screenshot: a sheet's range taken with its pictures still loading, 
   assert.match(out.content[0].text, /now\. Whether the document's pictures had all loaded could not be checked: one may be missing from the picture\. Its cells:/);
   assert.equal(out.details.pictures, "unknown");
   assert.equal((await take(undefined)).content[0].text, `${head} Its cells:\n\nA1: "Item"`, "a seat that says nothing of them says nothing");
+});
+
+
+/* ------------------------------------------------------------------ */
+/* removing, moving and resizing pictures (#13 PR 6)                   */
+/* ------------------------------------------------------------------ */
+
+test("office_edit says which picture each edit of a picture changed, as office_read lists it, and what it was: Word by block, cell and number, a sheet by its anchor, sheet and number", async () => {
+  const s = setup();
+  const doc = await createDoc({ title: "Report", type: "word", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ ops: 3, pictures: [
+    { did: "deleted", block: 2, n: 1, w: 1800000, h: 900000, alt: "Sales" },
+    { did: "moved", block: 9, cell: "A2", n: 2, w: 720000, h: 360000, alt: "" },
+    { did: "changed", block: 4, n: 1, w: 9525, h: 9525, alt: "Pixel" },
+  ] });
+  const out = (await tool(s, "office_edit").execute("e1", { id: doc.docId, ops: [{ editPicture: 2, delete: true }, { editPicture: 9, cell: "A2", n: 2, move: true }, { editPicture: 4, width: "1cm" }] })) as ToolResult;
+  assert.match(out.content[0].text, /^Edited "Report" \(3 ops\), saved as revision \d+\. Pictures: deleted the picture \[2\], which was 5 × 2\.5 cm, alt text "Sales"; moved the picture \[9\] A2 #2, which was 2 × 1 cm; changed the picture \[4\], which was 0\.03 × 0\.03 cm, alt text "Pixel"\.$/);
+  const run = editRuns(s)[0];
+  assert.deepEqual(run.args.ops, [
+    { editPicture: 2, n: 1, delete: true },
+    { editPicture: 9, cell: { row: 1, col: 0, text: "A2" }, n: 2, move: true },
+    { editPicture: 4, n: 1, width: 567 * 635 },
+  ], "the ops go to the editor as ops.ts checked them, with no file");
+  const sheet = await createDoc({ title: "Grid", type: "cell", folder: "/f/atlas" }, s.root);
+  s.seat.answer = () => ({ ops: 1, cells: 0, pictures: [{ did: "moved", at: "B5", sheet: "Sheet1", n: 1, w: 1800000, h: 1224000, alt: "Logo" }] });
+  const cells = (await tool(s, "office_edit").execute("e2", { id: sheet.docId, ops: [{ editPicture: "B5", at: "D9" }] })) as ToolResult;
+  assert.match(cells.content[0].text, /Pictures: moved the picture B5 of "Sheet1", which was 5 × 3\.4 cm, alt text "Logo"\.$/);
+  const audit = s.seen.records.filter((r) => r.reason.startsWith("office_edit"));
+  // A deleted, moved or sized picture is not the kind an inserted one is: the audit tells them apart.
+  assert.match(audit[0].reason, /office_edit: 3 op\(s\) \(picture edits\) on /);
+  assert.match(audit[1].reason, /office_edit: 1 op\(s\) \(picture edits\) on /);
+  // The call's time allowance grows with them, as with a picture put in (the editor looks for a deleted one for a while).
+  assert.equal(editRuns(s)[1].timeoutMs, 20_000 + 2_000);
 });

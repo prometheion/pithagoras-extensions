@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import http from "node:http";
 import https from "node:https";
@@ -2317,6 +2318,297 @@ async function run(PITHAGORAS: string): Promise<void> {
     console.log(`36. office_read with formatting: ${Date.now() - t0} ms, ${text.length} characters; its end: ${JSON.stringify(text.slice(-700))}`);
     assert.match(text, /\nValidation: E2:E769 list "a,b"\./, "the cells the read lists only (its first 769 rows): the validation below them is not read");
     assert.ok(read.ms > 0);
+  });
+
+  /* ---- #13 PR 5: pictures from the agent's own files ---- */
+  const jpegFile = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAyAGQDAREAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAj/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCSJySYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//2Q==", "base64"); // 100 x 50, green
+  const gifFile = Buffer.from("R0lGODlhPAAeAPAAAAAA/wAAACH5BAAAAAAALAAAAAA8AB4AAAIqhI+py+0Po5y02ouz3rz7D4biSJbmiabqyrbuC8fyTNf2jef6zvf+LyoAADs=", "base64"); // 60 x 30, blue
+  /** A PNG of `width` x `height` pixels of random bytes, which nothing shrinks: its file is as large as its pixels. */
+  const noisePng = (width: number, height: number) => {
+    const chunk = (type: string, body: Buffer) => {
+      const head = Buffer.alloc(8);
+      head.writeUInt32BE(body.length, 0);
+      head.write(type, 4, "latin1");
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(zlib.crc32(body, zlib.crc32(Buffer.from(type, "latin1"))) >>> 0);
+      return Buffer.concat([head, body, crc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr.set([8, 2, 0, 0, 0], 8);
+    const raw = Buffer.alloc((width * 3 + 1) * height);
+    for (let y = 0; y < height; y++) raw.set(crypto.randomBytes(width * 3), y * (width * 3 + 1) + 1);
+    return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw, { level: 1 })), chunk("IEND", Buffer.alloc(0))]);
+  };
+  /** The green JPEG (100 x 50 as stored) with an EXIF orientation of 6, as a phone saves a portrait photo: shown 50 x 100. */
+  const turnedJpeg = (() => {
+    const tiff = Buffer.alloc(26);
+    tiff.write("MM", 0, "latin1");
+    tiff.writeUInt16BE(42, 2);
+    tiff.writeUInt32BE(8, 4);
+    tiff.writeUInt16BE(1, 8);
+    tiff.writeUInt16BE(0x0112, 10);
+    tiff.writeUInt16BE(3, 12);
+    tiff.writeUInt32BE(1, 14);
+    tiff.writeUInt16BE(6, 18);
+    const body = Buffer.concat([Buffer.from("Exif\0\0", "latin1"), tiff]);
+    const head = Buffer.from([0xff, 0xe1, 0, 0]);
+    head.writeUInt16BE(body.length + 2, 2);
+    return Buffer.concat([jpegFile.subarray(0, 2), head, body, jpegFile.subarray(2)]);
+  })();
+  /** The agent's folder gets the test's picture files: a red PNG (200 x 100), a green JPEG, a blue GIF; the JPEG turned by
+   * its EXIF, and the red PNG with text after its end. */
+  const pictureFiles = () => {
+    mkdirSync(path.join(project, "pics"), { recursive: true });
+    writeFileSync(path.join(project, "pics", "red.png"), png(200, 100, [255, 0, 0]));
+    writeFileSync(path.join(project, "pics", "green.jpg"), jpegFile);
+    writeFileSync(path.join(project, "pics", "blue.gif"), gifFile);
+    writeFileSync(path.join(project, "pics", "turned.jpg"), turnedJpeg);
+    writeFileSync(path.join(project, "pics", "tail.png"), Buffer.concat([png(200, 100, [255, 0, 0]), Buffer.from("SECRET-TAIL ".repeat(100))]));
+  };
+  /** How many pixels of an image (a JPEG, base64) are strongly red, green and blue, as a page of Chromium decodes it. */
+  const colours = async (data: string) => {
+    const page = await browser.newPage();
+    try {
+      return (await page.evaluate(`(async function () {
+        var img = new Image();
+        img.src = "data:image/jpeg;base64," + ${JSON.stringify(data)};
+        await img.decode();
+        var c = document.createElement("canvas");
+        c.width = img.width; c.height = img.height;
+        var g = c.getContext("2d");
+        g.drawImage(img, 0, 0);
+        var d = g.getImageData(0, 0, c.width, c.height).data, out = { red: 0, green: 0, blue: 0 };
+        for (var k = 0; k < d.length; k += 4) {
+          if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
+          else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
+          else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
+        }
+        return out;
+      })()`)) as { red: number; green: number; blue: number };
+    } finally {
+      await page.close();
+    }
+  };
+  /** The same count over every canvas a person's editor (its frame) has drawn. */
+  const personColours = async (frame: import("@playwright/test").Frame) =>
+    (await frame.evaluate(`(function () {
+      var out = { red: 0, green: 0, blue: 0 };
+      Array.prototype.forEach.call(document.querySelectorAll("canvas"), function (c) {
+        if (!c.width || !c.height) return;
+        var d;
+        try { d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; } catch (e) { return; }
+        for (var k = 0; k < d.length; k += 4) {
+          if (d[k + 3] < 200) continue;
+          if (d[k] > 200 && d[k + 1] < 80 && d[k + 2] < 80) out.red++;
+          else if (d[k + 1] > 120 && d[k] < 80 && d[k + 2] < 80) out.green++;
+          else if (d[k + 2] > 200 && d[k] < 80 && d[k + 1] < 80) out.blue++;
+        }
+      });
+      return out;
+    })()`)) as { red: number; green: number; blue: number };
+  /** The saved file's media: each file's name and bytes. */
+  const savedMedia = async (docId: string, folder: string) => {
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(docId)));
+    const out: Record<string, Buffer> = {};
+    for (const f of zip.file(new RegExp(`^${folder}/media/`))) out[f.name.slice(folder.length + 7)] = await f.async("nodebuffer");
+    return out;
+  };
+
+  test("37. pictures in a real Word document: a PNG, a JPEG and a GIF from the agent's folder, after a paragraph and at the end; office_read says where they are, the person's editor and the agent's own screenshot draw them at once, the save holds the files as they are, and a call that fails takes them back", { timeout: 900_000 }, async () => {
+    pictureFiles();
+    const doc = await agentDoc("Pictured", "word");
+    await tools.office_edit.execute("q0", { id: doc, ops: [{ quote: "New document", replacement: "Intro text" }, { paragraphs: ["Closing text"] }] });
+    const person = await personOpens(doc);
+    const before = await personColours(person.frame);
+    assert.deepEqual([before.red, before.green, before.blue], [0, 0, 0], "no coloured box yet");
+
+    const ops = [
+      { after: "Intro text", picture: "pics/red.png", width: "6cm", alt: "A red box" },
+      { after: "Closing text", picture: path.join(project, "pics", "green.jpg") },
+      { picture: "./pics/blue.gif", alt: "" },
+    ];
+    const t0 = Date.now();
+    const made = (await tools.office_edit.execute("q1", { id: doc, ops })).content[0].text;
+    const took = Date.now() - t0;
+    console.log(`37. ${made} (${took} ms)`);
+    assert.match(made, /^Edited "Pictured" \(3 ops\), saved as revision /);
+
+    // office_read: each picture on a line under its paragraph, with size and alt text; the file's name where no alt text was given.
+    const read = (await tools.office_read.execute("q2", { id: doc })).content[0].text.split("\n\n").slice(1).join("\n\n");
+    console.log(`37. office_read:\n${read}`);
+    assert.match(read, /\[1\] Intro text\n\[2\] \n    a picture 6 × 3 cm, alt text "A red box"\n\[3\] Closing text\n\[4\] \n    a picture 2\.6 × 1\.3 cm, alt text "green\.jpg"\n\[5\] \n    a picture 1\.6 × 0\.8 cm$/);
+    const looks = (await tools.office_read.execute("q3", { id: doc, formatting: true })).content[0].text;
+    assert.match(looks, /\[2\] \n    a picture 6 × 3 cm, alt text "A red box"/, "the same with formatting");
+
+    // The person's editor draws them without a reload; the agent's own picture of the page does at once (no wait for them from us).
+    assert.ok(await until(async () => { const c = await personColours(person.frame); return c.red > 500 && c.green > 200 && c.blue > 100; }, 8000), `the person's editor draws the three: ${JSON.stringify(await personColours(person.frame))}`);
+    const t1 = Date.now();
+    const shot = await shoot("37. page 1", { id: doc });
+    const seen = await colours(shot.image);
+    console.log(`37. page 1 right after the edit (${Date.now() - t1} ms): ${JSON.stringify(seen)}; ${JSON.stringify(shot.text.split("\n")[0])}`);
+    assert.ok(seen.red > 300 && seen.green > 100 && seen.blue > 50, `the agent's own page shows the three pictures: ${JSON.stringify(seen)}`);
+    assert.equal(shot.out.details.picturesLoading, undefined);
+
+    // The save: three drawings inline, their alt text, and the media exactly as the files are.
+    const xml = await partOf(doc, "word/document.xml");
+    assert.equal((xml.match(/<wp:inline /g) ?? []).length, 3);
+    assert.match(xml, /descr="A red box"/);
+    assert.match(xml, /descr="green\.jpg"/);
+    const media = await savedMedia(doc, "word");
+    console.log(`37. saved media: ${Object.entries(media).map(([n, b]) => `${n} ${b.length} B`).join(", ")}`);
+    const files = Object.values(media);
+    assert.equal(files.length, 3);
+    assert.ok(files.some((b) => b.equals(readFileSync(path.join(project, "pics", "red.png")))), "the PNG as it was");
+    assert.ok(files.some((b) => b.equals(jpegFile)), "the JPEG as it was");
+    assert.ok(files.some((b) => b.equals(gifFile)), "the GIF as it was");
+    assert.ok(Object.keys(media).some((n) => /\.png$/.test(n)) && Object.keys(media).some((n) => /\.jpe?g$/.test(n)) && Object.keys(media).some((n) => /\.gif$/.test(n)));
+
+    // A job whose second picture the editor cannot make (one the tool could not send: no file): the first picture and the
+    // paragraph before it are taken back by the plugin's Undo, in the agent's editor and the person's, and in the save.
+    const colourBefore = await personColours(person.frame);
+    const readBefore = (await tools.office_read.execute("q4", { id: doc })).content[0].text;
+    const refused = await seat.run(home, doc, "edit", { kind: "word.edit", args: { ops: [{ paragraphs: ["Taken back"] }, { picture: "pics/red.png", file: { data: `data:image/png;base64,${readFileSync(path.join(project, "pics", "red.png")).toString("base64")}`, px: { w: 200, h: 100 }, bytes: 1, name: "red.png" } }, { picture: "pics/red.png" }] } } as never).then(() => "made", (e: Seat.SeatError) => `${e.code}: ${e.message}`);
+    console.log(`37. a failing job: ${refused}`);
+    assert.match(refused, /^failed: /);
+    assert.equal((await tools.office_read.execute("q5", { id: doc })).content[0].text, readBefore, "office_read is as before");
+    await delay(1000);
+    assert.deepEqual(await personColours(person.frame), colourBefore, "the person's editor is as before");
+    await tools.office_edit.execute("q6", { id: doc, ops: [{ paragraphs: ["Saved after"] }] });
+    assert.equal((xml.match(/<wp:inline /g) ?? []).length, ((await partOf(doc, "word/document.xml")).match(/<wp:inline /g) ?? []).length, "the save has the same three drawings");
+    assert.doesNotMatch(await partOf(doc, "word/document.xml"), /Taken back/);
+
+    // Two pictures of about 5 MB each in one call (the largest a call takes): the job channel, the editor's upload and the
+    // save take them, and the files in the save are the files.
+    const big1 = noisePng(1250, 1250);
+    const big2 = noisePng(1250, 1250);
+    assert.ok(big1.length < 5_000_000 && big1.length > 4_500_000, `${big1.length}`);
+    writeFileSync(path.join(project, "pics", "big1.png"), big1);
+    writeFileSync(path.join(project, "pics", "big2.png"), big2);
+    const t2 = Date.now();
+    const bigSaid = (await tools.office_edit.execute("q7", { id: doc, ops: [{ picture: "pics/big1.png", width: "8cm" }, { picture: "pics/big2.png", width: "8cm" }] })).content[0].text;
+    console.log(`37. two ${(big1.length / 1_000_000).toFixed(2)} MB pictures in one call: ${Date.now() - t2} ms: ${bigSaid}`);
+    const bigMedia = Object.values(await savedMedia(doc, "word"));
+    assert.ok(bigMedia.some((b) => b.equals(big1)) && bigMedia.some((b) => b.equals(big2)), "both large files are in the save as they were");
+    // One more past the call's 10 MB is refused before the editor is asked.
+    writeFileSync(path.join(project, "pics", "big3.png"), noisePng(1250, 1250));
+    assert.match(await failing(tools.office_edit.execute("q8", { id: doc, ops: [{ picture: "pics/big1.png" }, { picture: "pics/big2.png" }, { picture: "pics/big3.png" }] })), /^error:bad_op op 3: the picture "pics\/big3\.png" would take the call's pictures past 10 MB/);
+    // A link in the agent's folder that leads out of it is not followed, whatever it leads to, and a path that leaves the folder is not one.
+    symlinkSync("/etc/hostname", path.join(project, "pics", "leak.png"));
+    symlinkSync("/etc", path.join(project, "pics", "etc"));
+    for (const leak of ["pics/leak.png", "pics/etc/hostname", path.join(project, "pics", "leak.png"), "../../../../etc/hostname", "/etc/hostname"]) {
+      assert.match(await failing(tools.office_edit.execute("q9", { id: doc, ops: [{ picture: leak }] })), /^error:(bad_op|not_found) op 1: the picture /, leak);
+    }
+
+    // A picture in a table's cell (after its text) is listed under the table by its cell; a JPEG turned by its EXIF (a
+    // portrait photo) keeps the proportions it is shown in; the text after a PNG's end does not go into the document.
+    const said = (await tools.office_edit.execute("q10", { id: doc, ops: [{ table: [["Item", "Logo"], ["Total", ""]] }, { after: "Total", picture: "pics/turned.jpg", width: "2cm", alt: "Turned" }, { picture: "pics/tail.png", alt: "Tail" }] })).content[0].text;
+    console.log(`37. a table cell's picture: ${said}`);
+    const withTable = (await tools.office_read.execute("q11", { id: doc })).content[0].text;
+    console.log(`37. office_read with it:\n${withTable.split("\n").slice(-6).join("\n")}`);
+    assert.match(withTable, /\] table\n\| Item \| Logo \|\n\| Total \/ {2}\| {2}\|\n {4}A2: a picture 2 × 4 cm, alt text "Turned"\n(?:\[\d+\] \n)+ {4}a picture 5\.3 × 2\.6 cm, alt text "Tail"$/);
+    const tableXml = await partOf(doc, "word/document.xml");
+    const turned = /<wp:extent cx="(\d+)" cy="(\d+)"\/>(?:(?!<wp:inline)[\s\S])*?descr="Turned"/.exec(tableXml);
+    assert.ok(turned, "the turned picture is in the save");
+    assert.equal(Math.round(Number(turned![2]) / Number(turned![1])), 2, `upright, twice as high as wide: ${turned![0].slice(0, 60)}`);
+    const tableMedia = await savedMedia(doc, "word");
+    assert.ok(!Object.values(tableMedia).some((b) => b.includes("SECRET-TAIL")), "nothing after the PNG's end is in the save");
+    console.log(`37. the turned JPEG in the save: ${Object.values(tableMedia).some((b) => b.equals(turnedJpeg)) ? "the file as it is (not turned by the Document Server)" : "not the file as it is (turned by the Document Server?)"}`);
+    await person.page.context().close();
+  });
+
+  test("38. pictures in a real spreadsheet: anchored at their cells with their sizes, office_read lists them, the person's editor and the agent's own picture draw them, the save holds the files and their alt text; a call that fails deletes them again, in both editors and in the save", { timeout: 900_000 }, async () => {
+    pictureFiles();
+    const doc = await agentDoc("Sheet pictures", "cell");
+    await tools.office_edit.execute("r0", { id: doc, ops: [{ range: "A1:C3", values: [["a", "b", "c"], [1, 2, 3], [4, 5, 6]] }, { addSheet: "Data" }] });
+    const person = await personOpens(doc);
+    assert.deepEqual(Object.values(await personColours(person.frame)), [0, 0, 0]);
+    const ops = [
+      { picture: "pics/red.png", at: "B5", width: "4cm", alt: "A red box" },
+      { sheet: "Data", picture: "pics/green.jpg", at: "C3" },
+      { picture: path.join(project, "pics", "blue.gif"), at: "G2", alt: "" },
+    ];
+    const t0 = Date.now();
+    const made = (await tools.office_edit.execute("r1", { id: doc, ops })).content[0].text;
+    console.log(`38. ${made} (${Date.now() - t0} ms)`);
+    assert.match(made, /^Edited "Sheet pictures" \(3 ops\), saved as revision /);
+    const read = (await tools.office_read.execute("r2", { id: doc })).content[0].text;
+    console.log(`38. office_read:\n${read.split("\n\n").slice(1).join("\n\n")}`);
+    assert.match(read, /Sheet "Sheet1" \(A1:C3\):\n(?:[A-C][1-3]: .*\n)+Pictures: B5 4 × 2 cm "A red box"; G2 1\.6 × 0\.8 cm\.\n\nSheet "Data"/);
+    assert.match(read, /Sheet "Data" \(A1\):\n\(empty\)\nPictures: C3 2\.6 × 1\.3 cm "green\.jpg"\.$/);
+    assert.equal((await tools.office_read.execute("r2b", { id: doc, sheet: "Sheet1" })).content[0].text.match(/Pictures:/g)?.length, 1);
+
+    // The person's editor, a sheet at a time: the red and the blue box on the first, the green on the second, at once, without a reload.
+    const showSheet = async (k: number) => { await person.frame.evaluate(`window.Asc.editor.asc_showWorksheet(${k})`); await delay(700); };
+    await showSheet(0);
+    assert.ok(await until(async () => { const c = await personColours(person.frame); return c.red > 500 && c.blue > 100 && c.green === 0; }, 8000), `the person's editor draws them: ${JSON.stringify(await personColours(person.frame))}`);
+    await showSheet(1);
+    assert.ok(await until(async () => (await personColours(person.frame)).green > 200, 8000), `and the other sheet's: ${JSON.stringify(await personColours(person.frame))}`);
+    await showSheet(0);
+    // The agent's own picture of the cells right after the edit.
+    const t1 = Date.now();
+    const shot = await shoot("38. A1:L16", { id: doc, range: "A1:L16" });
+    const seen = await colours(shot.image);
+    console.log(`38. A1:L16 right after the edit (${Date.now() - t1} ms): ${JSON.stringify(seen)}`);
+    assert.ok(seen.red > 300 && seen.blue > 50, `the agent's own picture of the cells shows them: ${JSON.stringify(seen)}`);
+    const dataShot = await colours((await shoot("38. Data", { id: doc, sheet: "Data", range: "A1:J12" })).image);
+    assert.ok(dataShot.green > 100, `and the other sheet's: ${JSON.stringify(dataShot)}`);
+
+    // The save: three pictures in drawings, their alt text, and the media as the files are.
+    const zip = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    const drawings = await Promise.all(zip.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")));
+    console.log(`38. saved: ${Object.keys(zip.files).filter((n) => /drawing|media/.test(n)).join(", ")}`);
+    assert.equal(drawings.join("").match(/<xdr:pic>/g)?.length, 3);
+    assert.match(drawings.join(""), /descr="A red box"/);
+    assert.match(drawings.join(""), /descr="green\.jpg"/);
+    const media = Object.values(await savedMedia(doc, "xl"));
+    assert.ok(media.some((b) => b.equals(readFileSync(path.join(project, "pics", "red.png")))) && media.some((b) => b.equals(jpegFile)) && media.some((b) => b.equals(gifFile)), "the files as they were");
+
+    // A call that fails at its last op (a name that is not there, which only the step finds): its two pictures are deleted again.
+    const readBefore = (await tools.office_read.execute("r3", { id: doc })).content[0].text;
+    const colourBefore = await personColours(person.frame);
+    const t2 = Date.now();
+    const said = await failing(tools.office_edit.execute("r4", { id: doc, ops: [{ picture: "pics/red.png", at: "B12" }, { sheet: "Data", picture: "pics/green.jpg", at: "A8" }, { name: "NoSuchName", delete: true }] }));
+    console.log(`38. a failing call (${Date.now() - t2} ms): ${said}`);
+    assert.match(said, /^error:not_found op 3: there is no name "NoSuchName"/);
+    assert.equal((await tools.office_read.execute("r5", { id: doc })).content[0].text, readBefore, "office_read is as before");
+    assert.ok(await until(async () => JSON.stringify(await personColours(person.frame)) === JSON.stringify(colourBefore), 5000), "the person's editor is as before");
+    await tools.office_edit.execute("r6", { id: doc, ops: [{ range: "E1", values: [["saved"]] }] });
+    const after = await JSZip.loadAsync(readFileSync(await fileOf(doc)));
+    const drawingsAfter = await Promise.all(after.file(/^xl\/drawings\/drawing\d+\.xml$/).map((f) => f.async("string")));
+    assert.equal(drawingsAfter.join("").match(/<xdr:pic>/g)?.length, 3, "the save has the three pictures of the first call, and no others");
+    // A JPEG turned by its EXIF keeps the proportions it is shown in at a cell too.
+    await tools.office_edit.execute("r7", { id: doc, ops: [{ picture: "pics/turned.jpg", at: "J2", width: "2cm" }] });
+    assert.match((await tools.office_read.execute("r8", { id: doc, sheet: "Sheet1" })).content[0].text, /; J2 2 × 4 cm "turned\.jpg"\.$/m);
+    await person.page.context().close();
+  });
+
+  test("39. office_screenshot right after pictures the agent inserted, while the Document Server serves its pictures slowly: the page and the range show them", { timeout: 900_000 }, async () => {
+    pictureFiles();
+    const doc = await agentDoc("Pictured slowly by the agent", "word");
+    await tools.office_edit.execute("s0", { id: doc, ops: [{ quote: "New document", replacement: "Slow intro" }] });
+    const sheet = await agentDoc("Sheet pictured slowly", "cell");
+    await tools.office_edit.execute("s1", { id: sheet, ops: [{ range: "A1", values: [["x"]] }] });
+    // Every image the agents' browser asks the Document Server for is held for 5 s.
+    const slow = slowPictures(5000);
+    await slow.ready;
+    try {
+      const t0 = Date.now();
+      await tools.office_edit.execute("s2", { id: doc, ops: [{ picture: "pics/red.png", alt: "Red" }, { picture: "pics/blue.gif" }] });
+      await tools.office_edit.execute("s3", { id: sheet, ops: [{ picture: "pics/red.png", at: "B3" }, { picture: "pics/green.jpg", at: "F3" }] });
+      console.log(`39. the edits took ${Date.now() - t0} ms`);
+      const page = await shoot("39. page 1", { id: doc });
+      const cells = await shoot("39. A1:L12", { id: sheet, range: "A1:L12" });
+      const word = await colours(page.image);
+      const grid = await colours(cells.image);
+      console.log(`39. page ${JSON.stringify(word)} (${page.took} ms); cells ${JSON.stringify(grid)} (${cells.took} ms); ${JSON.stringify(page.text.split("\n")[0])}`);
+      assert.ok(word.red > 300 && word.blue > 50, `the page shows the pictures: ${JSON.stringify(word)}`);
+      assert.ok(grid.red > 300 && grid.green > 100, `the range shows the pictures: ${JSON.stringify(grid)}`);
+      assert.ok(cells.took >= 3000, `the range waited for the pictures the Document Server held for 5 s (${cells.took} ms)`);
+    } finally {
+      console.log(`39. held: ${(await slow.stop()).join(" | ")}`);
+    }
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

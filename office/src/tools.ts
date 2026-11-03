@@ -40,7 +40,8 @@ import { canonical, createDoc, docSize, docsForHome, MAX_IMPORT_BYTES, readDoc, 
 import { docxThreads, parseDocx, parseXlsx, xlsxThreads, type CommentThread } from "./ooxml";
 import { agentsOf, usersOf, isLocked } from "./live";
 import { saveNow, type SaveAfterEdit } from "./editing";
-import { editJob, formatJob, isSheetOp, OpError, viewJob, type EditJob, type FormatJob, type SheetFormatJob } from "./ops";
+import { editJob, formatJob, isSheetOp, OpError, PICTURE_SIDE_MAX, viewJob, type EditJob, type FormatJob, type SheetFormatJob } from "./ops";
+import { MAX_PICTURES_BYTES, MAX_PICTURE_BYTES, PictureError, pictureFile, pictureSized, type PictureFile } from "./pictures";
 import * as seat from "./seat";
 import { MAX_READ_FORMAT, MAX_SHOWN_TEXT, SETTLE } from "./seat-page";
 import { PICTURES_MS, type ShotPictures } from "./cdp";
@@ -107,6 +108,10 @@ export type ToolsDeps = {
    * path): its descriptor, which the caller closes, and its size. Default: portal().files.open with likeParent, the
    * chat, and no link followed. */
   openFile?: (file: string, chatId: string) => { fd: number; size: number };
+  /** A picture's file, `rel` in the folder `folder` (the agent's home or project), opened for `chatId`'s agent as it
+   * could open it itself: its descriptor, which the caller closes, and its size. Default: portal().files.open with
+   * likeParent and the chat. */
+  openPicture?: (folder: string, rel: string, chatId: string) => { fd: number; size: number };
   /** Throws where `chatId`'s agent could not change the document `file` itself: its folder is not one the agent
    * may write in, as the kernel would tell it. Default: portal().files.identity of the folder with likeParent and the
    * chat, which asks for that. */
@@ -178,6 +183,102 @@ function readAsAgent(file: string, chatId: string): Buffer {
     fs.closeSync(opened.fd);
   }
 }
+/**
+ * The pictures of an office_edit call read from the agent's files (owner answer 12 of #13): each `picture` op's file, in
+ * the agent's own folder `home` (a path relative to it, or an absolute one below it; never an address), opened as the
+ * agent (`openPicture`: refused where it could not read it), told by its first bytes, its size read from the header and
+ * held to the caps (pictures.ts) before anything goes to the editor. The ops with `file` added; the job as it was where
+ * the call has no picture. The files are read here and not by the ops' check: their data is outside the ops' 1 MB cap
+ * (which counts the paths), under a cap of its own, MAX_PICTURES_BYTES.
+ */
+function withPictures(job: EditJob, chatId: string, home: string, spelled: string): EditJob {
+  const ops = job.args.ops as { picture?: string; width?: number; height?: number; file?: PictureFile }[];
+  if (!ops.some((op) => op.picture !== undefined)) return job;
+  const open = (rel: string) => (cfg.openPicture ?? ((f: string, r: string, c: string) => portal().files.open(f, r, { likeParent: true, chats: [c] })))(home, rel, chatId);
+  let total = 0;
+  const read = new Map<string, PictureFile>();
+  const out = ops.map((op, i) => {
+    if (op.picture === undefined) return op;
+    const n = i + 1;
+    const refuse = (code: string, why: string) => new Refusal(code, `op ${n}: the picture ${JSON.stringify(op.picture)} ${why}`);
+    const rel = pictureRel(op.picture, [home, spelled]);
+    if (rel === null) throw refuse("bad_op", "is not in your own folder: pictures come from files of your home or the project, as a path below it");
+    let file = read.get(rel);
+    if (!file) {
+      let opened: { fd: number; size: number };
+      try {
+        opened = open(rel);
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException & { code?: string };
+        if (err.code === "ENOENT" || err.code === "missing") throw refuse("not_found", "is not a file there");
+        if (err.code === "EISDIR") throw refuse("bad_op", "is a folder, not a picture file");
+        throw refuse("not_found", `is not a file your agent can read (${err.message})`);
+      }
+      try {
+        // The caps before a byte is read: the file's size (a picture's own cap first: no call takes a file past it), and
+        // with it what the call has taken so far.
+        pictureSized(opened.size);
+        if (total + opened.size > MAX_PICTURES_BYTES) throw refuse("bad_op", callCap);
+        file = pictureFile(() => {
+          const bytes = Buffer.alloc(Math.min(opened.size, MAX_PICTURE_BYTES));
+          let got = 0;
+          while (got < bytes.length) {
+            const k = fs.readSync(opened.fd, bytes, got, bytes.length - got, got);
+            if (k === 0) break;
+            got += k;
+          }
+          return bytes.subarray(0, got);
+        }, opened.size, path.basename(rel));
+      } catch (e) {
+        if (e instanceof PictureError) throw refuse("bad_op", `cannot be used: ${e.message}`);
+        throw e;
+      } finally {
+        fs.closeSync(opened.fd);
+      }
+      read.set(rel, file);
+    }
+    total += file.bytes;
+    if (total > MAX_PICTURES_BYTES) throw refuse("bad_op", callCap);
+    // One side given: the other is the picture's proportions of it, held to the same 50 cm (a picture of 4,000 x 1
+    // pixels 1 cm high would be 40 m wide).
+    const [given, other] = op.width !== undefined && op.height === undefined ? (["width", "height"] as const) : op.height !== undefined && op.width === undefined ? (["height", "width"] as const) : [null, null];
+    if (given) {
+      const side = Math.round((op[given]! * (other === "height" ? file.px.h / file.px.w : file.px.w / file.px.h)));
+      if (side > PICTURE_SIDE_MAX) throw refuse("bad_op", `would be ${(side >= 36_000_000 ? Math.round(side / 360_000) : emuCm(side)).toLocaleString("en")} cm ${other === "height" ? "high" : "wide"} at that ${given} (its proportions: ${file.px.w} × ${file.px.h} pixels), and a side may be 50cm at most: give a smaller ${given}, or both`);
+    }
+    return { ...op, file };
+  });
+  return { ...job, args: { ops: out } } as EditJob;
+}
+
+/** A picture's path as a path in the agent's folder: relative ones as they are (normalized, never up out of the
+ * folder), absolute ones below one of `homes` (the folder, and its spelling before any link was resolved: the one the
+ * agent sees) made relative; null for any other. A path is only compared, never resolved here: a link on the way is
+ * the portal's to follow, as the agent (files.open), not the portal's own to look into. */
+function pictureRel(spec: string, homes: string[]): string | null {
+  const given = spec.trim();
+  let rel: string;
+  if (path.isAbsolute(given)) {
+    const full = path.resolve(given);
+    const home = homes.find((h) => within(h, full));
+    if (home === undefined) return null;
+    rel = path.relative(home, full);
+  } else rel = path.normalize(given);
+  return rel === "" || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel) ? null : rel;
+}
+
+/** The refusal of a picture that takes the call past its cap. */
+const callCap = `would take the call's pictures past ${MAX_PICTURES_BYTES / 1_000_000} MB (a call takes that many at most, each use of a file counted): put the rest in another call`;
+
+/** What the audit log says of a call's pictures: each file as the agent named it and the bytes sent, never the data
+ * (the first five, and how many more). */
+function picturesAudit(job: EditJob): string {
+  const files = (job.args.ops as { picture?: string; file?: PictureFile }[]).filter((op) => op.file);
+  if (!files.length) return "";
+  const shown = files.slice(0, 5).map((op) => `${JSON.stringify(op.picture!.slice(0, 200))} ${op.file!.bytes} B`);
+  return `; pictures ${shown.join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""}`;
+}
+
 /** Whether the agent of `chatId` could change the document `file` itself: the portal (and the Document
  * Server's save) writes it with its own rights, which may be root's. */
 function mayWrite(file: string, chatId: string): boolean {
@@ -240,7 +341,7 @@ function installForChat(pi: unknown, chat: { id: string }): void {
     return; // gone chat or folder: nothing to register into
   }
   if (!home) return; // no agent's nor project's: no tools
-  installTools(pi, canonical(home), chat.id);
+  installTools(pi, canonical(home), chat.id, home);
 }
 
 /* ------------------------------------------------------------------ */
@@ -310,6 +411,9 @@ function settlesOf(ops: readonly object[]) {
  * (600 pages, 140 kB: 6 s). A call cut off by its time is one of unknown outcome, so this leaves room for a busy
  * machine. MAX_EDIT_MS at most in all. */
 const WORD_LAYOUT_MS = 30_000;
+/** What a picture may add to the time an edit takes: the editor uploads it (a pair of 5 MB pictures took 0.5 s in the real
+ * editor, e2e 38), a sheet's is also taken back by the plugin's own step. */
+const PICTURE_MS = 2_000;
 
 /** Of what pi hands a tool's execute last (its ExtensionContext), what office_screenshot reads: the chat's model, and
  * whether it takes pictures (`input`). */
@@ -411,7 +515,9 @@ type RunLook = { font?: string; size?: number; bold?: boolean; italic?: boolean;
 type ParaLook = { align?: string; spaceBefore?: number; spaceAfter?: number; line?: { multiple: number } | { exact: number } | { atLeast: number }; indentLeft?: number; indentRight?: number; firstLine?: number; keepWithNext?: boolean; pageBreakBefore?: boolean };
 /** A footnote's mark: the text before it (its last 40 characters), the note's text, and in a table its cell. */
 type NoteMark = { at: string; note: string; row?: number; cell?: number };
-type BlockLook = { para?: ParaLook; runs?: { t: string; look: RunLook }[]; notes?: NoteMark[]; pictures?: [number, number][] };
+type BlockLook = { para?: ParaLook; runs?: { t: string; look: RunLook }[]; notes?: NoteMark[] };
+/** A picture as the read commands give it: width and height in EMU, and its alternative text. */
+type PictureRead = [number, number, string];
 /** Borders by side, each as office_format takes it ("single 1.5pt #C00000", "none"). */
 type Borders = Partial<Record<"top" | "bottom" | "left" | "right" | "insideH" | "insideV", string>>;
 /** A table cell's look, an entry a cell paragraph with its own formatting (its row and place in the row from 0; `k` the
@@ -419,7 +525,7 @@ type Borders = Partial<Record<"top" | "bottom" | "left" | "right" | "insideH" | 
  * its first entry (or an entry of their own). */
 type CellLook = { row: number; cell: number; k?: number; of?: number; fill?: string; valign?: string; borders?: Borders; para?: ParaLook; runs?: { t: string; look: RunLook }[] };
 type TableLook = { style?: string; headerRows?: number; merged?: { row: number; cell: number; across?: number; above?: true }[]; borders?: Borders; cells?: CellLook[]; notes?: NoteMark[]; pictures?: true };
-type WordBlock = ({ p: string; style?: string; list?: "bullet" | "number"; level?: number; format?: string; label?: string; look?: BlockLook } | { table: string[][]; row?: number; of?: number; look?: TableLook });
+type WordBlock = ({ p: string; style?: string; list?: "bullet" | "number"; level?: number; format?: string; label?: string; pics?: PictureRead[]; look?: BlockLook } | { table: string[][]; row?: number; of?: number; pics?: [number, number, ...PictureRead][]; look?: TableLook });
 type WordFormat = {
   defaults?: RunLook;
   styles: { name: string; type: string; basedOn?: string; text?: RunLook; para?: ParaLook }[];
@@ -431,6 +537,10 @@ type WordFormat = {
 type WordBlocks = { blocks: WordBlock[]; truncated?: boolean; format?: WordFormat; formatCut?: number };
 
 const pt = (twips: number) => `${+(twips / 20).toFixed(1)}pt`;
+/** English Metric Units (360,000 to the centimetre) in cm, one decimal (two where that reads 0: a picture of a pixel). */
+const emuCm = (emu: number) => (+(emu / 360000).toFixed(1) === 0 && emu > 0 ? +(emu / 360000).toFixed(2) : +(emu / 360000).toFixed(1));
+/** A Word picture as office_read says it. */
+const pictureWords = (w: number, h: number, alt: string) => `a picture ${emuCm(w)} × ${emuCm(h)} cm${alt ? `, alt text ${JSON.stringify(alt)}` : ""}`;
 const cm = (twips: number) => `${+((twips / 1440) * 2.54).toFixed(2)}cm`;
 /** A list's words in a block's brackets: "bullet", "numbered", its numbering where it is not 1, 2, 3, its label (a
  * formatting read's: "3."), its level. */
@@ -493,13 +603,13 @@ function cellLookLines(cells: CellLook[]): string[] {
  * What a Word page's picture says of the document's pictures where one may be missing from it: still loading after
  * the wait, not loadable, or not known (the editor's image loader not found). Nothing where all of them are drawn.
  */
-function picturesNote(p: ShotPictures | undefined): string {
+function picturesNote(p: ShotPictures | undefined, where = "page"): string {
   if (p === undefined) return "";
   if (p === null) return " Whether the document's pictures had all loaded could not be checked: one may be missing from the picture.";
   const n = (k: number) => `${k} of the document's pictures`;
   return (
-    (p.loading ? ` ${n(p.loading)} ${p.loading === 1 ? "was" : "were"} still loading after a wait of up to ${PICTURES_MS / 1000} s, so ${p.loading === 1 ? "it is" : "they are"} missing from the picture if on this page: take it again in a moment.` : "") +
-    (p.failed ? ` ${n(p.failed)} could not be loaded by the editor, so ${p.failed === 1 ? "it is" : "they are"} missing from the picture if on this page.` : "")
+    (p.loading ? ` ${n(p.loading)} ${p.loading === 1 ? "was" : "were"} still loading after a wait of up to ${PICTURES_MS / 1000} s, so ${p.loading === 1 ? "it is" : "they are"} missing from the picture if on this ${where}: take it again in a moment.` : "") +
+    (p.failed ? ` ${n(p.failed)} could not be loaded by the editor, so ${p.failed === 1 ? "it is" : "they are"} missing from the picture if on this ${where}.` : "")
   );
 }
 
@@ -512,14 +622,15 @@ function wordText(read: WordBlocks, first = 1): string {
     .map((b, i) => {
       if ("table" in b) {
         const l = b.look;
-        const words = l ? [l.style ? `style ${JSON.stringify(l.style)}` : "", l.headerRows ? `header row${l.headerRows === 1 ? "" : "s"} ${l.headerRows}` : "", ...(l.merged ?? []).map((m) => `${colName(m.cell)}${m.row + 1} ${m.above ? "merged with the cell above" : `spans ${m.across} columns`}`), l.borders ? bordersWords(l.borders) : "", l.pictures ? "holds pictures (not read)" : ""].filter(Boolean) : [];
+        const words = l ? [l.style ? `style ${JSON.stringify(l.style)}` : "", l.headerRows ? `header row${l.headerRows === 1 ? "" : "s"} ${l.headerRows}` : "", ...(l.merged ?? []).map((m) => `${colName(m.cell)}${m.row + 1} ${m.above ? "merged with the cell above" : `spans ${m.across} columns`}`), l.borders ? bordersWords(l.borders) : "", l.pictures ? "its look not read: it holds pictures" : ""].filter(Boolean) : [];
         // A page's rows of a table (b.row) are numbered from the table's first row, as its cells' looks are.
         const cells = cellLookLines((l?.cells ?? []).filter((c) => !b.row || (c.row >= b.row - 1 && c.row < b.row - 1 + b.table.length))).map((line) => `\n    ${line}`);
-        return `[${i + first}] table${rows(b)}${words.length ? ` (${words.join(", ")})` : ""}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}${cells.join("")}`;
+        const pics = (b.pics ?? []).map(([row, cell, w, h, alt]) => `\n    ${colName(cell)}${row + 1}: ${pictureWords(w, h, alt)}`);
+        return `[${i + first}] table${rows(b)}${words.length ? ` (${words.join(", ")})` : ""}\n${b.table.map((row) => `| ${row.join(" | ")} |`).join("\n")}${cells.join("")}${pics.join("")}`;
       }
       const look = b.look;
       const bracket = [b.style, listWords(b), look?.para ? paraWords(look.para) : ""].filter(Boolean).join(", ");
-      const under = [...(look?.runs ?? []).map((r) => `${quoted(r.t)}: ${runWords(r.look)}`), ...(look?.pictures ?? []).map(([w, h]) => `a picture ${+(w / 360000).toFixed(1)} × ${+(h / 360000).toFixed(1)} cm`)];
+      const under = [...(look?.runs ?? []).map((r) => `${quoted(r.t)}: ${runWords(r.look)}`), ...(b.pics ?? []).map(([w, h, alt]) => pictureWords(w, h, alt))];
       return `[${i + first}]${bracket ? ` (${bracket})` : ""} ${b.p}${under.length ? `\n    ${under.join("; ")}` : ""}`;
     })
     .join("\n");
@@ -567,7 +678,7 @@ function formatHead(read: WordBlocks): string {
 
 /** A spreadsheet's cells as the agent reads them: every sheet of the workbook first, by its position (from 1) and
  * whether it is hidden, then the cells of each sheet read, `A1: value`, a text in quotes, a formula after its value. */
-type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean; look?: SheetLook }[] };
+type CellSheets = { book: { name: string; hidden: boolean }[]; sheets: { name: string; range: string; cells: { a: string; v: unknown; f?: string }[]; truncated: boolean; skipped?: boolean; pictures?: { count: number; items: { a: string; w: number; h: number; alt: string }[] }; look?: SheetLook }[] };
 function sheetList(book: CellSheets["book"]): string {
   return `Sheets: ${book.map((s, i) => `${i + 1} ${JSON.stringify(s.name)}${s.hidden ? " (hidden)" : ""}`).join(", ")}`;
 }
@@ -580,7 +691,8 @@ function cellText(read: CellSheets): string {
   const sheets = read.sheets.map((s) => {
     const cells = cellLines(s.cells);
     if (s.skipped) return `Sheet "${s.name}": not read (the sheets before it filled the read; read it with sheet)`;
-    return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}${s.look ? `\n${sheetLookText(s.look)}` : ""}`;
+    const pics = s.pictures?.count ? `\nPictures: ${s.pictures.items.map((p) => `${p.a} ${emuCm(p.w)} × ${emuCm(p.h)} cm${p.alt ? ` ${JSON.stringify(p.alt)}` : ""}`).join("; ")}${s.pictures.count > s.pictures.items.length ? ` (and ${s.pictures.count - s.pictures.items.length} more)` : ""}.` : "";
+    return `Sheet "${s.name}" (${s.range}):\n${cells || "(empty)"}${s.truncated ? "\n(not all of its cells are shown: a read gives 20,000 cells of a sheet and 200,000 characters at most)" : ""}${pics}${s.look ? `\n${sheetLookText(s.look)}` : ""}`;
   });
   return [sheetList(read.book), ...sheets].join("\n\n");
 }
@@ -707,7 +819,7 @@ function savedText(doc: DocMeta, chatId: string, home: string, sheet?: string): 
 /* per-chat tools                                                       */
 /* ------------------------------------------------------------------ */
 
-function installTools(pi: unknown, home: string, chatId: string): void {
+function installTools(pi: unknown, home: string, chatId: string, spelled = home): void {
   const p = pi as any; // portal's extend factory hands a pi that carries registerTool (host mode) or not.
 
   /** A doc in THIS home's scope by id (store.visibleTo); anything else is `not_found` with the SAME words as a nonexistent id, so another home's docs do not leak into view. */
@@ -832,7 +944,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     name: "office_edit",
     label: LABELS.office_edit,
     guard: GUARDS.office_edit,
-    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops (a quote is the body's text inside one paragraph, as office_read shows it; \`nth\` picks a repeat, from 1): {quote, replacement} replaces text (an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: a paragraph style of the document, "Heading 1"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote. Formatting: office_format. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; values, formulas, number formats and column widths only), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. Rows and columns: {sheet?, insertRows: "5:6"} (new rows 5 and 6), {sheet?, insertColumns: "C"}, {sheet?, deleteRows}, {sheet?, deleteColumns} (last in a call: they cannot be taken back; formulas into them turn #REF!). {sheet?, sort: "A2:D9", by: ["B desc", "C"]} sorts the range's rows (leave the header row out); {name: "Sales", refersTo: "Data!B6:C9"} makes or changes a named range, {name, delete: true} removes it. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more, or give nth.`,
+    description: `Edit a document of your library through your own editor in it: people who have it open see your change at once, and nothing they typed is lost. One call is one edit, made whole or not at all (error:partial where even that failed: read again); every quote is checked first against the document as it stands then. Word ops (a quote is the body's text inside one paragraph, as office_read shows it; \`nth\` picks a repeat, from 1): {quote, replacement} replaces text (an empty replacement removes it); {after?, paragraphs, style?} adds paragraphs after the paragraph that holds \`after\`, or at the end (style: a paragraph style of the document, "Heading 1"); {after?, table} adds a table, its first row the header; {remove} removes the paragraph that holds the quote; {after?, picture, width?, height?, alt?} adds a picture in a paragraph of its own (a PNG, JPEG or GIF file below your folder, never an address: 5 MB, 20 a call), at its own size or the size given ("6cm"; one side keeps its proportions), alt text the file's name unless given. Formatting: office_format. Spreadsheet ops: {sheet?, range, values}: values for exactly the range, one list per row ("B2:C3" takes [[1, 2], [3, 4]]), on the first sheet where none is named; a text starting with "=" is a formula ("=Data!A1", "='My data'!A1" reach other sheets), "" clears the cell. Sheets, up to 20 a call: {addSheet, position?} (at the end by default), {renameSheet, to}, {moveSheet, position} (a visible sheet), {copySheet, to, position?} (right after it by default; values, formulas, number formats and column widths only), {hideSheet}, {showSheet}, {deleteSheet} (formulas naming it turn #REF!); names match in any case, positions count from 1 as office_read lists them, a name has at most 31 characters and none of []:*?/\\, and one sheet stays visible. Rows and columns: {sheet?, insertRows: "5:6"} (new rows 5 and 6), {sheet?, insertColumns: "C"}, {sheet?, deleteRows}, {sheet?, deleteColumns} (last in a call: they cannot be taken back; formulas into them turn #REF!). {sheet?, sort: "A2:D9", by: ["B desc", "C"]} sorts the range's rows (leave the header row out); {name: "Sales", refersTo: "Data!B6:C9"} makes or changes a named range, {name, delete: true} removes it. {sheet?, picture, at: "B2", width?, height?, alt?} puts a picture at a cell. After the edit the document is saved, with what people typed until then, and you hear the new revision. A quote that is not found or found twice changes nothing (error:quote_not_found, error:quote_ambiguous): read again and quote more, or give nth.`,
     promptSnippet: "Edit a Word or spreadsheet document live, through your own editor",
     executionMode: "sequential",
     parameters: {
@@ -873,6 +985,11 @@ function installTools(pi: unknown, home: string, chatId: string): void {
               by: {},
               name: { type: "string" },
               refersTo: { type: "string" },
+              picture: {},
+              at: {},
+              width: {},
+              height: {},
+              alt: {},
               delete: { type: "boolean" },
               to: { type: "string", description: "Spreadsheet: the new name." },
               position: { type: "integer", minimum: 1, description: "Spreadsheet: the sheet's place, 1 = first." },
@@ -885,7 +1002,7 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     execute: guarded(async ({ id, ops }, signal) => {
       const doc = visibleDoc(id);
       const job: EditJob = editJob(doc.ext, ops);
-      const kinds = [...new Set(job.args.ops.map((op) => ("quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "sort" in op ? "sort" : "name" in op ? "names" : "rows and columns")))].join(", ");
+      const kinds = [...new Set(job.args.ops.map((op) => ("picture" in op ? "pictures" : "quote" in op ? "replace" : "remove" in op ? "remove" : "table" in op ? "table" : "paragraphs" in op ? "insert" : "range" in op ? "cells" : isSheetOp(op) ? "sheets" : "sort" in op ? "sort" : "name" in op ? "names" : "rows and columns")))].join(", ");
       return change(doc, job, "office_edit", "Edited", kinds, signal);
     }),
   });
@@ -937,6 +1054,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
     if (state === "starting") throw new Refusal("ds_starting", "Office is still starting (its Document Server sets itself up after its first start, about two minutes): try again in a moment.");
 
     return oneAtATime(doc.docId, async () => {
+      // The pictures' files, read as the agent and checked, before anything reaches the editor.
+      const sent = job.kind === "word.edit" || job.kind === "cell.edit" ? withPictures(job, chatId, home, path.resolve(spelled)) : job;
       // The revision as it is now: an edit queued behind another starts from that one's.
       const from = refresh(doc.docId, rootDir())?.mtimeMs ?? doc.mtimeMs;
       const n = job.args.ops.length;
@@ -947,11 +1066,13 @@ function installTools(pi: unknown, home: string, chatId: string): void {
       const bytes = refresh(doc.docId, rootDir())?.sizeBytes ?? doc.sizeBytes;
       // (A name made shows a moment after its command, as a link does.)
       const names = job.kind === "cell.edit" ? job.args.ops.filter((op) => "name" in op).length : 0;
-      const extraMs = job.kind === "cell.edit" ? SHEET_OP_MS * sheetOps + SETTLE_MS * names : job.kind === "cell.format" ? SETTLE_MS * settles : Math.ceil((WORD_LAYOUT_MS * bytes) / 100_000);
-      const what = `${tool}: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}`;
+      // (A picture is uploaded to the Document Server by the editor, and again where the call is taken back.)
+      const pictures = job.kind === "word.edit" || job.kind === "cell.edit" ? (job.args.ops as object[]).filter((op) => "picture" in op).length : 0;
+      const extraMs = (job.kind === "cell.edit" ? SHEET_OP_MS * sheetOps + SETTLE_MS * names : job.kind === "cell.format" ? SETTLE_MS * settles : Math.ceil((WORD_LAYOUT_MS * bytes) / 100_000)) + PICTURE_MS * pictures;
+      const what = `${tool}: ${n} op(s) (${kinds}) on ${doc.docId} by ${home}${job.kind === "word.edit" || job.kind === "cell.edit" ? picturesAudit(sent as EditJob) : ""}`;
       let made: unknown;
       try {
-        made = await seats().run(home, doc.docId, "edit", job, { signal, ...(extraMs ? { timeoutMs: Math.min(seat.LIMITS.jobMs + extraMs, MAX_EDIT_MS) } : {}) });
+        made = await seats().run(home, doc.docId, "edit", sent, { signal, ...(extraMs ? { timeoutMs: Math.min(seat.LIMITS.jobMs + extraMs, MAX_EDIT_MS) } : {}) });
       } catch (e) {
         // Cut off: a sheet the call deletes waits hidden under another name until the end (seat-page.ts, cellEdit).
         if (e instanceof seat.SeatError && (e.code === "timeout" || e.code === "editor_closed") && job.kind === "cell.edit" && job.args.ops.some((op) => "deleteSheet" in op)) {
@@ -1098,8 +1219,8 @@ function installTools(pi: unknown, home: string, chatId: string): void {
         const cut = located.cut === true ? ` The sheet's used range is ${located.used}: this is the part that fits from A1; take the rest with range.` : "";
         const hidden = located.hidden === true ? " Its hidden rows and columns are not in the picture, and their cells are not listed." : "";
         const more = located.truncated === true ? `\n(not all of the cells it shows are listed: a picture gives ${MAX_SHOWN_TEXT.toLocaleString("en")} characters of text at most; office_read gives them)` : "";
-        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${cut}${hidden} Its cells:\n\n${cellLines(cells) || "(empty)"}${more}`;
-        shown = { sheet: located.sheet, range: located.range, zoom };
+        said = `Sheet ${JSON.stringify(located.sheet)} ${located.range} at ${zoom} %, as your editor shows it now.${picturesNote(image.pictures, "range")}${cut}${hidden} Its cells:\n\n${cellLines(cells) || "(empty)"}${more}`;
+        shown = { sheet: located.sheet, range: located.range, zoom, ...(image.pictures === null ? { pictures: "unknown" } : image.pictures?.loading || image.pictures?.failed ? { picturesLoading: image.pictures.loading, picturesFailed: image.pictures.failed } : {}) };
       }
       return {
         content: [

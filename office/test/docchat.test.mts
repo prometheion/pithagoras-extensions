@@ -119,6 +119,11 @@ afterEach(() => {
 const settle = async () => {
   for (let i = 0; i < 40; i++) await tick();
 };
+/** Waits until `done` holds, at most `ms`: the posts' retries run on timers, and a slow machine takes longer than a fixed wait. */
+const until = async (done: () => boolean, ms = 10_000) => {
+  const end = Date.now() + ms;
+  while (!done() && Date.now() < end) await delay(10);
+};
 const ui = (id: string, kind: "comment" | "reply" | "edit" | "editReply" | "resolve" | "chat", guid: string | undefined, text: string, more: Record<string, unknown> = {}): docchat.PageEvent => ({ type: "ui", id, kind, ...(guid ? { guid } : {}), text, ...more }) as docchat.PageEvent;
 // The folders here are names only: each document is made in a folder of the test's own that stands for its owner's.
 fakePlaces();
@@ -827,7 +832,7 @@ test("every post handed to the agent's editor is in the audit log: posts not rea
     docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")]);
     await settle();
     prompts[0].resolve({ status: "done", answer: "Erledigt." });
-    await delay(300);
+    await until(() => audits.some((a) => /comment thread 00000001/.test(a.reason) && /given up/.test(a.reason)));
     const thread = audits.filter((a) => /comment thread 00000001/.test(a.reason)).map((a) => a.reason.replace(/ of \d+ characters/, ""));
     assert.equal(posts.filter((p) => p.job.kind === "word.reply").length, 4);
     assert.equal(thread.filter((r) => /^posted an answer in/.test(r)).length, 1, JSON.stringify(thread));
@@ -847,7 +852,8 @@ test("every post handed to the agent's editor is in the audit log: posts not rea
     docchat.report(docId, "key-a", [ui("c1", "chat", undefined, "Lang bitte")]);
     await settle();
     prompts[1].resolve({ status: "done", answer: "a".repeat(2048) + "b".repeat(2048) + "c".repeat(100) });
-    await delay(200);
+    await until(() => posts.filter((p) => p.job.kind === "chat.send").length >= 3);
+    await delay(100);
     assert.deepEqual(posts.filter((p) => p.job.kind === "chat.send").map((p) => p.job.args.text[0]), ["a", "b", "c"], "the first message once");
     assert.ok(audits.some((a) => /message 2 of 3 .* not posted \(Docker did not answer in time\); the ones before it were/.test(a.reason)), JSON.stringify(audits));
   } finally {
@@ -872,7 +878,8 @@ test("a post whose editor closed while it ran is read back before it is posted a
     docchat.report(docId, "k", [ui("u1", "comment", "00000001", "+Aegis eins")]);
     await settle();
     prompts[0].resolve({ status: "done", answer: "Erledigt." });
-    await delay(300);
+    await until(() => audits.some((a) => /was found posted on reading back/.test(a.reason)));
+    await delay(100);
     assert.equal(posts.filter((p) => p.job.kind === "word.reply").length, 1);
     assert.ok(audits.some((a) => /may have been posted, the outcome is not known/.test(a.reason)));
     assert.ok(audits.some((a) => /was found posted on reading back/.test(a.reason)));

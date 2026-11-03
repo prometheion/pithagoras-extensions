@@ -2218,7 +2218,7 @@ async function run(PITHAGORAS: string): Promise<void> {
 
     // What cannot be taken back is named when a later op fails: a chart, a table, cleared rules.
     // (A table over a linked cell breaks that cell's formats in the editor: refused, so the table goes elsewhere.)
-    assert.match(await failing(tools.office_format.execute("y-linked-table", { id: doc, ops: [{ asTable: "A1:C5" }] })), /^error:bad_op op 1: a table over a cell with a link breaks that cell in the editor .* and A\d of "Sheet1" has one/);
+    assert.match(await failing(tools.office_format.execute("y-linked-table", { id: doc, ops: [{ asTable: "A1:C5" }] })), /^error:bad_op op 1: a table over a cell with a link can break that cell in the editor .* and A\d of "Sheet1" has one/);
     await tools.office_edit.execute("y-tag", { id: doc, ops: [{ range: "F1:G3", values: [["Tag", "Weight"], ["a", 1], ["b", 2]] }] });
     // A link's look replaces the cell's font: a bold link replaced by another and taken back comes back with its link, and
     // the answer names the font it could not put back. (The sort above moved the old link to A4.)
@@ -2848,6 +2848,110 @@ async function run(PITHAGORAS: string): Promise<void> {
     assert.match(after.xml, /descr="First blue"/);
     assert.match(after.xml, /descr="Their green"/);
     await person.page.context().close();
+  });
+
+  // ONLYOFFICE/DocumentServer#3870: in a workbook without xl/styles.xml, a table (FormatAsTable) over a cell whose font
+  // the session changed (a link set through the API, SetBold) breaks that cell's format getters. A workbook made here has
+  // the part; one from elsewhere may not.
+  const TABLE_ROWS = [["Name", "Link", "Count"], ["Alpha", "Home", 10], ["Beta", "Docs", 20], ["Gamma", "Blog", 30], ["Delta", "About", 40]];
+  const withoutStyles = async (docId: string) => {
+    const { templateXlsx } = await import("../../src/store.ts");
+    const zip = await JSZip.loadAsync(await templateXlsx());
+    zip.remove("xl/styles.xml");
+    zip.file("[Content_Types].xml", (await zip.file("[Content_Types].xml")!.async("string")).replace(/<Override PartName="\/xl\/styles\.xml"[^>]*\/>/, ""));
+    zip.file("xl/_rels/workbook.xml.rels", (await zip.file("xl/_rels/workbook.xml.rels")!.async("string")).replace(/<Relationship [^>]*relationships\/styles"[^>]*\/>/, ""));
+    writeFileSync(await fileOf(docId), await zip.generateAsync({ type: "nodebuffer" }));
+  };
+
+  test("42. a new workbook has its styles part (Calibri 11): a bold cell before a table and a link after it keep every format getter working, office_read reads them, and the save holds the styles", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Styled table", "cell");
+    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Calibri"\/>/, "the new file has the part");
+    await tools.office_edit.execute("sx0", { id: doc, ops: [{ range: "A1:C5", values: TABLE_ROWS }] });
+    // A bold cell and the table over it (a table goes last in its call), then a link and a bold cell inside the table: each of them broke its cell's formats without the part.
+    const table = await tools.office_format.execute("sx1", { id: doc, ops: [{ format: "A4", set: { bold: true } }, { asTable: "A1:C5" }] });
+    const marks = await tools.office_format.execute("sx1b", { id: doc, ops: [{ link: "B3", set: { url: "https://example.com/docs", text: "Docs" } }, { format: "C2", set: { bold: true } }] });
+    console.log(`42. table: ${table.content[0].text}; link and bold: ${marks.content[0].text}`);
+    await delay(800);
+    const read = await readSheet(doc, "Sheet1");
+    console.log(`42. read:\n${read}`);
+    assert.doesNotMatch(read, /\(not read, the editor failed/, "every cell is read");
+    assert.match(read, /Formatting: font Calibri 11 where no other is said/);
+    assert.match(read, /\nFormats: .*C2, A4 bold; B3 underline/);
+    assert.match(read, /Links: .*B3 https:\/\/example\.com\/docs/);
+    assert.match(read, /\nB3: "Docs"\n/);
+    // The save holds the table, the link and the styles, and a second look reads the same.
+    await tools.office_edit.execute("sx2", { id: doc, ops: [{ range: "E1", values: [["saved"]] }] });
+    assert.match(await partOf(doc, "xl/styles.xml"), /<name val="Calibri"\/>/);
+    assert.match(await partOf(doc, "xl/worksheets/sheet1.xml"), /<hyperlink /);
+    assert.match(await readSheet(doc, "Sheet1"), /C2, A4 bold/);
+    // The guard stays: a table over a link set before it is refused (a workbook from elsewhere may lack the part).
+    await tools.office_format.execute("sx3", { id: doc, ops: [{ link: "E2", set: { url: "https://example.com/e", text: "E" } }] });
+    assert.match(await failing(tools.office_format.execute("sx4", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link can break that cell in the editor .* and E2 of "Sheet1" has one/);
+  });
+
+  test("45. office_screenshot of a wide range in a workbook office_create made: 22 default columns fit at 100 % (the columns are 64 px, as the fit reckons), as in one from elsewhere", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("Wide new", "cell");
+    const row = Array.from({ length: 22 }, (_, k) => k + 1);
+    await tools.office_edit.execute("wd0", { id: doc, ops: [{ range: "A1:V3", values: [row, row, row] }] });
+    const wide = await shoot("45. Sheet1!A1:V3", { id: doc, range: "A1:V3" });
+    assert.match(wide.text, /^Sheet "Sheet1" A1:V3 at 100 %, as your editor shows it now\./);
+    // 22 columns of 64 px come to 1,408 px, which fit the grid at 100 %; with a wider default font the columns would be
+    // 72 px, the range would not fit, and the picture would fail (or need 75 %).
+    assert.equal(wide.out.details.zoom, 100);
+  });
+
+  test("43. a workbook from elsewhere without a styles part still breaks a table over a bold cell: office_read leaves the cell out and says so, and a table over a link is refused", { timeout: 600_000 }, async () => {
+    const doc = await agentDoc("No styles", "cell");
+    await withoutStyles(doc);
+    assert.equal(await partOf(doc, "xl/styles.xml").then(() => true, () => false), false, "the file has no styles part");
+    await tools.office_edit.execute("nx0", { id: doc, ops: [{ range: "A1:C5", values: TABLE_ROWS }, { range: "E1:E3", values: [["Tag"], ["x"], ["y"]] }] });
+    await tools.office_format.execute("nx2", { id: doc, ops: [{ link: "E2", set: { url: "https://example.com/e", text: "E" } }] });
+    const made = await failing(tools.office_format.execute("nx1", { id: doc, ops: [{ format: "A4", set: { bold: true } }, { asTable: "A1:C5" }] }));
+    console.log(`43. bold and table without styles: ${made}`);
+    // The call itself is taken: the breakage shows when the cells are read afterwards (below). A later editor that fixed
+    // DocumentServer#3870 makes that read assertion fail, and the guard can go.
+    assert.match(made, /^answered: Formatted "No styles" \(2 ops\)/);
+    await delay(800);
+    const read = await readSheet(doc, "Sheet1");
+    console.log(`43. read:\n${read}`);
+    assert.match(read, /not read, the editor failed at them: .*A4/, "the cell it cannot read is left out, and said");
+    assert.match(read, /\nA4: "Gamma"\n/, "its value is read all the same");
+    // A table over a link is refused there.
+    assert.match(await failing(tools.office_format.execute("nx3", { id: doc, ops: [{ asTable: "E1:E3" }] })), /^error:bad_op op 1: a table over a cell with a link can break that cell in the editor .* and E2 of "Sheet1" has one/);
+  });
+
+  test("44. DocumentBuilder, the Document Server's own: a link and a bold cell, then a table over them, in the workbook this extension makes, leave every format getter working", { timeout: 600_000 }, async () => {
+    const { templateXlsx } = await import("../../src/store.ts");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "office-xs-builder-"));
+    try {
+      writeFileSync(path.join(dir, "new.xlsx"), await templateXlsx());
+      const script = [
+        'builder.OpenFile("/work/new.xlsx", "");',
+        "var ws = Api.GetActiveSheet(), out = [];",
+        `var rows = ${JSON.stringify(TABLE_ROWS)};`,
+        "for (var r = 0; r < rows.length; r++) for (var c = 0; c < 3; c++) ws.GetRangeByNumber(r, c).SetValue(rows[r][c]);",
+        'ws.SetHyperlink("B3", "https://example.com/docs", "", "", "Docs");',
+        'ws.GetRange("A4").SetBold(true);',
+        'ws.FormatAsTable("A1:C5");',
+        'ws.SetHyperlink("B4", "https://example.com/blog", "", "", "Blog");',
+        'ws.GetRange("C2").SetBold(true);',
+        '["B3", "B4", "A4", "C2", "C3"].forEach(function (a) {',
+        "  var cell = ws.GetRange(a), f = cell.GetCharacters(1, 4).GetFont(), fill = cell.GetFillColor();",
+        '  out.push(a + " " + [cell.GetNumberFormat(), cell.GetWrapText(), cell.GetOrientation(), fill && fill.GetRGB ? "rgb" : fill, f.GetName(), f.GetSize(), f.GetBold()].join("|"));',
+        "});",
+        'console.log("RESULT " + out.join(";"));',
+        "builder.CloseFile();",
+      ].join("\n");
+      writeFileSync(path.join(dir, "repro.docbuilder"), script);
+      const out = execFileSync("docker", ["run", "--rm", "--name", `${PREFIX}-builder`, "--memory", "2g", "--entrypoint", "sh", "-v", `${dir}:/work`, IMAGE, "-c", "documentserver-generate-allfonts.sh true >/dev/null 2>&1; cd /var/www/onlyoffice/documentserver/server/FileConverter/bin && ./docbuilder /work/repro.docbuilder 2>&1"], { encoding: "utf8", timeout: 300_000 });
+      console.log(`44. ${out.trim()}`);
+      const result = /RESULT (.*)/.exec(out)?.[1];
+      assert.ok(result, `the script ran to its end (${out.trim()})`);
+      assert.deepEqual(result.split(";"), ["B3 General|false|0|No Fill|Calibri|11|false", "B4 General|false|0|No Fill|Calibri|11|false", "A4 General|false|0|No Fill|Calibri|11|true", "C2 General|false|0|No Fill|Calibri|11|true", "C3 General|false|0|No Fill|Calibri|11|false"]);
+    } finally {
+      try { execFileSync("docker", ["rm", "-f", `${PREFIX}-builder`], { stdio: "ignore" }); } catch { /* it ended with --rm */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("9. Office stopped: office_read reads the saved file and says so, office_edit is refused, and the agents' browser is gone", { timeout: 600_000 }, async () => {

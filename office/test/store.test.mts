@@ -55,7 +55,31 @@ test("templateXlsx: minimal xlsx parses with ooxml.parseXlsx as one empty Sheet1
   assert.deepEqual(parsed.sheetNames, ["Sheet1"]);
   assert.deepEqual(parsed.sheets["Sheet1"], []);
   const zip = await JSZip.loadAsync(buf);
-  for (const name of ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/worksheets/sheet1.xml"]) assert.ok(zip.file(name), `missing ${name}`);
+  for (const name of ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/styles.xml", "xl/worksheets/sheet1.xml"]) assert.ok(zip.file(name), `missing ${name}`);
+});
+
+test("templateXlsx: the styles part is declared and related, and gives the workbook Calibri 11, the two required fills and the style Normal (a workbook without it breaks a table over a bold or linked cell, ONLYOFFICE/DocumentServer#3870)", async () => {
+  const zip = await JSZip.loadAsync(await templateXlsx());
+  const styles = await zip.file("xl/styles.xml")?.async("string");
+  assert.ok(styles, "xl/styles.xml is there");
+  assert.match(await zip.file("[Content_Types].xml")!.async("string"), /<Override PartName="\/xl\/styles\.xml" ContentType="application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.styles\+xml"\/>/);
+  const rels = await zip.file("xl/_rels/workbook.xml.rels")!.async("string");
+  assert.match(rels, /Type="http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships\/styles" Target="styles\.xml"/);
+  const ids = [...rels.matchAll(/Id="(rId\d+)"/g)].map((m) => m[1]);
+  assert.equal(new Set(ids).size, ids.length, "the relationship ids are all different");
+  const font = /<fonts count="1"><font>([\s\S]*?)<\/font><\/fonts>/.exec(styles)?.[1] ?? "";
+  assert.match(font, /<name val="Calibri"\/>/);
+  assert.match(font, /<sz val="11"\/>/);
+  assert.doesNotMatch(styles, /Arial/);
+  assert.match(styles, /<fills count="2"><fill><patternFill patternType="none"\/><\/fill><fill><patternFill patternType="gray125"\/><\/fill><\/fills>/, "the two fills every file starts with");
+  assert.match(styles, /<borders count="1">/);
+  assert.match(styles, /<cellStyleXfs count="1"><xf [^>]*\/><\/cellStyleXfs>/);
+  assert.match(styles, /<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"\/><\/cellXfs>/);
+  assert.match(styles, /<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"\/><\/cellStyles>/);
+  // Well-formed, in the order the schema wants: fonts, fills, borders, cellStyleXfs, cellXfs, cellStyles, dxfs, tableStyles.
+  const order = ["fonts", "fills", "borders", "cellStyleXfs", "cellXfs", "cellStyles", "dxfs", "tableStyles"].map((tag) => styles.indexOf(`<${tag} `));
+  assert.ok(order.every((at, k) => at > 0 && (k === 0 || at > order[k - 1])), `parts in order (${order})`);
+  assert.ok(styles.trimEnd().endsWith("</styleSheet>"));
 });
 
 test("slugify: lowercase, non-alnum runs -> single dash, trimmed", () => {

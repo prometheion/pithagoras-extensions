@@ -211,6 +211,7 @@ const XLSX_CONTENT_TYPES =
   `<Default Extension="xml" ContentType="application/xml"/>` +
   `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>` +
   `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+  `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` +
   `</Types>`;
 
 const XLSX_ROOT_RELS =
@@ -229,21 +230,41 @@ const XLSX_WORKBOOK_RELS =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
   `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
   `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>` +
+  `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
   `</Relationships>`;
 
 const XLSX_SHEET1 =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
   `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`;
 
-/** A minimal valid xlsx (jszip, DEFLATE): [Content_Types].xml, _rels/.rels, xl/workbook.xml, xl/_rels/workbook.xml.rels
- * and an empty xl/worksheets/sheet1.xml named "Sheet1". Opens cleanly in Excel/OnlyOffice and parses with
- * ooxml.parseXlsx (one sheet, zero rows). Async for the same jszip reason as templateDocx. */
+// The workbook's styles, as Excel and the Document Server write them for a blank one (one font, the two fills a file
+// must start with, one border, one cell format, the style "Normal"), with Calibri 11 as the font, what a styles-less workbook
+// has by default (the editor's column widths, 7 px a digit, and office_screenshot's fit are reckoned on it).
+// Without this part the editor has no cell formats to start from, and a table (FormatAsTable) over a cell whose font
+// the session changed (a link set through the API, SetBold) then breaks that cell's format getters
+// (ONLYOFFICE/DocumentServer#3870). Only a workbook made here gets this: an uploaded one has its own.
+const XLSX_STYLES =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+  `<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+  `<fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>` +
+  `<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>` +
+  `<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
+  `<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
+  `<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>` +
+  `<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
+  `<dxfs count="0"/><tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>` +
+  `</styleSheet>`;
+
+/** A minimal valid xlsx (jszip, DEFLATE): [Content_Types].xml, _rels/.rels, xl/workbook.xml, xl/_rels/workbook.xml.rels,
+ * xl/styles.xml (Calibri 11) and an empty xl/worksheets/sheet1.xml named "Sheet1". Opens cleanly in Excel/OnlyOffice and
+ * parses with ooxml.parseXlsx (one sheet, zero rows). Async for the same jszip reason as templateDocx. */
 export async function templateXlsx(): Promise<Buffer> {
   const zip = new (await jsZip())();
   zip.file("[Content_Types].xml", XLSX_CONTENT_TYPES);
   zip.file("_rels/.rels", XLSX_ROOT_RELS);
   zip.file("xl/workbook.xml", XLSX_WORKBOOK);
   zip.file("xl/_rels/workbook.xml.rels", XLSX_WORKBOOK_RELS);
+  zip.file("xl/styles.xml", XLSX_STYLES);
   zip.file("xl/worksheets/sheet1.xml", XLSX_SHEET1);
   return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
 }

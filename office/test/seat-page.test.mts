@@ -280,9 +280,12 @@ type FakeSheet = {
   filter: string | null;
   criteria: unknown[][];
   tables: string[];
+  /** #13 PR 5: pictures (images), by the internal id the editor gives them. */
+  images: FakeImage[];
 };
+type FakeImage = { id: string; col: number; row: number; w: number; h: number; alt: string; src: string; co?: number; ro?: number };
 type FakeRule = { type: string; applies: string; operator?: string; f1?: string; f2?: string; rank?: number; topBottom?: string; percent?: boolean; dupe?: string; fill?: string; fontColor?: string; bold?: boolean; italic?: boolean; underline?: string; strike?: boolean; barColor?: string; colors?: string[] };
-const freshSheet = (name: string, hidden = false): FakeSheet => ({ name, hidden, cells: {}, formats: {}, widths: {}, looks: {}, colLooks: {}, rowLooks: {}, aligns: {}, borders: {}, merges: [], heights: {}, hiddenCols: [], hiddenRows: [], frozen: { cols: 0, rows: 0 }, chars: {}, rules: [], validations: {}, links: {}, charts: [], filter: null, criteria: [], tables: [] });
+const freshSheet = (name: string, hidden = false): FakeSheet => ({ name, hidden, cells: {}, formats: {}, widths: {}, looks: {}, colLooks: {}, rowLooks: {}, aligns: {}, borders: {}, merges: [], heights: {}, hiddenCols: [], hiddenRows: [], frozen: { cols: 0, rows: 0 }, chars: {}, rules: [], validations: {}, links: {}, charts: [], filter: null, criteria: [], tables: [], images: [] });
 
 const colOf = (l: string) => [...l].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
 const nameOf = (n: number) => { let out = ""; for (n++; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(65 + ((n - 1) % 26)) + out; return out; };
@@ -330,10 +333,10 @@ const colourOf = (h: string) => { const n = parseInt(h.slice(1), 16); const c = 
  * lock); `autofitAtOnce` lays an autofit out in its command, as an editor nobody else has been in does. `nameLag`: the
  * commands a name made takes to show (1 by default).
  */
-function workbook(start: (string | { name: string; hidden: boolean })[], options: { poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean; nameLag?: number } = {}) {
+function workbook(start: (string | { name: string; hidden: boolean })[], options: { poisonImage?: boolean; poisonAlt?: boolean; poisonSize?: boolean; keepImages?: boolean; onlyShown?: boolean; poison?: string; poisonLook?: string; poisonRead?: string; never?: boolean | ((what: string) => boolean); before?: (commands: number, sheets: FakeSheet[]) => void; autofitAtOnce?: boolean; nameLag?: number } = {}) {
   const sheets: FakeSheet[] = start.map((s) => (typeof s === "string" ? freshSheet(s) : freshSheet(s.name, s.hidden)));
   const later: { due: number; fn: () => void }[] = [];
-  const state = { sheets, commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0, names: {} as Record<string, string> };
+  const state = { sheets, ids: 0, methods: [] as string[], commands: 0, saves: 0, active: sheets[0], asked: [] as string[], poisoned: false, formatted: [] as string[], calls: [] as string[], selected: null as null | { sheet: FakeSheet; address: string }, ranges: 0, names: {} as Record<string, string> };
   const ask = (what: string, fn: () => void) => {
     state.asked.push(what);
     const never = typeof options.never === "function" ? options.never(what) : options.never;
@@ -415,7 +418,37 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     sh.looks = move(sh.looks);
     sh.aligns = move(sh.aligns);
     sh.borders = move(sh.borders);
+    // A picture anchored at or below the rows (right of the columns) moves with them.
+    for (const img of sh.images) {
+      const k = kind === "rows" ? img.row : img.col;
+      if (k >= from) kind === "rows" ? (img.row = Math.max(from, k + delta)) : (img.col = Math.max(from, k + delta));
+    }
   };
+  const imageApi = (img: FakeImage) => ({
+    GetClassType: () => "image",
+    GetInternalId: () => img.id,
+    GetPosition: () => ({ fromCol: img.col, colOffset: img.co ?? 0, fromRow: img.row, rowOffset: img.ro ?? 0 }),
+    GetWidth: () => img.w,
+    GetHeight: () => img.h,
+    // #13 PR 6: SetSize and SetPosition take effect at once (DS 10.0.0.1, measured), EMU and cells from 0.
+    SetSize: (w: number, h: number) => {
+      if (options.poisonSize) throw new Error("the editor refused the size");
+      img.w = w;
+      img.h = h;
+    },
+    SetPosition: (col: number, co: number, row: number, ro: number) => {
+      img.col = col;
+      img.co = co;
+      img.row = row;
+      img.ro = ro;
+    },
+    GetDescription: () => (img.alt === "" ? null : img.alt),
+    SetDescription: (t: string) => {
+      if (options.poisonAlt) throw new Error("the editor refused the description");
+      img.alt = t;
+      return true;
+    },
+  });
   /* #13 PR 4's parts of the builder, as docbuilder and the editor showed them (DS 10.0.0.1): */
   const rgbOf = (c: { r: number; g: number; b: number } | undefined) => (c ? hexOf(c) : undefined);
   const ruleItem = (sh: FakeSheet, rule: FakeRule) => {
@@ -766,6 +799,15 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
           GetPosition: () => ({ fromCol: chart.col, colOffset: 0, fromRow: chart.row, rowOffset: 0 }),
         };
       },
+      // #13 PR 5: pictures as the editor has them (docbuilder and the real editor, DS 10.0.0.1): AddImage anchors one at a
+      // cell with its size in EMU, each answers its internal id, place, size and description; the builder has no delete.
+      AddImage: (src: string, w: number, h: number, col: number, _colOffset: number, row: number) => {
+        if (options.poisonImage) throw new Error("the editor refused the picture");
+        const img: FakeImage = { id: `1_${++state.ids}`, col, row, w, h, alt: "", src };
+        sh.images.push(img);
+        return imageApi(img);
+      },
+      GetAllImages: () => sh.images.map(imageApi),
       GetAllCharts: () => sh.charts.map((chart) => ({ GetChartType: () => chart.type, GetTitle: () => (chart.title === undefined ? null : `${chart.title}\n`), GetPosition: () => ({ fromCol: chart.col, fromRow: chart.row }) })),
       // The editor gives a filter object with no range where there is none (docbuilder gives null).
       GetAutoFilter: () => ({ GetRange: () => (sh.filter ? rangeOf(sh, sh.filter) : null) }),
@@ -846,7 +888,13 @@ function workbook(start: (string | { name: string; hidden: boolean })[], options
     }
     return JSON.parse(JSON.stringify(vm.runInNewContext(`(${source})()`, { Api, Asc: { scope: { args: JSON.parse(JSON.stringify(args)) } } }) ?? null));
   };
-  return { state, run, view: () => sheets.map((s) => `${s.name}${s.hidden ? " (hidden)" : ""}`) };
+  /** The editor's plugin methods: RemoveOleObject deletes a drawing by its internal id (DS 10.0.0.1, measured), a sheet's picture too. */
+  const method = (name: string, args: unknown[]) => {
+    state.methods.push(name);
+    // (DS 10.0.0.1: the method reaches the drawings of the sheet the editor shows; for another sheet's it never answered.)
+    if (name === "RemoveOleObject" && !options.keepImages) for (const sh of sheets) if (!options.onlyShown || sh === state.active) sh.images = sh.images.filter((img) => img.id !== args[0]);
+  };
+  return { state, run, method, view: () => sheets.map((s) => `${s.name}${s.hidden ? " (hidden)" : ""}`) };
 }
 
 /** The plugin running in its frame with `book` as its editor: it is handed `job`, and resolves with what it posts. */
@@ -864,7 +912,8 @@ async function plugin(book: ReturnType<typeof workbook>, job: { kind: string; ar
           const out = book.run(fn.toString(), window.Asc.scope.args);
           setImmediate(() => then(out));
         },
-        executeMethod(_name: string, _args: unknown[], then: () => void) {
+        executeMethod(name: string, args: unknown[], then: () => void) {
+          book.method(name, args);
           setImmediate(then);
         },
       },
@@ -3228,4 +3277,679 @@ test("cell.read with formatting: a cell whose format the editor cannot read is l
   assert.deepEqual(look.formats.map((f: any) => [f.ranges, f.look]), [[["A1"], { bold: true }], [["B2"], { italic: true }]]);
   assert.equal(look.unread.length, 1);
   assert.match(look.unread[0], /^the format of A2 \(the editor refused A2\)/);
+});
+
+/* ------------------------------------------------------------------ */
+/* pictures (#13 PR 5)                                                 */
+/* ------------------------------------------------------------------ */
+
+/** A picture op as tools.ts hands it to the editor: the file read (its data URL, pixels, name) beside the agent's keys. */
+const pictureOp = (extra: Record<string, unknown> = {}, px = { w: 200, h: 100 }, name = "logo.png") => ({ picture: name, file: { data: "data:image/png;base64,AAAA", px, bytes: 4, name }, ...extra });
+
+/** A Word document that takes pictures as DS 10.0 does: Api.CreateImage(data, w, h) then a paragraph's AddDrawing. */
+function pictureDoc(page = { width: 11906, height: 16838, margins: [1134, 850, 1134, 1701] }) {
+  const made: { src: string; w: number; h: number; alt?: string }[] = [];
+  const pushed: { drawings: unknown[] }[] = [];
+  const section = { GetPageWidth: () => page.width, GetPageHeight: () => page.height, GetPageMarginTop: () => page.margins[0], GetPageMarginRight: () => page.margins[1], GetPageMarginBottom: () => page.margins[2], GetPageMarginLeft: () => page.margins[3] };
+  const doc = { ...contentOf([paragraph("Only")]), GetStyle: () => null, GetFinalSection: () => section, Push: (el: { drawings: unknown[] }) => pushed.push(el) };
+  const Api = {
+    GetDocument: () => doc,
+    Save() {},
+    CreateImage: (src: string, w: number, h: number) => {
+      const record: (typeof made)[number] = { src, w, h };
+      made.push(record);
+      return { SetDescription: (t: string) => void (record.alt = t) };
+    },
+    CreateParagraph: () => ({ drawings: [] as unknown[], AddText() {}, SetStyle() {}, AddDrawing(d: unknown) { this.drawings.push(d); } }),
+  };
+  return { Api, made, pushed };
+}
+
+test("word.edit: a picture is made inline in a paragraph of its own, at the end where no `after` is given, at its own size at 96 dpi, made smaller to the page's text area, or at the size asked for with the other side in proportion", () => {
+  const run = (op: Record<string, unknown>, page?: Parameters<typeof pictureDoc>[0]) => {
+    const w = pictureDoc(page);
+    const out = command("word.edit", w.Api, { ops: [op] });
+    assert.deepEqual(out, { result: { ops: 1 } }, JSON.stringify(out));
+    assert.equal(w.pushed.length, 1, "one new paragraph, at the end");
+    assert.equal(w.pushed[0].drawings.length, 1, "with the picture in it");
+    assert.equal(w.made.length, 1);
+    return w.made[0];
+  };
+  // 200 x 100 px is 1,905,000 x 952,500 EMU (9,525 to the pixel), within the text area (9,355 x 14,570 twips).
+  assert.deepEqual(run(pictureOp()), { src: "data:image/png;base64,AAAA", w: 1_905_000, h: 952_500, alt: "logo.png" });
+  // 4,000 x 3,000 px does not fit: the width, 11,906 - 850 - 1,701 = 9,355 twips = 5,940,425 EMU, is the limit, in proportion.
+  const big = run(pictureOp({}, { w: 4000, h: 3000 }, "photo.jpg"));
+  assert.equal(big.w, 9355 * 635);
+  assert.equal(big.h, Math.round((9355 * 635 * 3) / 4));
+  // A tall one is held by the page's text height: 14,570 twips.
+  const tall = run(pictureOp({}, { w: 1000, h: 8000 }, "tall.png"));
+  assert.equal(tall.h, 14570 * 635);
+  assert.equal(tall.w, Math.round((14570 * 635) / 8));
+  // A landscape page has the room it has.
+  assert.equal(run(pictureOp({}, { w: 4000, h: 1000 }, "wide.png"), { width: 16838, height: 11906, margins: [720, 720, 720, 720] }).w, (16838 - 1440) * 635);
+  // Sizes asked for: both as given; one with the other in the picture's proportions (even past the page).
+  assert.deepEqual([run(pictureOp({ width: 3_402 * 635 })).w, run(pictureOp({ width: 3_402 * 635 })).h], [3_402 * 635, Math.round((3_402 * 635) / 2)]);
+  assert.equal(run(pictureOp({ height: 1_440 * 635 })).w, 1_440 * 635 * 2);
+  assert.deepEqual(run(pictureOp({ width: 100_000, height: 7 })), { src: "data:image/png;base64,AAAA", w: 100_000, h: 7, alt: "logo.png" });
+  // The alt text: the agent's, the file's name by default, none for "".
+  assert.equal(run(pictureOp({ alt: "Our logo" })).alt, "Our logo");
+  assert.equal(run(pictureOp({ alt: "" })).alt, undefined);
+});
+
+test("word.edit: a picture the editor does not take fails the edit as touched (the plugin's Undo takes the call back); a document where `after` is not found is refused before anything is made", () => {
+  const w = pictureDoc();
+  w.Api.CreateImage = () => {
+    throw new Error("the editor cannot read the picture");
+  };
+  const out = command("word.edit", w.Api, { ops: [{ paragraphs: ["First"] }, pictureOp()] });
+  assert.equal(out.error?.code, "failed");
+  assert.match(out.error.message, /the editor cannot read the picture/);
+  assert.equal(out.touched, true, "the paragraph before it was made: the whole command is undone");
+  const missing = pictureDoc();
+  const refused = command("word.edit", missing.Api, { ops: [pictureOp({ after: "Not in the document" })] });
+  assert.equal(refused.error?.code, "quote_not_found");
+  assert.equal(refused.touched, false);
+  assert.equal(missing.made.length, 0, "no picture was made");
+});
+
+test("a spreadsheet picture: made at its cell with its size in EMU (its own at 96 dpi, at most 16 x 12 cm, or as asked), its alt text set, and taken back by its internal id when a later op fails", async () => {
+  const book = workbook(["Sheet1", "Data"], { poison: "Z9" });
+  // 400 x 100 px is 3,810,000 x 952,500 EMU, inside 16 x 12 cm (5,760,000 x 4,320,000).
+  const ops = [pictureOp({ at: "B2", cell: { col: 1, row: 1 } }, { w: 400, h: 100 }), pictureOp({ sheet: "data", at: "E5", cell: { col: 4, row: 4 }, alt: "Chart" }, { w: 4000, h: 3000 }, "photo.jpg"), pictureOp({ at: "A10", cell: { col: 0, row: 9 }, width: 1_800_000, alt: "" }, { w: 600, h: 300 })];
+  const out = await plugin(book, { kind: "cell.edit", args: { ops } });
+  assert.deepEqual(out.result, { ops: 3, cells: 0 }, JSON.stringify(out));
+  const [sheet1, data] = book.state.sheets;
+  assert.deepEqual(sheet1.images.map((i) => [i.col, i.row, i.w, i.h, i.alt]), [[1, 1, 3_810_000, 952_500, "logo.png"], [0, 9, 1_800_000, 900_000, ""]]);
+  // 4,000 x 3,000 px is 38,100,000 x 28,575,000: the limit is 5,760,000 across (16 cm) and 4,320,000 down (12 cm): the larger scale-down, 4,320,000 / 28,575,000 = .1512, holds; 5,760,000 / 38,100,000 = .1512 too.
+  assert.deepEqual(data.images.map((i) => [i.col, i.row, i.w, i.h, i.alt]), [[4, 4, 5_760_000, 4_320_000, "Chart"]]);
+  assert.equal(book.state.methods.length, 0, "nothing was taken back");
+  // The same ops and then an op the editor refuses: every picture is deleted by its id, and the sheets are as before.
+  const before = JSON.stringify(book.state.sheets);
+  book.state.sheets.forEach((s) => (s.images = []));
+  const failed = await plugin(book, { kind: "cell.edit", args: { ops: [...ops, { range: "Z9", values: [[1]] }] } });
+  assert.equal(failed.error?.code, "failed");
+  assert.equal(failed.undone, true, JSON.stringify(failed));
+  assert.deepEqual(book.state.sheets.map((s) => s.images), [[], []], "the pictures are gone again");
+  assert.deepEqual(book.state.methods, ["RemoveOleObject", "RemoveOleObject", "RemoveOleObject"], "each by the plugin's own method");
+  assert.notEqual(before, "");
+});
+
+test("a spreadsheet picture the editor refuses, or whose alt text it refuses, fails the call at its op; the second names the picture that stays made", async () => {
+  const refused = workbook(["Sheet1"], { poisonImage: true });
+  const out = await plugin(refused, { kind: "cell.edit", args: { ops: [{ range: "A1", values: [["x"]] }, pictureOp({ at: "B2", cell: { col: 1, row: 1 } })] } });
+  assert.equal(out.error?.code, "failed");
+  assert.match(out.error.message, /the editor refused the picture/);
+  assert.equal(out.error.op, 1);
+  assert.equal(refused.state.sheets[0].cells.A1, undefined, "the write before it is taken back");
+  // The picture is made and its description refused: the step cannot take it back by itself (a picture is deleted by the plugin), so the answer names it.
+  const alt = workbook(["Sheet1"], { poisonAlt: true });
+  const partial = await plugin(alt, { kind: "cell.edit", args: { ops: [pictureOp({ at: "B2", cell: { col: 1, row: 1 } })] } });
+  assert.equal(partial.error?.code, "partial", JSON.stringify(partial));
+  assert.match(partial.error.message, /^op 1: the picture is made, but the editor refused the description\..* Not taken back: the picture at B2 of "Sheet1" that op 1 made\./);
+  assert.equal(alt.state.sheets[0].images.length, 1);
+});
+
+test("a picture's inverse keeps what a person did after the step: one they resized, moved or described stays and is named, one they deleted is just gone, and one that rows moved for good is still deleted by its id", async () => {
+  const run = async (person: (sheets: FakeSheet[]) => void) => {
+    // The person acts once the picture is made, before the writes after it (the second fails).
+    let acted = false;
+    const book = workbook(["Sheet1"], { poison: "Z9", before: (_commands, sheets) => { if (!acted && sheets[0].images.length) { acted = true; person(sheets); } } });
+    const ops = [pictureOp({ at: "B2", cell: { col: 1, row: 1 } }), { range: "A1", values: [[1]] }, { range: "Z9", values: [[1]] }];
+    return { out: await plugin(book, { kind: "cell.edit", args: { ops } }), book };
+  };
+  const plain = await run(() => {});
+  assert.equal(plain.out.error?.code, "failed");
+  assert.deepEqual(plain.book.state.sheets[0].images, []);
+  const sized = await run((sheets) => void (sheets[0].images[0].w += 1000));
+  assert.equal(sized.out.error?.code, "partial", JSON.stringify(sized.out));
+  assert.match(sized.out.error.message, /Kept as a person changed them after this call: the picture B2 of "Sheet1"\./);
+  assert.equal(sized.book.state.sheets[0].images.length, 1, "their picture stays");
+  const moved = await run((sheets) => void (sheets[0].images[0].row += 3));
+  assert.equal(moved.out.error?.code, "partial");
+  assert.equal(moved.book.state.sheets[0].images.length, 1);
+  const described = await run((sheets) => void (sheets[0].images[0].alt = "Their words"));
+  assert.equal(described.out.error?.code, "partial");
+  const gone = await run((sheets) => void (sheets[0].images = []));
+  assert.equal(gone.out.error?.code, "failed", "a picture they deleted needs no taking back");
+  assert.equal(gone.out.undone, true);
+});
+
+test("cell.step dropPicture: a picture is compared by size, description and place, the place only where no rows or columns moved for good; one that is not there is gone", () => {
+  const book = workbook(["Sheet1"]);
+  const sheet = book.state.sheets[0];
+  sheet.images.push({ id: "1_9", col: 1, row: 1, w: 100, h: 50, alt: "A", src: "" });
+  const left = { col: 1, row: 1, w: 100, h: 50, alt: "A" };
+  const step = (op: Record<string, unknown>) => book.run(CELL_EDIT_COMMANDS.step, { op: { dropPicture: "Sheet1", id: "1_9", at: "B2", left, real: true, ...op }, index: -1, pending: [] }).result;
+  assert.deepEqual(step({}), { id: "1_9" });
+  sheet.images[0].row = 4;
+  assert.deepEqual(step({}), { kept: [{ what: "picture", sheet: "Sheet1", cells: ["B2"] }] });
+  assert.deepEqual(step({ moved: true }), { id: "1_9" }, "rows moved it for good: its place is not compared");
+  sheet.images[0].h = 51;
+  assert.deepEqual(step({ moved: true }), { kept: [{ what: "picture", sheet: "Sheet1", cells: ["B2"] }] }, "its size is");
+  assert.deepEqual(step({ id: "1_10" }), { gone: true });
+});
+
+test("cell.read lists a sheet's pictures (images only) with the cell each is anchored in, its size and alt text, 50 at most, the rest counted; word.read gives a paragraph's pictures with their sizes and alt text, with and without formatting, and asks no paragraph where the document has none", () => {
+  const book = workbook(["Sheet1", "Empty"]);
+  const sheet = book.state.sheets[0];
+  for (let k = 0; k < 53; k++) sheet.images.push({ id: `1_${k}`, col: k % 26, row: Math.floor(k / 26), w: 360_000 * (k + 1), h: 360_000, alt: k === 0 ? "x".repeat(300) : "", src: "" });
+  const read = book.run(COMMANDS["cell.read"].source, {}).result.sheets as { name: string; pictures?: { count: number; items: { a: string; w: number; h: number; alt: string }[] } }[];
+  assert.equal(read[0].pictures!.count, 53);
+  assert.equal(read[0].pictures!.items.length, 50);
+  assert.deepEqual(read[0].pictures!.items[0], { a: "A1", w: 360_000, h: 360_000, alt: "x".repeat(200) });
+  assert.deepEqual(read[0].pictures!.items[27], { a: "B2", w: 360_000 * 28, h: 360_000, alt: "" });
+  assert.equal(read[1].pictures, undefined, "a sheet with none says nothing");
+
+  const drawn = { GetClassType: () => "image", GetWidth: () => 1_800_000, GetHeight: () => 1_224_000, GetDescription: () => "Sales by region" };
+  const chart = { GetClassType: () => "chart", GetWidth: () => 5, GetHeight: () => 5, GetDescription: () => null };
+  const withPicture = { ...paragraph("Sales"), GetAllDrawingObjects: () => [drawn, chart] };
+  const plain = { ...paragraph("Plain"), GetAllDrawingObjects: () => [] };
+  const asked: string[] = [];
+  const doc = (images: unknown[]) => ({ ...contentOf([withPicture, plain]), GetAllImages: () => images, GetAllStyles: () => [], GetStyle: () => null, GetDefaultTextPr: () => ({ ToJSON: () => "{}" }), GetSections: () => [], GetFootnotesFirstParagraphs: () => [] });
+  const out = command("word.read", { GetDocument: () => doc([drawn]) });
+  assert.deepEqual(out.result.blocks, [{ p: "Sales", pics: [[1_800_000, 1_224_000, "Sales by region"]] }, { p: "Plain" }]);
+  const none = command("word.read", { GetDocument: () => ({ ...doc([]), GetElement: (i: number) => ({ ...[withPicture, plain][i], GetAllDrawingObjects: () => void asked.push("asked") }) }) });
+  assert.deepEqual(none.result.blocks, [{ p: "Sales" }, { p: "Plain" }]);
+  assert.deepEqual(asked, [], "a document without images is not asked paragraph by paragraph");
+});
+
+test("a picture anchored below rows this call made, which a person wrote into and so stay, is still taken back: its place moved with the rows, and its inverse is by its id", async () => {
+  let acted = false;
+  const book = workbook(["Sheet1"], { poison: "Z9", before: (_commands, sheets) => { if (!acted && sheets[0].images[0]?.row === 2) { acted = true; sheets[0].cells.A1 = "theirs"; } } });
+  const ops = [pictureOp({ at: "B2", cell: { col: 1, row: 1 } }), { insertRows: "1:1", from: 0, count: 1 }, { range: "Z9", values: [[1]] }];
+  const out = await plugin(book, { kind: "cell.edit", args: { ops } });
+  assert.equal(acted, true, "the picture moved down with the new row");
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /Kept as a person changed them after this call: the rows? 1.* this call made \(a person wrote into them\)/);
+  assert.doesNotMatch(out.error.message, /the picture B2/, "the picture itself is taken back, wherever the rows put it");
+  assert.deepEqual(book.state.sheets[0].images, []);
+});
+
+test("word.read gives the pictures in a table's cells (of the rows it reads) on the table, each with its cell's row and place in the row; a table without any carries none", () => {
+  const image = (w: number, alt: string | null) => ({ GetClassType: () => "image", GetWidth: () => w, GetHeight: () => 360_000, GetDescription: () => alt });
+  const cellPara = (text: string, drawings: unknown[] = []) => ({ ...paragraph(text), GetAllDrawingObjects: () => drawings });
+  const table = (cells: unknown[][][]) => ({
+    GetClassType: () => "table",
+    GetInternalId: () => "t1",
+    GetRowsCount: () => cells.length,
+    GetRow: (r: number) => ({ GetCellsCount: () => cells[r].length, GetCell: (c: number) => ({ GetContent: () => contentOf(cells[r][c]) }) }),
+  });
+  const pictured = table([[[cellPara("Item")], [cellPara("Logo")]], [[cellPara("Total"), cellPara("", [image(720_000, "Sum")])], [cellPara("", [image(360_000, null)])]]]);
+  const plain = table([[[cellPara("a")]]]);
+  const logo = image(1, "x");
+  const doc = { ...contentOf([pictured, plain]), GetAllImages: () => [logo], GetStyle: () => null };
+  const out = command("word.read", { GetDocument: () => doc });
+  assert.deepEqual(out.result.blocks, [
+    { table: [["Item", "Logo"], ["Total / ", ""]], pics: [[1, 0, 720_000, 360_000, "Sum"], [1, 1, 360_000, 360_000, ""]] },
+    { table: [["a"]] },
+  ]);
+});
+
+/* ------------------------------------------------------------------ */
+/* removing, moving and resizing pictures (#13 PR 6)                   */
+/* ------------------------------------------------------------------ */
+
+type WImg = { w: number; h: number; alt: string | null; title: string | null; wrap: string; media: string; par: WPar | null };
+type WPar = { kind: "paragraph"; id: string; text: string; imgs: WImg[]; sect?: boolean; parent: WBox | null };
+type WBox = { items: (WPar | WTable | WSdt)[] };
+type WTable = { kind: "table"; id: string; rows: WBox[][] };
+type WSdt = { kind: "sdt"; id: string; box: WBox };
+type WSpec = string | { text?: string; pics?: { w: number; h: number; alt?: string | null; title?: string }[]; sect?: boolean } | { table: WSpec[][][] } | { sdt: WSpec[] };
+
+/**
+ * A Word document with the parts of the builder the picture edits use, as DS 10.0.0.1 has them (measured): a picture is an
+ * `image` of a paragraph (`GetAllDrawingObjects`), `Delete()` takes it out of its paragraph and leaves the paragraph, `Copy()`
+ * makes one of the same media without its description or title, `SetSize` sets EMU; a paragraph's `Delete()` takes it out of
+ * its box. `spec`: a paragraph's text, or {text?, pics?, sect?}, {table: rows of cells of paragraph specs}, {sdt: paragraph specs}.
+ */
+function pictureWord(spec: WSpec[], options: { poisonSize?: boolean } = {}) {
+  let ids = 0;
+  const log: string[] = [];
+  const parApis = new Map<WPar, any>();
+  const imgApis = new Map<WImg, any>();
+  const backPar = new Map<any, WPar>();
+  const backImg = new Map<any, WImg>();
+  const par = (s: WSpec, parent: WBox | null): WPar => {
+    const o = typeof s === "string" ? { text: s } : (s as { text?: string; pics?: { w: number; h: number; alt?: string | null; title?: string }[]; sect?: boolean });
+    const p: WPar = { kind: "paragraph", id: `p${++ids}`, text: o.text ?? "", imgs: [], sect: o.sect, parent };
+    for (const pic of o.pics ?? []) p.imgs.push({ w: pic.w, h: pic.h, alt: pic.alt === undefined ? null : pic.alt, title: pic.title ?? null, wrap: "inline", media: `m${++ids}`, par: p });
+    return p;
+  };
+  const fill = (box: WBox, list: WSpec[]) => {
+    for (const s of list) {
+      if (typeof s === "object" && "table" in s) box.items.push({ kind: "table", id: `t${++ids}`, rows: s.table.map((row) => row.map((cell) => { const b: WBox = { items: [] }; fill(b, cell); return b; })) });
+      else if (typeof s === "object" && "sdt" in s) { const b: WBox = { items: [] }; fill(b, s.sdt); box.items.push({ kind: "sdt", id: `s${++ids}`, box: b }); }
+      else box.items.push(par(s, box));
+    }
+  };
+  const body: WBox = { items: [] };
+  fill(body, spec);
+  const itemApi = (it: WPar | WTable | WSdt): any => {
+    if (it.kind === "paragraph") return parApi(it);
+    if (it.kind === "table") return { GetClassType: () => "table", GetInternalId: () => it.id, GetRowsCount: () => it.rows.length, GetRow: (r: number) => ({ GetCellsCount: () => it.rows[r].length, GetCell: (c: number) => ({ GetContent: () => boxApi(it.rows[r][c]) }) }) };
+    return { GetClassType: () => "blockLvlSdt", GetInternalId: () => it.id, GetContent: () => boxApi(it.box) };
+  };
+  const boxApi = (box: WBox): any => ({
+    GetElementsCount: () => box.items.length,
+    GetElement: (i: number) => itemApi(box.items[i]),
+    AddElement: (pos: number, el: any) => { const p = backPar.get(el)!; p.parent = box; box.items.splice(pos, 0, p); log.push(`add at ${pos}`); },
+    Push: (el: any) => { const p = backPar.get(el)!; p.parent = box; box.items.push(p); log.push("push"); },
+  });
+  const imgApi = (d: WImg): any => {
+    if (!imgApis.has(d)) {
+      const api = {
+        GetClassType: () => "image",
+        GetWidth: () => d.w,
+        GetHeight: () => d.h,
+        GetDescription: () => d.alt,
+        GetTitle: () => d.title,
+        SetDescription: (t: string) => void ((d.alt = t), log.push(`describe ${t}`)),
+        SetTitle: (t: string) => void (d.title = t),
+        SetSize: (w: number, h: number) => { if (options.poisonSize) throw new Error("the editor refused the size"); d.w = w; d.h = h; log.push(`size ${w} ${h}`); },
+        SetWrappingStyle: (w: string) => void (d.wrap = w),
+        Copy: () => imgApi({ ...d, alt: null, title: null, par: null }),
+        Delete: () => { if (d.par) d.par.imgs.splice(d.par.imgs.indexOf(d), 1); d.par = null; log.push("delete picture"); },
+        GetParentParagraph: () => (d.par ? parApi(d.par) : null),
+      };
+      imgApis.set(d, api);
+      backImg.set(api, d);
+    }
+    return imgApis.get(d);
+  };
+  const parApi = (p: WPar): any => {
+    if (!parApis.has(p)) {
+      const api = {
+        GetClassType: () => "paragraph",
+        GetText: (o?: { Numbering?: boolean }) => `${p.text}\r\n`,
+        GetStyle: () => null,
+        GetParaPr: () => ({ GetStyle: () => null }),
+        GetNumbering: () => null,
+        GetInternalId: () => p.id,
+        GetAllDrawingObjects: () => p.imgs.map(imgApi),
+        GetParent: () => boxApi(p.parent!),
+        GetPosInParent: () => p.parent!.items.indexOf(p),
+        GetElementsCount: () => p.imgs.length,
+        ToJSON: () => JSON.stringify({ pPr: p.sect ? { sectPr: {} } : {}, content: [] }),
+        // (A picture of a paragraph taken out still answers its paragraph, as the editor's does.)
+        Delete: () => { if (p.parent) p.parent.items.splice(p.parent.items.indexOf(p), 1); p.parent = null; log.push(`delete paragraph ${p.text || "(empty)"}`); },
+        GetNext: () => null,
+        GetPrevious: () => null,
+        GetRange: () => ({}),
+        AddText: (t: string) => void (p.text += t),
+        SetStyle() {},
+        AddDrawing: (d: any) => { const img = backImg.get(d)!; img.par = p; p.imgs.push(img); },
+      };
+      parApis.set(p, api);
+      backPar.set(api, p);
+    }
+    return parApis.get(p);
+  };
+  const every = (box: WBox, out: WPar[] = []): WPar[] => {
+    for (const it of box.items) {
+      if (it.kind === "paragraph") out.push(it);
+      else if (it.kind === "table") it.rows.forEach((row) => row.forEach((cell) => every(cell, out)));
+      else every(it.box, out);
+    }
+    return out;
+  };
+  const section = { GetPageWidth: () => 11906, GetPageHeight: () => 16838, GetPageMarginTop: () => 1134, GetPageMarginRight: () => 850, GetPageMarginBottom: () => 1134, GetPageMarginLeft: () => 1701 };
+  const doc = {
+    ...boxApi(body),
+    GetStyle: () => null,
+    GetAllStyles: () => [],
+    GetAllComments: () => [],
+    GetFinalSection: () => section,
+    // The editor's search, kept to the text of a paragraph: one hit a place.
+    Search: (q: string) => every(body).flatMap((p) => { const hits: any[] = []; for (let k = p.text.indexOf(q); k !== -1; k = p.text.indexOf(q, k + q.length)) hits.push({ GetAllParagraphs: () => [parApi(p)], GetStartPos: () => k, GetEndPos: () => k + q.length }); return hits; }),
+  };
+  const Api = {
+    GetDocument: () => doc,
+    Save() {},
+    CreateParagraph: () => parApi(par("", null)),
+    CreateImage: (src: string, w: number, h: number) => imgApi({ w, h, alt: null, title: null, wrap: "inline", media: src, par: null }),
+  };
+  /** The document as plain data: a paragraph as "text|WxH alt, ..." (EMU), a table as {table}, a content control's as {sdt}. */
+  const outline = (box: WBox = body): unknown[] =>
+    box.items.map((it) =>
+      it.kind === "paragraph" ? `${it.text}|${it.imgs.map((i) => `${i.w}x${i.h}${i.alt === null ? "" : ` ${i.alt}`}${i.title ? ` [${i.title}]` : ""}${i.wrap === "inline" ? "" : ` (${i.wrap})`}`).join(", ")}`
+      : it.kind === "table" ? { table: it.rows.map((row) => row.map((cell) => outline(cell))) }
+      : { sdt: outline(it.box) });
+  return { Api, outline, log };
+}
+
+/** An edit of a Word document's pictures, its ops checked as ops.ts takes them. */
+const pictureEdit = (w: ReturnType<typeof pictureWord>, ops: Record<string, unknown>[]) => command("word.edit", w.Api, { ops: editJob("docx", ops).args.ops });
+
+test("word.edit: a picture is deleted with the paragraph that held only it, or alone where its paragraph has text or other pictures, or is the last in its place or ends a section", () => {
+  const w = pictureWord(["Intro", { pics: [{ w: 100, h: 50, alt: "Own" }] }, { text: "Text", pics: [{ w: 10, h: 10, alt: "In text" }] }, { pics: [{ w: 1, h: 1, alt: "A" }, { w: 2, h: 2, alt: "B" }] }, { sect: true, pics: [{ w: 5, h: 5, alt: "Section" }] }, { table: [[["Cell", { pics: [{ w: 7, h: 7, alt: "Cell pic" }] }], [{ pics: [{ w: 8, h: 8, alt: "Only" }] }]]] }]);
+  const out = pictureEdit(w, [{ editPicture: 2, delete: true }, { editPicture: 3, delete: true }, { editPicture: 4, n: 2, delete: true }, { editPicture: 5, delete: true }, { editPicture: 6, cell: "A1", delete: true }, { editPicture: 6, cell: "B1", delete: true }]);
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(w.outline(), [
+    "Intro|",
+    "Text|",
+    "|1x1 A",
+    "|",
+    { table: [[["Cell|"], ["|"]]] },
+  ], "a paragraph of the picture alone goes; one with text, with another picture, one that ends a section and the only paragraph of a cell stay");
+  assert.deepEqual(out.result.pictures.map((p: { did: string; block: number; cell?: string; n: number; w: number; h: number; alt: string }) => [p.did, p.block, p.cell, p.n, p.w, p.h, p.alt]), [
+    ["deleted", 2, undefined, 1, 100, 50, "Own"],
+    ["deleted", 3, undefined, 1, 10, 10, "In text"],
+    ["deleted", 4, undefined, 2, 2, 2, "B"],
+    ["deleted", 5, undefined, 1, 5, 5, "Section"],
+    ["deleted", 6, "A1", 1, 7, 7, "Cell pic"],
+    ["deleted", 6, "B1", 1, 8, 8, "Only"],
+  ], "each answer names the picture as it was");
+});
+
+test("word.edit: the paragraph of a deleted or moved picture stays where removing it would leave a table last in its container or two tables side by side, and goes where a paragraph or the start is next to it", () => {
+  const pic = { pics: [{ w: 5, h: 5, alt: "P" }] };
+  const tab = (t: string) => ({ table: [[[t]]] });
+  // A table before it and nothing after: the body would end in a table.
+  const last = pictureWord(["Text", tab("T"), pic]);
+  assert.equal(pictureEdit(last, [{ editPicture: 3, delete: true }]).error, undefined);
+  assert.deepEqual(last.outline(), ["Text|", { table: [[["T|"]]] }, "|"], "the empty paragraph ends the body");
+  // Tables on both sides: removing it would join them.
+  const between = () => pictureWord([tab("A"), pic, tab("B"), "End"]);
+  const joined = between();
+  assert.equal(pictureEdit(joined, [{ editPicture: 2, delete: true }]).error, undefined);
+  assert.deepEqual(joined.outline(), [{ table: [[["A|"]]] }, "|", { table: [[["B|"]]] }, "End|"]);
+  const moved = between();
+  assert.equal(pictureEdit(moved, [{ editPicture: 2, move: true, after: "End" }]).error, undefined);
+  assert.deepEqual(moved.outline(), [{ table: [[["A|"]]] }, "|", { table: [[["B|"]]] }, "End|", "|5x5 P"]);
+  // A paragraph or the start next to it, or a table on one side only: it goes.
+  const open = pictureWord([tab("A"), pic, "Text", pic, tab("B")]);
+  assert.equal(pictureEdit(open, [{ editPicture: 2, delete: true }, { editPicture: 4, delete: true }]).error, undefined);
+  assert.deepEqual(open.outline(), [{ table: [[["A|"]]] }, "Text|", { table: [[["B|"]]] }]);
+  // In a cell as in the body: a nested table before it makes it the cell's last paragraph.
+  const cell = pictureWord([{ table: [[[tab("In"), pic]]] }]);
+  assert.equal(pictureEdit(cell, [{ editPicture: 1, cell: "A1", delete: true }]).error, undefined);
+  assert.deepEqual(cell.outline(), [{ table: [[[{ table: [[["In|"]]] }, "|"]]] }]);
+});
+
+test("word.edit: a picture is named by the number office_read gives its paragraph or table (a content control's paragraphs counted in reading order), its cell and its number there; what is not there is refused before anything changes", () => {
+  const spec: WSpec[] = ["One", { sdt: ["In control", { pics: [{ w: 3, h: 3, alt: "In sdt" }] }] }, { table: [[[{ pics: [{ w: 4, h: 4, alt: "T1" }, { w: 5, h: 5, alt: "T2" }] }]]] }, "Last"];
+  const w = pictureWord(spec);
+  // [1] One, [2] In control, [3] the picture's paragraph, [4] the table, [5] Last.
+  const ok = pictureEdit(w, [{ editPicture: 3, alt: "Renamed" }, { editPicture: 4, cell: "A1", n: 2, alt: "Second" }]);
+  assert.deepEqual(ok.result.pictures.map((p: { block: number; cell?: string; n: number; alt: string }) => [p.block, p.cell, p.n, p.alt]), [[3, undefined, 1, "In sdt"], [4, "A1", 2, "T2"]]);
+  assert.deepEqual(w.outline()[1], { sdt: ["In control|", "|3x3 Renamed"] });
+  const no = (ops: Record<string, unknown>[], code: string, pattern: RegExp, doc = pictureWord(spec)) => {
+    const out = pictureEdit(doc, ops);
+    assert.equal(out.error?.code, code, JSON.stringify(out));
+    assert.match(out.error.message, pattern);
+    assert.equal(out.touched, false, "nothing was changed");
+    assert.deepEqual(doc.log, []);
+  };
+  no([{ editPicture: 9, delete: true }], "not_found", /^op 1: the document has no \[9\] \(office_read numbers its paragraphs and tables; this call's numbers are those it showed before\)/);
+  no([{ editPicture: 1, delete: true }], "not_found", /^op 1: office_read lists no picture under \[1\]/);
+  no([{ editPicture: 3, n: 2, delete: true }], "not_found", /^op 1: office_read lists 1 picture under \[3\], not 2/);
+  no([{ editPicture: 4, delete: true }], "bad_op", /^op 1: \[4\] is a table: give the cell the picture is listed under, as cell: "A2"/);
+  no([{ editPicture: 3, cell: "A1", delete: true }], "bad_op", /^op 1: \[3\] is a paragraph: cell is for a picture in a table/);
+  no([{ editPicture: 4, cell: "C1", delete: true }], "not_found", /^op 1: the table \[4\] has no cell C1 \(row 1 has 1 cell\)/);
+  no([{ editPicture: 4, cell: "A5", delete: true }], "not_found", /^op 1: the table \[4\] has no cell A5 \(it has 1 row\)/);
+  // A picture of an earlier op's refusal comes first: later ops are not tried.
+  no([{ paragraphs: ["x"] }, { editPicture: 9, delete: true }], "not_found", /^op 2: /);
+});
+
+test("word.edit: a picture moves to a paragraph of its own after the paragraph that holds `after`, or to the end: the same media, its description and title kept, inline, and its old paragraph gone where it held only it", () => {
+  const w = pictureWord(["First", { pics: [{ w: 200, h: 100, alt: "Logo", title: "Brand" }] }, "Middle", "End"]);
+  const out = pictureEdit(w, [{ editPicture: 2, move: true, after: "Middle" }]);
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(w.outline(), ["First|", "Middle|", "|200x100 Logo [Brand]", "End|"]);
+  assert.equal(out.result.pictures[0].did, "moved");
+  // To the end where no `after` is given; a picture inside a text paragraph leaves its text where it was.
+  const v = pictureWord([{ text: "Text", pics: [{ w: 30, h: 20, alt: "Inline", title: "" }] }, "More"]);
+  assert.equal(pictureEdit(v, [{ editPicture: 1, move: true }]).error, undefined);
+  assert.deepEqual(v.outline(), ["Text|", "More|", "|30x20 Inline"]);
+  // Into a table cell after its text, and from a floating place: set inline.
+  const t = pictureWord(["Pic", { text: "", pics: [{ w: 9, h: 9, alt: "F" }] }, { table: [[["Cell text"]]] }]);
+  assert.equal(pictureEdit(t, [{ editPicture: 2, move: true, after: "Cell text" }]).error, undefined);
+  assert.deepEqual(t.outline(), ["Pic|", { table: [[["Cell text|", "|9x9 F"]]] }]);
+  // An `after` that is not in the body, or found twice, is refused before the editor is asked (as an insert's).
+  const x = pictureWord(["Same", "Same", { pics: [{ w: 1, h: 1 }] }]);
+  const refused = pictureEdit(x, [{ editPicture: 3, move: true, after: "Same" }]);
+  assert.equal(refused.error?.code, "quote_ambiguous");
+  assert.equal(refused.touched, false);
+  assert.equal(pictureEdit(x, [{ editPicture: 3, move: true, after: "Nowhere" }]).error?.code, "quote_not_found");
+  assert.equal(pictureEdit(x, [{ editPicture: 3, move: true, after: "Same", nth: 2 }]).error, undefined);
+  assert.deepEqual(x.outline(), ["Same|", "Same|", "|1x1"]);
+});
+
+test("word.edit: a picture is sized with both sides as asked or one side and the other in its present proportions, held to 50 cm, and described again; a size or alt text the editor refuses fails the call as touched", () => {
+  const cm = (n: number) => n * 360_000;
+  // A length as ops.ts takes it: whole twips (1,440 to the inch), 635 EMU each.
+  const emu = (n: number) => Math.round((n * 1440) / 2.54) * 635;
+  const make = () => pictureWord([{ pics: [{ w: cm(8), h: cm(4), alt: "Wide" }] }, { pics: [{ w: cm(2), h: cm(20), alt: "Tall" }] }]);
+  const w = make();
+  const out = pictureEdit(w, [{ editPicture: 1, width: "4cm" }, { editPicture: 2, height: "10cm", alt: "Half" }, { editPicture: 1, width: "6cm", height: "6cm" }]);
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(w.outline(), [`|${emu(6)}x${emu(6)} Wide`, `|${Math.round(emu(10) / 10)}x${emu(10)} Half`]);
+  assert.deepEqual(out.result.pictures.map((p: { did: string; w: number; h: number }) => [p.did, p.w, p.h]), [["changed", cm(8), cm(4)], ["changed", cm(2), cm(20)], ["changed", emu(4), Math.round(emu(4) / 2)]], "the answers say what each picture was when its op came");
+  // The alt text alone: nothing else is set.
+  const a = make();
+  assert.equal(pictureEdit(a, [{ editPicture: 1, alt: "Only words" }]).error, undefined);
+  assert.deepEqual(a.outline()[0], `|${cm(8)}x${cm(4)} Only words`);
+  assert.deepEqual(a.log, ["describe Only words"], "no size set");
+  // 50 cm: the side worked out from the other past it is refused, with the sides it would give; an earlier op's change is taken back by the plugin (touched).
+  const big = make();
+  const tall = pictureEdit(big, [{ editPicture: 1, alt: "First" }, { editPicture: 2, width: "30cm" }]);
+  assert.equal(tall.error?.code, "bad_op");
+  assert.match(tall.error.message, /^op 2: the picture would be 300 cm high at that width \(its proportions: 720000 x 7200000 EMU\), and a side may be 50cm at most: give a smaller width, or both$/);
+  assert.equal(tall.touched, true, "op 1 changed the document: the plugin takes it back");
+  const refused = pictureWord([{ pics: [{ w: cm(8), h: cm(4) }] }], { poisonSize: true });
+  const failed = pictureEdit(refused, [{ editPicture: 1, width: "3cm" }]);
+  assert.equal(failed.error?.code, "failed");
+  assert.match(failed.error.message, /the editor refused the size/);
+  assert.equal(failed.touched, true);
+});
+
+test("word.edit: a picture an earlier op of the call took away is refused by name, and the ops are tried in order: a delete, then a resize of the same picture, fails at the second", () => {
+  const w = pictureWord([{ pics: [{ w: 5, h: 5, alt: "Gone" }] }, "Rest"]);
+  const out = pictureEdit(w, [{ editPicture: 1, delete: true }, { editPicture: 1, width: "3cm" }]);
+  assert.equal(out.error?.code, "not_found");
+  assert.match(out.error.message, /^op 2: the picture is gone: an earlier op of this call took it away \(deleted or moved it, or removed its paragraph\)$/);
+  assert.equal(out.touched, true, "the delete changed the document: the plugin's Undo takes it back");
+  // A paragraph removed by an op of the same call takes its picture with it: the same refusal.
+  const v = pictureWord([{ text: "Doomed", pics: [{ w: 5, h: 5 }] }, "Rest"]);
+  const both = pictureEdit(v, [{ remove: "Doomed" }, { editPicture: 1, delete: true }]);
+  assert.equal(both.error?.code, "not_found");
+  assert.match(both.error.message, /^op 2: the picture is gone/);
+});
+
+/** A workbook whose first sheet holds pictures: [cell as col, row from 0, w, h, alt, offsets?]. */
+function pictureBook(images: { col: number; row: number; w: number; h: number; alt: string; co?: number; ro?: number }[], options: Parameters<typeof workbook>[1] = {}, names: string[] = ["Sheet1"]) {
+  const book = workbook(names, options);
+  images.forEach((img, k) => book.state.sheets[0].images.push({ id: `1_${100 + k}`, src: "", ...img }));
+  return book;
+}
+const sheetEdit = (ops: Record<string, unknown>[]) => ({ kind: "cell.edit", args: editJob("xlsx", ops).args });
+const imagesOf = (book: ReturnType<typeof workbook>, sheet = 0) => book.state.sheets[sheet].images.map((i) => [i.col, i.row, i.co ?? 0, i.ro ?? 0, i.w, i.h, i.alt]);
+
+test("a spreadsheet picture is moved, sized and described by the cell it is anchored at and its number there: SetPosition to a whole cell, SetSize in EMU with one side keeping the picture's proportions, the alt text; the answer says what each was", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }, { col: 1, row: 4, w: 600_000, h: 300_000, alt: "Badge" }, { col: 3, row: 2, w: 900_000, h: 900_000, alt: "" }]);
+  const out = await plugin(book, sheetEdit([{ editPicture: "b5", n: 2, at: "d9" }, { editPicture: "B5", width: "4cm" }, { editPicture: "D3", alt: "Square", height: 20 }]));
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  // Op 2 names the picture at B5 that is still the first one there (the second moved to D9).
+  assert.deepEqual(imagesOf(book), [[1, 4, 0, 0, 1_440_180, 720_090, "Logo"], [3, 8, 0, 0, 600_000, 300_000, "Badge"], [3, 2, 0, 0, 254_000, 254_000, "Square"]]);
+  assert.deepEqual(out.result.ops, 3);
+  assert.deepEqual(out.result.pictures, [
+    { did: "moved", at: "B5", sheet: "Sheet1", n: 2, w: 600_000, h: 300_000, alt: "Badge" },
+    { did: "changed", at: "B5", sheet: "Sheet1", n: 1, w: 2_000_000, h: 1_000_000, alt: "Logo" },
+    { did: "changed", at: "D3", sheet: "Sheet1", n: 1, w: 900_000, h: 900_000, alt: "" },
+  ]);
+  assert.ok(book.state.saves >= 1);
+});
+
+test("a spreadsheet picture that is not there is refused at its op with where the sheet's pictures are, and nothing is changed; a size past 50 cm is refused with its sides", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }, { col: 3, row: 2, w: 100, h: 1_000_000, alt: "Thin" }]);
+  const wrote = { range: "A1", values: [["x"]] };
+  const none = await plugin(book, sheetEdit([wrote, { editPicture: "C3", delete: true }]));
+  assert.equal(none.error?.code, "not_found", JSON.stringify(none));
+  assert.match(none.error.message, /^op 2: there is no picture anchored at C3 of "Sheet1" \(its pictures are at B5, D3\)$/);
+  assert.equal(none.undone, undefined, "found before the first op: nothing was changed, so nothing is taken back");
+  assert.equal(book.state.sheets[0].cells.A1, undefined, "the write before it is never made");
+  assert.equal(book.state.commands, 1, "only the check ran");
+  const second = await plugin(book, sheetEdit([{ editPicture: "B5", n: 2, alt: "x" }]));
+  assert.match(second.error.message, /^op 1: office_read lists 1 picture at B5 of "Sheet1", not 2$/);
+  const wide = await plugin(book, sheetEdit([{ editPicture: "D3", width: "30cm" }]));
+  assert.equal(wide.error?.code, "bad_op");
+  assert.match(wide.error.message, /^op 1: the picture would be 3,?0{3}? cm high|^op 1: the picture would be \d+ cm high at that width/);
+  assert.equal(imagesOf(book)[1][4], 100, "unchanged");
+  const empty = await plugin(workbook(["Sheet1"]), sheetEdit([{ editPicture: "A1", delete: true }]));
+  assert.match(empty.error.message, /^op 1: there is no picture anchored at A1 of "Sheet1" \(it has none\)$/);
+  const missing = await plugin(book, sheetEdit([{ sheet: "Nope", editPicture: "A1", delete: true }]));
+  assert.equal(missing.error?.code, "not_found");
+  assert.match(missing.error.message, /there is no sheet named "Nope"/);
+});
+
+test("a spreadsheet picture moved, sized and described is put back exactly (its place with the offsets it had, its size, its alt text) when a later op fails, in reverse order when the same picture is changed twice", async () => {
+  const book = pictureBook([{ col: 1, row: 4, co: 12_345, ro: 6_789, w: 2_000_000, h: 1_000_000, alt: "Logo" }], { poison: "Z9" });
+  const before = imagesOf(book);
+  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "New" }, { editPicture: "B5", alt: "Again" }, { editPicture: "B5", at: "F20" }, { range: "Z9", values: [[1]] }]));
+  assert.equal(out.error?.code, "failed", JSON.stringify(out));
+  assert.equal(out.undone, true);
+  assert.deepEqual(imagesOf(book), before, "as it was, offsets and all");
+  // A size the editor refuses fails at its op, the step puts back what it changed, and the call is taken back.
+  const refusing = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }], { poisonSize: true });
+  const refused = await plugin(refusing, sheetEdit([{ editPicture: "B5", width: "3cm" }]));
+  assert.equal(refused.error?.code, "failed");
+  assert.match(refused.error.message, /^op 1: the editor refused the size/);
+  assert.deepEqual(imagesOf(refusing), [[1, 4, 0, 0, 2_000_000, 1_000_000, "Logo"]]);
+});
+
+test("a spreadsheet picture is named as office_read numbered it before the call: two deletes at one cell, a number whose picture an earlier op moved, and a move into a cell do not renumber anything", async () => {
+  const first = { col: 1, row: 7, w: 100, h: 100, alt: "First" };
+  const second = { col: 1, row: 7, w: 200, h: 100, alt: "Second" };
+  // office_read: B8 #1 "First", B8 #2 "Second": both are deleted by the numbers it gave.
+  const both = pictureBook([first, second]);
+  const out = await plugin(both, sheetEdit([{ editPicture: "B8", n: 1, delete: true }, { editPicture: "B8", n: 2, delete: true }]));
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(imagesOf(both), []);
+  assert.deepEqual(out.result.pictures.map((p: { n: number; alt: string }) => [p.n, p.alt]), [[1, "First"], [2, "Second"]], "each answer names the picture the number meant before the call");
+  // The editor's order: F2 "Moved in", then B8 #1, B8 #2. The move to B8 does not make "Moved in" the first one there.
+  const moved = pictureBook([{ col: 5, row: 1, w: 50, h: 50, alt: "Moved in" }, first, second]);
+  const into = await plugin(moved, sheetEdit([{ editPicture: "F2", at: "B8" }, { editPicture: "B8", n: 2, alt: "Meant Second" }]));
+  assert.equal(into.error, undefined, JSON.stringify(into));
+  assert.deepEqual(imagesOf(moved).map((i) => [i[0], i[1], i[6]]), [[1, 7, "Moved in"], [1, 7, "First"], [1, 7, "Meant Second"]]);
+  // A picture an earlier op moved away is gone for a later op that names it, whatever now stands at the cell; the call is taken back.
+  const away = pictureBook([first, second, { col: 5, row: 1, w: 50, h: 50, alt: "Other" }]);
+  const gone = await plugin(away, sheetEdit([{ editPicture: "B8", n: 1, at: "D9" }, { editPicture: "B8", n: 1, alt: "Again" }]));
+  assert.equal(gone.error?.code, "not_found", JSON.stringify(gone));
+  assert.match(gone.error.message, /^op 2: the picture is gone: an earlier op of this call took it away \(deleted or moved it\)$/);
+  assert.equal(gone.undone, true);
+  assert.deepEqual(imagesOf(away).map((i) => [i[0], i[1], i[6]]), [[1, 7, "First"], [1, 7, "Second"], [5, 1, "Other"]], "the move is taken back");
+});
+
+test("a spreadsheet picture an op names is looked for by the id found before the call: one a person deleted in between is told so, not swapped for another", async () => {
+  let acted = false;
+  const book = pictureBook([{ col: 1, row: 7, w: 100, h: 100, alt: "First" }, { col: 1, row: 7, w: 200, h: 100, alt: "Second" }, { col: 3, row: 3, w: 50, h: 50, alt: "Other" }], {
+    before: (commands, sheets) => { if (!acted && commands === 2) { acted = true; sheets[0].images.splice(0, 1); } },
+  });
+  const out = await plugin(book, sheetEdit([{ editPicture: "D4", alt: "x" }, { editPicture: "B8", n: 1, alt: "Meant First" }]));
+  assert.equal(out.error?.code, "not_found", JSON.stringify(out));
+  assert.match(out.error.message, /^op 2: the picture B8 of "Sheet1" is not there any more: a person may have deleted it since the call began$/);
+  assert.deepEqual(imagesOf(book).map((i) => i[6]), ["Second", "Other"], "the second picture at B8 is not renamed in its place; the first op is taken back");
+});
+
+test("a picture of a hidden sheet is not deleted (the editor shows the sheet for the plugin's method, if it can at all): the op is refused with the sheet's name; a size or a move needs no shown sheet", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 100, h: 100, alt: "Here" }], {}, ["Sheet1", "Data"]);
+  book.state.sheets[1].hidden = true;
+  book.state.sheets[1].images.push({ id: "1_900", col: 1, row: 1, w: 720_000, h: 360_000, alt: "There", src: "" });
+  const out = await plugin(book, sheetEdit([{ sheet: "Data", editPicture: "B2", delete: true }]));
+  assert.equal(out.error?.code, "sheet_hidden", JSON.stringify(out));
+  assert.match(out.error.message, /^op 1: "Data" is hidden, and the editor deletes a picture of a visible sheet only: show it first$/);
+  assert.deepEqual(book.state.methods, [], "the plugin's method was not called");
+  assert.equal(book.state.sheets[1].hidden, true, "the sheet stays hidden");
+  assert.equal(book.state.sheets[1].images.length, 1);
+  const sized = await plugin(book, sheetEdit([{ sheet: "Data", editPicture: "B2", alt: "Still described" }]));
+  assert.equal(sized.error, undefined, JSON.stringify(sized));
+  // Shown by an op of the call first, it can be deleted.
+  const shown = await plugin(book, sheetEdit([{ showSheet: "Data" }, { sheet: "Data", editPicture: "B2", delete: true }]));
+  assert.equal(shown.error, undefined, JSON.stringify(shown));
+  assert.deepEqual(book.state.sheets[1].images, []);
+});
+
+test("a person's change to a picture wins over the inverse: one they moved, sized or described after the call's step stays as they made it and is named, one they deleted needs nothing", async () => {
+  const run = async (person: (images: FakeImage[]) => void) => {
+    let acted = false;
+    const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }], { poison: "Z9", before: (_commands, sheets) => { if (!acted && sheets[0].images[0]?.alt === "Mine") { acted = true; person(sheets[0].images); } } });
+    const out = await plugin(book, sheetEdit([{ editPicture: "B5", alt: "Mine" }, { range: "A1", values: [[1]] }, { range: "Z9", values: [[1]] }]));
+    return { out, book };
+  };
+  const plain = await run(() => {});
+  assert.equal(plain.out.error?.code, "failed");
+  assert.equal(plain.book.state.sheets[0].images[0].alt, "Logo", "taken back");
+  for (const [what, change, check] of [
+    ["moved", (i: FakeImage[]) => void (i[0].row += 2), (i: FakeImage) => i.row === 6],
+    ["sized", (i: FakeImage[]) => void (i[0].h += 5), (i: FakeImage) => i.h === 1_000_005],
+    ["moved a little", (i: FakeImage[]) => void (i[0].co = 7), (i: FakeImage) => i.co === 7],
+    ["described", (i: FakeImage[]) => void (i[0].alt = "Theirs"), (i: FakeImage) => i.alt === "Theirs"],
+  ] as const) {
+    const { out, book } = await run(change);
+    assert.equal(out.error?.code, "partial", `${what}: ${JSON.stringify(out)}`);
+    assert.match(out.error.message, /Kept as a person changed them after this call: the picture B5 of "Sheet1"\./, what);
+    assert.ok(check(book.state.sheets[0].images[0]), `${what}: theirs stays`);
+  }
+  const deleted = await run((images) => void images.splice(0));
+  assert.equal(deleted.out.error?.code, "failed", "a picture they deleted needs no taking back");
+  assert.equal(deleted.out.undone, true);
+});
+
+test("a spreadsheet picture is deleted by the plugin (RemoveOleObject by its id) and looked for until it is gone; it cannot be taken back, so a later failure leaves it and says so; one the editor does not delete fails the op and says it may still be", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }, { col: 3, row: 2, w: 900_000, h: 900_000, alt: "Other" }], { poison: "Z9" });
+  const ok = await plugin(book, sheetEdit([{ editPicture: "B5", delete: true }]));
+  assert.equal(ok.error, undefined, JSON.stringify(ok));
+  assert.deepEqual(book.state.methods, ["RemoveOleObject"]);
+  assert.deepEqual(imagesOf(book), [[3, 2, 0, 0, 900_000, 900_000, "Other"]]);
+  assert.deepEqual(ok.result.pictures, [{ did: "deleted", at: "B5", sheet: "Sheet1", n: 1, w: 2_000_000, h: 1_000_000, alt: "Logo" }]);
+  // A later failure (here, as ops.ts would refuse it, an op after the delete): the delete stays and is named; the op before it is taken back.
+  const failed = await plugin(book, { kind: "cell.edit", args: { ops: [{ range: "A1", values: [["x"]] }, ...editJob("xlsx", [{ editPicture: "D3", delete: true }]).args.ops, { range: "Z9", values: [[1]] }] } });
+  assert.equal(failed.error?.code, "partial", JSON.stringify(failed));
+  assert.match(failed.error.message, / Not taken back: the picture D3 of "Sheet1" that op 2 deleted\.$/);
+  assert.equal(book.state.sheets[0].cells.A1, undefined);
+  assert.deepEqual(imagesOf(book), []);
+  // The editor takes the id and does not delete: no luck within the wait.
+  const stuck = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "Logo" }], { keepImages: true });
+  const never = await plugin(stuck, sheetEdit([{ editPicture: "B5", delete: true }]));
+  assert.equal(never.error?.code, "partial", JSON.stringify(never));
+  assert.match(never.error.message, /^op 1: the editor did not delete the picture B5 of "Sheet1" within 2 s: a person may be working in that sheet; try again later\./);
+  assert.match(never.error.message, /the change the editor was asked for may still be made/);
+  assert.doesNotMatch(never.error.message, /that op 1 deleted/, "it is not claimed deleted");
+});
+
+test("rows deleted for good after a moved picture: its place is not the old one's any more, so it is not moved back (one above the rows is), and the answer names the op", async () => {
+  const book = pictureBook([{ col: 1, row: 9, w: 100, h: 100, alt: "Low" }, { col: 1, row: 1, w: 100, h: 100, alt: "High" }], { never: (what) => what.startsWith("delete") }, ["Sheet1", "Old"]);
+  const out = await plugin(book, sheetEdit([{ editPicture: "B10", at: "F10" }, { editPicture: "B2", at: "F2" }, { deleteSheet: "Old" }, { deleteRows: "5" }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, / Not taken back: the rows 5:5 of "Sheet1" that op 4 deleted\. Not taken back either, as the rows or columns of their sheet moved after them for good: op 1\.$/);
+  assert.deepEqual(imagesOf(book), [[5, 8, 0, 0, 100, 100, "Low"], [1, 1, 0, 0, 100, 100, "High"]], "the one below the deleted rows stays where the call put it (the deleted row moved it up), the one above is back");
+});
+
+test("cell.read numbers the pictures anchored at one cell (k, in the order the editor lists them) and no others", () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 360_000, h: 360_000, alt: "A" }, { col: 3, row: 2, w: 360_000, h: 360_000, alt: "B" }, { col: 1, row: 4, w: 720_000, h: 360_000, alt: "C" }]);
+  const read = book.run(COMMANDS["cell.read"].source, {}) as { result: { sheets: { pictures: { count: number; items: { a: string; k?: number; alt: string }[] } }[] } };
+  assert.deepEqual(read.result.sheets[0].pictures.items.map((p) => [p.a, p.k, p.alt]), [["B5", 1, "A"], ["D3", undefined, "B"], ["B5", 2, "C"]]);
+});
+
+test("a spreadsheet picture that had no alt text is given one for good: the editor's SetDescription leaves the old text where it is given \"\", so a later failure puts back its size and place and names the alt text as staying", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 2_000_000, h: 1_000_000, alt: "" }], { poison: "Z9" });
+  const out = await plugin(book, sheetEdit([{ editPicture: "B5", width: "5cm", alt: "Fresh" }, { range: "Z9", values: [[1]] }]));
+  assert.equal(out.error?.code, "partial", JSON.stringify(out));
+  assert.match(out.error.message, /The editor cannot read back the alt text of "Sheet1"!B5 \(op 1\), which stay as this call set them\./);
+  assert.deepEqual(imagesOf(book), [[1, 4, 0, 0, 2_000_000, 1_000_000, "Fresh"]]);
+});
+
+test("a picture of a sheet the editor is not showing is deleted with that sheet made the active one for it, and the sheet that was active is shown again", async () => {
+  const book = pictureBook([{ col: 1, row: 4, w: 1_000_000, h: 500_000, alt: "Here" }], { onlyShown: true }, ["Sheet1", "More"]);
+  book.state.sheets[1].images.push({ id: "1_900", col: 1, row: 1, w: 720_000, h: 360_000, alt: "There", src: "" });
+  assert.equal(book.state.active.name, "Sheet1");
+  const out = await plugin(book, sheetEdit([{ sheet: "more", editPicture: "B2", delete: true }]));
+  assert.equal(out.error, undefined, JSON.stringify(out));
+  assert.deepEqual(book.state.sheets[1].images, []);
+  assert.deepEqual(book.state.sheets[0].images.map((i) => i.alt), ["Here"], "the other sheet's picture is not touched");
+  assert.equal(book.state.active.name, "Sheet1", "the sheet that was shown is shown again");
+  // On the sheet already shown nothing is switched.
+  const same = await plugin(book, sheetEdit([{ editPicture: "B5", delete: true }]));
+  assert.equal(same.error, undefined, JSON.stringify(same));
+  assert.deepEqual(book.state.sheets[0].images, []);
 });

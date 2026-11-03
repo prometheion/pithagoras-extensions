@@ -527,7 +527,7 @@ test("frame function, sheets: the sheet shown, the range in view as the editor s
   const w = frameWindow({ Asc: { editor: s.editor } }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
   // B2:D3 (columns 1-3, rows 1-2) on the second sheet, at 100 %.
   const out = await frameFn(w.window, { kind: "cell", index: 1, name: "Sheet2", c1: 1, r1: 1, c2: 3, r2: 2, centre: [2, 1], away: [1, 302], zoom: 1 });
-  assert.deepEqual(out, { data: "QUJD", width: 6 + 30, height: 4 + 10, zoom: 1 });
+  assert.deepEqual(out, { data: "QUJD", width: 6 + 30, height: 4 + 10, zoom: 1, pictures: null }, "no image loader in this editor: its pictures not known");
   assert.deepEqual(s.did, ["sheet 1"]);
   // Corner, column letters over the range, row numbers beside it, the range: from the cells' canvas, then the charts'.
   const parts = w.drawn.map((d) => [d.from === s.ws ? "cells" : "charts", ...d.args.slice(0, 6)]);
@@ -542,6 +542,35 @@ test("frame function, sheets: the sheet shown, the range in view as the editor s
     ["charts", 16, 9, 30, 10, 6, 4],
   ]);
   assert.deepEqual(s.view.active, [1, 1], "the agent's selection left on the range's first cell");
+});
+
+test("frame function, sheets: the sheet's pictures are waited for as a Word page's are, after the sheet is shown and before the range is placed and drawn; one still loading at the wait's end, or one that failed, is counted and the range is taken", async () => {
+  const first = { complete: false };
+  const s = sheetEditor();
+  setTimeout(() => ((first.complete = true), s.did.push("picture")), 150);
+  const w = frameWindow({ Asc: { editor: s.editor }, ...imageLoader(s.editor, { "http://ds/media/image1.png": first }) }, { "ws-canvas": s.ws, "ws-canvas-graphic": s.charts });
+  const began = Date.now();
+  const out = await frameFn(w.window, { kind: "cell", index: 1, name: "Sheet2", c1: 1, r1: 1, c2: 3, r2: 2, centre: [2, 1], away: [1, 302], zoom: 1 });
+  assert.ok(Date.now() - began >= 150, "waited for the picture");
+  assert.deepEqual(s.did, ["sheet 1", "picture"], "the sheet is shown first, the picture waited for after");
+  assert.deepEqual(out.pictures, { loading: 0, failed: 0 });
+  assert.equal(out.data, "QUJD");
+  // Still loading at the wait's end, and one that failed: counted, the range taken all the same.
+  const slow = sheetEditor();
+  const pictures = { "http://ds/media/slow.png": { complete: false }, "http://ds/media/gone.png": null, "http://ds/media/fine.png": { complete: true } };
+  const w2 = frameWindow({ Asc: { editor: slow.editor }, ...imageLoader(slow.editor, pictures) }, { "ws-canvas": slow.ws, "ws-canvas-graphic": slow.charts });
+  const t0 = Date.now();
+  const late = await frameFn(w2.window, { kind: "cell", index: 1, name: "Sheet2", c1: 1, r1: 1, c2: 3, r2: 2, centre: [2, 1], away: [1, 302], zoom: 1, picturesMs: 200 });
+  assert.ok(Date.now() - t0 >= 200 && Date.now() - t0 < 1500);
+  assert.deepEqual(late.pictures, { loading: 1, failed: 1 });
+  assert.equal(late.data, "QUJD");
+  // The range is refused before any wait for pictures where its sheet was changed meanwhile.
+  const gone = sheetEditor();
+  const w3 = frameWindow({ Asc: { editor: gone.editor }, ...imageLoader(gone.editor, pictures) }, { "ws-canvas": gone.ws, "ws-canvas-graphic": gone.charts });
+  const t1 = Date.now();
+  const refused = await frameFn(w3.window, { kind: "cell", index: 1, name: "Renamed", c1: 1, r1: 1, c2: 3, r2: 2, centre: [2, 1], away: [1, 302], zoom: 1, picturesMs: 3000 });
+  assert.equal(refused.error?.code, "sheet_changed");
+  assert.ok(Date.now() - t1 < 1000, "no wait");
 });
 
 test("frame function, sheets: a range out of view is centred from a cell far from it; one too wide at 100 % is taken at 75 %; one too large even then is refused", async () => {

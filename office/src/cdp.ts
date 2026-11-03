@@ -119,7 +119,7 @@ export const FRAME_FN = `async function (t) {
     try { return loader(); } catch (e) { return null; }
   }
   function loader() {
-    var api = window.editor, common = window.AscCommon, maps = [];
+    var api = window.editor || (window.Asc && window.Asc.editor), common = window.AscCommon, maps = [];
     if (!api || !common) return null;
     var entry = function (e) { return e !== null && typeof e === "object" && typeof e.src === "string" && "Image" in e; };
     Object.keys(common).forEach(function (k) {
@@ -145,6 +145,22 @@ export const FRAME_FN = `async function (t) {
     });
     return out;
   }
+  // The document's pictures waited for: until none is loading (picturesMs at most, never into the last picturesSpareMs of
+  // the deadline). A picture that came is drawn by its own load event, which asks the editor for a new frame.
+  async function loaded() {
+    var pics = pictures();
+    if (pics && pics.loading) {
+      var end = Math.min(Date.now() + t.picturesMs, t.until - t.picturesSpareMs);
+      while (pics && pics.loading && Date.now() < end) {
+        await sleep(50);
+        alive();
+        pics = pictures();
+      }
+      await drawn();
+      alive();
+    }
+    return pics;
+  }
   async function word() {
     var api = window.editor;
     if (!api || typeof api.getCountPages !== "function") return stop("not_ready", "the editor is not ready");
@@ -160,18 +176,7 @@ export const FRAME_FN = `async function (t) {
     // Refused before the pictures are waited for: they do not change the page count (a picture's size is in the file),
     // and the wait would hold the browser's shots and the editor's jobs for nothing.
     if (t.page > pages) return stop("no_page", "the document has " + pages + " page" + (pages === 1 ? "" : "s") + " as the editor lays it out now");
-    var pics = pictures();
-    if (pics && pics.loading) {
-      var end = Math.min(Date.now() + t.picturesMs, t.until - t.picturesSpareMs);
-      while (pics && pics.loading && Date.now() < end) {
-        await sleep(50);
-        alive();
-        pics = pictures();
-      }
-      // A picture that came is drawn by its own load event, which asks the editor for a new frame.
-      await drawn();
-      alive();
-    }
+    var pics = await loaded();
     try { api.asc_setDrawCollaborationMarks(false); } catch (e) {}
     api.zoomFitToPage();
     api.goToPage(t.page - 1);
@@ -227,6 +232,9 @@ export const FRAME_FN = `async function (t) {
       alive();
       if (api.asc_getActiveWorksheetIndex() !== t.index) return stop("not_drawn", "the editor did not show the sheet");
     }
+    // The sheet's pictures (and a chart's) waited for as a Word page's are: a picture the agent just put in is fetched from the
+    // Document Server once uploaded, and the grid draws nothing where it has not come.
+    var pics = await loaded();
     var cv = document.getElementById("ws-canvas"), charts = document.getElementById("ws-canvas-graphic");
     if (!cv) return stop("not_drawn", "the editor has no sheet canvas");
     var g = cv.getContext("2d");
@@ -319,6 +327,9 @@ export const FRAME_FN = `async function (t) {
       });
       var shot = jpeg(parts, hx + w, hy + h);
       shot.zoom = zooms[z];
+      // Counted again as the picture is taken, as a Word page's are.
+      if (pics) pics = pictures();
+      shot.pictures = pics ? { loading: pics.loading, failed: pics.failed } : null;
       return shot;
     }
     return stop("range_too_large", "the range does not fit in the editor's view at " + Math.round(zooms[zooms.length - 1] * 100) + " %");

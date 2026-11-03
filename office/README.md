@@ -211,7 +211,92 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   formats, the validation of the cells it lists (of the used range, 20,000 cells at most), its links, its filter and its charts, 50,000 characters of
   it at most. It cannot say the alignment or the borders (OnlyOffice has no getter for them), a formatted table (its
   style, its total row), the data a chart shows or the workbook's named ranges (none is listed by the API; the agent
-  deletes the ones it made by name): `office_screenshot` shows the first three. The agent cannot write comments or tracked
+  deletes the ones it made by name): `office_screenshot` shows the first three.
+  **Pictures** are `office_edit`'s too: the agent puts a PNG, JPEG or GIF from its own folder into a Word document
+  (`{after?, picture, width?, height?, alt?}`: inline in a paragraph of its own after the paragraph that holds `after`,
+  or at the end) or a spreadsheet (`{sheet?, picture, at: "B2", width?, height?, alt?}`: its top left corner in that
+  cell). `picture` is a path below the agent's home or the project's folder, never an address; the file is opened
+  through the portal as the agent itself would read it (with the sandbox on, one it could not read is refused, and a
+  link that leads out of the folder is not followed), told by its first bytes and not by its name, and checked by its
+  header before anything goes to the editor: 5 MB a picture, 10 MB and 20 pictures a call (MB of 1,000,000 bytes; a
+  file used twice counts twice), 40 megapixels (a small PNG can unpack to gigabytes; a GIF's frames count where they
+  reach past its screen) and 100 frames of a GIF (the editor shows its first). The picture goes to the editor as it is,
+  up to its end marker (bytes after it are left out), so the saved file holds the file's own bytes, **its metadata
+  too**: a photo's EXIF (where it was taken, the camera) goes into the document with it. Its data is outside the ops'
+  own 1 MB limit. Its size is its own at 96 dpi (a JPEG turned by its EXIF orientation as it is shown), made smaller to
+  fit the page's text area (Word) or 16 × 12 cm (a sheet), or the `width` and `height` given (a length like `"6cm"`, a
+  number is points, 0.2 to 50 cm; one given keeps the proportions, and the other side may not come out past 50 cm);
+  its alt text is the file's name unless `alt` is given (`""` gives none). A call that fails after its pictures is taken
+  back like the other ops: in Word by the editor's Undo, in a sheet by deleting each picture the call made, except one
+  you moved, resized or described meanwhile, which stays as you made it and which the answer names. (OnlyOffice's builder
+  API has no way to delete a sheet's drawing; Office does it with the plugin method `RemoveOleObject`, which in 10.0.0.1
+  deletes any drawing of a sheet by its id.) `office_read` lists the pictures, with or without `formatting`: under a
+  Word paragraph with their size and alt text (under a table by their cell, `A2: a picture …`, for one put `after` a
+  cell's text), per sheet after its cells (`Pictures: B2 4 × 2 cm "Logo"`, 50 at most); several in one place carry
+  `#1`, `#2`.
+  **The pictures a document has**, a person's and the agent's own, are changed by `{editPicture, …}` ops of
+  `office_edit`: deleted, moved, sized or given new alt text. No crop, rotation or wrapping.
+
+  *Naming a picture.* The agent names a picture by what `office_read` lists it under, and the two sit side by side:
+
+  | `office_read` says | the op that changes that picture |
+  |---|---|
+  | `[2] Their text` and under it `a picture 4 × 2 cm, alt text "Their logo"` | `{editPicture: 2, width: "8cm"}`, `{editPicture: 2, delete: true}` |
+  | `[4] table`, under it `B2: #1 a picture 2 × 1 cm, …` and `B2: #2 a picture 1 × 1 cm, …` | `{editPicture: 4, cell: "B2", n: 2, alt: "New words"}` |
+  | `[3] Floating text` and under it `a picture 3 × 3 cm, alt text "Their floating"` | `{editPicture: 3, move: true, after: "Closing paragraph"}` (to the end: `{editPicture: 3, move: true}`) |
+  | `Pictures: B2 7 × 4.2 cm "Wider red"; B8 #1 1.6 × 0.8 cm "First blue"; B8 #2 2.6 × 1.3 cm "Second green".` | `{sheet?, editPicture: "B8", n: 2, at: "B14"}`, `{editPicture: "B2", height: "3cm"}`, `{editPicture: "B8", delete: true}` |
+
+  In Word `editPicture` is the number in brackets that `office_read` gives the paragraph or the table (a content
+  control's paragraphs are counted in reading order), `cell` is the table cell the picture is listed under, and `n`
+  (from 1) says which of several listed there: they carry `#1`, `#2` in the listing, and only where there are several.
+  In a sheet `editPicture` is the cell the picture is anchored at (its top left corner), and `n` which of the pictures
+  anchored there. The numbers are those `office_read` showed **before the call**, in Word and in a sheet: every picture
+  the ops name is found before the first op changes anything, so a call's own inserts, deletes and moves do not
+  renumber them (two deletes at one cell are `n: 1` and `n: 2`, and a picture moved to a cell is not the first there).
+  An op that names a picture an earlier op of the call has taken away (deleted or moved) is refused, as is a picture
+  that is not listed before the call (one the same call puts in cannot be edited by it, except on a sheet the call makes itself, where the op looks at its turn). The answer repeats each
+  changed picture with what it was (`Pictures: deleted the picture [2], which was 4 × 2 cm, alt text "Their logo"`), so
+  that a number that meant another picture (a person changed the document since it was read) shows; a sheet picture a
+  person deleted since the call began is told so, and is not swapped for another.
+
+  *What an op does.* An op does one thing:
+
+  - `delete: true`.
+  - A move. Word: `move: true` and `after`, `nth`, as an insert places a picture, in an inline paragraph of its own
+    after the paragraph that holds `after`, or at the end. A sheet: `at`, the cell its top left corner moves to. A
+    model that wrote the destination under the other of the two, or under `to`, is understood, and keys given as `null`
+    and `delete` or `move` as `false` are left out, as the model of the real-portal tests filled in every key of the
+    schema.
+  - A new `width`, `height` and `alt` (a length like `"6cm"`, 0.2 to 50 cm). One side keeps the picture's proportions as
+    it is now, and the other may not come out past 50 cm. OnlyOffice cannot take a picture's alt text away, so `alt` is
+    a text.
+
+  A deleted or moved picture takes its paragraph with it where that held nothing else. It stays where it is the only
+  paragraph of a table cell or the document, where it ends a section, and where removing it would leave a table last in
+  its cell or the document or join two tables (Word draws those as one table); a picture inside a paragraph with text
+  leaves the text. A moved picture is the same file (a copy of its media: not made again as a PNG), inline from then on,
+  with its alt text and title. A cropped, rotated or wrapped picture is changed in its size and place only, and the text
+  inside a picture is not read (the guard does not see it either).
+
+  *Undone, and a person's change.* All or nothing as for the other ops:
+
+  - Word: by the editor's Undo, which takes back the whole call. A person's change to the same picture between the
+    agent's read and its call is not guarded (the answer names what the picture was), and what the Undo does to a change
+    a person made to that picture between the call's first op and its failure was not measured: Word is not covered
+    there.
+  - A sheet: a move, a size and an alt text are put back by the steps that made them, except where a person changed the
+    picture since (theirs stays and the answer names it), or where rows or columns were deleted for good after the move
+    (then it stays where the call put it and the answer names the op), or an alt text where the picture had none (the
+    editor cannot put none back).
+  - **A deleted sheet picture cannot be taken back**: OnlyOffice reads a picture's bytes back only as a PNG it draws of
+    the picture (a JPEG or GIF would not be the file it was), so a delete goes last in a call, as deleted rows do, and
+    where a later op of the call fails (a delete of another picture, say) the answer names what stays deleted.
+  - The delete is done by the plugin method `RemoveOleObject`, as the inverse of a picture put in is. It reaches the
+    sheet the editor shows, so the agent's editor shows the picture's sheet for a moment and the sheet it showed before
+    again; a hidden sheet's picture is not deleted (the op is refused: show the sheet first, in the call before the
+    delete or in another).
+
+  The agent cannot write comments or tracked
   changes (it reads comments with `office_comments`). Calls on one document run one at a time.
   A document nobody has open is opened by the agent's editor alone, and saved when it closes. While an agent's editor
   is in a document its session stays open after the people left it, so it is saved as the last person leaves: what
@@ -224,8 +309,8 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   it: a Word page (by number, or the page that holds a quote), laid out once the editor's page count holds still and
   drawn once the document's pictures have loaded (the editor shows a document before its pictures come, and draws
   nothing where one is missing: the picture waits up to 6 s for them, and where one has still not come, or could not
-  be loaded, takes the page as it is and says so to the agent); or
-  a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
+  be loaded, takes the page as it is and says so to the agent; the same for the pictures the agent has just put in);
+  or a range of a sheet with its column letters and row numbers, at 100 % zoom, at 75 % where it does not fit, and
   refused beyond that with the largest range from its first cell that fits (about 23 columns by 41 rows of default
   cells at 100 %, 30 by 55 at 75 %); hidden rows and columns are left out. By default a sheet's used range from A1, as
   much as fits. 1,024 px on the longer side (`large`: as large as the editor draws it, up to 1,568 for a sheet range,
@@ -394,8 +479,9 @@ It is pinned by its digest: a tag that came to name another build is refused, no
   was posted again, a post whose outcome is not known (its editor closed or timed out while it ran), and a message of
   the editor's chat that failed after the ones before it went.
 - **The agent writes only through its editor**, whose saves go through the same revision check as yours, and each
-  document-changing call is recorded in the portal's audit log with the chat that made it, its ops and the revision
-  it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
+  document-changing call is recorded in the portal's audit log with the chat that made it, its ops (for pictures, each
+  file as the agent named it and its bytes, never its data; an edit of a picture is named `picture edits`, apart from
+  `pictures` put in) and the revision it saved; an edit the editor took without a clear outcome (not sent in time, no answer, cut off) is recorded too,
   as such.
 
 ## Data
@@ -462,17 +548,19 @@ agents' editor.
 - The agents' editors are one portal-wide browser: at most three documents at once, and a call that finds all three
   busy is refused (`error:busy`).
 - `office_format` leaves out, for now: small caps, character spacing, paragraph borders and shading, tab stops, text
-  columns, odd and even pages' headers, pictures, and inserting or deleting a table's rows and columns. A link lies
+  columns, odd and even pages' headers, how a picture looks (cropping, borders, text wrapping), and inserting or deleting a table's rows and columns. A link lies
   inside one paragraph, and goes on text, not on table cells. `office_read`'s formatting leaves out what a table that holds a
   picture looks like and the cells of a table inside a cell (`office_screenshot` shows them). For spreadsheets `office_format` leaves out, for now:
-  pictures, cell styles, a table's style and total row, a chart's series and axes beyond what it is made with,
+  how a picture looks, cell styles, a table's style and total row, a chart's series and axes beyond what it is made with,
   sparklines, pivot tables, a sheet's tab colour, grouped rows and columns, protection and print setup; `office_read` does not read a sheet's
   alignment and borders (`office_screenshot` shows them).
 - `office_screenshot` shows one Word page or one sheet range a call, at most what the editor's grid shows at 75 %, and
   100 columns and 200 rows (hidden ones counted); a larger range is taken in parts. A Word page beyond the count the
   editor has laid out after 5 s is refused with that count. Its text is 20,000 characters at most. A Word picture
   waits for all of the document's pictures, not only the page's (the editor does not say which are on a page), so a
-  slow picture elsewhere in the document delays it, up to 6 s. A sheet's picture does not wait for pictures.
+  slow picture elsewhere in the document delays it, up to 6 s. A sheet's range waits for the sheet editor's pictures
+  and charts' images the same way (the grid draws nothing where one has not come), and the answer's first line says how
+  many were still loading or failed, as a Word page's does.
 
 ## Licences
 

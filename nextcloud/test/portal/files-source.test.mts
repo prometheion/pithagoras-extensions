@@ -234,6 +234,7 @@ test("once an instance is set up, the primary person's chat has the source -- an
   assert.equal((await send("/instances", { name: "nextcloud", ...FIELDS })).status, 200);
   await applyDone();
   assert.deepEqual(await sourcesFor(), [{ id: "nextcloud", label: "Nextcloud", writable: true }]);
+  assert.equal((await status()).instances[0].filesSource, true, "and the settings page is told");
   // Files sends no source's answer to a person the source does not show itself to: its routes say there is no such source
   assert.deepEqual(await sourcesFor(asNobody), []);
   for (const route of ["files?path=", "file?path=notes.txt", "file?path=notes.txt&download=1"]) {

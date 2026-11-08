@@ -361,6 +361,12 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
               {status.health.ok ? (t("answering") + (status.health.server ? ` ${status.health.server.name}` : "")) : status.health.error}
             </span>
           </div>
+          {status.filesSource === true && (
+            <div className="flex items-center gap-1.5">
+              <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-ok" />
+              <span>{t("Its files are also in the chat's Files tab.")}</span>
+            </div>
+          )}
           {account && (
             <div className="flex items-center gap-1.5">
               <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${account.bad ? "bg-danger" : status.account?.state === "ok" ? "bg-ok" : "bg-fg-subtle"}`} />

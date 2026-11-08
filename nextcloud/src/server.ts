@@ -21,7 +21,7 @@ import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWrit
 import { CAPABILITIES, APPROVE_TOOLS, EARLIER_APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
 import { normalizeUrl, checkAccountSoon, forgetAccount } from "./account";
-import { filesHookOf, syncSources, dropSources, type FilesHook, type SourceDeps } from "./files-source";
+import { filesHookOf, syncSources, dropSources, sourceIdOf, type FilesHook, type SourceDeps } from "./files-source";
 import { ensureOwn, releaseOwn, containerState, instanceAddress, ownAddress, planOwn, CONTAINER_BASE, IMAGE, OwnPlan } from "./container";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
@@ -331,7 +331,11 @@ async function status(): Promise<Record<string, unknown>> {
   } catch (error) {
     return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message };
   }
-  const rows = await Promise.all(insts.map((inst) => instanceStatus(docker(), plans, inst)));
+  const rows = await Promise.all(insts.map(async (inst) => {
+    const row = await instanceStatus(docker(), plans, inst);
+    // Whether this instance's files are in the chat's Files tab too (with Files 0.2.0 or later): the settings page says so.
+    return filesHook ? { ...row, filesSource: filesSources.has(sourceIdOf(inst.name)) } : row;
+  }));
   // `filesSources`: the sources this has given Files, where Files 0.2.0 or later is there (the settings page says where to find them).
   return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError, ...(filesHook ? { filesSources: [...filesSources] } : {}) };
 }

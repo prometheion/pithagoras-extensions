@@ -158,9 +158,10 @@ export function mcpClient(url: string) {
       const result = (await rpc("tools/list")) as Record<string, unknown>;
       return (result?.tools ?? []) as McpTool[];
     },
-    /** Call a tool of the server: its content parts back, raw -- this module parses none of them. */
-    async callTool(name: string, args: Record<string, unknown>): Promise<McpResult> {
-      const result = (await rpc("tools/call", { name, arguments: args }, TOOL_TIMEOUT_MS)) as McpResult;
+    /** Call a tool of the server: its content parts back, raw -- this module parses none of them. `timeoutMs` is how long
+     * the call is given, for a caller that is itself cut off sooner (Files' source: 30 s). */
+    async callTool(name: string, args: Record<string, unknown>, timeoutMs = TOOL_TIMEOUT_MS): Promise<McpResult> {
+      const result = (await rpc("tools/call", { name, arguments: args }, timeoutMs)) as McpResult;
       return result ?? { content: [] };
     },
     /** Ends the session on the server (best effort), for a client that is not used again. */

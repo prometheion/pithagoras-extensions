@@ -20,8 +20,8 @@ import { setPortal, portal, docker, personGate } from "./host";
 import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
 import { CAPABILITIES, APPROVE_TOOLS, EARLIER_APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
-import { normalizeUrl, checkAccountSoon, forgetAccount } from "./account";
-import { filesHookOf, syncSources, dropSources, sourceIdOf, type FilesHook, type SourceDeps } from "./files-source";
+import { normalizeUrl, checkAccount, checkAccountSoon, forgetAccount, accountIdOf } from "./account";
+import { filesHookOf, syncSources, dropSources, sourceIdOf, wantedSources, type FilesHook, type SourceDeps } from "./files-source";
 import { ensureOwn, releaseOwn, containerState, instanceAddress, ownAddress, planOwn, CONTAINER_BASE, IMAGE, OwnPlan } from "./container";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
@@ -380,13 +380,17 @@ function endpointFor(insts: NextcloudInstance[], inst: NextcloudInstance, tool: 
   return address;
 }
 
-/** How long a tool call of the source in Files is given: Files cuts a call off at 30 s, and ours is gone by then too. */
-const SOURCE_TOOL_MS = Number(process.env.PITHAGORAS_NEXTCLOUD_SOURCE_MS?.trim()) > 0 ? Number(process.env.PITHAGORAS_NEXTCLOUD_SOURCE_MS) : 25_000;
+/** How long one call of Files to the source is given in all, its tool calls and handshakes together: Files cuts a call off at 30 s, and
+ * ours is gone before that. */
+const SOURCE_CALL_MS = Number(process.env.PITHAGORAS_NEXTCLOUD_SOURCE_MS?.trim()) > 0 ? Number(process.env.PITHAGORAS_NEXTCLOUD_SOURCE_MS) : 25_000;
 
 /** What the source in Files is given of this half. */
 const sourceDeps: SourceDeps = {
   instance: (name) => loadInstances().find((inst) => inst.name === name),
-  call: (inst, tool, args) => clientFor(endpointFor(loadInstances(), inst, tool)).callTool(tool, args, SOURCE_TOOL_MS),
+  call: (inst, tool, args, limits) => clientFor(endpointFor(loadInstances(), inst, tool)).callTool(tool, args, limits),
+  callMs: SOURCE_CALL_MS,
+  accountId: (inst) => accountIdOf(inst),
+  log: (text) => portal().log(text),
   personsKnown: () => typeof (portal().http as { person?: unknown } | undefined)?.person === "function",
 };
 
@@ -395,7 +399,10 @@ let filesHook: FilesHook | undefined;
 const filesSources = new Set<string>();
 /** The sources in Files brought to where the instances ask for them (a no-op without Files). */
 function syncFilesSources(): void {
-  syncSources(filesHook, filesSources, loadInstances(), sourceDeps, (text) => portal().log(text));
+  const insts = loadInstances();
+  syncSources(filesHook, filesSources, insts, sourceDeps, (text) => portal().log(text));
+  // Ask Nextcloud who each login is, in the background: its user id is what the download addresses are made of (see accountIdOf).
+  if (filesHook) for (const w of wantedSources(insts)) void checkAccount(insts.find((i) => i.name === w.name)!).catch(() => {});
 }
 
 const nextcloud: ServerHalf = async (portalArg) => {

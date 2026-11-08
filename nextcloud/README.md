@@ -118,7 +118,7 @@ left behind after a removal is not known to the extension: take it out in Settin
   - **A save is checked against the version you opened**: if the file was changed in Nextcloud since, the save is
     refused as a conflict and nothing is written; "Save anyway" writes over the version there is. Files saves text only.
   - **Downloads go to Nextcloud itself**: the download buttons open the file's WebDAV address on your Nextcloud
-    (`…/remote.php/dav/files/<user>/<path>`), which your browser opens with the login it has there — no login of this
+    (`…/remote.php/dav/files/<user>/<path>`, `<user>` being your Nextcloud user id, which can differ from the login name), which your browser opens with the login it has there — no login of this
     extension is in the address, and the file does not pass through the portal. Your browser has to reach the
     Nextcloud's address for that (reading a file in the view goes through the portal and does not need it). A file over
     8 MB is not read into the view: download it.

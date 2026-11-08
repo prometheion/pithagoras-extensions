@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_FILE_BYTES, buildSource, cleanPath, dropSources, errorFromTool, filesHookOf, sourceIdOf, syncSources, wantedSources, type FilesHook, type FilesSource, type SourceContext, type SourceDeps, SourceError } from "../src/files-source.ts";
+import { MAX_ANSWER_BYTES, MAX_FILE_BYTES, buildSource, cleanPath, dropSources, errorFromTool, filesHookOf, sourceIdOf, syncSources, wantedSources, type FilesHook, type FilesSource, type SourceContext, type SourceDeps, SourceError } from "../src/files-source.ts";
 import type { NextcloudInstance } from "../src/config.ts";
 import type { McpResult } from "../src/ncmcp.ts";
 
@@ -33,11 +33,12 @@ function webdav(initial: Record<string, Stored> = {}) {
     "": [{ name: "Docs", is_directory: true }, { name: "notes.txt", is_directory: false, size: 5, content_type: "text/plain", last_modified: "Wed, 21 Oct 2026 07:28:00 GMT" }, { name: "huge.bin", is_directory: false, size: 20 * 1024 * 1024 }],
     Docs: [{ name: "readme.md", is_directory: false, size: 3, last_modified: 1_700_000_000 }],
   };
-  const state = { files, dirs, calls: [] as { tool: string; args: any }[], etag: 100, fail: undefined as string | undefined, hang: false };
-  const call: SourceDeps["call"] = async (_inst, tool, args) => {
+  const state = { files, dirs, calls: [] as { tool: string; args: any }[], limits: [] as { timeoutMs: number; maxBytes: number }[], etag: 100, fail: undefined as string | Error | undefined, hang: false, noEtagOnWrite: false };
+  const call: SourceDeps["call"] = async (_inst, tool, args, limits) => {
     state.calls.push({ tool, args });
+    state.limits.push(limits);
     if (state.hang) await new Promise(() => {});
-    if (state.fail) throw new Error(state.fail);
+    if (state.fail) throw typeof state.fail === "string" ? new Error(state.fail) : state.fail;
     if (tool === "nc_webdav_list_directory") {
       const rows = dirs[(args.path as string | undefined) ?? ""];
       return rows ? text({ files: rows }) : refused(`Not found: ${args.path}`);
@@ -53,7 +54,7 @@ function webdav(initial: Record<string, Stored> = {}) {
       if (args.if_match !== undefined && (!there || there.etag !== args.if_match)) return refused("412 Precondition Failed: the file has changed since it was read");
       const etag = `e${++state.etag}`;
       files.set(args.path, { content: args.content, etag });
-      return text({ path: args.path, created: !there, etag });
+      return text({ path: args.path, created: !there, ...(state.noEtagOnWrite ? {} : { etag }) });
     }
     return refused(`no stand-in for ${tool}`);
   };
@@ -63,9 +64,10 @@ function webdav(initial: Record<string, Stored> = {}) {
 function setup(over: { instance?: NextcloudInstance | undefined; persons?: boolean; files?: Record<string, Stored> } = {}) {
   const dav = webdav(over.files ?? { "notes.txt": { content: "hello", etag: "e1", type: "text/plain" } });
   const holder = { inst: "instance" in over ? over.instance : inst() };
-  const deps: SourceDeps = { instance: (name) => (holder.inst?.name === name ? holder.inst : undefined), call: dav.call, personsKnown: () => over.persons ?? true };
+  const logged: string[] = [];
+  const deps: SourceDeps = { instance: (name) => (holder.inst?.name === name ? holder.inst : undefined), call: dav.call, personsKnown: () => over.persons ?? true, log: (line) => void logged.push(line) };
   const source = buildSource("nextcloud", "Nextcloud", deps);
-  return { dav, source, holder, deps };
+  return { dav, source, holder, deps, logged };
 }
 
 test("a folder is listed with its entries as Files takes them, and the root asks for no path", async () => {
@@ -101,7 +103,7 @@ test("a file is read as text with a version stamp that changes with its etag, an
 
 test("a file that is not there is `missing`, a folder listing that fails shows the server's words", async () => {
   const { source } = setup();
-  await assert.rejects(source.read("nope.txt", context()), { code: "missing", message: /Not found/ });
+  await assert.rejects(source.read("nope.txt", context()), { code: "missing", message: /no such file/i });
   await assert.rejects(source.list("Nope", context()), { code: "missing" });
 });
 
@@ -204,13 +206,15 @@ test("visible asks no one: it is the settings alone", () => {
   assert.equal(dav.calls.length, 0);
 });
 
-test("a Nextcloud that is down or slow is the source's error and no one else's: the words the call failed with are thrown", async () => {
-  const { source, dav } = setup();
+test("a Nextcloud that is down or slow is the source's error and no one else's, in words that carry no address; the detail goes to the log", async () => {
+  const { source, dav, logged } = setup();
   dav.fail = "The MCP server at http://127.0.0.1:8000/mcp could not be reached: fetch failed";
-  await assert.rejects(source.list("", context()), /could not be reached/);
-  await assert.rejects(source.read("notes.txt", context()), /could not be reached/);
-  dav.fail = "The MCP server at http://127.0.0.1:8000/mcp could not be reached: it took longer than 25 s";
-  await assert.rejects(source.write("notes.txt", "x", context()), /took longer than 25 s/);
+  for (const call of [() => source.list("", context()), () => source.read("notes.txt", context())]) {
+    await assert.rejects(call(), (error: Error) => /could not be reached/.test(error.message) && !/127\.0\.0\.1|8000|fetch failed/.test(error.message));
+  }
+  assert.match(logged.join("\n"), /127\.0\.0\.1:8000\/mcp could not be reached: fetch failed/, "the log has the address");
+  dav.fail = Object.assign(new Error("The MCP server at http://127.0.0.1:8000/mcp could not be reached: it took longer than 25 s"), { code: "E_TIMEOUT" }) as never;
+  await assert.rejects(source.write("notes.txt", "x", context()), (error: Error) => /did not answer in time/.test(error.message) && !/127\.0\.0\.1/.test(error.message));
   dav.fail = undefined;
   assert.equal((await source.list("", context())).length, 3, "and it works again when Nextcloud is back");
 });
@@ -353,4 +357,116 @@ test("the registered source is the live one: it follows the settings it is asked
   holder.inst = undefined; // removed in Settings: the source stays registered until the next sync, and shows to no one
   assert.equal(source.visible(context()), false);
   assert.deepEqual(calls, ["nc_webdav_list_directory"]);
+});
+
+// ---- review round 1 ------------------------------------------------------------------------------------------
+
+test("a save whose answer has no etag still hands back the file's version: the next save from the same view is checked, not a \"save anyway\"", async () => {
+  const { source, dav } = setup();
+  const opened = await source.read("notes.txt", context());
+  dav.noEtagOnWrite = true; // a proxy strips the etag from the write's answer
+  const first = await source.write("notes.txt", "mine1", { ...context(), expected: opened.mtime });
+  assert.ok(first.mtime !== undefined && first.mtime > 0, "a version, not nothing (Files would keep 0)");
+  assert.equal(first.mtime, (await source.read("notes.txt", context())).mtime, "and it is the version the file has now");
+  dav.files.set("notes.txt", { content: "someone else's", etag: "other" });
+  await assert.rejects(source.write("notes.txt", "mine2", { ...context(), expected: first.mtime }), { code: "conflict" });
+  assert.equal(dav.files.get("notes.txt")!.content, "someone else's");
+});
+
+test("one call of Files has one time for all its tool calls: each gets what is left, and a save is not begun with too little of it", async () => {
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    const { dav, deps } = setup();
+    const slow: SourceDeps = { ...deps, callMs: 10_000, call: async (i, tool, args, limits) => {
+      const answer = await dav.call(i, tool, args, limits);
+      if (tool === "nc_webdav_read_file") now += 4_000; // the pre-read of a save is slow
+      return answer;
+    } };
+    const source = buildSource("nextcloud", "Nextcloud", slow);
+    await source.write("notes.txt", "x", context());
+    assert.deepEqual(dav.limits.map((l) => l.timeoutMs), [10_000, 6_000], "the write gets what the pre-read left");
+    assert.ok(dav.limits.every((l) => l.maxBytes === MAX_ANSWER_BYTES));
+    // a pre-read that takes nearly all of it: nothing is written, since Files will have reported the failure by the time it would land
+    dav.calls.length = 0;
+    const slower: SourceDeps = { ...slow, call: async (i, tool, args, limits) => {
+      const answer = await dav.call(i, tool, args, limits);
+      if (tool === "nc_webdav_read_file") now += 9_000;
+      return answer;
+    } };
+    await assert.rejects(buildSource("nextcloud", "Nextcloud", slower).write("notes.txt", "y", context()), /did not answer in time/);
+    assert.deepEqual(dav.calls.map((c) => c.tool), ["nc_webdav_read_file"], "no write was sent");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a status in the words counts, a number in a path does not: a folder called 412 is `missing`, not a conflict", async () => {
+  assert.equal(errorFromTool("Folder Reports/412 not found").code, "missing");
+  assert.equal(errorFromTool("Not found: invoices/412.txt").code, "missing");
+  assert.equal(errorFromTool("Not found: Reports/404 and 413").code, "missing");
+  assert.equal(errorFromTool("HTTP 412 for invoices/a.txt").code, "conflict");
+  assert.equal(errorFromTool("Client error '412 Precondition Failed' for url 'https://cloud.example.org/x'").code, "conflict");
+  assert.equal(errorFromTool("status code: 413").code, "too_large");
+  // through a save: the pre-read of a removed file called 412.txt is `missing`, so \"save anyway\" creates it again
+  const { dav } = setup({ files: {} });
+  const call = dav.call;
+  const gone: SourceDeps = { instance: () => inst(), personsKnown: () => true, call: async (i, tool, args, limits) => tool === "nc_webdav_read_file" ? refused("File not found: invoices/412 failed.txt") : call(i, tool, args, limits) };
+  const written = await buildSource("nextcloud", "Nextcloud", gone).write("invoices/412.txt", "again", context());
+  assert.ok(written.mtime && written.mtime > 0);
+  assert.equal(dav.files.get("invoices/412.txt")!.content, "again");
+});
+
+test("the download address is made of the user's id where Nextcloud gave one, and of the login name before that; no double slash", () => {
+  const { deps } = setup({ instance: inst({ username: "anna@example.org", url: "https://cloud.example.org/" }) });
+  const source = buildSource("nextcloud", "Nextcloud", { ...deps, instance: () => inst({ username: "anna@example.org", url: "https://cloud.example.org/" }) });
+  assert.equal(source.url("Docs/a b.txt", context()), "https://cloud.example.org/remote.php/dav/files/anna%40example.org/Docs/a%20b.txt", "not asked yet: the login name");
+  const asked = buildSource("nextcloud", "Nextcloud", { ...deps, instance: () => inst({ username: "anna@example.org", url: "https://cloud.example.org/" }), accountId: () => "anna" });
+  assert.equal(asked.url("Docs/a b.txt", context()), "https://cloud.example.org/remote.php/dav/files/anna/Docs/a%20b.txt");
+});
+
+test("every call checks the person itself: a colleague gets nothing from list, read, url or write even when it is called without visible", async () => {
+  const { source, dav } = setup();
+  for (const role of ["colleague", "guest", "unknown"] as const) {
+    const other = context({ person: { id: "x", name: "X", role } });
+    await assert.rejects(source.list("", other), { code: "missing" }, role);
+    await assert.rejects(source.read("notes.txt", other), { code: "missing" }, role);
+    await assert.rejects(source.write("notes.txt", "x", other), { code: "missing" }, role);
+    assert.throws(() => source.url("notes.txt", other), { code: "missing" }, role);
+  }
+  await assert.rejects(source.list("", context({ person: undefined })), { code: "missing" }, "a request with no person on a portal that tells people apart");
+  assert.equal(dav.calls.length, 0, "not one tool call");
+  // and a portal that does not tell people apart lets whoever is signed in through, as its routes do
+  const old = setup({ persons: false });
+  assert.equal((await old.source.list("", context({ person: undefined }))).length, 3);
+});
+
+test("what the tool or the MCP server said does not reach the Files tab, and goes to the log", async () => {
+  const words = "Not found: https://cloud.internal.example/remote.php/dav/files/anna/Private/plan.txt";
+  assert.doesNotMatch(errorFromTool(words).message, /internal|anna|Private/);
+  assert.doesNotMatch(errorFromTool("boom at https://cloud.internal.example/x").message, /internal/);
+  assert.doesNotMatch(errorFromTool("The file https://cloud.internal.example/y already exists").message, /internal/);
+  const { deps, logged } = setup();
+  const refusing: SourceDeps = { ...deps, call: async (_i, _tool, args) => (refused(`httpx failed for url 'https://cloud.internal.example/remote.php/dav/files/anna/${args.path}'`)) };
+  await assert.rejects(buildSource("nextcloud", "Nextcloud", refusing).read("notes.txt", context()), (error: Error) => !/internal|anna/.test(error.message));
+  assert.match(logged.join("\n"), /cloud\.internal\.example\/remote\.php\/dav\/files\/anna\/notes\.txt/);
+});
+
+test("an answer past the limit is `too_large` whether or not the listing told the size: every call is bounded, the answer is never taken whole", async () => {
+  const { dav, deps } = setup();
+  const bigError = Object.assign(new Error("The answer of the MCP server is larger than 11 bytes"), { code: "E_ANSWER_TOO_BIG" });
+  const bounded: SourceDeps = { ...deps, call: async (i, tool, args, limits) => {
+    await dav.call(i, tool, args, limits);
+    throw bigError;
+  } };
+  const source = buildSource("nextcloud", "Nextcloud", bounded);
+  // never listed (or listed over a minute ago): the size is not known, the call is
+  await assert.rejects(source.read("huge.bin", context()), { code: "too_large", message: /larger than the 8 MB/ });
+  assert.equal(dav.limits[0].maxBytes, MAX_ANSWER_BYTES);
+  assert.ok(MAX_ANSWER_BYTES > (MAX_FILE_BYTES * 4) / 3 && MAX_ANSWER_BYTES < 2 * MAX_FILE_BYTES, "room for a file of the limit as base64, and not much more");
+});
+
+test("a name no instance may have makes no source: a settings file edited by hand does not make Files refuse one", () => {
+  assert.deepEqual(wantedSources([inst({ name: "bad name!" }), inst({ name: "9lives" }), inst({ name: "work" })]).map((w) => w.id), ["nextcloud-work"]);
 });

@@ -13,7 +13,8 @@
 import { createHash } from "node:crypto";
 import type { RequestPerson } from "../../shared/person-gate";
 import { configured, type NextcloudInstance } from "./config";
-import type { McpResult } from "./ncmcp";
+import { isValidInstanceName } from "./instance-name";
+import { ANSWER_TOO_BIG, TIMED_OUT, type McpResult } from "./ncmcp";
 
 /** The id of the extension this one builds on, as its package.json names it under `optional`. */
 export const FILES_EXTENSION = "pithagoras-files";
@@ -64,15 +65,28 @@ export interface SourceDeps {
   /** The instance by its name as the settings hold it now: undefined where it is gone. */
   instance(name: string): NextcloudInstance | undefined;
   /** One WebDAV tool of the instance's Nextcloud MCP server, called through the extension's one way to call a tool (the same
-   * checks as the panel's), within the time Files gives a source. Rejects with why it could not be called. */
-  call(instance: NextcloudInstance, tool: string, args: Record<string, unknown>): Promise<McpResult>;
+   * checks as the panel's), within `limits.timeoutMs` (a handshake it needs included) and taking no more than `limits.maxBytes` of
+   * an answer into memory. Rejects with why it could not be called. */
+  call(instance: NextcloudInstance, tool: string, args: Record<string, unknown>, limits: { timeoutMs: number; maxBytes: number }): Promise<McpResult>;
   /** Whether this portal tells people apart (`http.person`, a Pithagoras of 0.3.0 and later). */
   personsKnown(): boolean;
+  /** How long one call of Files to the source may take in all, the tool calls it makes together (Files cuts it off at 30 s). */
+  callMs?: number;
+  /** The user id Nextcloud gave for the instance's login, where it has been asked (WebDAV addresses are made of it). */
+  accountId?(instance: NextcloudInstance): string | undefined;
+  /** Where the words go that are not shown in the Files tab: what Nextcloud or the MCP server said in failing. */
+  log?(text: string): void;
 }
 
 /** The most of a file the source pulls in to show or send: the panel reads no more than that inline either. */
 export const MAX_FILE_BYTES = 8 * 1024 * 1024;
+/** The most of an answer of a tool that is taken into memory: a file of the limit as base64, and what is around it. */
+export const MAX_ANSWER_BYTES = Math.ceil(MAX_FILE_BYTES / 3) * 4 + 64 * 1024;
+/** How long one call of Files to the source is given by default: Files cuts a call off at 30 s, and ours is gone before that. */
+export const CALL_MS = 25_000;
 const KNOWN_TTL_MS = 60_000;
+/** A save is not begun with less than this of the call's time left. */
+const MIN_WRITE_MS = 3_000;
 const KNOWN_MAX = 2_000;
 
 // ---- helpers -------------------------------------------------------------------------------------------------
@@ -91,10 +105,14 @@ const isRec = (value: unknown): value is Rec => typeof value === "object" && val
 const strOf = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
 
 /** What a tool answered in its first text part: JSON where it is JSON. A tool that said no (isError) is thrown with its words. */
-function dataOf(result: McpResult, tool: string): Rec {
+function dataOf(result: McpResult, tool: string, log?: (text: string) => void): Rec {
   const part = (result.content ?? []).find((p) => p.type === "text");
   const text = typeof part?.text === "string" ? part.text : "";
-  if (result.isError === true) throw errorFromTool(text || `${tool} said no without a word for it.`);
+  if (result.isError === true) {
+    // Its words may carry Nextcloud's addresses and the user's WebDAV paths: the log has them, the Files tab does not.
+    log?.(`Nextcloud: ${tool} said no: ${(text || "(no words)").slice(0, 500)}`);
+    throw errorFromTool(text);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -105,13 +123,31 @@ function dataOf(result: McpResult, tool: string): Rec {
   return parsed;
 }
 
-/** What the MCP server said when a tool failed, as the code Files knows it by. The words stay the server's. */
+/** A status as the server's words give it ("HTTP 412", "status code: 412", "412 Precondition Failed", httpx's "'412 Precondition Failed'"),
+ * and not any number in the text: the words carry the path, and `Reports/412` is a folder's name. */
+const statusIn = (code: number): RegExp => new RegExp(`(?:\\b(?:http|status(?: code)?)\\s*:?\\s*${code}\\b)|(?:^\\s*${code}\\b)|(?:['"]${code}\\s)`, "i");
+const PRECONDITION_FAILED = statusIn(412);
+const NOT_FOUND = statusIn(404);
+const REQUEST_TOO_LARGE = statusIn(413);
+
+const SAID = {
+  exists: "That already exists in Nextcloud.",
+  conflict: "The file was changed in Nextcloud since you opened it.",
+  missing: "There is no such file or folder in Nextcloud.",
+  too_large: "That is too large for Nextcloud to take.",
+  other: "Nextcloud could not do that. The portal's log has what it answered.",
+} as const;
+
+/** What the MCP server said when a tool failed, as the code Files knows it by, with words of our own for it: the server's own may name
+ * Nextcloud's addresses and the user's paths (see dataOf for where they go instead). A status (412, 404, 413) counts where it is said
+ * as one, before the words that could be a file's name. */
 export function errorFromTool(text: string): SourceError {
-  if (/already exists/i.test(text)) return new SourceError(text, "exists");
-  if (/\b412\b|precondition|changed since|modified since/i.test(text)) return new SourceError(text, "conflict");
-  if (/not found|\b404\b|does not exist|doesn't exist|no such/i.test(text)) return new SourceError(text, "missing");
-  if (/\b413\b|too large|too big/i.test(text)) return new SourceError(text, "too_large");
-  return new SourceError(text);
+  if (/already exists/i.test(text)) return new SourceError(SAID.exists, "exists");
+  if (/precondition failed/i.test(text) || PRECONDITION_FAILED.test(text)) return new SourceError(SAID.conflict, "conflict");
+  if (NOT_FOUND.test(text) || /not found|does not exist|doesn't exist|no such/i.test(text)) return new SourceError(SAID.missing, "missing");
+  if (REQUEST_TOO_LARGE.test(text) || /too large|too big/i.test(text)) return new SourceError(SAID.too_large, "too_large");
+  if (/precondition|changed since|modified since/i.test(text)) return new SourceError(SAID.conflict, "conflict");
+  return new SourceError(SAID.other);
 }
 
 /** A time Nextcloud gave as a number (seconds or milliseconds) or a date (the HTTP date of a WebDAV answer), as milliseconds. */
@@ -175,7 +211,19 @@ function readFrom(data: Rec, tool: string): Read {
   return { file: text !== undefined ? { content: text } : { bytes: new Uint8Array(bytes) }, etag, stamp: stampOf(etag, bytes) };
 }
 
-const tooLarge = (size: number): string => `This file (${(size / 1024 / 1024).toFixed(1)} MB) is larger than the ${MAX_FILE_BYTES / 1024 / 1024} MB this source reads. Download it from Nextcloud.`;
+const tooLarge = (size?: number): string => `This file${size !== undefined ? ` (${(size / 1024 / 1024).toFixed(1)} MB)` : ""} is larger than the ${MAX_FILE_BYTES / 1024 / 1024} MB this source reads. Download it from Nextcloud.`;
+
+const NO_ANSWER = "Nextcloud did not answer in time.";
+const NOT_REACHED = "Nextcloud could not be reached. The Nextcloud page in Settings says why.";
+
+/** Why a tool could not be called, in words for the Files tab: the detail (the MCP server's address, a failed connection) goes to the log. */
+function whyNot(error: unknown, tool: string, log?: (text: string) => void): SourceError {
+  if (error instanceof SourceError) return error;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === ANSWER_TOO_BIG) return new SourceError(tooLarge(), "too_large");
+  log?.(`Nextcloud: ${tool} was not called: ${error instanceof Error ? error.message : String(error)}`);
+  return new SourceError(code === TIMED_OUT || (error as Error | undefined)?.name === "TimeoutError" ? NO_ANSWER : NOT_REACHED);
+}
 
 // ---- the source ----------------------------------------------------------------------------------------------
 
@@ -202,9 +250,37 @@ export function buildSource(instanceName: string, label: string, deps: SourceDep
     return inst;
   };
 
-  const readNow = async (inst: NextcloudInstance, path: string): Promise<Read> => {
+  /** Only the person the instances are for: the primary person, on a portal that tells people apart (or whoever is signed in, on one that does not). */
+  const allowed = (context: SourceContext | undefined): boolean => !deps.personsKnown() || context?.person?.role === "primary";
+  // Files asks `visible` before each call, but a source does not rest on it: each call checks the person itself.
+  const guard = (context: SourceContext | undefined): void => {
+    if (!allowed(context)) throw new SourceError("There is no such place.", "missing");
+  };
+
+  /** The tool calls of ONE call of Files: they share its time, so that a slow Nextcloud cannot have this half still at work (a save landing)
+   * after Files has told the person it did not answer. */
+  const session = (inst: NextcloudInstance) => {
+    const deadline = Date.now() + (deps.callMs ?? CALL_MS);
+    const left = (): number => deadline - Date.now();
+    return {
+      left,
+      async call(tool: string, args: Record<string, unknown>): Promise<Rec> {
+        const timeoutMs = left();
+        if (timeoutMs < 1) throw new SourceError(NO_ANSWER);
+        let result: McpResult;
+        try {
+          result = await deps.call(inst, tool, args, { timeoutMs, maxBytes: MAX_ANSWER_BYTES });
+        } catch (error) {
+          throw whyNot(error, tool, deps.log);
+        }
+        return dataOf(result, tool, deps.log);
+      },
+    };
+  };
+
+  const readNow = async (run: ReturnType<typeof session>, path: string): Promise<Read> => {
     const tool = "nc_webdav_read_file";
-    return readFrom(dataOf(await deps.call(inst, tool, { path, parse_document: "raw" }), tool), tool);
+    return readFrom(await run.call(tool, { path, parse_document: "raw" }), tool);
   };
 
   return {
@@ -215,16 +291,17 @@ export function buildSource(instanceName: string, label: string, deps: SourceDep
     visible(context) {
       // The instances are the portal's primary person's (the settings and the tool calls are theirs alone): nobody else sees them.
       // A portal that does not tell people apart has the same rule as the routes of this extension then: whoever is signed in.
-      if (deps.personsKnown() && context?.person?.role !== "primary") return false;
+      if (!allowed(context)) return false;
       const inst = deps.instance(instanceName);
       return inst !== undefined && configured(inst) && inst.capabilities?.files !== false;
     },
 
-    async list(path) {
+    async list(path, context) {
+      guard(context);
       const at = cleanPath(path, "folder");
       const inst = usable();
       const tool = "nc_webdav_list_directory";
-      const files = dataOf(await deps.call(inst, tool, at === "" ? {} : { path: at }), tool).files;
+      const files = (await session(inst).call(tool, at === "" ? {} : { path: at })).files;
       if (!Array.isArray(files)) throw new SourceError(`${tool} did not answer in a way this source reads.`, "failed");
       const out: SourceEntry[] = [];
       for (const raw of files) {
@@ -240,32 +317,39 @@ export function buildSource(instanceName: string, label: string, deps: SourceDep
       return out;
     },
 
-    async read(path) {
+    async read(path, context) {
+      guard(context);
       const at = cleanPath(path, "file");
       const inst = usable();
       const listed = known.get(at);
       if (listed && Date.now() - listed.at < KNOWN_TTL_MS && listed.size > MAX_FILE_BYTES) throw new SourceError(tooLarge(listed.size), "too_large");
-      const read = await readNow(inst, at);
+      const read = await readNow(session(inst), at);
       return { ...read.file, mtime: read.stamp };
     },
 
     // Nextcloud's own WebDAV address of the file, which the person's browser opens with the login it has there: no login of this
     // extension's is in it, and the file is not pulled through the portal.
-    url(path) {
+    // WebDAV's address is made of the user's id, which is not always the login name (an e-mail address, an LDAP login): the id Nextcloud
+    // gave when the account was asked, the login name where it has not been yet.
+    url(path, context) {
+      guard(context);
       const at = cleanPath(path, "file");
       const inst = usable();
-      return `${inst.url}/remote.php/dav/files/${encodeURIComponent(inst.username)}/${at.split("/").map(encodeURIComponent).join("/")}`;
+      const user = deps.accountId?.(inst) ?? inst.username;
+      return `${inst.url.replace(/\/+$/, "")}/remote.php/dav/files/${encodeURIComponent(user)}/${at.split("/").map(encodeURIComponent).join("/")}`;
     },
 
     async write(path, content, context) {
+      guard(context);
       const at = cleanPath(path, "file");
       if (typeof content !== "string") throw new SourceError("There is no text to save", "invalid");
       const inst = usable();
+      const run = session(inst);
       // The server writes a file that is there only against the etag it has now. The file as it stands is read for it; when the person read
       // another version (or it is gone), nothing is written. "Save anyway" (no `expected`) writes against the etag it has now, or creates.
       let current: Read | undefined;
       try {
-        current = await readNow(inst, at);
+        current = await readNow(run, at);
       } catch (error) {
         if (!(error instanceof SourceError) || error.code !== "missing") throw error;
       }
@@ -274,10 +358,18 @@ export function buildSource(instanceName: string, label: string, deps: SourceDep
         if (current.stamp !== context.expected) throw new SourceError("The file was changed in Nextcloud since you opened it.", "conflict");
       }
       if (current && current.etag === undefined) throw new SourceError("Nextcloud did not say which version of the file this is, so it is not overwritten.", "failed");
-      const tool = "nc_webdav_write_file";
-      const saved = dataOf(await deps.call(inst, tool, { path: at, content, ...(current?.etag !== undefined ? { if_match: current.etag } : {}) }), tool);
+      // Files has given up on a call at 30 s: a write begun with too little of our time left would land after the person was told it failed.
+      if (run.left() < Math.min(MIN_WRITE_MS, (deps.callMs ?? CALL_MS) / 5)) throw new SourceError(NO_ANSWER);
+      const saved = await run.call("nc_webdav_write_file", { path: at, content, ...(current?.etag !== undefined ? { if_match: current.etag } : {}) });
       const etag = strOf(saved.etag);
-      return etag !== undefined ? { mtime: stampOf(etag, Buffer.alloc(0)) } : {};
+      if (etag !== undefined) return { mtime: stampOf(etag, Buffer.alloc(0)) };
+      // The answer has no etag (a proxy strips it): the file read again gives it. Without a version Files would keep 0, and the next save
+      // from the same view would go out with no `expected` -- a "save anyway" nobody chose.
+      try {
+        return { mtime: (await readNow(run, at)).stamp };
+      } catch {
+        return {};
+      }
     },
   };
 }
@@ -300,7 +392,8 @@ export function filesHookOf(use: (name: string) => unknown): FilesHook | undefin
 /** The sources the settings ask for: one for each instance that is set up and has its Files on. "Nextcloud" where there is one, and the
  * instance's name added where there are several. */
 export function wantedSources(instances: NextcloudInstance[]): { id: string; name: string; label: string }[] {
-  const usable = instances.filter((inst) => configured(inst) && inst.capabilities?.files !== false);
+  // A name that is none this extension would stand an instance up under (a settings file edited by hand) makes no valid id: left out here.
+  const usable = instances.filter((inst) => isValidInstanceName(inst.name) && configured(inst) && inst.capabilities?.files !== false);
   return usable.map((inst) => ({ id: sourceIdOf(inst.name), name: inst.name, label: usable.length > 1 ? `Nextcloud (${inst.name})` : "Nextcloud" }));
 }
 

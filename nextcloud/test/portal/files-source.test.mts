@@ -295,7 +295,7 @@ test("a Nextcloud that is down or slow is the source's own error, and the chat's
   mode.fail = "The MCP server could not reach Nextcloud: connection refused";
   const down = await get(`${filesAt}/sources/nextcloud/files?path=`);
   assert.equal(down.status, 502);
-  assert.match(((await down.json()) as any).error, /^Nextcloud: .*connection refused/);
+  assert.match(((await down.json()) as any).error, /^Nextcloud: Nextcloud could not do that/, "its own words, not the server's");
   mode.fail = undefined;
   mode.slowMs = 3_000;
   const started = Date.now();
@@ -305,7 +305,7 @@ test("a Nextcloud that is down or slow is the source's own error, and the chat's
   assert.ok(Date.now() - started < 900, "and at once");
   const slowAnswer = await slow;
   assert.equal(slowAnswer.status, 502);
-  assert.match(((await slowAnswer.json()) as any).error, /^Nextcloud: .*took longer than 1 s/);
+  assert.match(((await slowAnswer.json()) as any).error, /^Nextcloud: Nextcloud did not answer in time/);
   assert.ok(Date.now() - started < 2_500, "the call was given up on by the source's own time, not left to run");
   mode.slowMs = undefined;
   await sleep(2_100); // what the stand-in still held answers into the void

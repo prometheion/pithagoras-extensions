@@ -44,16 +44,16 @@ function webdav(initial: Record<string, Stored> = {}) {
       return rows ? text({ files: rows }) : refused(`Not found: ${args.path}`);
     }
     if (tool === "nc_webdav_read_file") {
-      const file = files.get(args.path);
+      const file = files.get(args.path as string);
       if (!file) return refused(`Not found: ${args.path}`);
       return text({ path: args.path, content: file.content, etag: file.etag, ...(file.base64 ? { encoding: "base64" } : {}), ...(file.type ? { content_type: file.type } : {}) });
     }
     if (tool === "nc_webdav_write_file") {
-      const there = files.get(args.path);
+      const there = files.get(args.path as string);
       if (args.if_match === undefined && there) return refused(`The file ${args.path} already exists`);
       if (args.if_match !== undefined && (!there || there.etag !== args.if_match)) return refused("412 Precondition Failed: the file has changed since it was read");
       const etag = `e${++state.etag}`;
-      files.set(args.path, { content: args.content, etag });
+      files.set(args.path as string, { content: args.content as string, etag });
       return text({ path: args.path, created: !there, ...(state.noEtagOnWrite ? {} : { etag }) });
     }
     return refused(`no stand-in for ${tool}`);
@@ -156,9 +156,9 @@ test("a change between the check and the write is `conflict` as well: the server
   const { source, dav } = setup();
   const read = await source.read("notes.txt", context());
   const call = dav.call;
-  const racing: SourceDeps = { instance: () => inst(), personsKnown: () => true, call: async (i, tool, args) => {
+  const racing: SourceDeps = { instance: () => inst(), personsKnown: () => true, call: async (i, tool, args, limits) => {
     if (tool === "nc_webdav_write_file") dav.files.set("notes.txt", { content: "raced", etag: "e8" }); // lands just before the write
-    return call(i, tool, args);
+    return call(i, tool, args, limits);
   } };
   await assert.rejects(buildSource("nextcloud", "Nextcloud", racing).write("notes.txt", "mine", { ...context(), expected: read.mtime }), { code: "conflict" });
   assert.equal(dav.files.get("notes.txt")!.content, "raced");
@@ -174,10 +174,10 @@ test("\"save anyway\" (no `expected`) writes over the version there is, and a ne
 });
 
 test("a file whose version Nextcloud does not name is not overwritten blindly", async () => {
-  const { source, dav } = setup();
+  const { dav } = setup();
   const call = dav.call;
-  const mute: SourceDeps = { instance: () => inst(), personsKnown: () => true, call: async (i, tool, args) => {
-    const result = await call(i, tool, args);
+  const mute: SourceDeps = { instance: () => inst(), personsKnown: () => true, call: async (i, tool, args, limits) => {
+    const result = await call(i, tool, args, limits);
     return tool === "nc_webdav_read_file" ? text({ content: "hello" }) : result; // no etag in the answer
   } };
   await assert.rejects(buildSource("nextcloud", "Nextcloud", mute).write("notes.txt", "x", context()), { code: "failed", message: /which version/ });

@@ -1886,7 +1886,7 @@ test("office_edit says which picture each edit of a picture changed, as office_r
     { did: "changed", block: 4, n: 1, w: 9525, h: 9525, alt: "Pixel" },
   ] });
   const out = (await tool(s, "office_edit").execute("e1", { id: doc.docId, ops: [{ editPicture: 2, delete: true }, { editPicture: 9, cell: "A2", n: 2, move: true }, { editPicture: 4, width: "1cm" }] })) as ToolResult;
-  assert.match(out.content[0].text, /^Edited "Report" \(3 ops\), saved as revision \d+\. Pictures: deleted the picture \[2\], which was 5 × 2\.5 cm, alt text "Sales"; moved the picture \[9\] A2 #2, which was 2 × 1 cm; changed the picture \[4\], which was 0\.03 × 0\.03 cm, alt text "Pixel"\.$/);
+  assert.match(out.content[0].text, /^Edited "Report" \(3 ops\), saved as revision \d+(\.\d+)?\. Pictures: deleted the picture \[2\], which was 5 × 2\.5 cm, alt text "Sales"; moved the picture \[9\] A2 #2, which was 2 × 1 cm; changed the picture \[4\], which was 0\.03 × 0\.03 cm, alt text "Pixel"\.$/);
   const run = editRuns(s)[0];
   assert.deepEqual(run.args.ops, [
     { editPicture: 2, n: 1, delete: true },

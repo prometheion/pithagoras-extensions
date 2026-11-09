@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { checkAccount, checkAccountSoon, forgetAccount, normalizeUrl } from "../src/account.ts";
+import { accountIdOf, checkAccount, checkAccountSoon, forgetAccount, normalizeUrl } from "../src/account.ts";
 
 test("an address is https, or http where the person chose it; no login in it, no query, no trailing slash", () => {
   assert.deepEqual(normalizeUrl("https://cloud.example.org/", false), { url: "https://cloud.example.org" });
@@ -29,6 +29,7 @@ test("an address is https, or http where the person chose it; no login in it, no
 let basic = "Basic " + Buffer.from("anna:good").toString("base64");
 let mode: "nextcloud" | "html" | "error" | "slow" = "nextcloud";
 let asked = 0;
+let userId = "anna"; // the id Nextcloud gives for the login
 const nc = http.createServer((req, res) => {
   asked++;
   if (mode === "slow") return void setTimeout(() => res.end("{}"), 300);
@@ -36,7 +37,7 @@ const nc = http.createServer((req, res) => {
     if (req.headers.authorization !== basic) return res.writeHead(401).end("{}");
     if (mode === "html") return res.writeHead(200, { "content-type": "text/html" }).end("<html>a login page</html>");
     if (mode === "error") return res.writeHead(500).end("boom");
-    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ocs: { data: { id: "anna", displayname: "Anna Example" } } }));
+    return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ocs: { data: { id: userId, displayname: "Anna Example" } } }));
   }
   res.writeHead(404).end();
 });
@@ -49,7 +50,7 @@ after(() => {
 const inst = (password: string) => ({ name: "uni", url, username: "anna", password });
 
 test("the account is asked of the Nextcloud: ok with its name, refused, not Nextcloud, not reachable", async () => {
-  assert.deepEqual(await checkAccount(inst("good")), { state: "ok", name: "Anna Example" });
+  assert.deepEqual(await checkAccount(inst("good")), { state: "ok", name: "Anna Example", id: "anna" });
   const refused = await checkAccount(inst("revoked"));
   assert.equal(refused.state, "unauthorized");
   mode = "html";
@@ -82,4 +83,15 @@ test("a host that is slow to answer shows as checking, and the answer is there b
   assert.deepEqual(await checkAccountSoon(inst("slow"), 30), { state: "checking" });
   await new Promise((r) => setTimeout(r, 400));
   assert.notEqual((await checkAccountSoon(inst("slow"), 30)).state, "checking");
+});
+
+test("the user id Nextcloud gave is kept for a login, and is not the login name where they differ (an e-mail address as the login)", async () => {
+  mode = "nextcloud";
+  userId = "anna";
+  const byMail = { name: "uni", url, username: "anna@example.org", password: "mail" };
+  basic = "Basic " + Buffer.from("anna@example.org:mail").toString("base64");
+  assert.equal(accountIdOf(byMail), undefined, "not asked yet");
+  assert.equal((await checkAccount(byMail)).id, "anna");
+  assert.equal(accountIdOf(byMail), "anna");
+  assert.equal(accountIdOf({ ...byMail, password: "other" }), undefined, "another login is another answer");
 });

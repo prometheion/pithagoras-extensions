@@ -80,6 +80,7 @@ export const de = {
   "entry present": "Eintrag vorhanden",
   "entry absent": "Eintrag fehlt",
   "answering": "antwortet",
+  "Its files are also in the chat's Files tab.": "Die Dateien stehen auch im Dateien-Tab des Chats.",
   "Working: {task}": "Am Werk: {task}",
 
   // Dateien & Freigaben

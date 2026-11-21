@@ -1,0 +1,34 @@
+{
+  "name": "@pithagoras/saga",
+  "version": "0.1.0",
+  "description": "Saga for Pithagoras: a chat mode in which the agent is the game master of a story you play, a cultivation saga told as a film in a panel beside the chat, with choices, checks the server rolls, fights and puzzles",
+  "type": "module",
+  "keywords": ["pi-package", "pithagoras", "rpg", "game", "story", "xianxia", "cultivation"],
+  "homepage": "https://github.com/prometheion/pithagoras-extensions/tree/main/saga#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prometheion/pithagoras-extensions.git",
+    "directory": "saga"
+  },
+  "bugs": {
+    "url": "https://github.com/prometheion/pithagoras-extensions/issues"
+  },
+  "pi": {},
+  "pithagoras": {
+    "client": "./web/client.js",
+    "style": "./web/client.css",
+    "server": "./server.js"
+  },
+  "files": ["web", "server.js", "README.md", "NOTICE", "LICENSE"],
+  "scripts": {
+    "build": "node build.mjs && tsc --noEmit -p .",
+    "test": "node --import tsx --test --test-timeout=60000 test/*.test.mts",
+    "test:portal": "node -e \"\"",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "react-icons": "5.7.0"
+  },
+  "publishConfig": { "access": "public" },
+  "license": "Apache-2.0"
+}

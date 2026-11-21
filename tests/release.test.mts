@@ -45,7 +45,7 @@ function runStep(script: string, exists: boolean): { exit: number; asked: string
 /** The workflows that attach the sources the GPL asks for: a re-run makes sure they are on the release. */
 const WITH_SOURCES = ["blender-release.yml", "godot-release.yml"];
 
-for (const file of ["nextcloud-release.yml", "office-release.yml", "inline-ui-release.yml", ...WITH_SOURCES]) {
+for (const file of ["nextcloud-release.yml", "office-release.yml", "inline-ui-release.yml", "saga-release.yml", ...WITH_SOURCES]) {
   test(`${file}: a re-run finds the release made already and goes on; a first run makes it`, () => {
     const script = releaseStep(file);
     const again = runStep(script, true);

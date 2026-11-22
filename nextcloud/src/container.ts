@@ -20,6 +20,7 @@ import type { ContainerSpec, Docker } from "../../shared/docker-api";
 import { SPEC_LABEL, stamped } from "../../shared/service";
 import { NextcloudInstance, DEFAULT_INSTANCE_NAME } from "./config";
 import { ownName } from "./host";
+import { appsFor } from "./capabilities";
 
 /** The image by its release tag: what latest pointed to when this version was made (0.203.0, 2026-10-29), and
  * what it is tested with. It is downloaded by this tag (Docker for extensions takes an image by its tag), and a
@@ -132,7 +133,9 @@ export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: nu
       // network's: tool calls by name, with timings. Nothing of this extension reads it.
       "METRICS_ENABLED=false",
     ],
-    Cmd: ["--host", "127.0.0.1", "--port", String(port)],
+    // Only the apps of the families that are on are served (`--enable-app`, once for each: the server serves every app
+    // where it gets none), so the resources of a family that is off do not exist for pi's resource tools to read.
+    Cmd: ["--host", "127.0.0.1", "--port", String(port), ...appsFor(inst).flatMap((app) => ["--enable-app", app])],
     HostConfig: {
       NetworkMode: networkMode,
       CapDrop: ["ALL"],

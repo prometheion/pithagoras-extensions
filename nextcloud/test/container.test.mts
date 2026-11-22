@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ensureOwn, makeSpec, planOwn, releaseOwn, IMAGE, IMAGE_BY_DIGEST, IMAGE_DIGEST, CONTAINER_BASE, PORT } from "../src/container.ts";
+import { CAPABILITIES } from "../src/capabilities.ts";
 import { SPEC_LABEL } from "../../shared/service.ts";
 import type { NextcloudInstance } from "../src/config.ts";
 import { fakeDocker } from "./fake-docker.mts";
@@ -48,6 +49,26 @@ test("the container holds no capability, no new privileges, a memory and process
   assert.deepEqual(host.RestartPolicy, { Name: "unless-stopped" });
   assert.equal(host.NetworkMode, "host");
   assert.ok((spec.Labels as Record<string, string>)[SPEC_LABEL]);
+});
+
+test("the container serves the apps of the families that are on, so the resources of a family that is off do not exist", async () => {
+  const fake = world();
+  const cmd = async (capabilities?: Record<string, boolean>) => (await makeSpec(fake.docker, inst("nextcloud", capabilities ? { capabilities } : {}), 8123)).Cmd as string[];
+  const served = (c: string[]) => c.flatMap((word, i) => (c[i - 1] === "--enable-app" ? [word] : [])).sort();
+  const all = await cmd();
+  assert.deepEqual(all.slice(0, 4), ["--host", "127.0.0.1", "--port", "8123"]);
+  assert.deepEqual(served(all), ["calendar", "collectives", "contacts", "cookbook", "deck", "mail", "news", "notes", "sharing", "shopping_list", "tables", "talk", "webdav"]);
+  const some = await cmd({ notes: false, cookbook: false, deck: false, files: false });
+  assert.deepEqual(served(some), ["calendar", "collectives", "contacts", "mail", "news", "sharing", "shopping_list", "tables", "talk"]);
+  for (const gone of ["notes", "cookbook", "deck", "webdav"]) assert.equal(some.includes(gone), false, gone);
+  // every family off: the server would serve all of them given none, so the one app without resources is named
+  const none = await cmd(Object.fromEntries(CAPABILITIES.map((cap) => [cap.id, false])));
+  assert.deepEqual(served(none), ["webdav"]);
+  // a different set of families is a different container: it is remade where the choice changes, and only then
+  const plan = planOwn([inst("nextcloud")]).get("nextcloud")!;
+  assert.equal(await ensureOwn(fake.docker, plan), true);
+  assert.equal(await ensureOwn(fake.docker, plan), false);
+  assert.equal(await ensureOwn(fake.docker, planOwn([inst("nextcloud", { capabilities: { deck: false } })]).get("nextcloud")!), true);
 });
 
 test("the endpoint takes only its own loopback Host and no browser's Origin, and the image's metrics server is off", async () => {

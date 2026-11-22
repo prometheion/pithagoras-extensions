@@ -141,14 +141,14 @@ left behind after a removal is not known to the extension: take it out in Settin
   Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List, Notes, Talk, Tables). The few
   tools the server has outside these families (its own sign-in helpers and the like) cannot be turned off here, and
   the panel does not call them.
-  - **A family that is off still has its resources readable.** The choice keeps a family's *tools* out of the chats
-    (the entry's `toolExposure`). pi's resource tools (`list_mcp_resources`, `read_mcp_resource`) are not under it: they
-    reach every server that has resources, and the Nextcloud server has resource templates for Notes, Cookbook and
-    Deck (`nc://Notes/{note_id}`, `nc://Cookbook/{recipe_id}`, Deck boards, stacks and cards by id). With Notes, Cookbook
-    or Deck off, the agent can still read a note, a recipe or a card when it has its id, and what it reads is not asked
-    about. The adapter offered no resource templates, so this is new with the move to pi's own MCP support; pi has no
-    per-server switch for resources yet. Where that matters, do not give this server to a chat at all (switch the entry
-    off in Settings → MCP), or leave the instance's Nextcloud account without what the family would show.
+  - **A family that is off is not served at all.** Besides the entry's `toolExposure`, which keeps its *tools* out of
+    the chats, the instance's container is started with only the apps of the families that are on (the server's own
+    `--enable-app`, once for each; the server serves every app where it is given none). So the resources of a family that
+    is off (`nc://Notes/{note_id}`, `nc://Cookbook/{recipe_id}`, Deck boards, stacks and cards) do not exist, and pi's resource
+    tools (`list_mcp_resources`, `read_mcp_resource`), which reach every server's resources, find none of them. A change
+    of the choice makes the container again (a few seconds). With every family off the server is still given one app,
+    Files, whose tools the entry hides and this extension refuses, as it serves every app otherwise; the image has
+    no resource for Files.
   - **It is not a trusted server.** What Nextcloud returns is other people's words (mail, news, files and boards others
     share, invitations, recipes from any site), so the portal's guard treats it like any outside content: wrapped,
     scanned for injection, and a chat that has read it is tainted. (Version 0.1.0 registered the servers as trusted;
@@ -265,8 +265,7 @@ non-root user: those were not tried against the image, and a server that fails t
   tool's name in the chats is now `mcp__<instance>__<tool>` (was `<instance>_<tool>`); a switch of a chat's tools that
   names the old name has to be set again. Needs a Pithagoras with `portal.mcp.set`'s `approve` option: on one without
   it the extension writes no entry and says so in the instance's task (every call would run unasked there). A family
-  that is off keeps only its tools out of the chats; its resources stay readable through pi's resource tools (see
-  above).
+  that is off is not served by the container at all, so neither its tools nor its resources exist (see above).
 
 ## Licences
 

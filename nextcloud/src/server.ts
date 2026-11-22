@@ -284,7 +284,7 @@ async function instanceStatus(d: NonNullable<ReturnType<typeof docker>>, plans: 
   let capabilities: { available: Record<string, boolean>; on: Record<string, boolean> } | undefined;
   if (health.ok && address) {
     try {
-      capabilities = { available: availableFromTools(await toolNames(address)), on: inst.capabilities ? { ...inst.capabilities } : {} };
+      capabilities = { available: availableFromTools(await toolNames(address), inst), on: inst.capabilities ? { ...inst.capabilities } : {} };
     } catch {
       // the endpoint did not list its tools right now: availability stays unknown for this pass
     }

@@ -237,7 +237,8 @@ test("a saved instance stands in a container of its own, on the portal's network
   assert.equal(made.State, "running");
   assert.deepEqual(made.made?.Env?.slice(0, 3), [`NEXTCLOUD_HOST=${ncUrl}`, "NEXTCLOUD_USERNAME=anna", "NEXTCLOUD_PASSWORD=the-password"]);
   assert.ok(made.made?.Env?.includes(`MCP_ALLOWED_HOSTS=127.0.0.1:${mcpPort}`), "only its own loopback Host is taken");
-  assert.deepEqual(made.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)]);
+  assert.deepEqual(made.made?.Cmd?.slice(0, 4), ["--host", "127.0.0.1", "--port", String(mcpPort)]);
+  assert.equal(made.made?.Cmd?.filter((word: string) => word === "--enable-app").length, CAPABILITIES.length, "every family is on: every app is served");
   assert.equal(made.made?.HostConfig?.NetworkMode, "host"); // this portal is on the machine itself: no container between
   assert.equal(made.made?.Image, IMAGE_BY_DIGEST, "from the digest of the build it was tested with");
   assert.deepEqual(made.made?.HostConfig?.CapDrop, ["ALL"]);
@@ -261,10 +262,18 @@ test("a family that is turned off is hidden in the entry's toolExposure, by the 
   assert.equal((await save("uni", { capabilities: { news: false, talk: false } })).status, 200);
   await applyDone();
   assert.deepEqual(servers().uni, { url, toolExposure: { "nc_news_*": "hidden", "talk_*": "hidden" } });
+  const served = (name: string) => (ncContainer(name).made.Cmd as string[]).filter((_w, i, cmd) => cmd[i - 1] === "--enable-app");
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("news"), false, "the container does not serve a family that is off: its resources do not exist");
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("talk"), false);
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("notes"), true);
+  const row = (await until((s) => s.instances.some((i: any) => i.name === "uni" && i.capabilities), "the capabilities in the status")).instances.find((i: any) => i.name === "uni");
+  assert.equal("news" in row.capabilities.available, false, "a family that is off is not reported missing: its switch must stay usable on the page");
+  assert.equal(row.capabilities.available.notes, false, "the stand-in serves no tools: a family that is on and not served is missing");
   assert.deepEqual(approve("uni"), APPROVE_TOOLS, "writing the entry again keeps what is asked about");
   assert.equal((await save("uni", { capabilities: {} })).status, 200);
   await applyDone();
   assert.deepEqual(servers().uni, { url });
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("news"), true, "and the container serves it again");
 });
 
 test("an entry an earlier version wrote, with the adapter's keys, is written again as pi's own: the families left out stay left out, a person's tuning stays, a login is not carried", async () => {
@@ -388,9 +397,10 @@ test("a tool call goes over this instance's server and back with its answer raw;
 
 test("a save with nothing changed makes nothing again and writes nothing again; one that changes the password remakes the container where it stands", async () => {
   const written = statSync(mcpFile()).mtimeMs;
+  const base = docker.created.length;
   await save("uni");
   await applyDone(); // the no-op run of that save stands done
-  assert.equal(docker.created.length, 1, "nothing made again where nothing changed");
+  assert.equal(docker.created.length, base, "nothing made again where nothing changed");
   assert.equal(statSync(mcpFile()).mtimeMs, written, "and its entry not written again");
 
   ncPassword = "the-other";
@@ -398,11 +408,12 @@ test("a save with nothing changed makes nothing again and writes nothing again; 
   await applyDone(); // its remake stands done
   const uni = ncContainer("pithagoras-nextcloud-mcp-uni");
   assert.equal(uni.made?.Env?.find((e) => e.startsWith("NEXTCLOUD_PASSWORD=")), "NEXTCLOUD_PASSWORD=the-other");
-  assert.deepEqual(uni.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)], "remade where it stood: the port stands as it was");
-  assert.equal(docker.created.length, 2);
+  assert.deepEqual(uni.made?.Cmd?.slice(0, 4), ["--host", "127.0.0.1", "--port", String(mcpPort)], "remade where it stood: the port stands as it was");
+  assert.equal(docker.created.length, base + 1);
 });
 
 test("an address that is not https (unless chosen), has a login in it or is no address is refused, and a new host or user needs the password typed again", async () => {
+  const made = docker.created.length;
   for (const [url, why] of [["cloud.example.org", /not an address/], ["file:///etc/passwd", /https/], ["http://nas.example.org", /unencrypted/], ["https://anna:pw@cloud.example.org", /login/]] as const) {
     const answer = await save("uni", { url, allowHttp: false, password: "" });
     assert.equal(answer.status, 400, url);
@@ -414,7 +425,7 @@ test("an address that is not https (unless chosen), has a login in it or is no a
   const user = await post("/instances", { name: "uni", username: "mallory" });
   assert.equal(user.status, 400);
   assert.equal(ncContainer("pithagoras-nextcloud-mcp-uni").made?.Env?.[0], `NEXTCLOUD_HOST=${ncUrl}`, "nothing changed");
-  assert.equal(docker.created.length, 2, "and nothing made");
+  assert.equal(docker.created.length, made, "and nothing made");
   assert.equal((await post("/instances", { name: "uni", url: "https://cloud.elsewhere.example", password: "new" })).status, 200, "with the password it is a save");
   await applyDone();
   await save("uni", { password: "the-other" }); // and back
@@ -427,11 +438,14 @@ test("an address an earlier version saved only trimmed (a trailing slash, capita
   const made = docker.created.length;
   stored.instances.find((i: any) => i.name === "uni").url = `${ncUrl}/`.replace("http://", "HTTP://");
   writeFileSync(settings, JSON.stringify(stored));
-  const answer = await save("uni", { password: "", url: ncUrl, capabilities: { news: false } });
+  const answer = await save("uni", { password: "", url: ncUrl });
   assert.equal(answer.status, 200, await answer.clone().text());
   await applyDone();
   assert.equal(JSON.parse(readFileSync(settings, "utf8")).instances.find((i: any) => i.name === "uni").url, ncUrl, "kept normalized from now on");
   assert.equal(docker.created.length, made, "the same host: nothing made again for it");
+  await save("uni", { password: "", capabilities: { news: false } }); // another family set: the container is made for it
+  await applyDone();
+  assert.equal(docker.created.length, made + 1);
   await save("uni", { password: "", capabilities: {} });
   await applyDone();
 });
@@ -469,7 +483,7 @@ test("a second instance gets a container of its own, and the port the first one 
   const made = ncContainer("pithagoras-nextcloud-mcp-second");
   assert.ok(made, "a container of its own stands");
   assert.equal(made.State, "running");
-  assert.deepEqual(made.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)], "the first's freed port is the lowest free one again");
+  assert.deepEqual(made.made?.Cmd?.slice(0, 4), ["--host", "127.0.0.1", "--port", String(mcpPort)], "the first's freed port is the lowest free one again");
 
   const row = (await until((s) => s.instances.some((i: any) => i.name === "second"), "the second instance in the status")).instances.find((i: any) => i.name === "second");
   assert.equal(row.address, url);
@@ -567,10 +581,12 @@ test("a program on the port before the container starts keeps it from starting, 
 });
 
 test("a container that keeps restarting is not taken for what answers on its port", async () => {
-  const c = ncContainer("pithagoras-nextcloud-mcp-third");
   const before = servers().third;
-  // Docker starts it again and again (it cannot listen): each time it runs only for a moment
+  // Docker starts it again and again (it cannot listen): each time it runs only for a moment. Looked up each time:
+  // a save of another family set makes the container anew.
   const restart = () => {
+    const c = ncContainer("pithagoras-nextcloud-mcp-third");
+    if (!c) return;
     c.started = new Date().toISOString();
     c.restarts = (c.restarts ?? 0) + 1;
   };

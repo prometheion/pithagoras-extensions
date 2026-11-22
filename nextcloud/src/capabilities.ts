@@ -17,26 +17,28 @@ export interface Capability {
   label: string;
   /** The raw tool-name prefixes whose tools belong to the family. */
   prefixes: string[];
+  /** The name the server's own `--enable-app` calls the app that serves the family (its tools and its resources). */
+  app: string;
 }
 
 /** The families, in the order the settings page lists them. Files and sharing stand apart -- the panel shows them
  * under one tab, but what an instance keeps out of the chats' tool list is kept separate for each of them. */
 export const CAPABILITIES: Capability[] = [
-  { id: "shopping", label: "Shopping List", prefixes: ["nc_shopping_list_"] },
-  { id: "cookbook", label: "Cookbook", prefixes: ["nc_cookbook_"] },
-  { id: "notes", label: "Notes", prefixes: ["nc_notes_"] },
-  { id: "files", label: "Files", prefixes: ["nc_webdav_"] },
-  { id: "sharing", label: "Sharing", prefixes: ["nc_share_"] },
-  { id: "deck", label: "Deck", prefixes: ["deck_"] },
-  { id: "calendar", label: "Calendar", prefixes: ["nc_calendar_"] },
-  { id: "contacts", label: "Contacts", prefixes: ["nc_contacts_"] },
-  { id: "mail", label: "Mail", prefixes: ["nc_mail_"] },
-  { id: "news", label: "News", prefixes: ["nc_news_"] },
-  { id: "collectives", label: "Collectives", prefixes: ["collectives_"] },
+  { id: "shopping", label: "Shopping List", prefixes: ["nc_shopping_list_"], app: "shopping_list" },
+  { id: "cookbook", label: "Cookbook", prefixes: ["nc_cookbook_"], app: "cookbook" },
+  { id: "notes", label: "Notes", prefixes: ["nc_notes_"], app: "notes" },
+  { id: "files", label: "Files", prefixes: ["nc_webdav_"], app: "webdav" },
+  { id: "sharing", label: "Sharing", prefixes: ["nc_share_"], app: "sharing" },
+  { id: "deck", label: "Deck", prefixes: ["deck_"], app: "deck" },
+  { id: "calendar", label: "Calendar", prefixes: ["nc_calendar_"], app: "calendar" },
+  { id: "contacts", label: "Contacts", prefixes: ["nc_contacts_"], app: "contacts" },
+  { id: "mail", label: "Mail", prefixes: ["nc_mail_"], app: "mail" },
+  { id: "news", label: "News", prefixes: ["nc_news_"], app: "news" },
+  { id: "collectives", label: "Collectives", prefixes: ["collectives_"], app: "collectives" },
   // No tab of the panel stands for these two, but the server offers their tools to every user whose Nextcloud has
   // the app: Talk posts as the person and invites by mail, so it has to be something an instance can turn off.
-  { id: "talk", label: "Talk", prefixes: ["talk_"] },
-  { id: "tables", label: "Tables", prefixes: ["nc_tables_"] },
+  { id: "talk", label: "Talk", prefixes: ["talk_"], app: "talk" },
+  { id: "tables", label: "Tables", prefixes: ["nc_tables_"], app: "tables" },
 ];
 
 /** The one family a raw tool name stands with -- none where no family names it. */
@@ -44,11 +46,31 @@ export function capabilityOfTool(name: string): Capability | undefined {
   return CAPABILITIES.find((cap) => cap.prefixes.some((prefix) => name.startsWith(prefix)));
 }
 
-/** What an endpoint's tool list says of every family: present where at least one of its tools stands in it. */
-export function availableFromTools(toolNames: string[]): Record<string, boolean> {
+/** What an endpoint's tool list says of every family: present where at least one of its tools stands in it. A family
+ * the instance turned off (`off`) is not said of at all: the container does not serve it (see appsFor), so its tools
+ * are missing for that reason, not because the server lacks the app -- and the settings page must not grey out, and so
+ * lock, the switch that turns it on again. */
+export function availableFromTools(toolNames: string[], off: { capabilities?: Record<string, boolean> } = {}): Record<string, boolean> {
   const out: Record<string, boolean> = {};
-  for (const cap of CAPABILITIES) out[cap.id] = toolNames.some((name) => capabilityOfTool(name)?.id === cap.id);
+  for (const cap of CAPABILITIES) if (off.capabilities?.[cap.id] !== false) out[cap.id] = toolNames.some((name) => capabilityOfTool(name)?.id === cap.id);
   return out;
+}
+
+/** The app the container is started with where every family is off. The server serves every app where it is given
+ * none, so one is given: Files (`webdav`), which registers tools only, no resource, in the image this version runs --
+ * and its tools are hidden by the entry's `toolExposure` and refused by this extension's own routes like any family's
+ * that is off. */
+export const APP_WHEN_NONE = "webdav";
+
+/**
+ * The apps a container is started with for an instance: those of the families that are on, as the server's own
+ * `--enable-app` names them. A family that is off is then not served at all, neither its tools nor its resources
+ * (`nc://Notes/...`), which pi's resource tools would reach whatever the entry's `toolExposure` says. Every family on
+ * names every app, not none, so the command says what is served either way.
+ */
+export function appsFor(inst: { capabilities?: Record<string, boolean> }): string[] {
+  const on = CAPABILITIES.filter((cap) => inst.capabilities?.[cap.id] !== false).map((cap) => cap.app);
+  return on.length ? on : [APP_WHEN_NONE];
 }
 
 /** The patterns of one family in an entry's `toolExposure`, against the raw tool names the server gives: one per prefix. */

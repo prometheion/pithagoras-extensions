@@ -73,8 +73,6 @@ export const de = {
   "What this server offers to the chats and the pages": "Was dieser Server den Chats und den Seiten bietet",
   "A family off keeps its tools out of the chats and takes what shows it with. Where the server does not provide a family at all, it stands grey -- offered nowhere.":
     "Ausgeschaltete Familien nehmen ihre Werkzeuge aus den Chats und damit auch das, was sie hier zeigen. Was der Server gar nicht bringt, steht grau -- nirgends angeboten.",
-  "A family that is off keeps its tools out of the chats, but its resources (a note, a recipe or a Deck card by its address) can still be read through pi's resource tools.":
-    "Eine ausgeschaltete Familie hält ihre Werkzeuge aus den Chats, ihre Ressourcen (eine Notiz, ein Rezept oder eine Deck-Karte über ihre Adresse) lassen sich aber weiter über die Ressourcen-Werkzeuge von pi lesen.",
   "Saved.": "Gespeichert.",
   "Save and apply": "Speichern und anwenden",
   "Start again": "Neu starten",

@@ -61,9 +61,9 @@ test("a German text keeps the ellipsis and the full stop of its English", () => 
   }
 });
 
-test("the README and the settings page say that a family that is off keeps only its tools out: its resources stay readable through pi's resource tools", () => {
+test("the README says that a family that is off is not served by the container, so its resources do not exist; the settings page no longer says they can be read", () => {
   const readme = fs.readFileSync(path.resolve(import.meta.dirname, "../README.md"), "utf8");
-  assert.match(readme, /resources readable/);
-  assert.match(readme, /read_mcp_resource/);
-  assert.ok([...texts().keys()].some((key) => /resources .* can still be read/.test(key)), "the settings page shows it");
+  assert.match(readme, /--enable-app/);
+  assert.doesNotMatch(readme, /resources readable/);
+  assert.ok(![...texts().keys()].some((key) => /resources .* can still be read/.test(key)));
 });

@@ -2,7 +2,7 @@
  * tools the agent has to ask before it calls. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS, TABS, approveFor, availableFromTools, capabilityOfTool, exposureWritten, instanceOfTool, tabOffered, toolExposureFor } from "../src/capabilities.ts";
+import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS, TABS, appsFor, APP_WHEN_NONE, approveFor, availableFromTools, capabilityOfTool, exposureWritten, instanceOfTool, tabOffered, toolExposureFor } from "../src/capabilities.ts";
 
 const ask = (had: unknown, given?: unknown) => approveFor(had, given, "uni");
 
@@ -148,4 +148,27 @@ test("a family stands available where the endpoint lists one of its tools, and a
   assert.equal(tabOffered(files, available, { files: false }), false, "sharing is not provided either");
   assert.equal(tabOffered(files, { files: false, sharing: true }, { sharing: false }), false);
   assert.equal(tabOffered(news, undefined, {}), true, "not asked yet: the choices alone decide");
+});
+
+test("the apps a container is started with are those of the families that are on, by the server's own names", () => {
+  // the names `--enable-app` takes in the image this version runs (AVAILABLE_APPS of nextcloud-mcp-server 0.203.0)
+  const server = ["notes", "tables", "webdav", "sharing", "calendar", "collectives", "contacts", "cookbook", "deck", "news", "mail", "talk", "shopping_list"];
+  assert.deepEqual(CAPABILITIES.map((cap) => cap.app).sort(), [...server].sort(), "every family stands for one app, and every app for one family");
+  assert.deepEqual([...appsFor({})].sort(), [...server].sort(), "every family on: every app named, not none");
+  assert.deepEqual(appsFor({ capabilities: { notes: false, deck: false, cookbook: false } }).sort(), server.filter((app) => !["notes", "deck", "cookbook"].includes(app)).sort());
+  assert.deepEqual(appsFor({ capabilities: { files: false } }).includes("webdav"), false);
+  assert.deepEqual(appsFor({ capabilities: { notes: true, mail: false } }).includes("notes"), true);
+});
+
+test("with every family off the container still gets one app, as the server serves all of them where it is given none", () => {
+  const all = Object.fromEntries(CAPABILITIES.map((cap) => [cap.id, false]));
+  assert.deepEqual(appsFor({ capabilities: all }), [APP_WHEN_NONE]);
+  assert.equal(CAPABILITIES.find((cap) => cap.app === APP_WHEN_NONE)?.id, "files");
+});
+
+test("a family that is off is not said to be missing from the server: only its container leaves it out, and its switch stays usable", () => {
+  const available = availableFromTools(["nc_mail_list_messages"], { capabilities: { news: false } });
+  assert.equal("news" in available, false);
+  assert.equal(available.mail, true);
+  assert.equal(available.notes, false, "a family that is on and not served is still missing");
 });

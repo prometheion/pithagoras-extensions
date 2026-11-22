@@ -111,6 +111,14 @@ export async function stopEntries(mcp: McpPort, names: string[]): Promise<void> 
     }
     if (there.entry.enabled === false || there.entry.disabled === true) continue; // off already: the stop did not do that, or an earlier stop did and has it recorded
     saveStopped(name, true); // recorded before the write: a crash between leaves a record of an entry that is on, which the next start finds nothing to do for
-    await mcp.set(name, { ...there.entry, enabled: false }, Array.isArray(there.approve) ? { approve: there.approve } : undefined);
+    try {
+      await mcp.set(name, { ...there.entry, enabled: false }, Array.isArray(there.approve) ? { approve: there.approve } : undefined);
+    } catch (e) {
+      // The portal refused the entry as it is (it checks what it writes, not what it removes): it goes, as every stop did before, so
+      // that pi tries no dead port, and the next start writes it anew. One refusal does not keep the others on, nor the containers up.
+      console.warn(`[nextcloud] could not switch ${name} off for the stop (${(e as Error).message}); it is removed instead`);
+      saveStopped(name, false);
+      await mcp.set(name, undefined).catch((gone) => console.warn(`[nextcloud] could not remove ${name} either: ${(gone as Error).message}`));
+    }
   }
 }

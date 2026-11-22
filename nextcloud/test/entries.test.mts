@@ -32,7 +32,7 @@ function fakeMcp(keeps = true) {
   const entries = new Map<string, Record<string, unknown>>();
   const gates = new Map<string, string[]>();
   const calls: { name: string; entry: Record<string, unknown> | undefined; options?: { approve?: string[] } }[] = [];
-  const state = { failSet: false };
+  const state = { failSet: false, refuse: "" };
   const port: McpPort = {
     get: (name) => {
       const entry = entries.get(name);
@@ -41,6 +41,7 @@ function fakeMcp(keeps = true) {
     set: async (name, entry, options) => {
       calls.push({ name, entry: entry && structuredClone(entry), options });
       if (state.failSet) throw new Error("the portal could not write the file");
+      if (entry !== undefined && name === state.refuse) throw new Error(`the portal refuses ${name}`);
       if (entry === undefined) {
         entries.delete(name);
         gates.delete(name);
@@ -186,6 +187,19 @@ test("a stop switches the entries that are on off and keeps them with their tool
     assert.deepEqual(mcp.entries.get("uni"), { url: "http://127.0.0.1:8001/mcp", toolExposure: { "nc_mail_*": "hidden", nc_notes_get_note: "hidden" }, timeout: 30 });
     assert.deepEqual(mcp.gates.get("uni"), [...APPROVE_TOOLS, "nc_notes_update_*"]);
     assert.deepEqual(loadStopped(), []);
+  });
+});
+
+test("an entry the portal refuses to write at the stop is removed instead, and the stop goes on with the others", async () => {
+  await withHome(async () => {
+    const mcp = fakeMcp();
+    await syncEntry(mcp.port, { ...inst(), name: "uni" }, ADDRESS, false, false);
+    await syncEntry(mcp.port, { ...inst(), name: "lab" }, "http://127.0.0.1:8001/mcp", false, false);
+    mcp.state.refuse = "uni";
+    await stopEntries(mcp.port, ["uni", "lab"]);
+    assert.equal(mcp.entries.has("uni"), false, "the refused one is removed, so pi tries no dead port");
+    assert.equal(mcp.entries.get("lab")?.enabled, false, "the next one is still switched off");
+    assert.deepEqual(loadStopped(), ["lab"]);
   });
 });
 

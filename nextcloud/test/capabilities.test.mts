@@ -2,7 +2,9 @@
  * tools the agent has to ask before it calls. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS, TABS, approveFor, availableFromTools, capabilityOfTool, instanceOfTool, tabOffered, toolExposureFor } from "../src/capabilities.ts";
+import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS, TABS, approveFor, availableFromTools, capabilityOfTool, exposureWritten, instanceOfTool, tabOffered, toolExposureFor } from "../src/capabilities.ts";
+
+const ask = (had: unknown, given?: unknown) => approveFor(had, given, "uni");
 
 /** pi's matching of a tool name against patterns (createToolNameMatcher in its core/mcp-servers): a name, or a pattern
  * where `*` is any characters and nothing else is a wildcard, against the server's own tool name. */
@@ -43,16 +45,24 @@ test("what is asked about is patterns of the server's own tool names with `*` on
 });
 
 test("an instance asks about the default, and about what a person added: a list the portal kept, or one still on the entry", () => {
-  assert.deepEqual(approveFor(undefined), APPROVE_TOOLS);
-  assert.deepEqual(approveFor([]), APPROVE_TOOLS, "no list is no choice of the person's");
-  assert.deepEqual(approveFor(APPROVE_TOOLS), APPROVE_TOOLS);
-  for (const earlier of EARLIER_APPROVE_TOOLS) assert.deepEqual(approveFor(earlier), APPROVE_TOOLS, "an earlier default gets this version's");
-  assert.deepEqual(approveFor(["nc_notes_*", "nc_mail_send_message"]), [...APPROVE_TOOLS, "nc_notes_*"]);
-  assert.deepEqual(approveFor(undefined, ["deck_*"]), [...APPROVE_TOOLS, "deck_*"]);
-  assert.deepEqual(approveFor(["deck_*"], ["deck_*", "nc_news_*"]), [...APPROVE_TOOLS, "deck_*", "nc_news_*"]);
-  assert.deepEqual(approveFor(undefined, true), [...APPROVE_TOOLS, "*"], "`true` asked about every tool");
-  assert.deepEqual(approveFor(undefined, false), APPROVE_TOOLS, "the questions cannot be turned off from the entry any more");
-  assert.deepEqual(approveFor(["nc_notes_?", "mcp__uni__x", "uni/x", " ", 3]), [...APPROVE_TOOLS, "nc_notes_*"], "`?` asks about more, what the portal would refuse is left out");
+  assert.deepEqual(ask(undefined), APPROVE_TOOLS);
+  assert.deepEqual(ask([]), APPROVE_TOOLS, "no list is no choice of the person's");
+  assert.deepEqual(ask(APPROVE_TOOLS), APPROVE_TOOLS);
+  for (const earlier of EARLIER_APPROVE_TOOLS) assert.deepEqual(ask(earlier), APPROVE_TOOLS, "an earlier default gets this version's");
+  assert.deepEqual(ask(["nc_notes_*", "nc_mail_send_message"]), [...APPROVE_TOOLS, "nc_notes_*"]);
+  assert.deepEqual(ask(undefined, ["deck_*"]), [...APPROVE_TOOLS, "deck_*"]);
+  assert.deepEqual(ask(["deck_*"], ["deck_*", "nc_news_*"]), [...APPROVE_TOOLS, "deck_*", "nc_news_*"]);
+  assert.deepEqual(ask(undefined, true), [...APPROVE_TOOLS, "*"], "`true` asked about every tool");
+  assert.deepEqual(ask(undefined, false), APPROVE_TOOLS, "the questions cannot be turned off from the entry any more");
+  assert.deepEqual(ask(["nc_notes_?", "mcp__uni__x", "uni/x", " ", 3]), [...APPROVE_TOOLS, "nc_notes_*"], "`?` asks about more, what the portal would refuse is left out");
+});
+
+test("a list still in the adapter's words is carried as patterns of the tools' own names, as the portal does it: only those match what the portal checks", () => {
+  const asked = ask(undefined, ["uni_nc_notes_*", "mcp__uni_nc_mail_*", "*_move_*", "uni_nc_webdav_?rite_file"]);
+  for (const tool of ["nc_notes_update_note", "nc_mail_move_message", "nc_webdav_write_file", "nc_webdav_move_resource"]) assert.equal(matches(asked, tool), true, `${tool} is asked about`);
+  assert.equal(matches(asked, "nc_calendar_get_event"), false, "and nothing more");
+  assert.ok(!asked.some((pattern) => pattern.startsWith("mcp__")), "no pi name, which the portal refuses");
+  assert.deepEqual(ask(undefined, EARLIER_APPROVE_TOOLS[0]), APPROVE_TOOLS, "an earlier default is not read as the person's, prefix or not");
 });
 
 test("Talk and Tables are families an instance can turn off, though no tab stands for them", () => {
@@ -89,16 +99,21 @@ test("every tool of a family that is off is hidden by pi's own reading of the en
 
 test("a person's own lines in an entry's toolExposure stay, but never one that would leave visible what a family hides", () => {
   const own = {
-    "nc_mail_*": "hidden", // a pattern of ours: written anew from the choices
+    "nc_mail_*": "hidden", // a pattern of ours (see `wrote` below): written anew from the choices
     "nc_news_list_feeds": "direct", // an exact name that a hidden pattern covers would win over the pattern
     "nc_mail_send_message": "hidden", // hidden anyway: harmless
     "nc_notes_get_note": "codemode", // a line of the person's, on a family that is on
     "nc_calendar_get_*": "codemode", // a person's pattern, not a family's
     "bad": 3, // not an exposure at all
   };
-  const kept = toolExposureFor({ capabilities: { news: false } }, own);
+  const kept = toolExposureFor({ capabilities: { news: false } }, own, ["nc_mail_*"]);
   assert.deepEqual(kept, { "nc_news_*": "hidden", "nc_mail_send_message": "hidden", "nc_notes_get_note": "codemode", "nc_calendar_get_*": "codemode" });
   for (const tool of ["nc_news_list_feeds", "nc_news_get_item"]) assert.equal(exposureOf(kept, tool), "hidden", tool);
+  assert.deepEqual(toolExposureFor({ capabilities: { news: false } }, { "nc_mail_*": "hidden" }), { "nc_news_*": "hidden", "nc_mail_*": "hidden" }, "a whole family the person hid in Settings -> MCP stays hidden, whatever its switch says here");
+  assert.deepEqual(toolExposureFor({}, { "nc_mail_*": "hidden", "nc_news_*": "hidden" }, ["nc_news_*"]), { "nc_mail_*": "hidden" }, "only what this extension hid itself goes with the family's switch");
+  assert.deepEqual(toolExposureFor({}, { "nc_mail_*": "hidden", nc_mail_get_message: "direct" }), { "nc_mail_*": "hidden" }, "and what a person's hidden pattern covers is not left visible by an exact name");
+  assert.deepEqual(exposureWritten({ capabilities: { mail: false, news: false } }, { "nc_mail_*": "hidden" }, ["nc_news_*"]), ["nc_news_*"], "a hide that stood there before and is not recorded is the person's, not written by this extension");
+  assert.deepEqual(exposureWritten({ capabilities: { mail: false } }, { "nc_mail_*": "hidden" }, ["nc_mail_*"]), ["nc_mail_*"]);
   assert.deepEqual(toolExposureFor({}, "not a map"), {});
   assert.deepEqual(toolExposureFor({}, ["nc_mail_*"]), {});
 });

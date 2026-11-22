@@ -79,6 +79,7 @@ export const de = {
   "Remove": "Entfernen",
   "entry present": "Eintrag vorhanden",
   "entry absent": "Eintrag fehlt",
+  "entry switched off: switch it on in Settings → MCP": "Eintrag ausgeschaltet: Schalte ihn unter Einstellungen → MCP ein",
   "answering": "antwortet",
   "Its files are also in the chat's Files tab.": "Die Dateien stehen auch im Dateien-Tab des Chats.",
   "Working: {task}": "Am Werk: {task}",

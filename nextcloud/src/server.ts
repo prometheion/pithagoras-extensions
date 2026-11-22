@@ -17,8 +17,8 @@ import { isDeepStrictEqual } from "node:util";
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { writesFromHere } from "../../shared/proxy";
 import { setPortal, portal, docker, personGate } from "./host";
-import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
-import { CAPABILITIES, approveFor, capabilityOfTool, toolExposureFor, availableFromTools } from "./capabilities";
+import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, loadHid, saveHid, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
+import { CAPABILITIES, approveFor, capabilityOfTool, toolExposureFor, exposureWritten, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
 import { normalizeUrl, checkAccount, checkAccountSoon, forgetAccount, accountIdOf } from "./account";
 import { filesHookOf, syncSources, dropSources, sourceIdOf, wantedSources, type FilesHook, type SourceDeps } from "./files-source";
@@ -215,6 +215,7 @@ function ensureApplied(): Promise<void> {
       const version = loadEntriesVersion();
       // Entries this extension wrote under names that no instance carries any more.
       for (const name of written) if (!names.has(name)) await portal().mcp.set(name, undefined);
+      for (const name of Object.keys(loadHid())) if (!names.has(name)) saveHid(name, []);
       written = written.filter((name) => names.has(name));
       saveWritten(written, version);
       const failed: string[] = [];
@@ -229,11 +230,12 @@ function ensureApplied(): Promise<void> {
           if (!loadInstances().some((i) => i.name === inst.name)) continue;
           await awaitAnswer(d, plan);
           const kept = carryOver(inst.name, there?.entry);
-          const toolExposure = toolExposureFor(inst, there?.entry.toolExposure);
+          const wrote = loadHid()[inst.name] ?? [];
+          const toolExposure = toolExposureFor(inst, there?.entry.toolExposure, wrote);
           const entry = { ...kept, url: ownAddress(plan.port), ...(Object.keys(toolExposure).length ? { toolExposure } : {}) };
           // What this extension asks about by default, in this version or an earlier one, gets this version's list (a
           // wider one reaches every install that ran an earlier one); what a person added to it stays.
-          const approve = approveFor(there?.approve, there?.entry.approveTools);
+          const approve = approveFor(there?.approve, there?.entry.approveTools, inst.name);
           // An entry an earlier version wrote counted as the person's own (trusted). Writing a server again does not
           // take the name out of Settings -> Guard's trusted servers; removing it does. Only the names that version
           // wrote: every name in `written` was written by this one (0.1.0 kept no such list), and a removal each run
@@ -243,6 +245,7 @@ function ensureApplied(): Promise<void> {
           await portal().mcp.set(inst.name, entry, { approve });
           written = [...written, inst.name];
           saveWritten(written, version);
+          saveHid(inst.name, exposureWritten(inst, there?.entry.toolExposure, wrote));
         } catch (error) {
           failed.push((error as Error).message);
         }
@@ -260,8 +263,9 @@ function ensureApplied(): Promise<void> {
  * earlier version wrote has (`lifecycle`, `debug`, `directTools`, `excludeTools`, `approveTools` ...): pi does not read
  * them, and the portal refuses an entry that has one. The two the person may have set to narrow what the agent reaches,
  * `includeTools` and `exposeResources: false`, have no word in pi's entry: dropped, they would widen it unseen, so the
- * entry stays as it is and the run says so. An entry the portal's move left switched off for its `excludeTools` (which
- * this one has just turned into `toolExposure`) is switched on again. */
+ * entry stays as it is and the run says so. An entry the portal's move left switched off stays switched off: the move
+ * does that for several reasons (the adapter was off, a list of switches had its tools off, a rule it could not carry)
+ * and does not say which, so only the person switches it on, in Settings -> MCP (the status says so). */
 function carryOver(name: string, entry: Record<string, unknown> | undefined): Record<string, unknown> {
   const kept: Record<string, unknown> = {};
   if (!entry) return kept;
@@ -270,7 +274,6 @@ function carryOver(name: string, entry: Record<string, unknown> | undefined): Re
     throw new Error(`${name}: its entry in pi's mcp.json has ${narrowing.join(" and ")}, which pi does not read, so writing it without would offer more than the person chose. Take it out in Settings -> MCP (hide the tools in its toolExposure instead), then press Start.`);
   for (const key of ["enabled", "timeout", "description", "exposure"]) if (key in entry) kept[key] = entry[key];
   if (entry.disabled === true) kept.enabled = false;
-  else if (kept.enabled === false && Array.isArray(entry.excludeTools) && entry.excludeTools.length) delete kept.enabled;
   return kept;
 }
 
@@ -360,6 +363,7 @@ async function teardown(): Promise<void> {
   for (const name of loadWritten()) {
     await portal().mcp.set(name, undefined);
     saveWritten(loadWritten().filter((n) => n !== name), version);
+    saveHid(name, []);
   }
   const found = (await d.containers.list()).filter((c) => c.name.startsWith(CONTAINER_BASE));
   await Promise.all(found.map((c) => releaseOwn(d, c.name)));

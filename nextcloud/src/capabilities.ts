@@ -65,28 +65,46 @@ function matches(pattern: string, name: string): boolean {
   return new RegExp(`^${source}$`).test(name);
 }
 
+/** The patterns of the families an instance turned off: what this extension hides in the entry's `toolExposure`. */
+export function familyPatterns(inst: { capabilities?: Record<string, boolean> }): string[] {
+  return CAPABILITIES.filter((cap) => inst.capabilities?.[cap.id] === false).flatMap(patternsFor);
+}
+
+/**
+ * The patterns of `familyPatterns` that this extension itself puts into the entry now, to be recorded as its own
+ * (`wrote` of the next run): not one the person had hidden already, which stays theirs whatever the family's switch
+ * says. `own` is what the entry says of its tools now, `wrote` what the extension recorded of its last run.
+ */
+export function exposureWritten(inst: { capabilities?: Record<string, boolean> }, own: unknown, wrote: readonly string[] = []): string[] {
+  const lines = own && typeof own === "object" && !Array.isArray(own) ? (own as Record<string, unknown>) : {};
+  return familyPatterns(inst).filter((pattern) => lines[pattern] !== "hidden" || wrote.includes(pattern));
+}
+
 /**
  * What an instance keeps out of the chats' tool list, as the `toolExposure` of its entry in pi's config: every
  * family it turned off, as the patterns of its prefixes, `hidden`. A choice that stands none keeps nothing (an
  * instance with no choices keeps nothing -- everything is offered). Only patterns, never an exact name of ours: pi
  * takes an exact name before any pattern, so a name that stood beside them could leave visible what a family hides.
  *
- * `own` is what the entry says of its tools already. A person's own lines in it stay (a tool they hid by name, say),
- * but not the patterns of the families, which are written anew from the choices, and not an exact name of another
- * exposure that a hidden pattern covers: that would win over the pattern and leave the tool visible.
+ * `own` is what the entry says of its tools already, `wrote` the patterns of the families that this extension put
+ * there itself (see exposureWritten). A person's own lines in it stay -- a tool they hid by name, or a whole family
+ * they hid in Settings -> MCP while its switch here is on -- but not the extension's own lines for the families,
+ * which are written anew from the choices, and not an exact name of another exposure that a hidden pattern covers:
+ * that would win over the pattern and leave the tool visible.
  */
-export function toolExposureFor(inst: { capabilities?: Record<string, boolean> }, own?: unknown): Record<string, string> {
-  const hidden: Record<string, string> = {};
-  for (const cap of CAPABILITIES) if (inst.capabilities?.[cap.id] === false) for (const pattern of patternsFor(cap)) hidden[pattern] = "hidden";
+export function toolExposureFor(inst: { capabilities?: Record<string, boolean> }, own?: unknown, wrote: readonly string[] = []): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pattern of familyPatterns(inst)) out[pattern] = "hidden";
   const ours = new Set(CAPABILITIES.flatMap(patternsFor));
-  const out = { ...hidden };
   if (own && typeof own === "object" && !Array.isArray(own)) {
     for (const [name, how] of Object.entries(own)) {
-      if (typeof how !== "string" || ours.has(name)) continue;
-      if (how !== "hidden" && !name.includes("*") && Object.keys(hidden).some((pattern) => matches(pattern, name))) continue;
+      if (typeof how !== "string" || name in out) continue;
+      if (ours.has(name) && how === "hidden" && wrote.includes(name)) continue; // what this extension hid for a family that is on again
       out[name] = how;
     }
   }
+  const hidden = Object.keys(out).filter((name) => out[name] === "hidden");
+  for (const name of Object.keys(out)) if (out[name] !== "hidden" && !name.includes("*") && hidden.some((pattern) => matches(pattern, name))) delete out[name];
   return out;
 }
 
@@ -122,25 +140,57 @@ export const EARLIER_APPROVE_TOOLS: string[][] = [
   ["nc_mail_send_message", "nc_share_create*", "nc_share_update*", "nc_share_delete*", "*_delete_*", "*_clear_*"],
 ];
 
+/** The prefixes the adapter gave a server's tools (`<server>_`, `<short>_`, `mcp__<server>_`, dashes as underscores),
+ * which its `approveTools` patterns were matched with. The portal matches the server's own tool names only. */
+function adapterPrefixes(server: string): string[] {
+  const long = server.replace(/-/g, "_");
+  const short = server.replace(/-?mcp$/i, "").replace(/-/g, "_") || "mcp";
+  return [`${long}_`, `${short}_`, `mcp__${long}_`];
+}
+
+/** The patterns of a tool's own name that `prefix` + the name matches `pattern` by: what is left of the pattern once
+ * the prefix has been matched against its start, wherever a `*` may take any part of it (`*_delete_*` for `uni_`
+ * leaves `delete_*` and `*_delete_*`). The same way the portal carries an adapter's list over. */
+function throughPrefix(pattern: string, prefix: string): string[] {
+  const seen = new Map<string, string[]>();
+  const walk = (i: number, j: number): string[] => {
+    if (j === prefix.length) return i < pattern.length ? [pattern.slice(i)] : [];
+    if (i === pattern.length) return [];
+    const key = `${i}:${j}`;
+    const known = seen.get(key);
+    if (known) return known;
+    const c = pattern[i];
+    const found = c === "*" ? [...walk(i + 1, j), ...walk(i, j + 1)] : c === "?" || c === prefix[j] ? walk(i + 1, j + 1) : [];
+    seen.set(key, found);
+    return found;
+  };
+  return [...new Set(walk(0, 0))];
+}
+
 /**
  * What an instance's calls ask the person about: the default, and what a person added to it. A pattern this
  * extension asks about by default (in this version or an earlier one) is its own; any other that the instance asks
  * about already is the person's, a list they gave that the portal kept when it moved the entry from the adapter, and
  * stays, so they are never asked about less than before. `had` is the patterns the portal holds for the server now
  * (`portal.mcp.get(...).approve`); `given` is the `approveTools` of the entry, where an earlier version's is still in
- * it (a list, or `true` for every tool).
+ * it (a list, or `true` for every tool), in the adapter's words: a pattern with the adapter's prefix (`<server>_...`)
+ * is carried as the pattern of the tool's own name, the way the portal does it, as only that matches.
  */
-export function approveFor(had: unknown, given?: unknown): string[] {
+export function approveFor(had: unknown, given: unknown, server: string): string[] {
   const known = new Set([...APPROVE_TOOLS, ...EARLIER_APPROVE_TOOLS.flat()]);
   const extra: string[] = [];
-  for (const list of [had, given === true ? ["*"] : given]) {
+  const add = (pattern: string) => {
+    // A pi name or a `<server>/<tool>` could never match here, and the portal refuses a list that has one.
+    if (pattern === "" || pattern.startsWith("mcp__") || pattern.includes("/") || known.has(pattern) || extra.includes(pattern)) return;
+    extra.push(pattern);
+  };
+  for (const [list, adapters] of [[had, false], [given === true ? ["*"] : given, true]] as const) {
     if (!Array.isArray(list)) continue;
     for (const one of list) {
-      // `?` was the adapter's wildcard for one character: to ask about more is safe, to ask about less is not. A pi name or
-      // a `<server>/<tool>` could never match here, and the portal refuses a list that has one.
+      // `?` was the adapter's wildcard for one character: to ask about more is safe, to ask about less is not.
       const pattern = typeof one === "string" ? one.trim().replace(/\?/g, "*") : "";
-      if (pattern === "" || pattern.startsWith("mcp__") || pattern.includes("/") || known.has(pattern) || extra.includes(pattern)) continue;
-      extra.push(pattern);
+      add(pattern);
+      if (adapters && !known.has(pattern)) for (const prefix of adapterPrefixes(server)) for (const own of throughPrefix(pattern.replace(/-/g, "_"), prefix)) add(own);
     }
   }
   return [...APPROVE_TOOLS, ...extra];

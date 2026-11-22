@@ -290,21 +290,34 @@ test("an entry an earlier version wrote, with the adapter's keys, is written aga
   const entry = servers().uni;
   assert.deepEqual(entry, { url, timeout: 30, toolExposure: { "nc_news_*": "hidden" } });
   for (const key of ADAPTER_KEYS) assert.equal(key in entry, false, `${key} is gone`);
-  assert.deepEqual(approve("uni"), [...APPROVE_TOOLS, "nc_notes_*", "uni_nc_news_*"], "what the person asked about is asked about still, beside the default");
+  assert.deepEqual(approve("uni"), [...APPROVE_TOOLS, "nc_notes_*", "uni_nc_news_*", "nc_news_*"], "what the person asked about is asked about still, beside the default, with the adapter's prefix taken off where only that matches");
   assert.equal((await save("uni", { capabilities: {} })).status, 200);
   await applyDone();
   assert.deepEqual(servers().uni, { url, timeout: 30 });
-  assert.deepEqual(approve("uni"), [...APPROVE_TOOLS, "nc_notes_*", "uni_nc_news_*"], "and kept by the next runs");
+  assert.deepEqual(approve("uni"), [...APPROVE_TOOLS, "nc_notes_*", "uni_nc_news_*", "nc_news_*"], "and kept by the next runs");
   db.setMcpApprove("uni", APPROVE_TOOLS);
 });
 
-test("an entry the portal's move from the adapter left switched off, for the exclusion it could not carry, is switched on again; a person's own include list is not dropped unseen", async () => {
+test("an entry the portal's move from the adapter left switched off stays switched off, whatever the reason, and says so; a person's own include list is not dropped unseen", async () => {
   const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  // The move leaves a server off for several reasons (the adapter was off, a list of switches had its tools off, a rule it could not carry) and does not say which.
   file.mcpServers.uni = { url, enabled: false, excludeTools: ["uni_nc_news_*"] };
   writeFileSync(mcpFile(), JSON.stringify(file));
   assert.equal((await save("uni", { capabilities: { news: false } })).status, 200);
   await applyDone();
-  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_news_*": "hidden" } });
+  assert.deepEqual(servers().uni, { url, enabled: false, toolExposure: { "nc_news_*": "hidden" } }, "the exclusion becomes toolExposure; the server is not switched on for it");
+  const off = await until((s) => s.instances.some((i: any) => i.name === "uni" && i.mcp?.registered), "the status of the entry");
+  assert.equal(off.instances.find((i: any) => i.name === "uni").mcp.on, false, "the status says the chats do not have it, for the page to tell the person where to switch it on");
+  assert.equal((await save("uni", { capabilities: { news: false, talk: false } })).status, 200);
+  await applyDone();
+  assert.equal(servers().uni.enabled, false, "later runs keep it off");
+  file.mcpServers.uni = { url, toolExposure: { "nc_news_*": "hidden" } }; // the person switched it on
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  await post("/start");
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_news_*": "hidden", "talk_*": "hidden" } });
+  assert.equal((await save("uni", { capabilities: { news: false } })).status, 200);
+  await applyDone();
 
   file.mcpServers.uni = { url, enabled: false, includeTools: ["uni_nc_notes_*"] };
   writeFileSync(mcpFile(), JSON.stringify(file));
@@ -322,6 +335,18 @@ test("an entry the portal's move from the adapter left switched off, for the exc
   assert.equal((await save("uni", { capabilities: {} })).status, 200);
   await applyDone();
   assert.deepEqual(servers().uni, { url, toolExposure: { nc_notes_get_note: "hidden" } });
+
+  // A whole family the person hid in Settings -> MCP stays hidden with its switch on here: the extension takes back only what it hid itself.
+  file.mcpServers.uni = { url, toolExposure: { "nc_mail_*": "hidden" } };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  await post("/start");
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_mail_*": "hidden" } }, "the person's hide of a whole family is not undone");
+  assert.equal((await save("uni", { capabilities: { mail: false } })).status, 200);
+  await applyDone();
+  assert.equal((await save("uni", { capabilities: {} })).status, 200);
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_mail_*": "hidden" } }, "and stays hidden when the extension's own hide of it goes");
   file.mcpServers.uni = { url };
   writeFileSync(mcpFile(), JSON.stringify(file));
   await post("/start");

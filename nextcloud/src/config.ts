@@ -85,11 +85,13 @@ function instanceFrom(raw: unknown): NextcloudInstance | undefined {
 }
 
 /** What the store holds as a whole: the instances, the names of the entries in pi's mcp.json this extension wrote
- * (and so may clear), and the version of how those entries are written (see ENTRIES_VERSION). */
+ * (and so may clear), the version of how those entries are written (see ENTRIES_VERSION), and per entry the patterns
+ * it hid in its `toolExposure` itself, so that a hide of the person's own is told from it. */
 interface Store {
   instances: NextcloudInstance[];
   written: string[];
   entries: number;
+  hid: Record<string, string[]>;
 }
 
 /** How the entries in pi's mcp.json are written now. 1 (not stored) wrote them as trusted servers; 2 does not, and
@@ -105,7 +107,10 @@ function readStore(): Store | undefined {
     const o = parsed as Record<string, unknown>;
     const list = Array.isArray(o.instances) ? o.instances.map(instanceFrom).filter((i): i is NextcloudInstance => i !== undefined) : [];
     const written = Array.isArray(o.written) ? o.written.filter((n): n is string => typeof n === "string" && n !== "") : [];
-    return { instances: list, written, entries: typeof o.entries === "number" ? o.entries : 1 };
+    const hid: Record<string, string[]> = {};
+    if (typeof o.hid === "object" && o.hid !== null && !Array.isArray(o.hid))
+      for (const [name, list] of Object.entries(o.hid)) if (Array.isArray(list)) hid[name] = list.filter((p): p is string => typeof p === "string");
+    return { instances: list, written, entries: typeof o.entries === "number" ? o.entries : 1, hid };
   } catch {
     return undefined; // no store yet -- or none that reads, which the first save makes one of again
   }
@@ -117,7 +122,7 @@ function writeStore(store: Store): void {
 
 /** No store at all: nothing was ever written, by this version or an earlier one (0.1.0 kept its instances in this
  * file as well), so there is nothing of an earlier version to take over either. */
-const emptyStore = (): Store => ({ instances: [], written: [], entries: ENTRIES_VERSION });
+const emptyStore = (): Store => ({ instances: [], written: [], entries: ENTRIES_VERSION, hid: {} });
 
 /** The instances as they stand. */
 export function loadInstances(): NextcloudInstance[] {
@@ -143,6 +148,20 @@ export function loadEntriesVersion(): number {
 /** Remember which entries this extension wrote, and with which version of how it writes them. */
 export function saveWritten(names: string[], entries: number = ENTRIES_VERSION): void {
   writeStore({ ...(readStore() ?? emptyStore()), written: [...new Set(names)], entries });
+}
+
+/** The patterns each entry's `toolExposure` was given by this extension itself (see exposureWritten), by instance name. */
+export function loadHid(): Record<string, string[]> {
+  return (readStore() ?? emptyStore()).hid;
+}
+
+/** Remember the patterns this extension hid in an entry's `toolExposure`; none forgets the entry. */
+export function saveHid(name: string, patterns: string[]): void {
+  const store = readStore() ?? emptyStore();
+  const hid = { ...store.hid };
+  if (patterns.length) hid[name] = patterns;
+  else delete hid[name];
+  writeStore({ ...store, hid });
 }
 
 /** Whether the instance names a Nextcloud to talk to: url, username and password all set. */

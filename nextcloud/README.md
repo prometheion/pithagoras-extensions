@@ -243,7 +243,10 @@ non-root user: those were not tried against the image, and a server that fails t
   `toolExposure` that hides the families an instance turned off. What asks you before a call is no longer the entry's
   `approveTools` but the `approve` the extension gives the portal (same list). `lifecycle`, `excludeTools`,
   `approveTools` and the adapter's other keys are no longer written, and an entry an earlier version wrote with them
-  is written again without them on the extension's next start, with the families that were left out kept left out. A
+  is written again without them on the extension's next start, with the families that were left out kept left out and
+  a list of tools to ask about carried over in the tools' own names. An entry the move left switched off stays
+  switched off (the move does that for several reasons and does not say which): the instance's line in Settings says so,
+  and you switch it on in Settings → MCP. A whole family you hid there by hand stays hidden. A
   tool's name in the chats is now `mcp__<instance>__<tool>` (was `<instance>_<tool>`); a switch of a chat's tools that
   names the old name has to be set again. Needs a Pithagoras with `portal.mcp.set`'s `approve` option.
 

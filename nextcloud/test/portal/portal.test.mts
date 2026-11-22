@@ -628,6 +628,62 @@ test("a restart of the half (an update) leaves everything as it was: its stop is
   assert.equal(ncContainer("pithagoras-nextcloud-mcp-fifth").State, "running");
 });
 
+test("a stop of the half keeps its entries, switched off, with what the person set on them; the next start switches on those and no other", async () => {
+  // the person's own tuning of the entry in Settings -> MCP, the questions the portal keeps, a family hidden here
+  assert.equal((await save("fifth", { capabilities: { news: false } })).status, 200);
+  await applyDone();
+  const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  file.mcpServers.fifth.toolExposure = { ...file.mcpServers.fifth.toolExposure, nc_notes_get_note: "hidden" };
+  file.mcpServers.fifth.timeout = 45;
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  const entryBefore = servers().fifth;
+  const approveBefore = approve("fifth");
+  db.setMcpApprove("fifth", [...approveBefore, "nc_notes_update_*"]);
+  const asked = approve("fifth");
+  await host.syncServerHalves([halves.docker]); // the half stops
+  assert.equal(host.isServing("@pithagoras/nextcloud"), false);
+  assert.deepEqual(docker.containers.map((c: any) => c.Name), [], "the container is gone");
+  assert.deepEqual(servers().fifth, { ...entryBefore, enabled: false }, "the entry stays, switched off: pi does not connect it, so no chat tries the dead port");
+  assert.deepEqual(approve("fifth"), asked, "and what the portal asks about stays");
+  await host.syncServerHalves([halves.docker, { ...halves.nextcloud, rev: "back" }]);
+  for (let i = 0; i < 300 && !host.isServing("@pithagoras/nextcloud"); i++) await new Promise((r) => setTimeout(r, 20));
+  await applyDone();
+  assert.deepEqual(servers().fifth, entryBefore, "switched on again, the person's lines and the hidden family as they were");
+  assert.deepEqual(approve("fifth"), asked);
+
+  // an entry that is off by the person's hand stays off through a stop and a start
+  const off = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  off.mcpServers.fifth.enabled = false;
+  writeFileSync(mcpFile(), JSON.stringify(off));
+  await host.syncServerHalves([halves.docker]);
+  await host.syncServerHalves([halves.docker, { ...halves.nextcloud, rev: "again" }]);
+  for (let i = 0; i < 300 && !host.isServing("@pithagoras/nextcloud"); i++) await new Promise((r) => setTimeout(r, 20));
+  await applyDone();
+  assert.equal(servers().fifth.enabled, false);
+  assert.deepEqual(approve("fifth"), asked);
+  const on = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  delete on.mcpServers.fifth.enabled;
+  writeFileSync(mcpFile(), JSON.stringify(on));
+  await post("/start");
+  await applyDone();
+});
+
+test("an instance deleted while the half is stopped has its entry removed by the next start, with its approve", async () => {
+  await host.syncServerHalves([halves.docker]);
+  assert.equal(servers().fifth.enabled, false);
+  const saved = JSON.parse(readFileSync(path.join(dataDir, "settings.json"), "utf8"));
+  saved.instances = [];
+  writeFileSync(path.join(dataDir, "settings.json"), JSON.stringify(saved));
+  await host.syncServerHalves([halves.docker, { ...halves.nextcloud, rev: "after the delete" }]);
+  for (let i = 0; i < 300 && !host.isServing("@pithagoras/nextcloud"); i++) await new Promise((r) => setTimeout(r, 20));
+  await applyDone();
+  assert.equal(servers().fifth, undefined);
+  assert.deepEqual(approve("fifth"), []);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(dataDir, "settings.json"), "utf8")).stopped, []);
+  assert.equal((await save("fifth")).status, 200); // the instance comes back for the tests after
+  await applyDone();
+});
+
 test("a reset takes the containers and the entries it wrote away and keeps the keys; a start brings them back", async () => {
   const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
   file.mcpServers.mine = { command: "npx", args: ["x"] };

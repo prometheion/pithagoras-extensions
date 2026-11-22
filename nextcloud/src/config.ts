@@ -85,13 +85,15 @@ function instanceFrom(raw: unknown): NextcloudInstance | undefined {
 }
 
 /** What the store holds as a whole: the instances, the names of the entries in pi's mcp.json this extension wrote
- * (and so may clear), the version of how those entries are written (see ENTRIES_VERSION), and per entry the patterns
- * it hid in its `toolExposure` itself, so that a hide of the person's own is told from it. */
+ * (and so may clear), the version of how those entries are written (see ENTRIES_VERSION), per entry the patterns
+ * it hid in its `toolExposure` itself, so that a hide of the person's own is told from it, and the names of the entries
+ * the stop of the server half switched off (`enabled: false`), so that the next start switches on those and no other. */
 interface Store {
   instances: NextcloudInstance[];
   written: string[];
   entries: number;
   hid: Record<string, string[]>;
+  stopped: string[];
 }
 
 /** How the entries in pi's mcp.json are written now. 1 (not stored) wrote them as trusted servers; 2 does not, and
@@ -110,7 +112,8 @@ function readStore(): Store | undefined {
     const hid: Record<string, string[]> = {};
     if (typeof o.hid === "object" && o.hid !== null && !Array.isArray(o.hid))
       for (const [name, list] of Object.entries(o.hid)) if (Array.isArray(list)) hid[name] = list.filter((p): p is string => typeof p === "string");
-    return { instances: list, written, entries: typeof o.entries === "number" ? o.entries : 1, hid };
+    const stopped = Array.isArray(o.stopped) ? o.stopped.filter((n): n is string => typeof n === "string" && n !== "") : [];
+    return { instances: list, written, entries: typeof o.entries === "number" ? o.entries : 1, hid, stopped };
   } catch {
     return undefined; // no store yet -- or none that reads, which the first save makes one of again
   }
@@ -122,7 +125,7 @@ function writeStore(store: Store): void {
 
 /** No store at all: nothing was ever written, by this version or an earlier one (0.1.0 kept its instances in this
  * file as well), so there is nothing of an earlier version to take over either. */
-const emptyStore = (): Store => ({ instances: [], written: [], entries: ENTRIES_VERSION, hid: {} });
+const emptyStore = (): Store => ({ instances: [], written: [], entries: ENTRIES_VERSION, hid: {}, stopped: [] });
 
 /** The instances as they stand. */
 export function loadInstances(): NextcloudInstance[] {
@@ -162,6 +165,18 @@ export function saveHid(name: string, patterns: string[]): void {
   if (patterns.length) hid[name] = patterns;
   else delete hid[name];
   writeStore({ ...store, hid });
+}
+
+/** The entries the stop of the server half switched off itself (see stopEntries in server.ts). */
+export function loadStopped(): string[] {
+  return (readStore() ?? emptyStore()).stopped;
+}
+
+/** Remember that the stop switched an entry off (or, with false, that it no longer holds that: it is switched on, or gone). */
+export function saveStopped(name: string, off: boolean): void {
+  const store = readStore() ?? emptyStore();
+  const rest = store.stopped.filter((n) => n !== name);
+  writeStore({ ...store, stopped: off ? [...rest, name] : rest });
 }
 
 /** Whether the instance names a Nextcloud to talk to: url, username and password all set. */

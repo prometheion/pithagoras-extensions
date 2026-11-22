@@ -73,8 +73,12 @@ so nothing an earlier version never offered is invented, and a server that start
 **Remove** takes an instance away: the settings of it go, and a run behind it takes its container and its entry in pi's
 config away (the extension remembers which entries it wrote, and clears those only). **Remove everything** takes the
 containers and the entries away and keeps the settings, so **Start again** brings them back without typing anything
-new. Stopping or updating the extension does the same removal for every instance and starts them again. Uninstalling
-it does not: the portal has no uninstall hook, so remove everything on the page first. (An entry that version 0.1.0
+new. Stopping or updating the extension (or the portal) takes the containers away and *switches the entries off*
+(`enabled: false`) instead of removing them, so pi does not try a port nothing listens on, and what you set on an entry
+-- the families you hid in Settings → MCP, the patterns you added to what it asks about, a timeout -- is still there when it
+starts again. The next start switches on only the entries that stop switched off; one that was off before (you, or the
+move from the old adapter) stays off. Uninstalling the extension has no hook of the portal's: remove everything on the
+page first, or the switched-off entries stay in Settings → MCP for you to delete. (An entry that version 0.1.0
 left behind after a removal is not known to the extension: take it out in Settings → MCP.)
 
 ## What you get

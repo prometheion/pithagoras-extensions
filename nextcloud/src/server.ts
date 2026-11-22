@@ -16,9 +16,9 @@ import net from "node:net";
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { writesFromHere } from "../../shared/proxy";
 import { setPortal, portal, docker, personGate } from "./host";
-import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, loadHid, saveHid, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
+import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, loadHid, saveHid, saveStopped, loadStopped, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
 import { CAPABILITIES, capabilityOfTool, availableFromTools } from "./capabilities";
-import { syncEntry } from "./entries";
+import { syncEntry, stopEntries } from "./entries";
 import { mcpClient } from "./ncmcp";
 import { normalizeUrl, checkAccount, checkAccountSoon, forgetAccount, accountIdOf } from "./account";
 import { filesHookOf, syncSources, dropSources, sourceIdOf, wantedSources, type FilesHook, type SourceDeps } from "./files-source";
@@ -216,6 +216,7 @@ function ensureApplied(): Promise<void> {
       // Entries this extension wrote under names that no instance carries any more.
       for (const name of written) if (!names.has(name)) await portal().mcp.set(name, undefined);
       for (const name of Object.keys(loadHid())) if (!names.has(name)) saveHid(name, []);
+      for (const name of loadStopped()) if (!names.has(name)) saveStopped(name, false);
       written = written.filter((name) => names.has(name));
       saveWritten(written, version);
       const failed: string[] = [];
@@ -327,7 +328,8 @@ async function status(): Promise<Record<string, unknown>> {
 }
 
 /** The containers this extension made gone and the entries it wrote cleared; the keys stay. Entries first: a chat
- * must not be offered tools of a server that is going. */
+ * must not be offered tools of a server that is going. What the person pressed Reset for: nothing of it stays, not
+ * the families they hid on an entry, nor the questions the portal keeps beside it. */
 async function teardown(): Promise<void> {
   const d = docker();
   const version = loadEntriesVersion();
@@ -335,7 +337,23 @@ async function teardown(): Promise<void> {
     await portal().mcp.set(name, undefined);
     saveWritten(loadWritten().filter((n) => n !== name), version);
     saveHid(name, []);
+    saveStopped(name, false);
   }
+  await removeContainers(d);
+}
+
+/** What a stop of this half does (a restart of the portal, SIGTERM, an update): the containers go, and the entries stay,
+ * switched off -- so that pi does not try a port nothing listens on at every chat start, and so that what the person
+ * set on an entry (the families they hid, the patterns they asked about, an `enabled: false`) is still there when the
+ * half starts again, which switches on the entries that this stop switched off (see stopEntries). A removal of an
+ * instance or a Reset is `teardown`, not this. Entries first, as there. */
+async function stopHalf(): Promise<void> {
+  const d = docker();
+  await stopEntries(portal().mcp, loadWritten());
+  await removeContainers(d);
+}
+
+async function removeContainers(d: NonNullable<ReturnType<typeof docker>>): Promise<void> {
   const found = (await d.containers.list()).filter((c) => c.name.startsWith(CONTAINER_BASE));
   await Promise.all(found.map((c) => releaseOwn(d, c.name)));
   for (const address of [...clients.keys()]) forgetClient(address);
@@ -530,7 +548,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
   });
 
   // On every start: one pass toward where the instances ask for their entries in pi's config (the entries were
-  // removed on stop, so this is how everything comes back after a restart of the portal). While the extension is
+  // switched off on stop, so this is how everything comes back after a restart of the portal). While the extension is
   // still loading, the portal refuses its actions outright, so that first pass retries them until the load has
   // finished instead of failing once and waiting for someone to press Start; any other failure stays in the status.
   void (async () => {
@@ -546,13 +564,14 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
   })();
 
-  // Where a stop or a removal takes the package: the entries it wrote out of pi's config and the containers it made
-  // gone with it; the keys stay, so the next start brings everything back. The portal waits for this before it
+  // Where a stop takes the package: the containers it made gone, and the entries it wrote switched off and kept (the
+  // portal has no hook for an uninstall, so a package that is removed leaves them off, for the person to delete in
+  // Settings -> MCP); the keys stay, so the next start brings everything back. The portal waits for this before it
   // starts the half again (an update, a restart of Docker's half), so it is what this returns, and it stands in the
   // row of runs like any other: the new half's first pass begins after it.
   return () => {
     dropSources(filesHook, filesSources); // a source is not taken away by itself when this half stops
-    return apply("removing the containers this extension made and its entries", teardown).catch(() => {});
+    return apply("stopping the containers this extension made and switching off its entries in pi's config", stopHalf).catch(() => {});
   };
 };
 

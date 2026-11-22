@@ -6,7 +6,7 @@
  * says how one is made, kept and checked.
  */
 import { isDeepStrictEqual } from "node:util";
-import { loadHid, saveHid, type NextcloudInstance } from "./config";
+import { loadHid, saveHid, loadStopped, saveStopped, type NextcloudInstance } from "./config";
 import { approveFor, exposureWritten, toolExposureFor } from "./capabilities";
 
 /** The part of `portal.mcp` this reads and writes (a real portal's is the whole of it). `approve` is missing from what
@@ -30,8 +30,9 @@ const oldPortal = (name: string): string =>
  * `includeTools` and `exposeResources: false`, have no word in pi's entry: dropped, they would widen it unseen, so the
  * entry stays as it is and the run says so. An entry the portal's move left switched off stays switched off: the move
  * does that for several reasons (the adapter was off, a list of switches had its tools off, a rule it could not carry)
- * and does not say which, so only the person switches it on, in Settings -> MCP (the status says so). */
-export function carryOver(name: string, entry: Record<string, unknown> | undefined): Record<string, unknown> {
+ * and does not say which, so only the person switches it on, in Settings -> MCP (the status says so). The one
+ * switch-off that is this extension's own is that of its stop (`resume`, see syncEntry): it is not carried. */
+export function carryOver(name: string, entry: Record<string, unknown> | undefined, resume = false): Record<string, unknown> {
   const kept: Record<string, unknown> = {};
   if (!entry) return kept;
   const narrowing = [Array.isArray(entry.includeTools) && entry.includeTools.length ? "includeTools" : "", entry.exposeResources === false ? "exposeResources" : ""].filter(Boolean);
@@ -39,6 +40,7 @@ export function carryOver(name: string, entry: Record<string, unknown> | undefin
     throw new Error(`${name}: its entry in pi's mcp.json has ${narrowing.join(" and ")}, which pi does not read, so writing it without would offer more than the person chose. Take it out in Settings -> MCP (hide the tools in its toolExposure instead), then press Start.`);
   for (const key of ["enabled", "timeout", "description", "exposure"]) if (key in entry) kept[key] = entry[key];
   if (entry.disabled === true) kept.enabled = false;
+  if (resume && kept.enabled === false) delete kept.enabled;
   return kept;
 }
 
@@ -63,7 +65,9 @@ export function carryOver(name: string, entry: Record<string, unknown> | undefin
 export async function syncEntry(mcp: McpPort, inst: NextcloudInstance, address: string, own: boolean, earlier: boolean): Promise<boolean> {
   const there = mcp.get(inst.name);
   if (there && !Array.isArray(there.approve)) throw new Error(oldPortal(inst.name));
-  const kept = carryOver(inst.name, there?.entry);
+  // The stop of the half switched this entry off (and recorded that): it is switched on now, and only for that reason.
+  const resume = loadStopped().includes(inst.name);
+  const kept = carryOver(inst.name, there?.entry, resume);
   const wrote = loadHid()[inst.name] ?? [];
   const toolExposure = toolExposureFor(inst, there?.entry.toolExposure, wrote);
   const entry = { ...kept, url: address, ...(Object.keys(toolExposure).length ? { toolExposure } : {}) };
@@ -73,6 +77,7 @@ export async function syncEntry(mcp: McpPort, inst: NextcloudInstance, address: 
   const hid = exposureWritten(inst, there?.entry.toolExposure, wrote);
   if (there && own && isDeepStrictEqual(there.entry, entry) && isDeepStrictEqual(there.approve, approve)) {
     saveHid(inst.name, hid);
+    saveStopped(inst.name, false); // on already (the person switched it on, or nothing stopped it): nothing is left to switch on
     return false;
   }
   saveHid(inst.name, [...new Set([...wrote, ...hid])]);
@@ -85,5 +90,27 @@ export async function syncEntry(mcp: McpPort, inst: NextcloudInstance, address: 
     throw new Error(oldPortal(inst.name));
   }
   saveHid(inst.name, hid);
+  saveStopped(inst.name, false);
   return true;
+}
+
+/**
+ * What a stop of the server half does to its entries: each one that is on is switched off (`enabled: false`) and
+ * kept, with its `toolExposure` and its `approve`, so that what the person set on it (a family they hid, patterns they
+ * added) and what the move carried over survive a restart, an update or a stop of the portal. Those the stop switched
+ * off are recorded, and only those are switched on again by the next start (syncEntry): an entry that was off
+ * already, by the person or the portal's move, stays off. A server that is off is not connected by pi, so no chat
+ * tries the stopped container's port. An entry that is gone (the person removed it) is not written again.
+ */
+export async function stopEntries(mcp: McpPort, names: string[]): Promise<void> {
+  for (const name of names) {
+    const there = mcp.get(name);
+    if (!there) {
+      saveStopped(name, false);
+      continue;
+    }
+    if (there.entry.enabled === false || there.entry.disabled === true) continue; // off already: the stop did not do that, or an earlier stop did and has it recorded
+    saveStopped(name, true); // recorded before the write: a crash between leaves a record of an entry that is on, which the next start finds nothing to do for
+    await mcp.set(name, { ...there.entry, enabled: false }, Array.isArray(there.approve) ? { approve: there.approve } : undefined);
+  }
 }

@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { carryOver, syncEntry, type McpPort } from "../src/entries.ts";
-import { loadHid, saveHid } from "../src/config.ts";
+import { carryOver, syncEntry, stopEntries, type McpPort } from "../src/entries.ts";
+import { loadHid, saveHid, loadStopped } from "../src/config.ts";
 import { APPROVE_TOOLS } from "../src/capabilities.ts";
 
 /** The adapter's keys, which pi does not read and the portal refuses where a server is on. */
@@ -167,5 +167,55 @@ test("a record left from an earlier run is replaced by what the entry says now",
     const mcp = fakeMcp();
     await syncEntry(mcp.port, inst({ mail: false }), ADDRESS, false, false);
     assert.deepEqual(loadHid(), { uni: ["nc_mail_*"] });
+  });
+});
+
+test("a stop switches the entries that are on off and keeps them with their toolExposure, their approve and the person's own lines", async () => {
+  await withHome(async () => {
+    const mcp = fakeMcp();
+    await syncEntry(mcp.port, inst({ mail: false }), ADDRESS, false, false);
+    // the person's own lines and patterns, added in Settings -> MCP
+    mcp.entries.set("uni", { ...mcp.entries.get("uni")!, toolExposure: { "nc_mail_*": "hidden", nc_notes_get_note: "hidden" }, timeout: 30 });
+    mcp.gates.set("uni", [...APPROVE_TOOLS, "nc_notes_update_*"]);
+    await stopEntries(mcp.port, ["uni"]);
+    assert.deepEqual(mcp.entries.get("uni"), { url: ADDRESS, toolExposure: { "nc_mail_*": "hidden", nc_notes_get_note: "hidden" }, timeout: 30, enabled: false });
+    assert.deepEqual(mcp.gates.get("uni"), [...APPROVE_TOOLS, "nc_notes_update_*"], "the approve is passed again: a set without it would drop it");
+    assert.deepEqual(loadStopped(), ["uni"]);
+    // the next start switches it on, and only that: the url and the family lines are written anew, the person's stay
+    assert.equal(await syncEntry(mcp.port, inst({ mail: false }), "http://127.0.0.1:8001/mcp", true, false), true);
+    assert.deepEqual(mcp.entries.get("uni"), { url: "http://127.0.0.1:8001/mcp", toolExposure: { "nc_mail_*": "hidden", nc_notes_get_note: "hidden" }, timeout: 30 });
+    assert.deepEqual(mcp.gates.get("uni"), [...APPROVE_TOOLS, "nc_notes_update_*"]);
+    assert.deepEqual(loadStopped(), []);
+  });
+});
+
+test("an entry that was off before the stop (the person's, or the move's) is not recorded, and stays off through a restart", async () => {
+  await withHome(async () => {
+    const mcp = fakeMcp();
+    await syncEntry(mcp.port, inst(), ADDRESS, false, false);
+    mcp.entries.set("uni", { ...mcp.entries.get("uni")!, enabled: false });
+    mcp.calls.length = 0;
+    await stopEntries(mcp.port, ["uni"]);
+    assert.deepEqual(mcp.calls, [], "nothing is written");
+    assert.deepEqual(loadStopped(), []);
+    await syncEntry(mcp.port, inst(), ADDRESS, true, false);
+    assert.equal(mcp.entries.get("uni")!.enabled, false);
+  });
+});
+
+test("a stopped entry that the person switched on meanwhile is left alone by the start, and the record goes; one that is gone is not written by the stop", async () => {
+  await withHome(async () => {
+    const mcp = fakeMcp();
+    await syncEntry(mcp.port, inst(), ADDRESS, false, false);
+    await stopEntries(mcp.port, ["uni"]);
+    const { enabled, ...on } = mcp.entries.get("uni")!;
+    mcp.entries.set("uni", on);
+    mcp.calls.length = 0;
+    assert.equal(await syncEntry(mcp.port, inst(), ADDRESS, true, false), false);
+    assert.deepEqual(mcp.calls, []);
+    assert.deepEqual(loadStopped(), []);
+    mcp.entries.delete("uni");
+    await stopEntries(mcp.port, ["uni"]);
+    assert.deepEqual(mcp.calls, []);
   });
 });

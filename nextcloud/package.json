@@ -10,6 +10,9 @@
     "server": "./server.js",
     "requires": {
       "pithagoras-docker": "^1.3.0"
+    },
+    "optional": {
+      "pithagoras-files": "^0.2.0"
     }
   },
   "files": [

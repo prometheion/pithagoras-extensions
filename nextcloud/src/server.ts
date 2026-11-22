@@ -20,7 +20,8 @@ import { setPortal, portal, docker, personGate } from "./host";
 import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
 import { CAPABILITIES, APPROVE_TOOLS, EARLIER_APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
-import { normalizeUrl, checkAccountSoon, forgetAccount } from "./account";
+import { normalizeUrl, checkAccount, checkAccountSoon, forgetAccount, accountIdOf } from "./account";
+import { filesHookOf, syncSources, dropSources, sourceIdOf, wantedSources, type FilesHook, type SourceDeps } from "./files-source";
 import { ensureOwn, releaseOwn, containerState, instanceAddress, ownAddress, planOwn, CONTAINER_BASE, IMAGE, OwnPlan } from "./container";
 
 /** What a save is doing on the person's behalf right now -- and what it says of its last failure. Where two saves
@@ -330,8 +331,13 @@ async function status(): Promise<Record<string, unknown>> {
   } catch (error) {
     return { image: IMAGE, instances: [], configured: false, task: applying?.description, error: (error as Error).message };
   }
-  const rows = await Promise.all(insts.map((inst) => instanceStatus(docker(), plans, inst)));
-  return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError };
+  const rows = await Promise.all(insts.map(async (inst) => {
+    const row = await instanceStatus(docker(), plans, inst);
+    // Whether this instance's files are in the chat's Files tab too (with Files 0.2.0 or later): the settings page says so.
+    return filesHook ? { ...row, filesSource: filesSources.has(sourceIdOf(inst.name)) } : row;
+  }));
+  // `filesSources`: the sources this has given Files, where Files 0.2.0 or later is there (the settings page says where to find them).
+  return { image: IMAGE, instances: rows, configured: rows.some((row) => row.configured), task: applying?.description, error: lastError, ...(filesHook ? { filesSources: [...filesSources] } : {}) };
 }
 
 /** The containers this extension made gone and the entries it wrote cleared; the keys stay. Entries first: a chat
@@ -348,6 +354,57 @@ async function teardown(): Promise<void> {
   for (const address of [...clients.keys()]) forgetClient(address);
 }
 
+/** Why a tool is not called, with the status the route answers it with. */
+class ToolRefusal extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+/** Where a tool of the instance is called: the address of its server -- or why it is not (set up completely, in a family that is on, with
+ * a container that runs). The one place that decides, for the panel's tool route and for the source in Files alike: what the chats may not
+ * call, neither of them calls either. */
+function endpointFor(insts: NextcloudInstance[], inst: NextcloudInstance, tool: string): string {
+  if (!configured(inst)) throw new ToolRefusal(409, `the instance ${inst.name} is not set up completely yet`);
+  const family = capabilityOfTool(tool);
+  if (!family) throw new ToolRefusal(403, `${tool} is not a tool of any family this extension offers`);
+  if (inst.capabilities?.[family.id] === false) throw new ToolRefusal(403, `${family.label} is switched off for ${inst.name}`);
+  let plans: Map<string, OwnPlan>;
+  try {
+    plans = planOwn(insts);
+  } catch (error) {
+    throw new ToolRefusal(502, (error as Error).message);
+  }
+  const address = instanceAddress(plans, inst);
+  if (!address) throw new ToolRefusal(502, `the container of ${inst.name} is not running`);
+  return address;
+}
+
+/** How long one call of Files to the source is given in all, its tool calls and handshakes together: Files cuts a call off at 30 s, and
+ * ours is gone before that. */
+const SOURCE_CALL_MS = Number(process.env.PITHAGORAS_NEXTCLOUD_SOURCE_MS?.trim()) > 0 ? Number(process.env.PITHAGORAS_NEXTCLOUD_SOURCE_MS) : 25_000;
+
+/** What the source in Files is given of this half. */
+const sourceDeps: SourceDeps = {
+  instance: (name) => loadInstances().find((inst) => inst.name === name),
+  call: (inst, tool, args, limits) => clientFor(endpointFor(loadInstances(), inst, tool)).callTool(tool, args, limits),
+  callMs: SOURCE_CALL_MS,
+  accountId: (inst) => accountIdOf(inst),
+  log: (text) => portal().log(text),
+  personsKnown: () => typeof (portal().http as { person?: unknown } | undefined)?.person === "function",
+};
+
+/** Files' hook where Files 0.2.0 or later is there, and the ids of the sources given to it. */
+let filesHook: FilesHook | undefined;
+const filesSources = new Set<string>();
+/** The sources in Files brought to where the instances ask for them (a no-op without Files). */
+function syncFilesSources(): void {
+  const insts = loadInstances();
+  syncSources(filesHook, filesSources, insts, sourceDeps, (text) => portal().log(text));
+  // Ask Nextcloud who each login is, in the background: its user id is what the download addresses are made of (see accountIdOf).
+  if (filesHook) for (const w of wantedSources(insts)) void checkAccount(insts.find((i) => i.name === w.name)!).catch(() => {});
+}
+
 const nextcloud: ServerHalf = async (portalArg) => {
   setPortal(portalArg);
   const r = portal().router;
@@ -357,6 +414,13 @@ const nextcloud: ServerHalf = async (portalArg) => {
   // call tools that send mail and delete.
   r.use(writesFromHere);
   r.use(personGate);
+
+  // Files 0.2.0 and later takes a source: Nextcloud's files in the chat's Files tab, beside its folder. Without Files, or with an
+  // older one, `use` gives nothing and the panel's own Files tab is all there is. Registered now and kept in step with the
+  // instances (a save, a removal); taken away again by the stop function below.
+  filesSources.clear();
+  filesHook = filesHookOf((name) => portal().extensions.use(name));
+  syncFilesSources();
 
   /** Where things stand of every instance, as above. */
   r.get("/status", async (_req, res) => {
@@ -418,6 +482,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
     }
     const saved = saveInstances(insts);
     forgetAccount(inst);
+    syncFilesSources();
     // Fire-and-forget on purpose (as office's settings route): a first pull takes minutes and must not hold the
     // response open -- the run stands reported in the status's task, one at a time, and its failures stay there.
     void ensureApplied().catch(() => {});
@@ -434,6 +499,7 @@ const nextcloud: ServerHalf = async (portalArg) => {
     const insts = loadInstances();
     if (!insts.some((i) => i.name === name)) return res.status(400).json({ error: "no such instance" });
     const saved = saveInstances(insts.filter((i) => i.name !== name));
+    syncFilesSources();
     void ensureApplied().catch(() => {});
     res.json({ instances: saved.map(view) });
   });
@@ -468,21 +534,10 @@ const nextcloud: ServerHalf = async (portalArg) => {
     const wanted = typeof body.instance === "string" ? body.instance.trim() : "";
     const inst = wanted ? insts.find((i) => i.name === wanted) : insts.find(configured);
     if (!inst) return res.status(409).json({ error: wanted ? `no such instance: ${wanted}` : "no Nextcloud is set: save the settings first" });
-    if (!configured(inst)) return res.status(409).json({ error: `the instance ${inst.name} is not set up completely yet` });
-    const family = capabilityOfTool(name);
-    if (!family) return res.status(403).json({ error: `${name} is not a tool of any family this extension offers` });
-    if (inst.capabilities?.[family.id] === false) return res.status(403).json({ error: `${family.label} is switched off for ${inst.name}` });
-    let plans: Map<string, OwnPlan>;
     try {
-      plans = planOwn(insts);
+      res.json(await clientFor(endpointFor(insts, inst, name)).callTool(name, args));
     } catch (error) {
-      return res.status(502).json({ error: (error as Error).message });
-    }
-    const address = instanceAddress(plans, inst);
-    if (!address) return res.status(502).json({ error: `the container of ${inst.name} is not running` });
-    try {
-      res.json(await clientFor(address).callTool(name, args));
-    } catch (error) {
+      if (error instanceof ToolRefusal) return res.status(error.status).json({ error: error.message });
       res.status(502).json({ error: (error as Error).message });
     }
   });
@@ -508,8 +563,10 @@ const nextcloud: ServerHalf = async (portalArg) => {
   // gone with it; the keys stay, so the next start brings everything back. The portal waits for this before it
   // starts the half again (an update, a restart of Docker's half), so it is what this returns, and it stands in the
   // row of runs like any other: the new half's first pass begins after it.
-  return () =>
-    apply("removing the containers this extension made and its entries", teardown).catch(() => {});
+  return () => {
+    dropSources(filesHook, filesSources); // a source is not taken away by itself when this half stops
+    return apply("removing the containers this extension made and its entries", teardown).catch(() => {});
+  };
 };
 
 export default nextcloud;

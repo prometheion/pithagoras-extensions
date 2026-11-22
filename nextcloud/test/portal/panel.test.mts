@@ -1211,6 +1211,19 @@ test("Settings: what the Nextcloud says of the login is shown beside the server'
   await close(page);
 });
 
+test("Settings: an instance whose files are in the chat's Files tab says so; without Files it says nothing of it", async () => {
+  instancesBody = { instances: [card("uni")] };
+  statusBody = { image: "x", instances: [instanceRow({ name: "uni", filesSource: true })], configured: true };
+  const page = await open("settings");
+  await page.getByText("Its files are also in the chat's Files tab.").waitFor();
+  await close(page);
+  statusBody = { image: "x", instances: [instanceRow({ name: "uni" })], configured: true };
+  const without = await open("settings");
+  await without.getByText(/answering/).waitFor();
+  assert.equal(await without.getByText(/Files tab/).count(), 0);
+  await close(without);
+});
+
 test("Settings: removing an instance asks through the portal's dialog first", async () => {
   instancesBody = { instances: [card("uni")] };
   statusBody = { image: "x", instances: [instanceRow({ name: "uni" })], configured: true };

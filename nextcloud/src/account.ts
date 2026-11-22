@@ -34,6 +34,8 @@ export interface Account {
   state: "ok" | "unauthorized" | "unreachable" | "other";
   /** The name Nextcloud shows for the user, where it said. */
   name?: string;
+  /** The user's id in Nextcloud, where it said: what its WebDAV addresses are made of, and not always the login name (an e-mail address, an LDAP login). */
+  id?: string;
   error?: string;
 }
 
@@ -45,6 +47,14 @@ const cache = new Map<string, { at: number; account: Account }>();
 const keyOf = (inst: NextcloudInstance): string => createHash("sha256").update(JSON.stringify([inst.url, inst.username, inst.password])).digest("hex");
 
 const asking = new Map<string, Promise<Account>>();
+/** The id Nextcloud last gave for a login, kept as long as the process lives (unlike the answers, which go stale after a minute): a
+ * synchronous caller -- the address of a download -- reads it with accountIdOf. */
+const ids = new Map<string, string>();
+
+/** The user id Nextcloud gave for this login when it was last asked, if it was; undefined before that. */
+export function accountIdOf(inst: NextcloudInstance): string | undefined {
+  return ids.get(keyOf(inst));
+}
 
 /** Asks the Nextcloud who the login is (`GET /ocs/v2.php/cloud/user`), and keeps the answer for a minute: the status
  * is read often, and the Nextcloud is not to be asked every time. */
@@ -57,6 +67,11 @@ export function checkAccount(inst: NextcloudInstance): Promise<Account> {
     running = ask(inst)
       .then((account) => {
         cache.set(key, { at: Date.now(), account });
+        if (account.id) {
+          ids.delete(key);
+          ids.set(key, account.id);
+          while (ids.size > 50) ids.delete(ids.keys().next().value as string);
+        }
         if (cache.size > 50) for (const [k, v] of cache) if (Date.now() - v.at >= CACHE_TTL_MS) cache.delete(k);
         return account;
       })
@@ -110,7 +125,7 @@ async function ask(inst: NextcloudInstance): Promise<Account> {
     const body = (await answer.json()) as { ocs?: { data?: { id?: string; displayname?: string } } };
     const data = body.ocs?.data;
     if (!data || typeof data !== "object") throw new Error("no ocs data");
-    return { state: "ok", ...(data.displayname || data.id ? { name: String(data.displayname || data.id) } : {}) };
+    return { state: "ok", ...(data.displayname || data.id ? { name: String(data.displayname || data.id) } : {}), ...(typeof data.id === "string" && data.id !== "" ? { id: data.id } : {}) };
   } catch {
     return { state: "other", error: `${inst.url} answered, but not as a Nextcloud does: is the address the Nextcloud's own?` };
   }

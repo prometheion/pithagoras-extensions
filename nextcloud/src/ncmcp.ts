@@ -43,6 +43,38 @@ const PROTOCOL_VERSION = "2025-03-26";
 const PING_TIMEOUT_MS = 15_000;
 const TOOL_TIMEOUT_MS = 120_000;
 
+/** The code of the error for an answer that is larger than the caller allowed. */
+export const ANSWER_TOO_BIG = "E_ANSWER_TOO_BIG";
+/** The code of the error for a request that was not answered within its time. */
+export const TIMED_OUT = "E_TIMEOUT";
+
+/** The body of an answer as text: all of it, or -- where `maxBytes` is given -- an error with ANSWER_TOO_BIG as soon as it is clear that it
+ * is more (the header says so, or the stream has run past it), without reading the rest into memory. */
+async function bodyText(answer: Response, maxBytes: number | undefined): Promise<string> {
+  if (maxBytes === undefined) return answer.text();
+  const tooBig = async (): Promise<never> => {
+    await answer.body?.cancel().catch(() => {});
+    throw Object.assign(new Error(`The answer of the MCP server is larger than ${maxBytes} bytes`), { code: ANSWER_TOO_BIG });
+  };
+  const declared = Number(answer.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) return tooBig();
+  if (!answer.body) return "";
+  const reader = answer.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return tooBig();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 /** A streamable-HTTP MCP client of `url`, sessionful. */
 export function mcpClient(url: string) {
   let sessionId: string | undefined;
@@ -53,7 +85,7 @@ export function mcpClient(url: string) {
 
   /** One JSON-RPC message to the server, answered as JSON or event stream, its one result read back -- given no
    * longer than `timeoutMs`, over the whole answer including its body. A notification (no id) has no result to read. */
-  async function post(message: JsonRpcMessage, timeoutMs = 30_000): Promise<unknown> {
+  async function post(message: JsonRpcMessage, timeoutMs = 30_000, maxBytes?: number): Promise<unknown> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       // The server takes nothing else: without both of them it answers 406.
@@ -66,7 +98,7 @@ export function mcpClient(url: string) {
       answer = await fetch(url, { method: "POST", headers, body: JSON.stringify(message), signal: AbortSignal.timeout(timeoutMs) });
     } catch (error) {
       const timedOut = (error as Error).name === "TimeoutError";
-      throw new Error(`The MCP server at ${url} could not be reached: ${timedOut ? `it took longer than ${Math.round(timeoutMs / 1000)} s` : (error as Error).message}`);
+      throw Object.assign(new Error(`The MCP server at ${url} could not be reached: ${timedOut ? `it took longer than ${Math.round(timeoutMs / 1000)} s` : (error as Error).message}`), timedOut ? { code: TIMED_OUT } : {});
     }
     const givenSession = answer.headers.get("mcp-session-id");
     if (givenSession) sessionId = givenSession;
@@ -84,7 +116,15 @@ export function mcpClient(url: string) {
       await answer.body?.cancel().catch(() => {}); // a notification: the server says 202 and nothing more
       return undefined;
     }
-    const text = await answer.text();
+    let text: string;
+    try {
+      text = await bodyText(answer, maxBytes);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === ANSWER_TOO_BIG) throw error;
+      // the time ran out (or the line broke) while the body was coming: the same as no answer at all
+      const timedOut = (error as Error).name === "TimeoutError";
+      throw Object.assign(new Error(`The MCP server at ${url} could not be reached: ${timedOut ? `it took longer than ${Math.round(timeoutMs / 1000)} s` : (error as Error).message}`), timedOut ? { code: TIMED_OUT } : {});
+    }
     const contentType = (answer.headers.get("content-type") ?? "").toLowerCase();
     let body: JsonRpcMessage | undefined;
     if (contentType.includes("text/event-stream")) {
@@ -114,10 +154,11 @@ export function mcpClient(url: string) {
   /** The handshake: initialize, what the server says of itself kept, and the notification that the client is ready. */
   async function handshake(timeoutMs: number): Promise<void> {
     sessionId = undefined;
+    const deadline = Date.now() + timeoutMs; // both of its requests together stay within the time
     const result = (await post({ jsonrpc: "2.0", id: nextId++, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "@pithagoras/nextcloud", version: "0.1.0" } } }, timeoutMs)) as Record<string, unknown>;
     const server = (result?.serverInfo ?? {}) as Record<string, unknown>;
     info = { name: String(server.name ?? ""), version: String(server.version ?? "") };
-    await post({ jsonrpc: "2.0", method: "notifications/initialized" }, timeoutMs);
+    await post({ jsonrpc: "2.0", method: "notifications/initialized" }, Math.max(1, deadline - Date.now()));
     initialized = true;
   }
 
@@ -128,16 +169,19 @@ export function mcpClient(url: string) {
     return initializing;
   }
 
-  /** One request of the client proper: a handshake first where needed, one retry over a gone session. */
-  async function rpc(method: string, params?: unknown, timeoutMs = 30_000): Promise<unknown> {
-    if (!initialized) await initialize();
+  /** One request of the client proper: a handshake first where needed, one retry over a gone session. `timeoutMs` is for the whole of it,
+   * the handshakes included (a handshake is given 30 s at most, and never more than what is left). */
+  async function rpc(method: string, params?: unknown, timeoutMs = 30_000, maxBytes?: number): Promise<unknown> {
+    const deadline = Date.now() + timeoutMs;
+    const left = (): number => Math.max(1, deadline - Date.now());
+    if (!initialized) await initialize(Math.min(left(), 30_000));
     for (let attempt = 0; ; attempt++) {
       try {
-        return await post({ jsonrpc: "2.0", id: nextId++, method, params }, timeoutMs);
+        return await post({ jsonrpc: "2.0", id: nextId++, method, params }, left(), maxBytes);
       } catch (error) {
         if (attempt === 0 && (error as NodeJS.ErrnoException).code === "E_SESSION_GONE") {
           initialized = false;
-          await initialize();
+          await initialize(Math.min(left(), 30_000));
           continue;
         }
         throw error;
@@ -158,9 +202,11 @@ export function mcpClient(url: string) {
       const result = (await rpc("tools/list")) as Record<string, unknown>;
       return (result?.tools ?? []) as McpTool[];
     },
-    /** Call a tool of the server: its content parts back, raw -- this module parses none of them. */
-    async callTool(name: string, args: Record<string, unknown>): Promise<McpResult> {
-      const result = (await rpc("tools/call", { name, arguments: args }, TOOL_TIMEOUT_MS)) as McpResult;
+    /** Call a tool of the server: its content parts back, raw -- this module parses none of them. `timeoutMs` is how long the call is
+     * given in all (a handshake it needs included), for a caller that is itself cut off sooner (Files' source: 30 s); `maxBytes` is the
+     * most of an answer it takes into memory (an error with code ANSWER_TOO_BIG where it is more). */
+    async callTool(name: string, args: Record<string, unknown>, limits: { timeoutMs?: number; maxBytes?: number } = {}): Promise<McpResult> {
+      const result = (await rpc("tools/call", { name, arguments: args }, limits.timeoutMs ?? TOOL_TIMEOUT_MS, limits.maxBytes)) as McpResult;
       return result ?? { content: [] };
     },
     /** Ends the session on the server (best effort), for a client that is not used again. */

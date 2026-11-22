@@ -22,6 +22,9 @@ This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the 
 - The address with its scheme, `https://…`. A Nextcloud with a certificate the container does not trust (a
   self-signed one, a private CA) is not reached: the extension has no way to give the container your CA. Plain `http://`
   is refused unless you switch it on for the instance (it sends the app password unencrypted).
+- Optionally [Files](https://thecodacus.github.io/pithagoras/guide/files) (`pithagoras-files`) 0.2.0 or later, which is
+  what shows your Nextcloud in the chat's Files tab (see "What you get"). Without it, or with an older Files, nothing
+  else changes: the extension runs as before and the panel's own Files tab is all there is.
 - The Nextcloud apps the tabs talk to, each only where it is installed on your Nextcloud: Files (always), Deck,
   Calendar, Contacts, Notes, Cookbook, Shopping List, Mail, News and Collectives. A tab whose app is missing does not
   show.
@@ -104,6 +107,25 @@ left behind after a removal is not known to the extension: take it out in Settin
     to its original.
   - **Collectives** — the collectives (a new one set off) and their pages searched as you type, a page opened for
     reading and — where one is not kept read-only — written and saved back; new pages made where the collective allows.
+- **Your Nextcloud in the chat's Files tab** (with Files 0.2.0 or later): the files of each instance appear as a root
+  of its own, labelled **Nextcloud**, beside the chat's folder — the same file view, so you browse the tree, read text
+  in place, download a file and, for text, edit it and save it back. It uses the same WebDAV tools as the panel's Files
+  tab and no second way into your cloud. Good to know:
+  - **Only you see it**, the portal's primary person, and only for an instance that is set up completely and has its
+    Files family switched on. With nothing set up there is no such root; a colleague or guest of the portal sees none
+    (they could not use this extension's tools either).
+  - **With several instances** there is one root each, named "Nextcloud (name)".
+  - **A save is checked against the version you opened**: if the file was changed in Nextcloud since, the save is
+    refused as a conflict and nothing is written; "Save anyway" writes over the version there is. Files saves text only.
+  - **Downloads go to Nextcloud itself**: the download buttons open the file's WebDAV address on your Nextcloud
+    (`…/remote.php/dav/files/<user>/<path>`, `<user>` being your Nextcloud user id, which can differ from the login name), which your browser opens with the login it has there — no login of this
+    extension is in the address, and the file does not pass through the portal. Your browser has to reach the
+    Nextcloud's address for that (reading a file in the view goes through the portal and does not need it). A file over
+    8 MB is not read into the view: download it.
+  - **A Nextcloud that is down or slow** shows as an error in its own root, after at most 30 s, and never holds up the
+    chat's folder.
+  - **The panel's own Files tab stays**, for what the chat's Files tab cannot do: shares and public links, the trash,
+    moving, renaming and copying, deleting, and making new folders and files.
 - **The agents reach your clouds too**: every server is registered in pi's config under the instance's name, persistent
   — so a chat can ask "check the milk off the list" or "what did I note down about the fence", and the answer comes
   from Nextcloud. What it may not reach is what its capability choices turn off: one choice per family (Files,
@@ -159,6 +181,7 @@ The portal's environment can change these, for a second portal on the same Docke
 | `PITHAGORAS_NEXTCLOUD_DATA_DIR` | the extension's data folder, where `settings.json` (mode 0600) is kept |
 | `PITHAGORAS_NEXTCLOUD_ANSWER_MS` | `60000`: how long a container is given to answer as the Nextcloud MCP server before the run says it did not |
 | `PITHAGORAS_NEXTCLOUD_SETTLED_MS` | `8000`: how long a container must have run without a break before its answer counts as its own |
+| `PITHAGORAS_NEXTCLOUD_SOURCE_MS` | `25000`: how long a call of the Nextcloud root in the chat's Files tab is given (Files cuts a call off at 30 s) |
 
 ## Security
 
@@ -199,7 +222,9 @@ non-root user: those were not tried against the image, and a server that fails t
 
 ## Limits
 
-- No upload of files from the panel (files are browsed, previewed, downloaded, moved, copied, shared and deleted).
+- No upload of files from the panel (files are browsed, previewed, downloaded, moved, copied, shared and deleted). The
+  Nextcloud root in the chat's Files tab can save text to a file that is there (or one a save names), but it does not
+  create folders, rename, delete or upload either.
 - Calendar: events of a series that Nextcloud repeats are listed but not changed here; the grid reads the 13 months around
   the one shown, at most 500 events, and says so when the answer is cut short. A time the panel writes (an event's, a
   card's due date) is sent as the wall-clock time you see, which Nextcloud reads in its own zone.

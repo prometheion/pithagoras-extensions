@@ -32,6 +32,8 @@ export interface InstanceStatus {
   /** What the Nextcloud itself says of the login (the server's own answer never reaches it); absent while it is not set up. */
   account?: { state: "ok" | "unauthorized" | "unreachable" | "other" | "checking"; name?: string; error?: string };
   configured: boolean;
+  /** Whether this instance's files are in the chat's Files tab as a source of its own (Files 0.2.0 or later is there and the instance is set up); absent without Files. */
+  filesSource?: boolean;
   /** What the endpoint's tool list says of each capability family -- where it could be asked. */
   capabilities?: { available: Record<string, boolean>; on: Record<string, boolean> };
 }

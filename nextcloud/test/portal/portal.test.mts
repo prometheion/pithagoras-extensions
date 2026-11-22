@@ -250,7 +250,7 @@ test("a saved instance stands in a container of its own, on the portal's network
   const row = (await until((s) => s.instances.some((i: any) => i.name === "uni" && i.capabilities), "the instance in the status, with what its server offers")).instances.find((i: any) => i.name === "uni");
   assert.deepEqual(row.capabilities.available, Object.fromEntries(CAPABILITIES.map((cap) => [cap.id, false]))); // the stand-in serves no tools, so nothing stands offered
   const { capabilities, ...plain } = row;
-  assert.deepEqual(plain, { name: "uni", containerName: "pithagoras-nextcloud-mcp-uni", state: "running", url: ncUrl, address: url, mcp: { registered: true, on: true, url }, health: { ok: true, server: { name: "Nextcloud MCP", version: "9.9.9" } }, configured: true, account: { state: "ok", name: "Anna Example" } });
+  assert.deepEqual(plain, { name: "uni", containerName: "pithagoras-nextcloud-mcp-uni", state: "running", url: ncUrl, address: url, mcp: { registered: true, on: true, url }, health: { ok: true, server: { name: "Nextcloud MCP", version: "9.9.9" } }, configured: true, account: { state: "ok", name: "Anna Example", id: "anna" } });
 });
 
 test("its entry is not a trusted server, and the agent is asked before the tools that send, share and delete", async () => {

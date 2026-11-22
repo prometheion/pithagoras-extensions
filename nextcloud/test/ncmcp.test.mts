@@ -206,3 +206,62 @@ test("a 404 on the first request says nothing serves /mcp there; it is not taken
     other.close();
   }
 });
+
+/** A server that takes its time over the handshake and over a tool call, and answers a tool call with as much text as it is told. */
+function slowServer(over: { initMs: number; callMs: number; bytes?: number; chunked?: boolean }) {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const message = JSON.parse(body) as { method?: string; id?: number };
+      const reply = (ms: number, result: unknown, session?: string) =>
+        setTimeout(() => {
+          const payload = JSON.stringify({ jsonrpc: "2.0", id: message.id, result });
+          res.writeHead(200, { "content-type": "application/json", ...(session ? { "mcp-session-id": session } : {}), ...(over.chunked ? {} : { "content-length": String(Buffer.byteLength(payload)) }) });
+          if (!over.chunked) return res.end(payload);
+          // no length given: the body comes in pieces, for as long as the client reads
+          const pieces = payload.match(/[\s\S]{1,65536}/g) ?? [];
+          let i = 0;
+          const next = () => (i < pieces.length && !res.destroyed ? res.write(pieces[i++], next) : res.end());
+          next();
+        }, ms);
+      if (message.method === "initialize") return reply(over.initMs, { serverInfo: { name: "slow", version: "1" } }, "s1");
+      if (message.method === "notifications/initialized") return void res.writeHead(202).end();
+      if (message.method === "tools/call") return reply(over.callMs, { content: [{ type: "text", text: "x".repeat(over.bytes ?? 10) }] });
+      res.writeHead(404).end("{}");
+    });
+  });
+  return {
+    start: () => new Promise<number>((resolve) => server.listen(0, "127.0.0.1", () => resolve((server.address() as AddressInfo).port))),
+    stop: () => new Promise<void>((resolve) => (server.closeAllConnections(), server.close(() => resolve()))),
+  };
+}
+
+test("a call's time is for all of it: a slow handshake takes from what the tool call has", async () => {
+  const server = slowServer({ initMs: 300, callMs: 300 });
+  const port = await server.start();
+  try {
+    const client = mcpClient(`http://127.0.0.1:${port}/mcp`);
+    await assert.rejects(client.callTool("t", {}, { timeoutMs: 500 }), (error: NodeJS.ErrnoException) => error.code === "E_TIMEOUT" && /took longer/.test(error.message));
+    const fresh = mcpClient(`http://127.0.0.1:${port}/mcp`);
+    assert.equal((await fresh.callTool("t", {}, { timeoutMs: 2_000 })).content[0].text, "xxxxxxxxxx", "with room for both it is answered");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("an answer past the byte limit is an error as soon as it is clear, whether the server says its length or not", async () => {
+  for (const chunked of [false, true]) {
+    const server = slowServer({ initMs: 0, callMs: 0, bytes: 3 * 1024 * 1024, chunked });
+    const port = await server.start();
+    try {
+      const client = mcpClient(`http://127.0.0.1:${port}/mcp`);
+      await assert.rejects(client.callTool("t", {}, { maxBytes: 1024 * 1024 }), (error: NodeJS.ErrnoException) => error.code === "E_ANSWER_TOO_BIG", `chunked: ${chunked}`);
+      const result = await client.callTool("t", {}, { maxBytes: 4 * 1024 * 1024 });
+      assert.equal(result.content[0].text!.length, 3 * 1024 * 1024, "under the limit it is whole");
+      assert.equal((await client.callTool("t", {})).content[0].text!.length, 3 * 1024 * 1024, "no limit given: no limit");
+    } finally {
+      await server.stop();
+    }
+  }
+});

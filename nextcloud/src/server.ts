@@ -13,12 +13,12 @@
  * extension that no plan names, and every entry it wrote (it keeps their names) that no instance carries.
  */
 import net from "node:net";
-import { isDeepStrictEqual } from "node:util";
 import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { writesFromHere } from "../../shared/proxy";
 import { setPortal, portal, docker, personGate } from "./host";
 import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, loadHid, saveHid, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
-import { CAPABILITIES, approveFor, capabilityOfTool, toolExposureFor, exposureWritten, availableFromTools } from "./capabilities";
+import { CAPABILITIES, capabilityOfTool, availableFromTools } from "./capabilities";
+import { syncEntry } from "./entries";
 import { mcpClient } from "./ncmcp";
 import { normalizeUrl, checkAccount, checkAccountSoon, forgetAccount, accountIdOf } from "./account";
 import { filesHookOf, syncSources, dropSources, sourceIdOf, wantedSources, type FilesHook, type SourceDeps } from "./files-source";
@@ -184,7 +184,7 @@ function foreignEntry(name: string): boolean {
  * The entry is pi's own: the loopback `url`, and the `toolExposure` that hides the families an instance turned off.
  * What asks the person before a call is the `approve` option of `portal.mcp.set`, which the portal keeps beside the
  * file. None of the adapter's keys (`lifecycle`, `excludeTools`, `approveTools` ...) is written, and an entry an
- * earlier version wrote with them is written again without them (see carryOver): the portal refuses an entry that has one. */
+ * earlier version wrote with them is written again without them (see entries.ts): the portal refuses an entry that has one. */
 function ensureApplied(): Promise<void> {
   const asked = loadInstances();
   return apply(
@@ -229,23 +229,15 @@ function ensureApplied(): Promise<void> {
           // Removed while it was made (a download takes minutes): no entry for it; the run behind that removal sweeps it.
           if (!loadInstances().some((i) => i.name === inst.name)) continue;
           await awaitAnswer(d, plan);
-          const kept = carryOver(inst.name, there?.entry);
-          const wrote = loadHid()[inst.name] ?? [];
-          const toolExposure = toolExposureFor(inst, there?.entry.toolExposure, wrote);
-          const entry = { ...kept, url: ownAddress(plan.port), ...(Object.keys(toolExposure).length ? { toolExposure } : {}) };
-          // What this extension asks about by default, in this version or an earlier one, gets this version's list (a
-          // wider one reaches every install that ran an earlier one); what a person added to it stays.
-          const approve = approveFor(there?.approve, there?.entry.approveTools, inst.name);
           // An entry an earlier version wrote counted as the person's own (trusted). Writing a server again does not
           // take the name out of Settings -> Guard's trusted servers; removing it does. Only the names that version
           // wrote: every name in `written` was written by this one (0.1.0 kept no such list), and a removal each run
           // would take a trust the person gave it since, and reload the open chats, while another instance fails.
-          if (there && version < ENTRIES_VERSION && !written.includes(inst.name)) await portal().mcp.set(inst.name, undefined);
-          else if (there && written.includes(inst.name) && isDeepStrictEqual(there.entry, entry) && isDeepStrictEqual(there.approve, approve)) continue; // nothing to say again: every set reloads the open chats
-          await portal().mcp.set(inst.name, entry, { approve });
-          written = [...written, inst.name];
-          saveWritten(written, version);
-          saveHid(inst.name, exposureWritten(inst, there?.entry.toolExposure, wrote));
+          const own = written.includes(inst.name);
+          if (await syncEntry(portal().mcp, inst, ownAddress(plan.port), own, !own && version < ENTRIES_VERSION)) {
+            written = [...written, inst.name];
+            saveWritten(written, version);
+          }
         } catch (error) {
           failed.push((error as Error).message);
         }
@@ -254,27 +246,6 @@ function ensureApplied(): Promise<void> {
       if (failed.length) throw new Error(failed.join(" "));
     },
   );
-}
-
-/** What an entry in pi's config keeps of itself where this extension rewrites it: what pi reads of the person's own
- * tuning of that server (that it is switched off, its timeout and description, how its tools are exposed) -- but not
- * how the server is reached, which the instance says now, never a login (a header, a token or an environment someone
- * put on an entry of that name is not sent on to the container), and none of the adapter's keys, which an entry an
- * earlier version wrote has (`lifecycle`, `debug`, `directTools`, `excludeTools`, `approveTools` ...): pi does not read
- * them, and the portal refuses an entry that has one. The two the person may have set to narrow what the agent reaches,
- * `includeTools` and `exposeResources: false`, have no word in pi's entry: dropped, they would widen it unseen, so the
- * entry stays as it is and the run says so. An entry the portal's move left switched off stays switched off: the move
- * does that for several reasons (the adapter was off, a list of switches had its tools off, a rule it could not carry)
- * and does not say which, so only the person switches it on, in Settings -> MCP (the status says so). */
-function carryOver(name: string, entry: Record<string, unknown> | undefined): Record<string, unknown> {
-  const kept: Record<string, unknown> = {};
-  if (!entry) return kept;
-  const narrowing = [Array.isArray(entry.includeTools) && entry.includeTools.length ? "includeTools" : "", entry.exposeResources === false ? "exposeResources" : ""].filter(Boolean);
-  if (narrowing.length)
-    throw new Error(`${name}: its entry in pi's mcp.json has ${narrowing.join(" and ")}, which pi does not read, so writing it without would offer more than the person chose. Take it out in Settings -> MCP (hide the tools in its toolExposure instead), then press Start.`);
-  for (const key of ["enabled", "timeout", "description", "exposure"]) if (key in entry) kept[key] = entry[key];
-  if (entry.disabled === true) kept.enabled = false;
-  return kept;
 }
 
 /** What one instance says of itself in the status: its container, its entry in pi's config, and whether its server

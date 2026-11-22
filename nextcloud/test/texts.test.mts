@@ -60,3 +60,10 @@ test("a German text keeps the ellipsis and the full stop of its English", () => 
     if (english.endsWith(".")) assert.ok(String(german).endsWith("."), `${english} -> ${german}`);
   }
 });
+
+test("the README and the settings page say that a family that is off keeps only its tools out: its resources stay readable through pi's resource tools", () => {
+  const readme = fs.readFileSync(path.resolve(import.meta.dirname, "../README.md"), "utf8");
+  assert.match(readme, /resources readable/);
+  assert.match(readme, /read_mcp_resource/);
+  assert.ok([...texts().keys()].some((key) => /resources .* can still be read/.test(key)), "the settings page shows it");
+});

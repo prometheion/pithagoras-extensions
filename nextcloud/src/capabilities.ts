@@ -89,8 +89,9 @@ export function exposureWritten(inst: { capabilities?: Record<string, boolean> }
  * `own` is what the entry says of its tools already, `wrote` the patterns of the families that this extension put
  * there itself (see exposureWritten). A person's own lines in it stay -- a tool they hid by name, or a whole family
  * they hid in Settings -> MCP while its switch here is on -- but not the extension's own lines for the families,
- * which are written anew from the choices, and not an exact name of another exposure that a hidden pattern covers:
- * that would win over the pattern and leave the tool visible.
+ * which are written anew from the choices, and not an exact name of another exposure that a pattern of a family
+ * that is off covers: that would win over the pattern and leave the tool visible. An exact name under a pattern of
+ * the person's own (`*` hidden, a few tools shown by name) stays: that is how they say it.
  */
 export function toolExposureFor(inst: { capabilities?: Record<string, boolean> }, own?: unknown, wrote: readonly string[] = []): Record<string, string> {
   const out: Record<string, string> = {};
@@ -103,8 +104,10 @@ export function toolExposureFor(inst: { capabilities?: Record<string, boolean> }
       out[name] = how;
     }
   }
-  const hidden = Object.keys(out).filter((name) => out[name] === "hidden");
-  for (const name of Object.keys(out)) if (out[name] !== "hidden" && !name.includes("*") && hidden.some((pattern) => matches(pattern, name))) delete out[name];
+  // Only the patterns this extension hides now: a person's own `*: hidden` with a few tools named as exceptions (the way
+  // to say what includeTools did) is a setup of theirs, whose exceptions stay.
+  const mine = familyPatterns(inst);
+  for (const name of Object.keys(out)) if (out[name] !== "hidden" && !name.includes("*") && mine.some((pattern) => matches(pattern, name))) delete out[name];
   return out;
 }
 

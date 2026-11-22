@@ -111,9 +111,15 @@ test("a person's own lines in an entry's toolExposure stay, but never one that w
   for (const tool of ["nc_news_list_feeds", "nc_news_get_item"]) assert.equal(exposureOf(kept, tool), "hidden", tool);
   assert.deepEqual(toolExposureFor({ capabilities: { news: false } }, { "nc_mail_*": "hidden" }), { "nc_news_*": "hidden", "nc_mail_*": "hidden" }, "a whole family the person hid in Settings -> MCP stays hidden, whatever its switch says here");
   assert.deepEqual(toolExposureFor({}, { "nc_mail_*": "hidden", "nc_news_*": "hidden" }, ["nc_news_*"]), { "nc_mail_*": "hidden" }, "only what this extension hid itself goes with the family's switch");
-  assert.deepEqual(toolExposureFor({}, { "nc_mail_*": "hidden", nc_mail_get_message: "direct" }), { "nc_mail_*": "hidden" }, "and what a person's hidden pattern covers is not left visible by an exact name");
+  assert.deepEqual(toolExposureFor({ capabilities: { mail: false } }, { nc_mail_get_message: "direct", nc_news_get_item: "direct" }), { "nc_mail_*": "hidden", nc_news_get_item: "direct" }, "what a family that is off covers is not left visible by an exact name of another exposure");
+  assert.deepEqual(toolExposureFor({}, { "nc_mail_*": "hidden", nc_mail_get_message: "direct" }), { "nc_mail_*": "hidden", nc_mail_get_message: "direct" }, "but a person's own pattern with an exact name shown beside it is how they choose, and stays");
   assert.deepEqual(exposureWritten({ capabilities: { mail: false, news: false } }, { "nc_mail_*": "hidden" }, ["nc_news_*"]), ["nc_news_*"], "a hide that stood there before and is not recorded is the person's, not written by this extension");
   assert.deepEqual(exposureWritten({ capabilities: { mail: false } }, { "nc_mail_*": "hidden" }, ["nc_mail_*"]), ["nc_mail_*"]);
+  // "Hide everything, show these few by name" (what includeTools was): the exceptions stay, all families on, and with one off only that family's exceptions go.
+  const fewOnly = { "*": "hidden", nc_notes_get_note: "direct", nc_notes_search_notes: "direct" };
+  assert.deepEqual(toolExposureFor({ capabilities: {} }, fewOnly, []), fewOnly);
+  assert.deepEqual(toolExposureFor({ capabilities: {} }, { "nc_notes_*": "hidden", nc_notes_get_note: "codemode" }, []), { "nc_notes_*": "hidden", nc_notes_get_note: "codemode" });
+  assert.deepEqual(toolExposureFor({ capabilities: { notes: false } }, fewOnly, []), { "nc_notes_*": "hidden", "*": "hidden" }, "a family that is off drops the exceptions under its pattern");
   assert.deepEqual(toolExposureFor({}, "not a map"), {});
   assert.deepEqual(toolExposureFor({}, ["nc_mail_*"]), {});
 });

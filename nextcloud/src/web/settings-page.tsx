@@ -349,6 +349,7 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
             );
           })}
         </div>
+        <p className="mt-1 text-xs text-fg-muted">{t("A family that is off keeps its tools out of the chats, but its resources (a note, a recipe or a Deck card by its address) can still be read through pi's resource tools.")}</p>
       </div>
 
       {status && (

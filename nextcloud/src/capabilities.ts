@@ -1,7 +1,7 @@
 /**
  * The capability families a Nextcloud MCP server offers, and how this extension knows them: by the raw prefixes
  * their tool names begin with. Two things turn with one choice per instance per family -- whether the chats' tool
- * list keeps it out (the globs in its entry in pi's config) and whether the panel shows what belongs to it; and
+ * list keeps it out (the `toolExposure` of its entry in pi's config) and whether the panel shows what belongs to it; and
  * whether a family is provided at all is found by asking the running endpoint for its tools, never assumed: a
  * family the server does not provide is offered nowhere -- no tab for it, nothing to keep out.
  *
@@ -51,26 +51,52 @@ export function availableFromTools(toolNames: string[]): Record<string, boolean>
   return out;
 }
 
-/** The globs of one family against the names pi-mcp-adapter gives the tools (<instance>_<tool>): one per prefix. */
-export function globsFor(cap: Capability, instanceName: string): string[] {
-  return cap.prefixes.map((prefix) => `${instanceName}_${prefix}*`);
+/** The patterns of one family in an entry's `toolExposure`, against the raw tool names the server gives: one per prefix. */
+export function patternsFor(cap: Capability): string[] {
+  return cap.prefixes.map((prefix) => `${prefix}*`);
 }
 
-/** What an instance keeps out of the chats' tool list on its explicit choices: every family it turned off; a
- * choice that stands none keeps nothing (an instance with no choices keeps nothing -- everything is offered). */
-export function excludeGlobs(inst: { name: string; capabilities?: Record<string, boolean> }): string[] {
-  const out: string[] = [];
-  for (const cap of CAPABILITIES) if (inst.capabilities?.[cap.id] === false) out.push(...globsFor(cap, inst.name));
+/** Whether a pattern matches a name as pi matches the keys of `toolExposure`: `*` for any characters, no other wildcard. */
+function matches(pattern: string, name: string): boolean {
+  const source = pattern
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${source}$`).test(name);
+}
+
+/**
+ * What an instance keeps out of the chats' tool list, as the `toolExposure` of its entry in pi's config: every
+ * family it turned off, as the patterns of its prefixes, `hidden`. A choice that stands none keeps nothing (an
+ * instance with no choices keeps nothing -- everything is offered). Only patterns, never an exact name of ours: pi
+ * takes an exact name before any pattern, so a name that stood beside them could leave visible what a family hides.
+ *
+ * `own` is what the entry says of its tools already. A person's own lines in it stay (a tool they hid by name, say),
+ * but not the patterns of the families, which are written anew from the choices, and not an exact name of another
+ * exposure that a hidden pattern covers: that would win over the pattern and leave the tool visible.
+ */
+export function toolExposureFor(inst: { capabilities?: Record<string, boolean> }, own?: unknown): Record<string, string> {
+  const hidden: Record<string, string> = {};
+  for (const cap of CAPABILITIES) if (inst.capabilities?.[cap.id] === false) for (const pattern of patternsFor(cap)) hidden[pattern] = "hidden";
+  const ours = new Set(CAPABILITIES.flatMap(patternsFor));
+  const out = { ...hidden };
+  if (own && typeof own === "object" && !Array.isArray(own)) {
+    for (const [name, how] of Object.entries(own)) {
+      if (typeof how !== "string" || ours.has(name)) continue;
+      if (how !== "hidden" && !name.includes("*") && Object.keys(hidden).some((pattern) => matches(pattern, name))) continue;
+      out[name] = how;
+    }
+  }
   return out;
 }
 
-/** The tools the agent may not call without the person's yes, by their raw names, which pi-mcp-adapter matches
- * whatever the instance is called (`approveTools` of the instance's entry): what goes out to other people (mail, a
- * Talk message, a conversation or a participant added, an event or a meeting with attendees, whom Nextcloud mails an
- * invitation), a public link or a share, and everything that deletes, clears or takes to the trash -- the calendar's
- * bulk operations and its calendar management among them, which delete by an argument the gate cannot look at. Whole
- * tools: an event without attendees is asked about too. Overwrites and moves of files and mail are not asked about
- * (the README says so). A person's own list in the entry takes this one's place. */
+/** The tools the agent may not call without the person's yes, by their raw names as the server gives them, which the
+ * portal matches whatever the instance is called (the `approve` option of `portal.mcp.set`, not a key of the entry):
+ * what goes out to other people (mail, a Talk message, a conversation or a participant added, an event or a meeting
+ * with attendees, whom Nextcloud mails an invitation), a public link or a share, and everything that deletes, clears
+ * or takes to the trash -- the calendar's bulk operations and its calendar management among them, which delete by an
+ * argument the gate cannot look at. Whole tools: an event without attendees is asked about too. Overwrites and moves
+ * of files and mail are not asked about (the README says so). Patterns with `*` only, no `?`. */
 export const APPROVE_TOOLS = [
   "nc_mail_send_message",
   "nc_share_create*",
@@ -89,12 +115,47 @@ export const APPROVE_TOOLS = [
   "*_trash_*",
 ];
 
-/** Every list an earlier version of this extension wrote as the entry's `approveTools`: an entry that holds one of
- * them holds this extension's default, not a choice of the person's, and gets the list of this version. A version
- * that changes APPROVE_TOOLS adds the one it replaces here. */
+/** Every list an earlier version of this extension asked about as the entry's `approveTools`: what it holds of them is
+ * this extension's default, not a choice of the person's. A version that changes APPROVE_TOOLS adds the one it
+ * replaces here. */
 export const EARLIER_APPROVE_TOOLS: string[][] = [
   ["nc_mail_send_message", "nc_share_create*", "nc_share_update*", "nc_share_delete*", "*_delete_*", "*_clear_*"],
 ];
+
+/**
+ * What an instance's calls ask the person about: the default, and what a person added to it. A pattern this
+ * extension asks about by default (in this version or an earlier one) is its own; any other that the instance asks
+ * about already is the person's, a list they gave that the portal kept when it moved the entry from the adapter, and
+ * stays, so they are never asked about less than before. `had` is the patterns the portal holds for the server now
+ * (`portal.mcp.get(...).approve`); `given` is the `approveTools` of the entry, where an earlier version's is still in
+ * it (a list, or `true` for every tool).
+ */
+export function approveFor(had: unknown, given?: unknown): string[] {
+  const known = new Set([...APPROVE_TOOLS, ...EARLIER_APPROVE_TOOLS.flat()]);
+  const extra: string[] = [];
+  for (const list of [had, given === true ? ["*"] : given]) {
+    if (!Array.isArray(list)) continue;
+    for (const one of list) {
+      // `?` was the adapter's wildcard for one character: to ask about more is safe, to ask about less is not. A pi name or
+      // a `<server>/<tool>` could never match here, and the portal refuses a list that has one.
+      const pattern = typeof one === "string" ? one.trim().replace(/\?/g, "*") : "";
+      if (pattern === "" || pattern.startsWith("mcp__") || pattern.includes("/") || known.has(pattern) || extra.includes(pattern)) continue;
+      extra.push(pattern);
+    }
+  }
+  return [...APPROVE_TOOLS, ...extra];
+}
+
+/** The instance a tool of the chats belongs to, by the name pi gives it, `mcp__<server>__<tool>` (the server's dashes
+ * as underscores): of the instances whose namespace the name stands under, the one with the longest name, as the
+ * servers `a` and `a_` have names that begin alike. None where it is no instance's. */
+export function instanceOfTool(toolName: string, instanceNames: string[]): string | undefined {
+  let best: string | undefined;
+  for (const name of instanceNames) {
+    if (toolName.startsWith(`mcp__${name.replace(/-/g, "_")}__`) && (!best || name.length > best.length)) best = name;
+  }
+  return best;
+}
 
 /** One tab of the panel and what its showing stands on: at least one of its capabilities turned on. */
 export interface PanelTab {

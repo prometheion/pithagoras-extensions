@@ -62,7 +62,7 @@ so. Pick another name, or remove that server first.
 
 The settings page also shows every capability this extension knows about — the tool families of its tabs, one choice
 each: files and sharing beside each other, mail, news, collectives among them. Each choice turns that family's tools
-off in pi's config where it is turned off, and keeps its tab out of the panel as well; where the instance's endpoint
+off where it is turned off (the entry's `toolExposure` hides them), and keeps its tab out of the panel as well; where the instance's endpoint
 does not provide a family at all (its server answers without those tools), the choice stands greyed out and is kept
 out wherever it would reach. What the endpoint provides is found from its own tool list every time the status looks,
 so nothing an earlier version never offered is invented, and a server that starts to offer more shows it on its own.
@@ -126,8 +126,10 @@ left behind after a removal is not known to the extension: take it out in Settin
     chat's folder.
   - **The panel's own Files tab stays**, for what the chat's Files tab cannot do: shares and public links, the trash,
     moving, renaming and copying, deleting, and making new folders and files.
-- **The agents reach your clouds too**: every server is registered in pi's config under the instance's name, persistent
-  — so a chat can ask "check the milk off the list" or "what did I note down about the fence", and the answer comes
+- **The agents reach your clouds too**: every server is registered in pi's config under the instance's name, as pi's
+  own MCP entry (its address, nothing of the adapter's), so its tools stand in the chats as `mcp__<instance>__<tool>`
+  (`mcp__uni__nc_notes_create_note`), found through the portal's tool search or offered at once as Settings → Tools
+  has it — so a chat can ask "check the milk off the list" or "what did I note down about the fence", and the answer comes
   from Nextcloud. What it may not reach is what its capability choices turn off: one choice per family (Files,
   Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List, Notes, Talk, Tables). The few
   tools the server has outside these families (its own sign-in helpers and the like) cannot be turned off here, and
@@ -143,12 +145,13 @@ left behind after a removal is not known to the extension: take it out in Settin
     cannot look at the arguments). It asks before a public link or a share (`nc_share_create*`, `nc_share_update*`),
     and before anything is deleted, cleared or taken to the trash (`*_delete_*`, `nc_share_delete*`, `*_clear_*`,
     `*_trash_*`, and the calendar's `nc_calendar_bulk_operations` and `nc_calendar_manage_calendar`, which delete by
-    an argument). The question comes through pi-mcp-adapter's `approveTools` on the entry; a chat nobody sits at (a
-    routine, a heartbeat) cannot be asked, and the call is refused. Change the list in Settings → MCP (`approveTools`
-    of the entry): a list you set there stays (the extension's own default list is replaced by a newer version's);
-    `false` turns the questions off. A global `approveTools: true` in pi's MCP settings does not reach these
-    servers, since a server's own list takes its place: set `true` on their entries for that. **Not asked about:**
-    reading and listing, creating notes, cards, todos and the like, comments and assignments other users of the
+    an argument). The question is the portal's: the list is what the extension gives `portal.mcp.set` as `approve`,
+    patterns of the server's own tool names, and the portal keeps it beside pi's file (Settings → MCP shows it in the
+    server's row), so every call of a matching tool is asked about, whether the agent calls it directly, through tool
+    search, from a script or from a subagent. A chat nobody sits at (a routine, a heartbeat) cannot be asked, and the
+    call is refused. A pattern the server already asks about that this extension's list does not hold (one you had
+    on the entry before the move to pi's own MCP support) stays; the extension's own list is replaced by a newer
+    version's. **Not asked about:** reading and listing, creating notes, cards, todos and the like, comments and assignments other users of the
     Nextcloud see, and overwriting, moving, copying or restoring files and moving mail (to the trash folder too).
 
 ## How it runs
@@ -232,6 +235,17 @@ non-root user: those were not tried against the image, and a server that fails t
 - A panel tab drops what was typed in it when you switch to another tab of the panel (the portal asks before the page
   or a dialog is closed on unsaved words, and a view asks before it is left by its own buttons).
 - A tool call is given 120 s; a very large file read can time out.
+
+## Changes
+
+- **Next version: the entry moved to pi's own MCP support.** Pithagoras runs MCP servers on pi's own support now, not
+  through pi-mcp-adapter, and the extension writes the entry in pi's words: the `url` of the instance's container, and a
+  `toolExposure` that hides the families an instance turned off. What asks you before a call is no longer the entry's
+  `approveTools` but the `approve` the extension gives the portal (same list). `lifecycle`, `excludeTools`,
+  `approveTools` and the adapter's other keys are no longer written, and an entry an earlier version wrote with them
+  is written again without them on the extension's next start, with the families that were left out kept left out. A
+  tool's name in the chats is now `mcp__<instance>__<tool>` (was `<instance>_<tool>`); a switch of a chat's tools that
+  names the old name has to be set again. Needs a Pithagoras with `portal.mcp.set`'s `approve` option.
 
 ## Licences
 

@@ -10,7 +10,7 @@
  * reachable by every local process, and it checks nobody (the server has no login of its own in this mode, and
  * a token in front of it would be as reachable as it is -- the README says so). What keeps the damage down is what
  * the portal does with it: the person is asked before mail goes out, a link is made, something is shared or deleted
- * (the `approveTools` of its entry), and the container is made without capabilities, with limits.
+ * (the `approve` of its entry), and the container is made without capabilities, with limits.
  * The image's entry point already runs `nextcloud-mcp-server run --host 0.0.0.0` (for its Kubernetes chart); the
  * `--host 127.0.0.1 --port` appended to the command line takes the place of that and says on which port, as click
  * reads an option named twice and keeps the last. Where several instances keep their containers, each listens on
@@ -123,7 +123,7 @@ export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: nu
       `NEXTCLOUD_PASSWORD=${inst.password}`,
       // The image's defaults answer any web page in a browser on this machine: CORS "*" with credentials (which
       // Starlette turns into an echo of the page's origin) and the MCP SDK's DNS-rebinding protection off. With the
-      // protection on, only the Host this extension and pi-mcp-adapter send is taken, and any request that carries
+      // protection on, only the Host this extension and pi's own MCP client send is taken, and any request that carries
       // an Origin (a browser's) is refused, as no allowed origin is set; neither client sends one.
       "MCP_DNS_REBINDING_PROTECTION=true",
       `MCP_ALLOWED_HOSTS=127.0.0.1:${port}`,

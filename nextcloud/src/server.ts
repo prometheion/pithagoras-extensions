@@ -18,7 +18,7 @@ import type { ServerHalf } from "@pithagoras/extension-api/server";
 import { writesFromHere } from "../../shared/proxy";
 import { setPortal, portal, docker, personGate } from "./host";
 import { loadInstances, saveInstances, loadWritten, loadEntriesVersion, saveWritten, ENTRIES_VERSION, configured, isValidInstanceName, NextcloudInstance } from "./config";
-import { CAPABILITIES, APPROVE_TOOLS, EARLIER_APPROVE_TOOLS, capabilityOfTool, excludeGlobs, availableFromTools } from "./capabilities";
+import { CAPABILITIES, approveFor, capabilityOfTool, toolExposureFor, availableFromTools } from "./capabilities";
 import { mcpClient } from "./ncmcp";
 import { normalizeUrl, checkAccount, checkAccountSoon, forgetAccount, accountIdOf } from "./account";
 import { filesHookOf, syncSources, dropSources, sourceIdOf, wantedSources, type FilesHook, type SourceDeps } from "./files-source";
@@ -156,14 +156,15 @@ async function awaitAnswer(d: ReturnType<typeof docker>, plan: OwnPlan): Promise
   throw new Error(`${plan.inst.name}: its server did not come up: ${last}. Its log is in Settings -> Docker.`);
 }
 
-/** Whether an entry of pi's mcp.json looks like one this extension wrote: the loopback /mcp of a container, kept
- * alive, with no login of its own. What an earlier version wrote and left behind is such an entry, with nothing
- * recorded of it -- asked only while that earlier version's entries are being taken over (`entries` below
- * ENTRIES_VERSION): later, every entry this extension writes stands in `written`, and a person's own local server of
- * that shape is theirs. */
+/** Whether an entry of pi's mcp.json looks like one this extension wrote: the loopback /mcp of a container, with no
+ * login of its own. What an earlier version wrote and left behind is such an entry, with nothing recorded of it --
+ * asked only while that earlier version's entries are being taken over (`entries` below ENTRIES_VERSION): later,
+ * every entry this extension writes stands in `written`, and a person's own local server of that shape is theirs.
+ * Those entries kept the adapter's `lifecycle: "persistent"`, which the portal's move to pi's own MCP support drops
+ * from them, so an entry with it or without it looks the same. */
 function looksOwn(entry: Record<string, unknown>): boolean {
   const login = ["headers", "env", "auth", "oauth", "command", "socket"].some((key) => key in entry) || Object.keys(entry).some((key) => /^bearer/i.test(key));
-  return typeof entry.url === "string" && /^http:\/\/127\.0\.0\.1:\d+\/mcp$/.test(entry.url) && entry.lifecycle === "persistent" && !login;
+  return typeof entry.url === "string" && /^http:\/\/127\.0\.0\.1:\d+\/mcp$/.test(entry.url) && (entry.lifecycle === undefined || entry.lifecycle === "persistent") && !login;
 }
 
 /** The server of that name in pi's mcp.json, where it is not this extension's to take: one it did not write and that
@@ -180,8 +181,10 @@ function foreignEntry(name: string): boolean {
  * names, and the entries it wrote under names no instance carries. An entry it did not write is never touched. The
  * keys are read where the run starts, not where it was asked for: a run standing in the row works on what stands now.
  *
- * What an entry in pi's config takes -- url, lifecycle, excludeTools and approveTools -- is pi-mcp-adapter's own
- * vocabulary, checked by eye against its source, as that API has no types of its own. */
+ * The entry is pi's own: the loopback `url`, and the `toolExposure` that hides the families an instance turned off.
+ * What asks the person before a call is the `approve` option of `portal.mcp.set`, which the portal keeps beside the
+ * file. None of the adapter's keys (`lifecycle`, `excludeTools`, `approveTools` ...) is written, and an entry an
+ * earlier version wrote with them is written again without them (see carryOver): the portal refuses an entry that has one. */
 function ensureApplied(): Promise<void> {
   const asked = loadInstances();
   return apply(
@@ -225,18 +228,19 @@ function ensureApplied(): Promise<void> {
           // Removed while it was made (a download takes minutes): no entry for it; the run behind that removal sweeps it.
           if (!loadInstances().some((i) => i.name === inst.name)) continue;
           await awaitAnswer(d, plan);
-          const kept = carryOver(there?.entry);
-          // A list this extension wrote itself, now or in an earlier version, is its default and not the person's
-          // choice: it gets this version's (a wider one reaches every install that ran an earlier one).
-          if ([APPROVE_TOOLS, ...EARLIER_APPROVE_TOOLS].some((list) => isDeepStrictEqual(kept.approveTools, list))) delete kept.approveTools;
-          const entry = { approveTools: APPROVE_TOOLS, ...kept, url: ownAddress(plan.port), lifecycle: "persistent", excludeTools: excludeGlobs(inst) };
+          const kept = carryOver(inst.name, there?.entry);
+          const toolExposure = toolExposureFor(inst, there?.entry.toolExposure);
+          const entry = { ...kept, url: ownAddress(plan.port), ...(Object.keys(toolExposure).length ? { toolExposure } : {}) };
+          // What this extension asks about by default, in this version or an earlier one, gets this version's list (a
+          // wider one reaches every install that ran an earlier one); what a person added to it stays.
+          const approve = approveFor(there?.approve, there?.entry.approveTools);
           // An entry an earlier version wrote counted as the person's own (trusted). Writing a server again does not
           // take the name out of Settings -> Guard's trusted servers; removing it does. Only the names that version
           // wrote: every name in `written` was written by this one (0.1.0 kept no such list), and a removal each run
           // would take a trust the person gave it since, and reload the open chats, while another instance fails.
           if (there && version < ENTRIES_VERSION && !written.includes(inst.name)) await portal().mcp.set(inst.name, undefined);
-          else if (there && written.includes(inst.name) && isDeepStrictEqual(there.entry, entry)) continue; // nothing to say again: every set reloads the open chats
-          await portal().mcp.set(inst.name, entry);
+          else if (there && written.includes(inst.name) && isDeepStrictEqual(there.entry, entry) && isDeepStrictEqual(there.approve, approve)) continue; // nothing to say again: every set reloads the open chats
+          await portal().mcp.set(inst.name, entry, { approve });
           written = [...written, inst.name];
           saveWritten(written, version);
         } catch (error) {
@@ -249,16 +253,24 @@ function ensureApplied(): Promise<void> {
   );
 }
 
-/** What an entry in pi's config keeps of itself where this extension rewrites it: the person's own tuning of that
- * server (the debug flag, the direct-tools flag, the tools they chose to be asked about) -- but not how the server
- * is reached, which the instance says now, and never a login: a header, a token or an environment someone put on
- * an entry of that name is not sent on to the container. */
-function carryOver(entry: Record<string, unknown> | undefined): Record<string, unknown> {
+/** What an entry in pi's config keeps of itself where this extension rewrites it: what pi reads of the person's own
+ * tuning of that server (that it is switched off, its timeout and description, how its tools are exposed) -- but not
+ * how the server is reached, which the instance says now, never a login (a header, a token or an environment someone
+ * put on an entry of that name is not sent on to the container), and none of the adapter's keys, which an entry an
+ * earlier version wrote has (`lifecycle`, `debug`, `directTools`, `excludeTools`, `approveTools` ...): pi does not read
+ * them, and the portal refuses an entry that has one. The two the person may have set to narrow what the agent reaches,
+ * `includeTools` and `exposeResources: false`, have no word in pi's entry: dropped, they would widen it unseen, so the
+ * entry stays as it is and the run says so. An entry the portal's move left switched off for its `excludeTools` (which
+ * this one has just turned into `toolExposure`) is switched on again. */
+function carryOver(name: string, entry: Record<string, unknown> | undefined): Record<string, unknown> {
   const kept: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(entry ?? {})) {
-    if (["url", "command", "args", "cwd", "socket", "headers", "env", "auth", "oauth"].includes(key) || /^bearer/i.test(key)) continue;
-    kept[key] = value;
-  }
+  if (!entry) return kept;
+  const narrowing = [Array.isArray(entry.includeTools) && entry.includeTools.length ? "includeTools" : "", entry.exposeResources === false ? "exposeResources" : ""].filter(Boolean);
+  if (narrowing.length)
+    throw new Error(`${name}: its entry in pi's mcp.json has ${narrowing.join(" and ")}, which pi does not read, so writing it without would offer more than the person chose. Take it out in Settings -> MCP (hide the tools in its toolExposure instead), then press Start.`);
+  for (const key of ["enabled", "timeout", "description", "exposure"]) if (key in entry) kept[key] = entry[key];
+  if (entry.disabled === true) kept.enabled = false;
+  else if (kept.enabled === false && Array.isArray(entry.excludeTools) && entry.excludeTools.length) delete kept.enabled;
   return kept;
 }
 

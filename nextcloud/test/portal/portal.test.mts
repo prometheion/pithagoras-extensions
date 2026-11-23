@@ -10,6 +10,9 @@ import { pathToFileURL } from "node:url";
 import express from "express";
 import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS } from "../../src/capabilities.ts";
 
+/** The adapter's keys of an entry in mcp.json, which pi does not read and the portal refuses where a server is on. */
+const ADAPTER_KEYS = ["lifecycle", "idleTimeout", "requestTimeoutMs", "directTools", "includeTools", "excludeTools", "approveTools", "approve", "debug", "trace", "toolPrefix", "disabled", "auth", "bearerToken", "bearerTokenEnv", "exposeResources", "socket"];
+
 /**
  * Nextcloud as a portal runs it: its server half started by Pithagoras' own extension host, after Docker for
  * extensions' (which it requires), each from its package as the portal reads it, with Docker speaking to the daemon
@@ -17,9 +20,8 @@ import { APPROVE_TOOLS, CAPABILITIES, EARLIER_APPROVE_TOOLS } from "../../src/ca
  * MCP server on the port an instance's container is told to hold, where the real nextcloud-mcp-server would answer.
  * Its routes are served as the portal serves an extension's, under /api/x/@pithagoras/nextcloud.
  *
- * The pi-mcp-adapter pi installs for the entries this extension writes into mcp.json is not installed through its
- * CLI in a test: the settings of the home the half runs from say it is already there (as every real portal's), so
- * what stands out is the entry itself, and none of the test needs a network.
+ * The entries the extension writes into mcp.json are pi's own, which pi's MCP support in the portal reads: what
+ * the tests look at is the entry itself and the `approve` the portal keeps beside it, and none of them needs a network.
  *
  * Needs a Pithagoras checkout at the version this extension is built for, with its server built:
  * `scripts/pithagoras.sh` makes one in .pithagoras/, and `PITHAGORAS_DIR` names it.
@@ -46,14 +48,6 @@ process.env.PITHAGORAS_NEXTCLOUD_ANSWER_MS = "1500";
 process.env.PITHAGORAS_NEXTCLOUD_SETTLED_MS = "200";
 // Loaded after the environment is set: the port and the container names are read as the module loads.
 const { IMAGE, IMAGE_BY_DIGEST } = await import("../../src/container.ts");
-
-/** The settings of the home the halves run from say pi-mcp-adapter is already installed for them, as a real
- * portal's say it: the entries the extension writes into mcp.json are then what stand out. */
-writeFileSync(
-  path.join(process.env.PI_CODING_AGENT_DIR!, "settings.json"),
-  JSON.stringify({ packages: [{ source: "npm:pi-mcp-adapter@2.18.0", autoload: true }] }),
-  { mode: 0o600 },
-);
 
 // A stand-in of the Nextcloud MCP server's endpoint, on the very port an instance's container is told to hold, while
 // a container told to hold it runs (the fake Docker starts it, below): it gives a session out on initialize and answers
@@ -201,6 +195,8 @@ const mcpFile = () => path.join(process.env.PI_CODING_AGENT_DIR!, "mcp.json");
 /** What pi's mcp.json holds now, by server name. */
 const servers = (): Record<string, any> => (existsSync(mcpFile()) ? JSON.parse(readFileSync(mcpFile(), "utf8")).mcpServers ?? {} : {});
 const trusted = (): string[] => [...db.trustedMcpServers()];
+/** What the portal holds of the tools a server asks the person about before a call. */
+const approve = (name: string): string[] => db.mcpApprove()[name] ?? [];
 const url = `http://127.0.0.1:${mcpPort}/mcp`;
 
 test("it waits for Docker for extensions, as its package.json requires, and starts once Docker's half runs", async () => {
@@ -241,7 +237,8 @@ test("a saved instance stands in a container of its own, on the portal's network
   assert.equal(made.State, "running");
   assert.deepEqual(made.made?.Env?.slice(0, 3), [`NEXTCLOUD_HOST=${ncUrl}`, "NEXTCLOUD_USERNAME=anna", "NEXTCLOUD_PASSWORD=the-password"]);
   assert.ok(made.made?.Env?.includes(`MCP_ALLOWED_HOSTS=127.0.0.1:${mcpPort}`), "only its own loopback Host is taken");
-  assert.deepEqual(made.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)]);
+  assert.deepEqual(made.made?.Cmd?.slice(0, 4), ["--host", "127.0.0.1", "--port", String(mcpPort)]);
+  assert.equal(made.made?.Cmd?.filter((word: string) => word === "--enable-app").length, CAPABILITIES.length, "every family is on: every app is served");
   assert.equal(made.made?.HostConfig?.NetworkMode, "host"); // this portal is on the machine itself: no container between
   assert.equal(made.made?.Image, IMAGE_BY_DIGEST, "from the digest of the build it was tested with");
   assert.deepEqual(made.made?.HostConfig?.CapDrop, ["ALL"]);
@@ -253,38 +250,126 @@ test("a saved instance stands in a container of its own, on the portal's network
   assert.deepEqual(plain, { name: "uni", containerName: "pithagoras-nextcloud-mcp-uni", state: "running", url: ncUrl, address: url, mcp: { registered: true, on: true, url }, health: { ok: true, server: { name: "Nextcloud MCP", version: "9.9.9" } }, configured: true, account: { state: "ok", name: "Anna Example", id: "anna" } });
 });
 
-test("its entry is not a trusted server, and the agent is asked before the tools that send, share and delete", async () => {
+test("its entry is pi's own: the address and nothing of the adapter's; the agent is asked before the tools that send, share and delete, by the portal, and the entry is not a trusted server", () => {
   const entry = servers().uni;
-  assert.equal(entry.url, url);
-  assert.equal(entry.lifecycle, "persistent");
-  assert.deepEqual(entry.approveTools, APPROVE_TOOLS);
+  assert.deepEqual(entry, { url }, "a family left on hides nothing: no toolExposure, no adapter key");
+  for (const key of ADAPTER_KEYS) assert.equal(key in entry, false, `${key} is not written`);
+  assert.deepEqual(approve("uni"), APPROVE_TOOLS, "the questions are the portal's `approve`, not a key of the entry");
   assert.equal(trusted().includes("uni"), false, "what Nextcloud returns is other people's words (mail, news, shared files): it is wrapped and scanned as any outside content");
 });
 
-test("a person's own list of tools to be asked about is kept; their other tuning too, and a login someone put on the entry is not", async () => {
+test("a family that is turned off is hidden in the entry's toolExposure, by the raw names of its tools, and comes back with the choice", async () => {
+  assert.equal((await save("uni", { capabilities: { news: false, talk: false } })).status, 200);
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_news_*": "hidden", "talk_*": "hidden" } });
+  const served = (name: string) => (ncContainer(name).made.Cmd as string[]).filter((_w, i, cmd) => cmd[i - 1] === "--enable-app");
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("news"), false, "the container does not serve a family that is off: its resources do not exist");
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("talk"), false);
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("notes"), true);
+  const row = (await until((s) => s.instances.some((i: any) => i.name === "uni" && i.capabilities), "the capabilities in the status")).instances.find((i: any) => i.name === "uni");
+  assert.equal("news" in row.capabilities.available, false, "a family that is off is not reported missing: its switch must stay usable on the page");
+  assert.equal(row.capabilities.available.notes, false, "the stand-in serves no tools: a family that is on and not served is missing");
+  assert.deepEqual(approve("uni"), APPROVE_TOOLS, "writing the entry again keeps what is asked about");
+  assert.equal((await save("uni", { capabilities: {} })).status, 200);
+  await applyDone();
+  assert.deepEqual(servers().uni, { url });
+  assert.equal(served("pithagoras-nextcloud-mcp-uni").includes("news"), true, "and the container serves it again");
+});
+
+test("an entry an earlier version wrote, with the adapter's keys, is written again as pi's own: the families left out stay left out, a person's tuning stays, a login is not carried", async () => {
+  assert.equal((await save("uni", { capabilities: { news: false } })).status, 200);
+  await applyDone();
   const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
-  file.mcpServers.uni = { ...file.mcpServers.uni, approveTools: ["nc_notes_*"], debug: true, headers: { Authorization: "Bearer x" }, env: { T: "1" } };
+  file.mcpServers.uni = {
+    url,
+    lifecycle: "persistent",
+    excludeTools: ["uni_nc_news_*"],
+    approveTools: ["nc_notes_*", "uni_nc_news_*"],
+    debug: true,
+    directTools: true,
+    idleTimeout: 5,
+    timeout: 30,
+    headers: { Authorization: "Bearer x" },
+    env: { T: "1" },
+  };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  db.setMcpApprove("uni", []); // as the portal held it before: nothing, the list stood in the entry
+  await post("/start");
+  await applyDone();
+  const entry = servers().uni;
+  assert.deepEqual(entry, { url, timeout: 30, toolExposure: { "nc_news_*": "hidden" } });
+  for (const key of ADAPTER_KEYS) assert.equal(key in entry, false, `${key} is gone`);
+  assert.deepEqual(approve("uni"), [...APPROVE_TOOLS, "nc_notes_*", "uni_nc_news_*", "nc_news_*"], "what the person asked about is asked about still, beside the default, with the adapter's prefix taken off where only that matches");
+  assert.equal((await save("uni", { capabilities: {} })).status, 200);
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, timeout: 30 });
+  assert.deepEqual(approve("uni"), [...APPROVE_TOOLS, "nc_notes_*", "uni_nc_news_*", "nc_news_*"], "and kept by the next runs");
+  db.setMcpApprove("uni", APPROVE_TOOLS);
+});
+
+test("an entry the portal's move from the adapter left switched off stays switched off, whatever the reason, and says so; a person's own include list is not dropped unseen", async () => {
+  const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  // The move leaves a server off for several reasons (the adapter was off, a list of switches had its tools off, a rule it could not carry) and does not say which.
+  file.mcpServers.uni = { url, enabled: false, excludeTools: ["uni_nc_news_*"] };
   writeFileSync(mcpFile(), JSON.stringify(file));
   assert.equal((await save("uni", { capabilities: { news: false } })).status, 200);
   await applyDone();
-  const entry = servers().uni;
-  assert.deepEqual(entry.approveTools, ["nc_notes_*"]);
-  assert.equal(entry.debug, true);
-  assert.equal(entry.headers, undefined);
-  assert.equal(entry.env, undefined);
-  assert.deepEqual(entry.excludeTools, ["uni_nc_news_*"]);
-  assert.equal((await save("uni", { capabilities: {} })).status, 200);
+  assert.deepEqual(servers().uni, { url, enabled: false, toolExposure: { "nc_news_*": "hidden" } }, "the exclusion becomes toolExposure; the server is not switched on for it");
+  const off = await until((s) => s.instances.some((i: any) => i.name === "uni" && i.mcp?.registered), "the status of the entry");
+  assert.equal(off.instances.find((i: any) => i.name === "uni").mcp.on, false, "the status says the chats do not have it, for the page to tell the person where to switch it on");
+  assert.equal((await save("uni", { capabilities: { news: false, talk: false } })).status, 200);
   await applyDone();
-});
-
-test("an entry that holds the list an earlier version wrote gets this version's: the extension's default is not taken for the person's", async () => {
-  const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
-  file.mcpServers.uni = { ...file.mcpServers.uni, approveTools: EARLIER_APPROVE_TOOLS[0] };
+  assert.equal(servers().uni.enabled, false, "later runs keep it off");
+  file.mcpServers.uni = { url, toolExposure: { "nc_news_*": "hidden" } }; // the person switched it on
   writeFileSync(mcpFile(), JSON.stringify(file));
   await post("/start");
   await applyDone();
-  assert.deepEqual(servers().uni.approveTools, APPROVE_TOOLS);
-  assert.ok(servers().uni.approveTools.includes("talk_send_message"));
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_news_*": "hidden", "talk_*": "hidden" } });
+  assert.equal((await save("uni", { capabilities: { news: false } })).status, 200);
+  await applyDone();
+
+  file.mcpServers.uni = { url, enabled: false, includeTools: ["uni_nc_notes_*"] };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  const before = readFileSync(mcpFile(), "utf8");
+  await post("/start");
+  const failed = await until((s) => s.task === undefined && s.error, "the run to say it left the entry");
+  assert.match(failed.error, /uni: .*includeTools.*Settings -> MCP/);
+  assert.equal(readFileSync(mcpFile(), "utf8"), before, "the entry stands as the person had it");
+
+  file.mcpServers.uni = { url, toolExposure: { "nc_news_*": "hidden", nc_notes_get_note: "hidden" } };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  await post("/start");
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_news_*": "hidden", nc_notes_get_note: "hidden" } }, "a tool the person hid by name stays hidden");
+  assert.equal((await save("uni", { capabilities: {} })).status, 200);
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { nc_notes_get_note: "hidden" } });
+
+  // A whole family the person hid in Settings -> MCP stays hidden with its switch on here: the extension takes back only what it hid itself.
+  file.mcpServers.uni = { url, toolExposure: { "nc_mail_*": "hidden" } };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  await post("/start");
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_mail_*": "hidden" } }, "the person's hide of a whole family is not undone");
+  assert.equal((await save("uni", { capabilities: { mail: false } })).status, 200);
+  await applyDone();
+  assert.equal((await save("uni", { capabilities: {} })).status, 200);
+  await applyDone();
+  assert.deepEqual(servers().uni, { url, toolExposure: { "nc_mail_*": "hidden" } }, "and stays hidden when the extension's own hide of it goes");
+  file.mcpServers.uni = { url };
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  await post("/start");
+  await applyDone();
+});
+
+test("what the portal holds as this extension's default list of an earlier version, or as nothing, gets this version's", async () => {
+  for (const held of [EARLIER_APPROVE_TOOLS[0], []]) {
+    db.setMcpApprove("uni", held);
+    await post("/start");
+    await applyDone();
+    assert.deepEqual(approve("uni"), APPROVE_TOOLS);
+  }
+  assert.ok(approve("uni").includes("talk_send_message"));
 });
 
 test("a tool call goes over this instance's server and back with its answer raw; a family that is off, or none, is refused", async () => {
@@ -312,9 +397,10 @@ test("a tool call goes over this instance's server and back with its answer raw;
 
 test("a save with nothing changed makes nothing again and writes nothing again; one that changes the password remakes the container where it stands", async () => {
   const written = statSync(mcpFile()).mtimeMs;
+  const base = docker.created.length;
   await save("uni");
   await applyDone(); // the no-op run of that save stands done
-  assert.equal(docker.created.length, 1, "nothing made again where nothing changed");
+  assert.equal(docker.created.length, base, "nothing made again where nothing changed");
   assert.equal(statSync(mcpFile()).mtimeMs, written, "and its entry not written again");
 
   ncPassword = "the-other";
@@ -322,11 +408,12 @@ test("a save with nothing changed makes nothing again and writes nothing again; 
   await applyDone(); // its remake stands done
   const uni = ncContainer("pithagoras-nextcloud-mcp-uni");
   assert.equal(uni.made?.Env?.find((e) => e.startsWith("NEXTCLOUD_PASSWORD=")), "NEXTCLOUD_PASSWORD=the-other");
-  assert.deepEqual(uni.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)], "remade where it stood: the port stands as it was");
-  assert.equal(docker.created.length, 2);
+  assert.deepEqual(uni.made?.Cmd?.slice(0, 4), ["--host", "127.0.0.1", "--port", String(mcpPort)], "remade where it stood: the port stands as it was");
+  assert.equal(docker.created.length, base + 1);
 });
 
 test("an address that is not https (unless chosen), has a login in it or is no address is refused, and a new host or user needs the password typed again", async () => {
+  const made = docker.created.length;
   for (const [url, why] of [["cloud.example.org", /not an address/], ["file:///etc/passwd", /https/], ["http://nas.example.org", /unencrypted/], ["https://anna:pw@cloud.example.org", /login/]] as const) {
     const answer = await save("uni", { url, allowHttp: false, password: "" });
     assert.equal(answer.status, 400, url);
@@ -338,7 +425,7 @@ test("an address that is not https (unless chosen), has a login in it or is no a
   const user = await post("/instances", { name: "uni", username: "mallory" });
   assert.equal(user.status, 400);
   assert.equal(ncContainer("pithagoras-nextcloud-mcp-uni").made?.Env?.[0], `NEXTCLOUD_HOST=${ncUrl}`, "nothing changed");
-  assert.equal(docker.created.length, 2, "and nothing made");
+  assert.equal(docker.created.length, made, "and nothing made");
   assert.equal((await post("/instances", { name: "uni", url: "https://cloud.elsewhere.example", password: "new" })).status, 200, "with the password it is a save");
   await applyDone();
   await save("uni", { password: "the-other" }); // and back
@@ -351,11 +438,14 @@ test("an address an earlier version saved only trimmed (a trailing slash, capita
   const made = docker.created.length;
   stored.instances.find((i: any) => i.name === "uni").url = `${ncUrl}/`.replace("http://", "HTTP://");
   writeFileSync(settings, JSON.stringify(stored));
-  const answer = await save("uni", { password: "", url: ncUrl, capabilities: { news: false } });
+  const answer = await save("uni", { password: "", url: ncUrl });
   assert.equal(answer.status, 200, await answer.clone().text());
   await applyDone();
   assert.equal(JSON.parse(readFileSync(settings, "utf8")).instances.find((i: any) => i.name === "uni").url, ncUrl, "kept normalized from now on");
   assert.equal(docker.created.length, made, "the same host: nothing made again for it");
+  await save("uni", { password: "", capabilities: { news: false } }); // another family set: the container is made for it
+  await applyDone();
+  assert.equal(docker.created.length, made + 1);
   await save("uni", { password: "", capabilities: {} });
   await applyDone();
 });
@@ -393,7 +483,7 @@ test("a second instance gets a container of its own, and the port the first one 
   const made = ncContainer("pithagoras-nextcloud-mcp-second");
   assert.ok(made, "a container of its own stands");
   assert.equal(made.State, "running");
-  assert.deepEqual(made.made?.Cmd, ["--host", "127.0.0.1", "--port", String(mcpPort)], "the first's freed port is the lowest free one again");
+  assert.deepEqual(made.made?.Cmd?.slice(0, 4), ["--host", "127.0.0.1", "--port", String(mcpPort)], "the first's freed port is the lowest free one again");
 
   const row = (await until((s) => s.instances.some((i: any) => i.name === "second"), "the second instance in the status")).instances.find((i: any) => i.name === "second");
   assert.equal(row.address, url);
@@ -491,10 +581,12 @@ test("a program on the port before the container starts keeps it from starting, 
 });
 
 test("a container that keeps restarting is not taken for what answers on its port", async () => {
-  const c = ncContainer("pithagoras-nextcloud-mcp-third");
   const before = servers().third;
-  // Docker starts it again and again (it cannot listen): each time it runs only for a moment
+  // Docker starts it again and again (it cannot listen): each time it runs only for a moment. Looked up each time:
+  // a save of another family set makes the container anew.
   const restart = () => {
+    const c = ncContainer("pithagoras-nextcloud-mcp-third");
+    if (!c) return;
     c.started = new Date().toISOString();
     c.restarts = (c.restarts ?? 0) + 1;
   };
@@ -510,7 +602,7 @@ test("a container that keeps restarting is not taken for what answers on its por
   }
   await post("/start");
   await applyDone();
-  assert.deepEqual(servers().third.excludeTools, ["third_nc_news_*"], "running without a break, it is written");
+  assert.deepEqual(servers().third.toolExposure, { "nc_news_*": "hidden" }, "running without a break, it is written");
   await save("third", { capabilities: {} });
   await applyDone();
 });
@@ -550,6 +642,62 @@ test("a restart of the half (an update) leaves everything as it was: its stop is
   assert.deepEqual(docker.containers.map((c: any) => c.Name).sort(), before.containers);
   assert.deepEqual(Object.keys(servers()).sort(), before.entries);
   assert.equal(ncContainer("pithagoras-nextcloud-mcp-fifth").State, "running");
+});
+
+test("a stop of the half keeps its entries, switched off, with what the person set on them; the next start switches on those and no other", async () => {
+  // the person's own tuning of the entry in Settings -> MCP, the questions the portal keeps, a family hidden here
+  assert.equal((await save("fifth", { capabilities: { news: false } })).status, 200);
+  await applyDone();
+  const file = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  file.mcpServers.fifth.toolExposure = { ...file.mcpServers.fifth.toolExposure, nc_notes_get_note: "hidden" };
+  file.mcpServers.fifth.timeout = 45;
+  writeFileSync(mcpFile(), JSON.stringify(file));
+  const entryBefore = servers().fifth;
+  const approveBefore = approve("fifth");
+  db.setMcpApprove("fifth", [...approveBefore, "nc_notes_update_*"]);
+  const asked = approve("fifth");
+  await host.syncServerHalves([halves.docker]); // the half stops
+  assert.equal(host.isServing("@pithagoras/nextcloud"), false);
+  assert.deepEqual(docker.containers.map((c: any) => c.Name), [], "the container is gone");
+  assert.deepEqual(servers().fifth, { ...entryBefore, enabled: false }, "the entry stays, switched off: pi does not connect it, so no chat tries the dead port");
+  assert.deepEqual(approve("fifth"), asked, "and what the portal asks about stays");
+  await host.syncServerHalves([halves.docker, { ...halves.nextcloud, rev: "back" }]);
+  for (let i = 0; i < 300 && !host.isServing("@pithagoras/nextcloud"); i++) await new Promise((r) => setTimeout(r, 20));
+  await applyDone();
+  assert.deepEqual(servers().fifth, entryBefore, "switched on again, the person's lines and the hidden family as they were");
+  assert.deepEqual(approve("fifth"), asked);
+
+  // an entry that is off by the person's hand stays off through a stop and a start
+  const off = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  off.mcpServers.fifth.enabled = false;
+  writeFileSync(mcpFile(), JSON.stringify(off));
+  await host.syncServerHalves([halves.docker]);
+  await host.syncServerHalves([halves.docker, { ...halves.nextcloud, rev: "again" }]);
+  for (let i = 0; i < 300 && !host.isServing("@pithagoras/nextcloud"); i++) await new Promise((r) => setTimeout(r, 20));
+  await applyDone();
+  assert.equal(servers().fifth.enabled, false);
+  assert.deepEqual(approve("fifth"), asked);
+  const on = JSON.parse(readFileSync(mcpFile(), "utf8"));
+  delete on.mcpServers.fifth.enabled;
+  writeFileSync(mcpFile(), JSON.stringify(on));
+  await post("/start");
+  await applyDone();
+});
+
+test("an instance deleted while the half is stopped has its entry removed by the next start, with its approve", async () => {
+  await host.syncServerHalves([halves.docker]);
+  assert.equal(servers().fifth.enabled, false);
+  const saved = JSON.parse(readFileSync(path.join(dataDir, "settings.json"), "utf8"));
+  saved.instances = [];
+  writeFileSync(path.join(dataDir, "settings.json"), JSON.stringify(saved));
+  await host.syncServerHalves([halves.docker, { ...halves.nextcloud, rev: "after the delete" }]);
+  for (let i = 0; i < 300 && !host.isServing("@pithagoras/nextcloud"); i++) await new Promise((r) => setTimeout(r, 20));
+  await applyDone();
+  assert.equal(servers().fifth, undefined);
+  assert.deepEqual(approve("fifth"), []);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(dataDir, "settings.json"), "utf8")).stopped, []);
+  assert.equal((await save("fifth")).status, 200); // the instance comes back for the tests after
+  await applyDone();
 });
 
 test("a reset takes the containers and the entries it wrote away and keeps the keys; a start brings them back", async () => {

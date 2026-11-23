@@ -357,7 +357,7 @@ function InstanceCard({ card, busy, drafts, save, remove, onChange, status }: { 
             <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT[healthOf(status)]}`} />
             <span>
               <span className={WORD[healthOf(status)] || undefined}>{status.state}</span> ·{" "}
-              {status.mcp.registered ? t("entry present") : t("entry absent")} ·{" "}
+              {status.mcp.registered ? (status.mcp.on ? t("entry present") : t("entry switched off: switch it on in Settings → MCP")) : t("entry absent")} ·{" "}
               {status.health.ok ? (t("answering") + (status.health.server ? ` ${status.health.server.name}` : "")) : status.health.error}
             </span>
           </div>

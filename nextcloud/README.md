@@ -253,7 +253,9 @@ non-root user: those were not tried against the image, and a server that fails t
 
 ## Changes
 
-- **Next version: the entry moved to pi's own MCP support.** Pithagoras runs MCP servers on pi's own support now, not
+- **0.2.0: your Nextcloud in the chat's Files tab.** With Files 0.2.0 or later, each instance is a root of the chat's
+  Files tab (see "What you get"); without it nothing else changes.
+- **0.2.0: the entry moved to pi's own MCP support.** Pithagoras runs MCP servers on pi's own support now, not
   through pi-mcp-adapter, and the extension writes the entry in pi's words: the `url` of the instance's container, and a
   `toolExposure` that hides the families an instance turned off. What asks you before a call is no longer the entry's
   `approveTools` but the `approve` the extension gives the portal (same list). `lifecycle`, `excludeTools`,

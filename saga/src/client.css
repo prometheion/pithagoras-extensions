@@ -1,0 +1,210 @@
+/*
+ * Saga's own stylesheet. The panel is a cinema: always dark whatever the portal's theme, its text in a serif face like
+ * a printed novel, gold for what matters. Everything sits over the stage's canvas.
+ */
+.saga-theatre {
+  --saga-gold: 236 196 112;
+  --saga-ink: 8 9 14;
+  --saga-paper: 238 232 220;
+  --saga-good: 120 220 150;
+  --saga-bad: 240 100 100;
+  position: relative;
+  height: 100%;
+  min-height: 320px;
+  overflow: hidden;
+  background: #05060a;
+  color: rgb(var(--saga-paper));
+  font-family: "Noto Serif SC", "Songti SC", "Source Han Serif", "Noto Serif", Georgia, "Times New Roman", serif;
+  user-select: none;
+  container-type: inline-size;
+}
+.saga-theatre button { font: inherit; color: inherit; }
+.saga-stage { position: absolute; inset: 0; }
+.saga-stage canvas { display: block; width: 100%; height: 100%; }
+
+.saga-said { display: grid; place-items: center; height: 100%; padding: 24px; text-align: center; color: #aab; background: #05060a; font-size: 14px; line-height: 1.6; }
+
+/* --- the head-up display --- */
+.saga-hud { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 10px 12px 26px; background: linear-gradient(rgb(0 0 0 / .7), rgb(0 0 0 / 0)); z-index: 5; font-family: system-ui, sans-serif; }
+.saga-hud-hero { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; row-gap: 3px; align-items: baseline; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; min-width: 0; }
+.saga-hud-name { font-weight: 600; font-size: 13px; letter-spacing: .02em; color: rgb(var(--saga-paper)); }
+.saga-hud-realm { font-size: 11px; color: rgb(var(--saga-gold)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.saga-hud-bars { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 56px); gap: 4px; }
+.saga-hud-right { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.saga-hud-stones { color: rgb(var(--saga-gold)); margin-right: 4px; white-space: nowrap; }
+.saga-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: rgb(255 255 255 / .06); border: 1px solid rgb(255 255 255 / .1); cursor: pointer; transition: background .15s; }
+.saga-icon:hover { background: rgb(255 255 255 / .14); }
+.saga-icon[aria-pressed="true"] { color: rgb(var(--saga-gold)); border-color: rgb(var(--saga-gold) / .5); }
+.saga-icon svg { width: 14px; height: 14px; }
+.saga-head-button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: rgb(var(--fg-subtle)); }
+.saga-head-button:hover { color: rgb(var(--fg)); background: rgb(var(--fg) / .06); }
+.saga-head-button svg { width: 14px; height: 14px; }
+
+.saga-bar { position: relative; display: block; height: 4px; border-radius: 4px; background: rgb(255 255 255 / .12); overflow: hidden; }
+.saga-bar > * { position: absolute; inset: 0 auto 0 0; border-radius: inherit; transition: width .5s cubic-bezier(.2,.8,.2,1); }
+.saga-bar.is-hp > * { background: linear-gradient(90deg, #b8323a, #f0605a); }
+.saga-bar.is-qi > * { background: linear-gradient(90deg, #2f6fd0, #6fc4ff); }
+.saga-bar.is-progress > * { background: linear-gradient(90deg, #b88a2a, rgb(var(--saga-gold))); }
+.saga-bar.is-wide { height: 6px; margin: 4px 0 10px; }
+
+/* --- a scene --- */
+.saga-title { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: radial-gradient(ellipse at center, rgb(0 0 0 / .55), rgb(0 0 0 / .15) 70%); border: 0; cursor: pointer; z-index: 6; animation: saga-title 2.4s ease both; }
+.saga-title span { font-size: clamp(22px, 7cqi, 40px); letter-spacing: .12em; text-align: center; padding: 0 24px; text-shadow: 0 0 24px rgb(var(--saga-gold) / .6), 0 2px 8px #000; }
+.saga-title span::after { content: ""; display: block; height: 1px; margin: 12px auto 0; width: 60%; background: linear-gradient(90deg, transparent, rgb(var(--saga-gold)), transparent); }
+.saga-title small { font-size: 12px; letter-spacing: .3em; text-transform: uppercase; color: rgb(var(--saga-gold) / .85); font-family: system-ui, sans-serif; }
+@keyframes saga-title { 0% { opacity: 0; letter-spacing: .4em; } 20% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }
+
+.saga-dialogue { position: absolute; left: 10px; right: 10px; bottom: 10px; display: block; text-align: left; padding: 18px 18px 16px; min-height: 96px; border-radius: 14px; border: 1px solid rgb(255 255 255 / .1); background: linear-gradient(rgb(10 10 16 / .72), rgb(6 6 10 / .9)); backdrop-filter: blur(6px); box-shadow: 0 10px 40px rgb(0 0 0 / .5); cursor: pointer; z-index: 4; animation: saga-rise .35s ease both; outline: none; }
+.saga-dialogue:focus-visible { border-color: rgb(var(--saga-gold) / .6); }
+.saga-dialogue.is-narrate .saga-text { color: rgb(var(--saga-paper) / .92); }
+.saga-dialogue.is-think .saga-text { font-style: italic; color: rgb(190 210 255 / .9); }
+.saga-dialogue.mood-shout .saga-text, .saga-dialogue.mood-angry .saga-text { font-weight: 600; }
+.saga-dialogue.mood-shout { animation: saga-rise .35s ease both, saga-jolt .3s .1s; }
+.saga-dialogue.mood-whisper .saga-text { opacity: .75; font-style: italic; }
+.saga-dialogue.mood-cold .saga-text { color: rgb(200 225 255); }
+.saga-speaker { position: absolute; top: -12px; left: 14px; padding: 2px 12px; border-radius: 999px; border: 1px solid; background: rgb(6 6 10 / .95); font-size: 13px; font-weight: 600; letter-spacing: .05em; }
+.saga-text { display: block; font-size: 15.5px; line-height: 1.65; white-space: pre-wrap; }
+.saga-more { position: absolute; right: 14px; bottom: 8px; color: rgb(var(--saga-gold)); animation: saga-bob 1s ease-in-out infinite; font-size: 12px; }
+.saga-skip { position: absolute; right: 14px; bottom: 118px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; border: 1px solid rgb(255 255 255 / .12); background: rgb(0 0 0 / .4); cursor: pointer; z-index: 4; opacity: .6; }
+.saga-skip:hover { opacity: 1; }
+.saga-skip svg { width: 14px; height: 14px; }
+@keyframes saga-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes saga-bob { 50% { transform: translateY(3px); } }
+@keyframes saga-jolt { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+
+.saga-choices { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 8px; z-index: 4; }
+.saga-choices.is-inline { position: static; }
+.saga-choice { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 12px 14px; border-radius: 12px; border: 1px solid rgb(var(--saga-gold) / .25); background: linear-gradient(rgb(14 12 18 / .82), rgb(8 8 12 / .92)); backdrop-filter: blur(6px); font-size: 14.5px; line-height: 1.4; cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s; animation: saga-rise .35s ease both; }
+.saga-choice:hover:not(:disabled) { border-color: rgb(var(--saga-gold) / .8); box-shadow: 0 0 18px rgb(var(--saga-gold) / .25); transform: translateX(3px); }
+.saga-choice:disabled { opacity: .5; cursor: default; }
+.saga-choice.is-continue { align-items: center; text-align: center; font-family: system-ui, sans-serif; font-size: 13px; letter-spacing: .08em; }
+.saga-check { align-self: flex-start; font-family: system-ui, sans-serif; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: rgb(255 255 255 / .07); }
+.saga-check.is-good { color: rgb(var(--saga-good)); }
+.saga-check.is-even { color: rgb(var(--saga-gold)); }
+.saga-check.is-bad { color: rgb(var(--saga-bad)); }
+.saga-free { display: flex; gap: 6px; }
+.saga-free input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid rgb(255 255 255 / .12); background: rgb(0 0 0 / .55); color: inherit; font: inherit; font-size: 14px; outline: none; user-select: text; }
+.saga-free input:focus { border-color: rgb(var(--saga-gold) / .6); }
+.saga-free button { width: 40px; display: grid; place-items: center; border-radius: 10px; border: 1px solid rgb(var(--saga-gold) / .4); background: rgb(var(--saga-gold) / .15); cursor: pointer; }
+.saga-free button:disabled { opacity: .4; cursor: default; }
+.saga-free svg { width: 15px; height: 15px; }
+.saga-error { padding: 6px 10px; border-radius: 8px; background: rgb(120 20 20 / .7); font-family: system-ui, sans-serif; font-size: 12px; }
+
+/* --- between scenes --- */
+.saga-between { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; pointer-events: none; z-index: 3; }
+.saga-unfolds { position: absolute; bottom: 18px; left: 0; right: 0; display: flex; justify-content: center; align-items: center; gap: 10px; font-size: 14px; letter-spacing: .08em; color: rgb(var(--saga-paper) / .8); text-shadow: 0 1px 6px #000; padding: 0 20px; text-align: center; }
+.saga-quiet { font-family: system-ui, sans-serif; font-size: 12px; letter-spacing: 0; color: rgb(var(--saga-paper) / .65); }
+.saga-ink { width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle, rgb(var(--saga-gold)) 0 30%, transparent 32%); box-shadow: 0 0 12px rgb(var(--saga-gold) / .7); animation: saga-pulse 1.4s ease-in-out infinite; }
+@keyframes saga-pulse { 50% { transform: scale(1.6); opacity: .5; } }
+.saga-dice { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 16px 28px; border-radius: 16px; background: rgb(0 0 0 / .6); border: 1px solid rgb(255 255 255 / .12); backdrop-filter: blur(6px); animation: saga-rise .3s ease both; }
+.saga-dice-label { font-family: system-ui, sans-serif; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; opacity: .75; }
+.saga-dice-number { font-size: 46px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.saga-dice-verdict { font-size: 15px; letter-spacing: .2em; text-transform: uppercase; }
+.saga-dice.is-success { border-color: rgb(var(--saga-good) / .6); box-shadow: 0 0 30px rgb(var(--saga-good) / .25); }
+.saga-dice.is-success .saga-dice-verdict, .saga-verdict.is-success { color: rgb(var(--saga-good)); }
+.saga-dice.is-failure { border-color: rgb(var(--saga-bad) / .6); box-shadow: 0 0 30px rgb(var(--saga-bad) / .25); }
+.saga-dice.is-failure .saga-dice-verdict, .saga-verdict.is-failure { color: rgb(var(--saga-bad)); }
+.saga-verdict { font-size: 26px; letter-spacing: .3em; text-transform: uppercase; text-shadow: 0 0 18px currentColor; animation: saga-rise .4s ease both; }
+
+.saga-toasts { position: absolute; top: 62px; right: 10px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; z-index: 6; pointer-events: none; }
+.saga-toast { padding: 5px 12px; border-radius: 999px; background: rgb(0 0 0 / .65); border: 1px solid rgb(255 255 255 / .12); font-family: system-ui, sans-serif; font-size: 12px; animation: saga-toast 5s ease both; }
+.saga-toast.is-gain { color: rgb(var(--saga-gold)); border-color: rgb(var(--saga-gold) / .4); }
+.saga-toast.is-loss { color: rgb(var(--saga-bad)); }
+.saga-toast.is-realm { color: #fff; border-color: rgb(var(--saga-gold)); box-shadow: 0 0 16px rgb(var(--saga-gold) / .6); font-weight: 600; }
+@keyframes saga-toast { 0% { opacity: 0; transform: translateX(20px); } 8%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+
+/* --- puzzles --- */
+.saga-puzzle { position: absolute; left: 50%; top: 50%; translate: -50% -46%; width: min(92%, 420px); max-height: 82%; overflow: auto; padding: 16px; border-radius: 16px; border: 1px solid rgb(var(--saga-gold) / .3); background: rgb(6 6 10 / .82); backdrop-filter: blur(8px); box-shadow: 0 20px 60px rgb(0 0 0 / .6); z-index: 4; animation: saga-rise .35s ease both; display: flex; flex-direction: column; gap: 10px; }
+.saga-puzzle-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 16px; letter-spacing: .05em; }
+.saga-puzzle-head span { color: rgb(var(--saga-gold)); font-size: 12px; letter-spacing: .2em; }
+.saga-puzzle-intro p, .saga-riddle-q { font-size: 15px; line-height: 1.6; margin: 0 0 10px; }
+.saga-hint { margin: 0; font-family: system-ui, sans-serif; font-size: 12px; color: rgb(var(--saga-paper) / .65); line-height: 1.5; }
+.saga-puzzle-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: system-ui, sans-serif; font-size: 12px; opacity: .8; }
+.saga-puzzle-foot button, .saga-giveup { padding: 4px 10px; border-radius: 8px; border: 1px solid rgb(255 255 255 / .15); background: rgb(255 255 255 / .05); cursor: pointer; font-family: system-ui, sans-serif !important; font-size: 12px !important; }
+.saga-giveup { align-self: center; opacity: .6; }
+.saga-formation { display: grid; gap: 10px; padding: 14px; margin: 6px auto; width: min(100%, 300px); aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle, rgb(var(--saga-gold) / .08), transparent 70%); }
+.saga-node { aspect-ratio: 1; border-radius: 50%; border: 2px solid rgb(var(--saga-gold) / .35); background: radial-gradient(circle, rgb(30 30 40), rgb(10 10 14)); cursor: pointer; transition: all .2s; }
+.saga-node.is-on { border-color: rgb(var(--saga-gold)); background: radial-gradient(circle, #fff6d8, rgb(var(--saga-gold)) 45%, rgb(var(--saga-gold) / .2) 75%); box-shadow: 0 0 18px rgb(var(--saga-gold) / .8); }
+.saga-runes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px auto; width: min(100%, 300px); }
+.saga-runes.is-8 { grid-template-columns: repeat(4, 1fr); }
+.saga-rune { aspect-ratio: 1; border-radius: 12px; border: 1px solid rgb(120 180 255 / .3); background: rgb(10 14 24 / .9); font-size: 28px; color: rgb(140 170 220 / .6); cursor: pointer; transition: all .15s; }
+.saga-rune:disabled { cursor: default; }
+.saga-rune.is-lit { color: #fff; border-color: rgb(120 200 255); background: rgb(40 90 160 / .7); box-shadow: 0 0 22px rgb(120 200 255 / .8); text-shadow: 0 0 10px #fff; }
+.saga-break { display: block; width: min(100%, 260px); margin: 6px auto; aspect-ratio: 1; border: 0; background: none; cursor: pointer; border-radius: 50%; }
+.saga-break svg { width: 100%; height: 100%; overflow: visible; }
+.saga-break-ring { fill: none; stroke: rgb(255 255 255 / .15); stroke-width: 3; }
+.saga-break-gate { fill: none; stroke: rgb(var(--saga-gold)); stroke-width: 6; stroke-linecap: round; filter: drop-shadow(0 0 4px rgb(var(--saga-gold))); }
+.saga-break-dot { fill: #9fe0ff; filter: drop-shadow(0 0 4px #9fe0ff); }
+.saga-break text { fill: rgb(var(--saga-paper)); font-size: 14px; font-family: system-ui, sans-serif; }
+.saga-break.is-hit { animation: saga-hit .3s; }
+.saga-break.is-miss { animation: saga-jolt .3s; }
+@keyframes saga-hit { 50% { transform: scale(1.06); filter: drop-shadow(0 0 20px rgb(var(--saga-gold))); } }
+
+/* --- a fight --- */
+.saga-foes { position: absolute; top: 66px; left: 10px; right: 10px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; z-index: 4; }
+.saga-foe { display: flex; flex-direction: column; gap: 4px; min-width: 96px; padding: 6px 10px; border-radius: 10px; border: 1px solid rgb(255 255 255 / .12); background: rgb(0 0 0 / .55); cursor: pointer; font-family: system-ui, sans-serif; font-size: 12px; text-align: left; }
+.saga-foe.is-target { border-color: rgb(var(--saga-bad) / .9); box-shadow: 0 0 12px rgb(var(--saga-bad) / .4); }
+.saga-foe.is-down { opacity: .35; cursor: default; text-decoration: line-through; }
+.saga-combat { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 8px; z-index: 4; }
+.saga-combat-log { display: flex; flex-direction: column; gap: 2px; font-size: 13px; text-shadow: 0 1px 4px #000; }
+.saga-combat-log > div { animation: saga-rise .25s ease both; }
+.saga-combat-log > div:not(:last-child) { opacity: .6; }
+.saga-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 6px; }
+.saga-actions button, .saga-menu button { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 6px; border-radius: 10px; border: 1px solid rgb(255 255 255 / .14); background: rgb(10 10 16 / .85); font-family: system-ui, sans-serif; font-size: 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+.saga-actions button:hover:not(:disabled), .saga-menu button:hover:not(:disabled), .saga-actions button[aria-pressed="true"] { border-color: rgb(var(--saga-gold) / .7); background: rgb(30 24 14 / .9); }
+.saga-actions button:disabled, .saga-menu button:disabled { opacity: .4; cursor: default; }
+.saga-actions svg { width: 14px; height: 14px; }
+.saga-menu { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow: auto; }
+.saga-menu button { justify-content: space-between; padding: 8px 12px; }
+.saga-menu small { opacity: .7; }
+.saga-combat-over { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.saga-float { position: absolute; top: 46%; translate: -50% 0; font-family: system-ui, sans-serif; font-weight: 800; font-size: 22px; text-shadow: 0 2px 6px #000; z-index: 5; pointer-events: none; animation: saga-float 1.3s ease-out both; }
+.saga-float.is-damage { color: #ff7a6a; }
+.saga-float.is-crit { color: #ffd34a; font-size: 30px; }
+.saga-float.is-heal { color: #7ef0a0; }
+.saga-float.is-miss { color: #ccd; font-size: 16px; font-style: italic; }
+@keyframes saga-float { 0% { opacity: 0; transform: translateY(10px) scale(.7); } 15% { opacity: 1; transform: scale(1.15); } 100% { opacity: 0; transform: translateY(-50px); } }
+
+/* --- the character sheet --- */
+.saga-sheet { position: absolute; inset: 0 0 0 auto; width: min(100%, 360px); display: flex; flex-direction: column; background: rgb(8 8 12 / .94); border-left: 1px solid rgb(var(--saga-gold) / .25); backdrop-filter: blur(10px); z-index: 10; animation: saga-slide .25s ease both; font-family: system-ui, sans-serif; }
+@keyframes saga-slide { from { transform: translateX(30px); opacity: 0; } }
+.saga-sheet-head { display: flex; justify-content: space-between; align-items: flex-start; padding: 14px 14px 10px; border-bottom: 1px solid rgb(255 255 255 / .08); }
+.saga-sheet-name { font-family: "Noto Serif SC", Georgia, serif; font-size: 20px; letter-spacing: .04em; }
+.saga-sheet-sub { font-size: 12px; color: rgb(var(--saga-gold)); margin-top: 2px; }
+.saga-sheet-body { flex: 1; overflow: auto; padding: 8px 14px 20px; user-select: text; }
+.saga-sheet-body section { padding: 8px 0; border-bottom: 1px solid rgb(255 255 255 / .06); }
+.saga-sheet-body h3 { margin: 4px 0 6px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: rgb(var(--saga-gold) / .9); }
+.saga-row { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; padding: 2px 0; }
+.saga-dim { opacity: .6; }
+.saga-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.saga-stat { display: flex; flex-direction: column; align-items: center; padding: 8px 4px; border-radius: 10px; background: rgb(255 255 255 / .04); font-size: 11px; }
+.saga-stat strong { font-size: 20px; color: rgb(var(--saga-gold)); }
+.saga-bond { display: grid; grid-template-columns: 1fr 80px 32px; align-items: center; gap: 8px; font-size: 13px; padding: 2px 0; }
+.saga-affinity { position: relative; height: 4px; background: rgb(255 255 255 / .1); border-radius: 4px; }
+.saga-affinity > span { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.saga-affinity .is-pos { background: rgb(var(--saga-good)); }
+.saga-affinity .is-neg { background: rgb(var(--saga-bad)); }
+.saga-chronicle { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.5; opacity: .85; }
+
+/* --- making the hero --- */
+.saga-hero-form { position: absolute; left: 50%; top: 50%; translate: -50% -50%; width: min(94%, 420px); max-height: 94%; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 18px; border-radius: 18px; border: 1px solid rgb(var(--saga-gold) / .3); background: rgb(6 6 10 / .78); backdrop-filter: blur(10px); box-shadow: 0 20px 60px rgb(0 0 0 / .6); z-index: 4; font-family: system-ui, sans-serif; animation: saga-rise .5s ease both; }
+.saga-hero-form h2 { margin: 0 0 4px; text-align: center; font-family: "Noto Serif SC", Georgia, serif; font-weight: 500; font-size: 22px; letter-spacing: .12em; color: rgb(var(--saga-gold)); }
+.saga-hero-form label { display: flex; flex-direction: column; gap: 4px; }
+.saga-hero-form label > span, .saga-label { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; opacity: .7; }
+.saga-hero-form input { padding: 10px 12px; border-radius: 10px; border: 1px solid rgb(255 255 255 / .14); background: rgb(0 0 0 / .5); color: inherit; font: inherit; font-size: 15px; outline: none; user-select: text; }
+.saga-hero-form input:focus { border-color: rgb(var(--saga-gold) / .7); }
+.saga-seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.saga-seg button, .saga-origins button { flex: 1; padding: 7px 8px; border-radius: 8px; border: 1px solid rgb(255 255 255 / .12); background: rgb(255 255 255 / .04); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.saga-seg button[aria-checked="true"], .saga-origins button[aria-pressed="true"] { border-color: rgb(var(--saga-gold) / .8); background: rgb(var(--saga-gold) / .15); color: rgb(var(--saga-gold)); }
+.saga-origins { display: flex; flex-wrap: wrap; gap: 4px; }
+.saga-origins button { flex: 1 1 45%; white-space: normal; }
+.saga-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.saga-swatches button { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+.saga-swatches button[aria-pressed="true"] { border-color: #fff; }
+.saga-begin { margin-top: 6px; padding: 12px; border-radius: 12px; border: 1px solid rgb(var(--saga-gold)); background: linear-gradient(rgb(var(--saga-gold) / .3), rgb(var(--saga-gold) / .12)); font-family: "Noto Serif SC", Georgia, serif !important; font-size: 16px !important; letter-spacing: .12em; cursor: pointer; transition: box-shadow .2s; }
+.saga-begin:hover:not(:disabled) { box-shadow: 0 0 24px rgb(var(--saga-gold) / .5); }
+.saga-begin:disabled { opacity: .5; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .saga-theatre *, .saga-theatre *::before, .saga-theatre *::after { animation-duration: .01s !important; transition-duration: .01s !important; }
+}

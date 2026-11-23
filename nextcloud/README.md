@@ -11,9 +11,9 @@ This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the 
 
 ## What it needs
 
-- A Pithagoras that has pi's own MCP support with the `approve` option of `portal.mcp.set`
-  ([thecodacus/pithagoras#387](https://github.com/thecodacus/pithagoras/pull/387); the release that carries it is
-  named here once there is one; the extension checks and refuses to write an entry on a portal without it) and
+- Pithagoras 0.3.0 or later, which runs MCP servers on pi's own support and has the `approve` option of
+  `portal.mcp.set` ([thecodacus/pithagoras#387](https://github.com/thecodacus/pithagoras/pull/387); the extension
+  checks, and writes no entry on an older portal) and
   [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker)
   (`pithagoras-docker` 1.3.0 or later), which installing this extension from npm brings along with the portal's
   `requires`. A Linux host with Docker Engine 28.0 or later that the portal can reach, as for any container it runs.
@@ -263,8 +263,8 @@ non-root user: those were not tried against the image, and a server that fails t
   switched off (the move does that for several reasons and does not say which): the instance's line in Settings says so,
   and you switch it on in Settings → MCP. A whole family you hid there by hand stays hidden. A
   tool's name in the chats is now `mcp__<instance>__<tool>` (was `<instance>_<tool>`); a switch of a chat's tools that
-  names the old name has to be set again. Needs a Pithagoras with `portal.mcp.set`'s `approve` option: on one without
-  it the extension writes no entry and says so in the instance's task (every call would run unasked there). A family
+  names the old name has to be set again. Needs Pithagoras 0.3.0 or later (`portal.mcp.set`'s `approve` option): on
+  an older portal the extension writes no entry and says so in the instance's task (every call would run unasked there). A family
   that is off is not served by the container at all, so neither its tools nor its resources exist (see above).
 
 ## Licences

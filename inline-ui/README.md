@@ -29,8 +29,8 @@ step, is starting on it, or gets it with your next message.
 
 Their descriptions tell the model to use a card when something is clearer seen or done than read, or to collect
 structured input; that the card has no network and everything must be inline; what the bridge offers; and to send
-small payloads. They work the same called by their names and through the `tools` gateway when the package is lazy:
-the card is drawn at the gateway's call.
+small payloads. They work the same called by their names and through `tool_search` when the package is lazy:
+the card is drawn at `tool_search`'s call.
 
 Limits: a card's HTML at most 256 KB, an event's data at most 32 KB as JSON, what `ui_update` posts at most 64 KB, at
 most 20 events per card, 200 cards kept per chat (the oldest go first).
@@ -146,4 +146,4 @@ with the portal's own policy: its theme and its height, a fetch and a picture fr
 and sent only after you have been in the card, undeclared ones dropped, and messages from any other window ignored.
 The portal-tier tests run the server half under the portal's extension host with a scripted model: the tools are
 registered, the frame is served through the portal's routes, an event reaches an idle chat as a message (and starts a
-turn with `wake`), and a waiting `ui_show` gets its event, called directly and through the `tools` gateway.
+turn with `wake`), and a waiting `ui_show` gets its event, called directly and through `tool_search`.

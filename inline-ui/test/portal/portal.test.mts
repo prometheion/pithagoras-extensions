@@ -166,11 +166,13 @@ test("ui_show with wait returns the event the card sends, to the model, in the s
   await until(() => idle(id), "the run to end");
 });
 
-test("lazy, through the tools gateway, ui_show waits and returns the same, and its card is drawn at the gateway's call", async () => {
+test("lazy, through tool_search, ui_show waits and returns the same, and its card is drawn at tool_search's call", async () => {
   const id = chat();
-  const calls = [{ name: "tools", args: { action: "call", name: "ui_show", args: { title: "Lazy", html: HTML, wait: { event: "submit", timeoutSec: 60 } } } }];
+  const calls = [{ name: "tool_search", args: { action: "call", name: "ui_show", args: { title: "Lazy", html: HTML, wait: { event: "submit", timeoutSec: 60 } } } }];
   script = (request) => calls[resultsIn(request)] ?? "Done.";
-  const client = await SdkPiClient.create({ cwd: process.env.WORKSPACE_ROOT, sessionDir: mkdtempSync(path.join(home, "pi-")), provider: "fake", modelId: "m", sessionId: id, toolsLazy: ["ui_show", "ui_update", "ui_close"], lazySets: [meta.name] });
+  // The chat's frozen lazy head (pi/sdk-client.ts, `lazy`): the package's tools are behind tool_search.
+  const lazy = { v: 1, lazy: [meta.name, "<tool>ui_show", "<tool>ui_update", "<tool>ui_close"], direct: [], hint: "Behind tool_search: Inline UI (ui_show, ui_update, ui_close).", outside: false, voice: [], tag: "0123456789abcdef" };
+  const client = await SdkPiClient.create({ cwd: process.env.WORKSPACE_ROOT, sessionDir: mkdtempSync(path.join(home, "pi-")), provider: "fake", modelId: "m", sessionId: id, lazy });
   const starts: any[] = [];
   const ends: any[] = [];
   client.on("event", (e: any) => {
@@ -183,13 +185,13 @@ test("lazy, through the tools gateway, ui_show waits and returns the same, and i
     const running = client.prompt("Ask me lazily");
     await until(async () => (await cards(id)).length === 1, "the card");
     for (const r of model.requests.slice(before)) for (const t of r.tools ?? []) offered.add(t.function.name);
-    assert.ok(offered.has("tools") && !offered.has("ui_show"), "ui_show is reached through the gateway alone");
+    assert.ok(offered.has("tool_search") && !offered.has("ui_show"), "ui_show is reached through tool_search alone");
     const [card] = await cards(id);
-    assert.equal(card.callId, starts.find((s) => s.toolName === "tools").toolCallId, "the card is the gateway call's");
+    assert.equal(card.callId, starts.find((s) => s.toolName === "tool_search").toolCallId, "the card is tool_search's call's");
     assert.deepEqual((await json(`${at}/chats/${id}/cards/c1/events`, { method: "POST", body: JSON.stringify({ event: "submit", data: { answer: 5 } }) })).body, { delivery: "wait" });
     await running;
-    await until(() => ends.some((e) => e.toolName === "tools"), "the call to end");
-    assert.match(JSON.stringify(ends.find((e) => e.toolName === "tools").result), /The person sent \\"submit\\" from card c1/);
+    await until(() => ends.some((e) => e.toolName === "tool_search"), "the call to end");
+    assert.match(JSON.stringify(ends.find((e) => e.toolName === "tool_search").result), /The person sent \\"submit\\" from card c1/);
   } finally {
     client.dispose();
   }

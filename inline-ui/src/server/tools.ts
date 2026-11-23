@@ -6,10 +6,16 @@ import type { Outcome, Waits } from "./waits";
 /**
  * The agent's three tools, registered in every chat's pi by the server half (`chats.extend`), so that they hold what
  * the routes hold: `ui_show` makes a card (and may wait for one of its events), `ui_update` replaces its HTML or posts
- * data to its script, `ui_close` closes it. Each is the same called by its name or through the `tools` gateway, where
- * the package is lazy: the gateway hands the call's id and signal on, and that id is the one the conversation draws
- * the card at.
+ * data to its script, `ui_close` closes it. Each is the same called by its name or through `tool_search`, where the
+ * package is lazy (see drawnAt).
  */
+
+/**
+ * The call the conversation draws a card at. pi runs a tool another tool calls (`tool_search`'s call, a code mode
+ * script) as a nested call with the id `<caller>/<n>`, and the conversation draws the outer call, as the tool inside
+ * it: the card is that call's, so that it is drawn, and can be answered, while it waits.
+ */
+export const drawnAt = (toolCallId: string): string => toolCallId.split("/")[0] || toolCallId;
 
 export interface ToolDeps {
   store: CardStore;
@@ -145,7 +151,7 @@ export function registerTools(pi: any, chat: { id: string }, deps: ToolDeps): vo
       const html = readHtml(params?.html);
       const events = readEvents(params?.events);
       const wait = readWait(params?.wait);
-      const card = deps.store.create(chatId, { callId: String(toolCallId), title, html, events, ...(wait ? { wait } : {}) });
+      const card = deps.store.create(chatId, { callId: drawnAt(String(toolCallId)), title, html, events, ...(wait ? { wait } : {}) });
       pushCard(card);
       const details = { card: card.id, title };
       if (!wait) return { content: [text(shown(card))], details };

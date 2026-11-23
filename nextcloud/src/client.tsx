@@ -5,7 +5,7 @@ import type { PanelProps, Portal } from "@pithagoras/extension-api";
 import {LuBookOpenText, LuCalendarX, LuCloud, LuContactRound, LuExternalLink, LuFiles, LuLayers, LuKanban, LuListChecks, LuMail, LuNewspaper} from "react-icons/lu";
 import { msg, portal, setPortal, t } from "./portal";
 import { de } from "./de";
-import { TABS, tabOffered } from "./capabilities";
+import { TABS, instanceOfTool, tabOffered } from "./capabilities";
 import { api, FamiliesContext, InstanceContext, NextcloudStatus, sayError } from "./web/api";
 
 /** What this conversation may use of the tools it is offered, as the portal's tool switch answers it: its list --
@@ -106,21 +106,15 @@ function NextcloudPanel({ chat, panel }: PanelProps) {
   // The first instance is what the pages talk to, as long as it stands; a chosen one that went gets its place.
   const instances = status?.instances ?? [];
   // What stands in this chat's switcher: every instance, save one this conversation switched off. The off list
-  // speaks the portal's <server>_<tool> spelling, and an entry claims to whichever instance its front matches --
-  // longest first, for "nextcloud" is a front of "nextcloud_uni", and the longer name has the claim: a server a
-  // chat turned off is offered nowhere in it. Nothing of an instance named off here stands unknown, and unknown
-  // is offered: what was never asked for is not hidden.
-  const ownerOf = (name: string): string | undefined => {
-    let best: string | undefined;
-    for (const inst of instances)
-      if ((name === inst.name || name.startsWith(inst.name + "_")) && (!best || inst.name.length > best.length))
-        best = inst.name;
-    return best;
-  };
+  // speaks the names pi gives the tools, mcp__<server>__<tool>, and an entry claims to whichever instance's namespace
+  // it stands under -- the longest name first, for "a" and "a_" have names that begin alike (see instanceOfTool): a
+  // server a chat turned off is offered nowhere in it. Nothing of an instance named off here stands unknown, and
+  // unknown is offered: what was never asked for is not hidden.
+  const instanceNames = instances.map((inst) => inst.name);
   const visible = !policy
     ? instances
     : instances.filter((inst) => {
-        if (!policy.off.some((name) => ownerOf(name) === inst.name)) return true; // none of it stands off here
+        if (!policy.off.some((name) => instanceOfTool(name, instanceNames) === inst.name)) return true; // none of it stands off here
         return policy.tools.some((tool) => tool.source === inst.name && !policy.off.includes(tool.name));
       });
   useEffect(() => {

@@ -35,7 +35,7 @@ test("the three tools are in every chat's pi, telling the model when to use them
   const { tools } = fake.piOf("a");
   assert.deepEqual([...tools.keys()].sort(), ["ui_close", "ui_show", "ui_update"]);
   const show = tools.get("ui_show");
-  assert.match(show.description.split("\n")[0], /^Show the person an interactive card in the chat/, "the line the tools gateway lists");
+  assert.match(show.description.split("\n")[0], /^Show the person an interactive card in the chat/, "the line tool_search lists");
   for (const said of [/no network at all/, /pithagoras\.emit\(name, data\)/, /pithagoras\.onData\(fn\)/, /pithagoras\.theme/, /var\(--accent\)/, /wake: true/, /With `wait`/, /32 KB/]) assert.match(show.description, said);
   assert.deepEqual(show.parameters.required, ["title", "html"]);
   assert.equal(show.guard, undefined, "what it returns is the person's, through a card the agent made: not outside content");

@@ -10,7 +10,7 @@
  * reachable by every local process, and it checks nobody (the server has no login of its own in this mode, and
  * a token in front of it would be as reachable as it is -- the README says so). What keeps the damage down is what
  * the portal does with it: the person is asked before mail goes out, a link is made, something is shared or deleted
- * (the `approveTools` of its entry), and the container is made without capabilities, with limits.
+ * (the `approve` of its entry), and the container is made without capabilities, with limits.
  * The image's entry point already runs `nextcloud-mcp-server run --host 0.0.0.0` (for its Kubernetes chart); the
  * `--host 127.0.0.1 --port` appended to the command line takes the place of that and says on which port, as click
  * reads an option named twice and keeps the last. Where several instances keep their containers, each listens on
@@ -20,6 +20,7 @@ import type { ContainerSpec, Docker } from "../../shared/docker-api";
 import { SPEC_LABEL, stamped } from "../../shared/service";
 import { NextcloudInstance, DEFAULT_INSTANCE_NAME } from "./config";
 import { ownName } from "./host";
+import { appsFor } from "./capabilities";
 
 /** The image by its release tag: what latest pointed to when this version was made (0.203.0, 2026-10-29), and
  * what it is tested with. It is downloaded by this tag (Docker for extensions takes an image by its tag), and a
@@ -123,7 +124,7 @@ export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: nu
       `NEXTCLOUD_PASSWORD=${inst.password}`,
       // The image's defaults answer any web page in a browser on this machine: CORS "*" with credentials (which
       // Starlette turns into an echo of the page's origin) and the MCP SDK's DNS-rebinding protection off. With the
-      // protection on, only the Host this extension and pi-mcp-adapter send is taken, and any request that carries
+      // protection on, only the Host this extension and pi's own MCP client send is taken, and any request that carries
       // an Origin (a browser's) is refused, as no allowed origin is set; neither client sends one.
       "MCP_DNS_REBINDING_PROTECTION=true",
       `MCP_ALLOWED_HOSTS=127.0.0.1:${port}`,
@@ -132,7 +133,9 @@ export async function makeSpec(docker: Docker, inst: NextcloudInstance, port: nu
       // network's: tool calls by name, with timings. Nothing of this extension reads it.
       "METRICS_ENABLED=false",
     ],
-    Cmd: ["--host", "127.0.0.1", "--port", String(port)],
+    // Only the apps of the families that are on are served (`--enable-app`, once for each: the server serves every app
+    // where it gets none), so the resources of a family that is off do not exist for pi's resource tools to read.
+    Cmd: ["--host", "127.0.0.1", "--port", String(port), ...appsFor(inst).flatMap((app) => ["--enable-app", app])],
     HostConfig: {
       NetworkMode: networkMode,
       CapDrop: ["ALL"],

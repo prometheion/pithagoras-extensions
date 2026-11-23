@@ -34,6 +34,8 @@ let instancesBody: Record<string, unknown> = {};
 /** Whether /status answers a failure (the server half is not up), and what the page sent to the instance routes. */
 let statusFails = false;
 let instancesFail = false;
+/** What the portal's tool switch says of the chat the panel stands beside (`/api/sessions/chat-1/tools`): not live, nothing off, unless a test says. */
+let toolsBody: Record<string, unknown> = { live: false, off: [], tools: [] };
 let posts: { route: string; body: any }[] = [];
 const ALL_ON = Object.fromEntries(["shopping", "cookbook", "notes", "files", "sharing", "deck", "calendar", "contacts", "mail", "news", "collectives"].map((id) => [id, true]));
 const instanceRow = (over: Record<string, unknown> = {}) => ({ name: "uni", containerName: "c", state: "running", address: "http://127.0.0.1:8000/mcp", url: "https://cloud.example.org", mcp: { registered: true, on: true }, health: { ok: true }, configured: true, capabilities: { available: ALL_ON, on: {} }, ...over });
@@ -52,6 +54,7 @@ before(async () => {
     if (url.pathname === "/view-page.js") return send(200, "text/javascript", pageJs);
     if (url.pathname === "/client.css") return send(200, "text/css", CSS);
     if (url.pathname === `${BASE}/status`) return statusFails ? send(502, "application/json", JSON.stringify({ error: "the server half is not running" })) : send(200, "application/json", JSON.stringify(statusBody));
+    if (url.pathname === "/api/sessions/chat-1/tools") return send(200, "application/json", JSON.stringify(toolsBody));
     if (url.pathname === `${BASE}/instances` && req.method === "GET") return instancesFail ? send(502, "application/json", JSON.stringify({ error: "the server half is not running" })) : send(200, "application/json", JSON.stringify(instancesBody));
     if (req.method === "POST" && [`${BASE}/instances`, `${BASE}/instances/remove`, `${BASE}/start`, `${BASE}/reset`].includes(url.pathname)) {
       let raw = "";
@@ -92,6 +95,7 @@ beforeEach(() => {
   posts = [];
   statusFails = false;
   instancesFail = false;
+  toolsBody = { live: false, off: [], tools: [] };
   statusBody = { image: "x", instances: [instanceRow()], configured: true };
   instancesBody = { instances: [{ name: "uni", url: "https://cloud.example.org", username: "anna", passwordSet: true, configured: true }] };
 });
@@ -1134,6 +1138,24 @@ test("Panel: a status that cannot be read is said, with a way to try again; the 
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await page.getByLabel("Which of the Nextclouds the pages talk to").waitFor();
   await close(page);
+});
+
+test("Panel: an instance whose tools the chat switched off, by the names pi gives them, is not in the switcher; one with a tool left on is", async () => {
+  statusBody = { image: "x", instances: [instanceRow(), instanceRow({ name: "home", url: "https://home.example.org" }), instanceRow({ name: "my-cloud", url: "https://my-cloud.example.org" })], configured: true };
+  const tool = (server: string, name: string) => ({ name: `mcp__${server.replace(/-/g, "_")}__${name}`, source: server });
+  const tools = [tool("uni", "nc_notes_create_note"), tool("uni", "nc_notes_get_note"), tool("home", "nc_notes_get_note"), tool("my-cloud", "nc_notes_get_note"), tool("my-cloud", "nc_news_list_feeds")];
+  // uni has every tool off, my-cloud (dashes are underscores in pi's names) one of two, home none: the old <server>_<tool> names say nothing of any
+  toolsBody = { live: true, tools, off: ["mcp__uni__nc_notes_create_note", "mcp__uni__nc_notes_get_note", "mcp__my_cloud__nc_news_list_feeds", "home_nc_notes_get_note", "uni_nc_notes_get_note"] };
+  const page = await open("panel");
+  const switcher = page.getByLabel("Which of the Nextclouds the pages talk to");
+  await switcher.waitFor();
+  assert.deepEqual(await switcher.locator("option").allInnerTexts(), ["home", "my-cloud"]);
+  await close(page);
+  // every tool of every instance off: none is left to talk to
+  toolsBody = { live: true, tools, off: tools.map((t) => t.name) };
+  const none = await open("panel");
+  await none.getByText("Every one of your Nextclouds is switched off in this chat's tools.").waitFor();
+  await close(none);
 });
 
 test("Panel: only the tabs the instance offers are in the tab list, which the keys move along; the way out is not a tab; the muted words are muted (L9, L13, M17)", async () => {

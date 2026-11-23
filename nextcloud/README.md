@@ -11,7 +11,10 @@ This extension is not made or endorsed by Nextcloud GmbH. "Nextcloud" names the 
 
 ## What it needs
 
-- Pithagoras 0.3.0 or later and [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker)
+- Pithagoras 0.3.0 or later, which runs MCP servers on pi's own support and has the `approve` option of
+  `portal.mcp.set` ([thecodacus/pithagoras#387](https://github.com/thecodacus/pithagoras/pull/387); the extension
+  checks, and writes no entry on an older portal) and
+  [Docker for extensions](https://thecodacus.github.io/pithagoras/guide/docker)
   (`pithagoras-docker` 1.3.0 or later), which installing this extension from npm brings along with the portal's
   `requires`. A Linux host with Docker Engine 28.0 or later that the portal can reach, as for any container it runs.
 - A reachable Nextcloud — your own server in the home lab as much as a hosted one — and an **app password** for the
@@ -62,7 +65,7 @@ so. Pick another name, or remove that server first.
 
 The settings page also shows every capability this extension knows about — the tool families of its tabs, one choice
 each: files and sharing beside each other, mail, news, collectives among them. Each choice turns that family's tools
-off in pi's config where it is turned off, and keeps its tab out of the panel as well; where the instance's endpoint
+off where it is turned off (the entry's `toolExposure` hides them), and keeps its tab out of the panel as well; where the instance's endpoint
 does not provide a family at all (its server answers without those tools), the choice stands greyed out and is kept
 out wherever it would reach. What the endpoint provides is found from its own tool list every time the status looks,
 so nothing an earlier version never offered is invented, and a server that starts to offer more shows it on its own.
@@ -70,8 +73,12 @@ so nothing an earlier version never offered is invented, and a server that start
 **Remove** takes an instance away: the settings of it go, and a run behind it takes its container and its entry in pi's
 config away (the extension remembers which entries it wrote, and clears those only). **Remove everything** takes the
 containers and the entries away and keeps the settings, so **Start again** brings them back without typing anything
-new. Stopping or updating the extension does the same removal for every instance and starts them again. Uninstalling
-it does not: the portal has no uninstall hook, so remove everything on the page first. (An entry that version 0.1.0
+new. Stopping or updating the extension (or the portal) takes the containers away and *switches the entries off*
+(`enabled: false`) instead of removing them, so pi does not try a port nothing listens on, and what you set on an entry
+-- the families you hid in Settings → MCP, the patterns you added to what it asks about, a timeout -- is still there when it
+starts again. The next start switches on only the entries that stop switched off; one that was off before (you, or the
+move from the old adapter) stays off. Uninstalling the extension has no hook of the portal's: remove everything on the
+page first, or the switched-off entries stay in Settings → MCP for you to delete. (An entry that version 0.1.0
 left behind after a removal is not known to the extension: take it out in Settings → MCP.)
 
 ## What you get
@@ -126,12 +133,22 @@ left behind after a removal is not known to the extension: take it out in Settin
     chat's folder.
   - **The panel's own Files tab stays**, for what the chat's Files tab cannot do: shares and public links, the trash,
     moving, renaming and copying, deleting, and making new folders and files.
-- **The agents reach your clouds too**: every server is registered in pi's config under the instance's name, persistent
-  — so a chat can ask "check the milk off the list" or "what did I note down about the fence", and the answer comes
+- **The agents reach your clouds too**: every server is registered in pi's config under the instance's name, as pi's
+  own MCP entry (its address, nothing of the adapter's), so its tools stand in the chats as `mcp__<instance>__<tool>`
+  (`mcp__uni__nc_notes_create_note`), found through the portal's tool search or offered at once as Settings → Tools
+  has it — so a chat can ask "check the milk off the list" or "what did I note down about the fence", and the answer comes
   from Nextcloud. What it may not reach is what its capability choices turn off: one choice per family (Files,
   Sharing, Deck, Calendar, Contacts, Mail, News, Collectives, Cookbook, Shopping List, Notes, Talk, Tables). The few
   tools the server has outside these families (its own sign-in helpers and the like) cannot be turned off here, and
   the panel does not call them.
+  - **A family that is off is not served at all.** Besides the entry's `toolExposure`, which keeps its *tools* out of
+    the chats, the instance's container is started with only the apps of the families that are on (the server's own
+    `--enable-app`, once for each; the server serves every app where it is given none). So the resources of a family that
+    is off (`nc://Notes/{note_id}`, `nc://Cookbook/{recipe_id}`, Deck boards, stacks and cards) do not exist, and pi's resource
+    tools (`list_mcp_resources`, `read_mcp_resource`), which reach every server's resources, find none of them. A change
+    of the choice makes the container again (a few seconds). With every family off the server is still given one app,
+    Files, whose tools the entry hides and this extension refuses, as it serves every app otherwise; the image has
+    no resource for Files.
   - **It is not a trusted server.** What Nextcloud returns is other people's words (mail, news, files and boards others
     share, invitations, recipes from any site), so the portal's guard treats it like any outside content: wrapped,
     scanned for injection, and a chat that has read it is tainted. (Version 0.1.0 registered the servers as trusted;
@@ -143,12 +160,13 @@ left behind after a removal is not known to the extension: take it out in Settin
     cannot look at the arguments). It asks before a public link or a share (`nc_share_create*`, `nc_share_update*`),
     and before anything is deleted, cleared or taken to the trash (`*_delete_*`, `nc_share_delete*`, `*_clear_*`,
     `*_trash_*`, and the calendar's `nc_calendar_bulk_operations` and `nc_calendar_manage_calendar`, which delete by
-    an argument). The question comes through pi-mcp-adapter's `approveTools` on the entry; a chat nobody sits at (a
-    routine, a heartbeat) cannot be asked, and the call is refused. Change the list in Settings → MCP (`approveTools`
-    of the entry): a list you set there stays (the extension's own default list is replaced by a newer version's);
-    `false` turns the questions off. A global `approveTools: true` in pi's MCP settings does not reach these
-    servers, since a server's own list takes its place: set `true` on their entries for that. **Not asked about:**
-    reading and listing, creating notes, cards, todos and the like, comments and assignments other users of the
+    an argument). The question is the portal's: the list is what the extension gives `portal.mcp.set` as `approve`,
+    patterns of the server's own tool names, and the portal keeps it beside pi's file (Settings → MCP shows it in the
+    server's row), so every call of a matching tool is asked about, whether the agent calls it directly, through tool
+    search, from a script or from a subagent. A chat nobody sits at (a routine, a heartbeat) cannot be asked, and the
+    call is refused. A pattern the server already asks about that this extension's list does not hold (one you had
+    on the entry before the move to pi's own MCP support) stays; the extension's own list is replaced by a newer
+    version's. **Not asked about:** reading and listing, creating notes, cards, todos and the like, comments and assignments other users of the
     Nextcloud see, and overwriting, moving, copying or restoring files and moving mail (to the trash folder too).
 
 ## How it runs
@@ -232,6 +250,24 @@ non-root user: those were not tried against the image, and a server that fails t
 - A panel tab drops what was typed in it when you switch to another tab of the panel (the portal asks before the page
   or a dialog is closed on unsaved words, and a view asks before it is left by its own buttons).
 - A tool call is given 120 s; a very large file read can time out.
+
+## Changes
+
+- **0.2.0: your Nextcloud in the chat's Files tab.** With Files 0.2.0 or later, each instance is a root of the chat's
+  Files tab (see "What you get"); without it nothing else changes.
+- **0.2.0: the entry moved to pi's own MCP support.** Pithagoras runs MCP servers on pi's own support now, not
+  through pi-mcp-adapter, and the extension writes the entry in pi's words: the `url` of the instance's container, and a
+  `toolExposure` that hides the families an instance turned off. What asks you before a call is no longer the entry's
+  `approveTools` but the `approve` the extension gives the portal (same list). `lifecycle`, `excludeTools`,
+  `approveTools` and the adapter's other keys are no longer written, and an entry an earlier version wrote with them
+  is written again without them on the extension's next start, with the families that were left out kept left out and
+  a list of tools to ask about carried over in the tools' own names. An entry the move left switched off stays
+  switched off (the move does that for several reasons and does not say which): the instance's line in Settings says so,
+  and you switch it on in Settings → MCP. A whole family you hid there by hand stays hidden. A
+  tool's name in the chats is now `mcp__<instance>__<tool>` (was `<instance>_<tool>`); a switch of a chat's tools that
+  names the old name has to be set again. Needs Pithagoras 0.3.0 or later (`portal.mcp.set`'s `approve` option): on
+  an older portal the extension writes no entry and says so in the instance's task (every call would run unasked there). A family
+  that is off is not served by the container at all, so neither its tools nor its resources exist (see above).
 
 ## Licences
 

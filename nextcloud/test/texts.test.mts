@@ -60,3 +60,10 @@ test("a German text keeps the ellipsis and the full stop of its English", () => 
     if (english.endsWith(".")) assert.ok(String(german).endsWith("."), `${english} -> ${german}`);
   }
 });
+
+test("the README says that a family that is off is not served by the container, so its resources do not exist; the settings page no longer says they can be read", () => {
+  const readme = fs.readFileSync(path.resolve(import.meta.dirname, "../README.md"), "utf8");
+  assert.match(readme, /--enable-app/);
+  assert.doesNotMatch(readme, /resources readable/);
+  assert.ok(![...texts().keys()].some((key) => /resources .* can still be read/.test(key)));
+});
